@@ -1,5 +1,5 @@
 // The part that runs inside the flatpak sandbox. It cannot see host processes,
-// so it starts cheat-poc-helper on the host via flatpak-spawn
+// so it starts ferret-helper on the host via flatpak-spawn
 // and forwards memory commands to it over stdin/stdout. Window capture and OCR
 // happen here, inside the sandbox.
 
@@ -39,7 +39,7 @@ fn sandbox_report() {
 fn cache_dir() -> PathBuf {
     let dir = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/cheat-poc"));
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/ferret"));
     fs::create_dir_all(&dir).ok();
     dir
 }
@@ -55,10 +55,10 @@ impl Helper {
         let mut cmd = match flatpak_app_path() {
             Some(app) => {
                 let mut c = Command::new("flatpak-spawn");
-                c.args(["--host", "--watch-bus", &format!("{app}/bin/cheat-poc-helper")]);
+                c.args(["--host", "--watch-bus", &format!("{app}/bin/ferret-helper")]);
                 c
             }
-            None => Command::new(std::env::current_exe().expect("current exe").with_file_name("cheat-poc-helper")),
+            None => Command::new(std::env::current_exe().expect("current exe").with_file_name("ferret-helper")),
         };
         let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
             Ok(c) => c,
@@ -105,7 +105,7 @@ fn match_count(reply: &[String]) -> Option<usize> {
 fn profile_path(exe: &str) -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/cheat-poc"));
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/ferret"));
     base.join("profiles").join(format!("{}.profile", exe.to_lowercase()))
 }
 

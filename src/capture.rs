@@ -27,7 +27,7 @@ pub struct WindowCapture {
 fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"))
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/ferret"))
 }
 
 fn token_file() -> PathBuf {
@@ -67,10 +67,10 @@ impl WindowCapture {
     pub fn start() -> Result<Self, String> {
         let conn = Connection::session().map_err(|e| e.to_string())?;
 
-        let res = request(&conn, "cheatpoc_create", |p| {
+        let res = request(&conn, "ferret_create", |p| {
             let opts = HashMap::from([
-                ("handle_token", Value::from("cheatpoc_create")),
-                ("session_handle_token", Value::from("cheatpoc")),
+                ("handle_token", Value::from("ferret_create")),
+                ("session_handle_token", Value::from("ferret")),
             ]);
             p.call_method("CreateSession", &(opts,)).map(drop)
         })?;
@@ -78,9 +78,9 @@ impl WindowCapture {
         let session_path = ObjectPath::try_from(session.as_str()).map_err(|e| e.to_string())?;
 
         let saved = fs::read_to_string(token_file()).ok();
-        request(&conn, "cheatpoc_select", |p| {
+        request(&conn, "ferret_select", |p| {
             let mut opts = HashMap::from([
-                ("handle_token", Value::from("cheatpoc_select")),
+                ("handle_token", Value::from("ferret_select")),
                 ("types", Value::from(SOURCE_WINDOW)),
                 ("multiple", Value::from(false)),
                 ("cursor_mode", Value::from(CURSOR_HIDDEN)),
@@ -92,8 +92,8 @@ impl WindowCapture {
             p.call_method("SelectSources", &(&session_path, opts)).map(drop)
         })?;
 
-        let res = request(&conn, "cheatpoc_start", |p| {
-            let opts = HashMap::from([("handle_token", Value::from("cheatpoc_start"))]);
+        let res = request(&conn, "ferret_start", |p| {
+            let opts = HashMap::from([("handle_token", Value::from("ferret_start"))]);
             p.call_method("Start", &(&session_path, "", opts)).map(drop)
         })?;
         if let Some(t) = res.get("restore_token").and_then(|v| string_of(v)) {

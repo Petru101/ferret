@@ -1,10 +1,10 @@
-id: io.github.Petru101.CheatPoc
+id: io.github.Petru101.Ferret
 runtime: org.freedesktop.Platform
 runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-command: cheat-poc
+command: ferret
 finish-args:
   - --talk-name=org.freedesktop.Flatpak
   - --env=TESSDATA_PREFIX=/app/share/tessdata
@@ -61,18 +61,18 @@ modules:
         url: https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata
         sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
 
-  - name: cheat-poc
+  - name: ferret
     buildsystem: simple
     build-commands:
-      - cargo build --release --offline --bin cheat-poc
-      - install -Dm755 target/release/cheat-poc /app/bin/cheat-poc
+      - cargo build --release --offline --bin ferret
+      - install -Dm755 target/release/ferret /app/bin/ferret
       # The helper runs on the host, outside the runtime, so it is linked
       # statically. The SDK has no static libm; std only needs its name.
       - mkdir -p stub && ar rc stub/libm.a
       - >-
         RUSTFLAGS="-C target-feature=+crt-static -L native=$PWD/stub"
-        cargo build --release --offline --target x86_64-unknown-linux-gnu --bin cheat-poc-helper
-      - install -Dm755 target/x86_64-unknown-linux-gnu/release/cheat-poc-helper /app/bin/cheat-poc-helper
+        cargo build --release --offline --target x86_64-unknown-linux-gnu --bin ferret-helper
+      - install -Dm755 target/x86_64-unknown-linux-gnu/release/ferret-helper /app/bin/ferret-helper
     sources:
       - type: dir
         path: .

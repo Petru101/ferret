@@ -70,4 +70,4 @@ echo "game running as host pid $pid ($comm): $(cat "$log")" >&2
     game "show"; echo "next ="; sleep 1
     echo list
     echo quit
-} | flatpak run io.github.Petru101.CheatPoc
+} | flatpak run io.github.Petru101.Ferret

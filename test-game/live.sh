@@ -9,13 +9,13 @@ dir="$(cd "$(dirname "$0")/.." && pwd)/run/live"
 case ${1:-} in
 start)
     rm -rf "$dir" && mkdir -p "$dir" && mkfifo "$dir/in"
-    systemctl --user stop cheat-poc-live 2>/dev/null || true
-    systemd-run --user --quiet --collect --unit=cheat-poc-live sh -c \
-        "sleep infinity > '$dir/in' & flatpak run io.github.Petru101.CheatPoc < '$dir/in' > '$dir/out' 2>&1; kill \$!"
+    systemctl --user stop ferret-live 2>/dev/null || true
+    systemd-run --user --quiet --collect --unit=ferret-live sh -c \
+        "sleep infinity > '$dir/in' & flatpak run io.github.Petru101.Ferret < '$dir/in' > '$dir/out' 2>&1; kill \$!"
     echo "session started"
     ;;
 stop)
-    systemctl --user stop cheat-poc-live
+    systemctl --user stop ferret-live
     echo "session stopped"
     ;;
 *)
