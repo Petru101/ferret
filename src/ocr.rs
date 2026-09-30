@@ -116,6 +116,8 @@ fn double(img: &GrayImage) -> GrayImage {
 /// kept only if a careful re-read agrees.
 pub fn numbers(frame: &Path, font: Option<&Font>) -> Result<Vec<Word>, String> {
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
+    // The game's own digits find its numbers exactly; Tesseract adds what they don't read.
+    let by_font = font.filter(|f| !f.is_empty()).map(|f| font_numbers(&img, f)).unwrap_or_default();
     // PGM: encoding a PNG this size takes longer than reading it.
     let contrast = frame.with_file_name("frame-contrast.pgm");
     let c = local_contrast(&img);
@@ -170,7 +172,128 @@ pub fn numbers(frame: &Path, font: Option<&Font>) -> Result<Vec<Word>, String> {
             found.push(Word { text: r.n.to_string(), rect: r.rect, conf: r.conf });
         }
     }
+    found.retain(|w| !by_font.iter().any(|f| overlaps(f.rect, w.rect)));
+    found.extend(by_font);
     Ok(found)
+}
+
+/// Numbers on the whole frame drawn in the learned digits: shapes of one flat colour that are
+/// learned digits, side by side at the same height. A row that also has other shapes of that
+/// colour and size is a word ("GOLD" has an O), not a number.
+fn font_numbers(img: &RgbImage, font: &Font) -> Vec<Word> {
+    let (w, h) = img.dimensions();
+    let colour = |i: usize| {
+        let p = img.as_raw();
+        (p[i * 3] >> 5, p[i * 3 + 1] >> 5, p[i * 3 + 2] >> 5)
+    };
+    // Same-colour shapes (4-connected), as glyph candidates.
+    struct Blob {
+        colour: (u8, u8, u8),
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        digit: Option<u8>,
+    }
+    let mut label = vec![0u32; (w * h) as usize];
+    let mut blobs: Vec<Blob> = Vec::new();
+    let mut stack = Vec::new();
+    let mut pixels = Vec::new();
+    for start in 0..label.len() {
+        if label[start] != 0 {
+            continue;
+        }
+        let c = colour(start);
+        let id = blobs.len() as u32 + 1;
+        label[start] = id;
+        stack.push(start);
+        pixels.clear();
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+        while let Some(i) = stack.pop() {
+            pixels.push(i);
+            let (x, y) = ((i as u32) % w, (i as u32) / w);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            let mut visit = |j: usize| {
+                if label[j] == 0 && colour(j) == c {
+                    label[j] = id;
+                    stack.push(j);
+                }
+            };
+            if x > 0 {
+                visit(i - 1);
+            }
+            if x + 1 < w {
+                visit(i + 1);
+            }
+            if y > 0 {
+                visit(i - w as usize);
+            }
+            if y + 1 < h {
+                visit(i + w as usize);
+            }
+        }
+        let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
+        // Glyph-sized and solid enough; not touching the frame's edge.
+        let sized = (6..=80).contains(&bh) && bw * 2 <= bh * 3 && pixels.len() as u32 * 10 >= bw * bh * 3;
+        let inside = x0 > 0 && y0 > 0 && x1 + 1 < w && y1 + 1 < h;
+        let digit = (sized && inside).then(|| {
+            let mut ink = vec![false; (bw * bh) as usize];
+            for &i in &pixels {
+                let (x, y) = ((i as u32) % w, (i as u32) / w);
+                ink[((y - y0) * bw + x - x0) as usize] = true;
+            }
+            font.digit_of(&Glyph { x: x0, w: bw, h: bh, ink, cut: false }, 1)
+        });
+        blobs.push(Blob { colour: c, x0, y0, x1, y1, digit: digit.flatten() });
+        if !(sized && inside) {
+            blobs.last_mut().unwrap().x1 = u32::MAX; // not a glyph: never part of a row
+        }
+    }
+    // Rows: glyphs of one colour, about the same top and height, close together.
+    let mut glyphs: Vec<&Blob> = blobs.iter().filter(|b| b.x1 != u32::MAX).collect();
+    glyphs.sort_by_key(|b| (b.colour, b.y0, b.x0));
+    let next_to = |a: &Blob, b: &Blob| {
+        let (ha, hb) = (a.y1 - a.y0 + 1, b.y1 - b.y0 + 1);
+        a.colour == b.colour
+            && ha.abs_diff(hb) <= ha / 4 + 1
+            && a.y0.abs_diff(b.y0) <= ha / 4 + 1
+            && b.x0 > a.x1
+            && b.x0 - a.x1 <= ha * 4 / 5
+    };
+    let mut used = vec![false; glyphs.len()];
+    let mut words = Vec::new();
+    let mut ones = Vec::new(); // rows of only 1s, with their colour: a 1 is a plain bar
+    for i in 0..glyphs.len() {
+        if used[i] || glyphs[i].digit.is_none() {
+            continue;
+        }
+        // Walk left to the start of the row, then right along it.
+        let mut first = i;
+        while let Some(j) = (0..glyphs.len()).find(|&j| !used[j] && next_to(glyphs[j], glyphs[first])) {
+            first = j;
+        }
+        let mut row = vec![first];
+        while let Some(j) = (0..glyphs.len()).find(|&j| !used[j] && !row.contains(&j) && next_to(glyphs[*row.last().unwrap()], glyphs[j])) {
+            row.push(j);
+        }
+        row.iter().for_each(|&j| used[j] = true);
+        let digits: Option<String> = row.iter().map(|&j| glyphs[j].digit.map(|d| char::from(b'0' + d))).collect();
+        let Some(text) = digits else { continue };
+        let (x0, y0) = (row.iter().map(|&j| glyphs[j].x0).min().unwrap(), row.iter().map(|&j| glyphs[j].y0).min().unwrap());
+        let (x1, y1) = (row.iter().map(|&j| glyphs[j].x1).max().unwrap(), row.iter().map(|&j| glyphs[j].y1).max().unwrap());
+        let word = Word { text, rect: Rect { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }, conf: 99.0 };
+        if word.text.bytes().all(|c| c == b'1') {
+            ones.push((glyphs[first].colour, word));
+        } else {
+            words.push((glyphs[first].colour, word));
+        }
+    }
+    // Any solid bar reads as a 1: keep those only when a number with other digits, in the same
+    // colour and height, says that's how numbers look here.
+    let kept: Vec<(u8, u8, u8, u32)> = words.iter().map(|(c, w)| (c.0, c.1, c.2, w.rect.h)).collect();
+    let vouched = |c: &(u8, u8, u8), w: &Word| kept.iter().any(|k| (k.0, k.1, k.2) == *c && k.3.abs_diff(w.rect.h) <= 1);
+    ones.retain(|(c, w)| vouched(c, w));
+    words.into_iter().chain(ones).map(|(_, w)| w).collect()
 }
 
 /// Grows a word's box so the number still fits when it gains digits.

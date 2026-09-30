@@ -258,6 +258,11 @@ impl Font {
         self.samples.is_empty() && self.grids.is_empty()
     }
 
+    /// The digit a glyph is, if any.
+    pub fn digit_of(&self, g: &Glyph, scale: u32) -> Option<u8> {
+        self.digit(g, scale).map(|(d, _)| d)
+    }
+
     /// The shapes learned for `d`, grids first.
     pub fn shapes(&self, d: u8) -> Vec<DigitShape> {
         let grids = self.grids.iter().filter(|(e, _)| *e == d).map(|(_, g)| DigitShape { w: g.w, h: g.h, cells: g.cells.clone() });
