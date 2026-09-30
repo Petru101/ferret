@@ -280,11 +280,33 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// How many leading parts (start, then offsets) a path has in common with the closest of `known`.
+fn shared_start(path: &str, known: &[&String]) -> usize {
+    let common = |k: &String| path.split_whitespace().zip(k.split_whitespace()).take_while(|(a, b)| a == b).count();
+    known.iter().map(|k| common(k)).max().unwrap_or(0)
+}
+
+/// A game's values mostly hang off the same few structures (in GameMaker games, its variable
+/// list): unconfirmed paths starting the way another value's confirmed ones do (the same start
+/// and at least two offsets) are much more likely to be the real ones.
+const SHARED_START: usize = 3;
+
 impl Entry {
-    /// The pointer paths to follow, as the helper takes them: the confirmed ones, else the candidates.
-    fn followed(&self) -> Vec<String> {
-        let paths = if self.paths.is_empty() { &self.candidates } else { &self.paths };
-        paths.iter().map(|p| path_arg(p)).collect()
+    /// Confirmed paths of the game's other values.
+    fn known<'a>(&self, all: &'a [Entry]) -> Vec<&'a String> {
+        all.iter().filter(|e| e.name != self.name).flat_map(|e| &e.paths).collect()
+    }
+
+    /// The pointer paths to follow, as the helper takes them: the confirmed ones, else the
+    /// candidates that start like other values' confirmed paths, else all candidates.
+    fn followed(&self, all: &[Entry]) -> Vec<String> {
+        if !self.paths.is_empty() {
+            return self.paths.iter().map(|p| path_arg(p)).collect();
+        }
+        let known = self.known(all);
+        let likely: Vec<&String> = self.candidates.iter().filter(|p| shared_start(p, &known) >= SHARED_START).collect();
+        let paths = if likely.is_empty() { self.candidates.iter().collect() } else { likely };
+        paths.into_iter().map(|p| path_arg(p)).collect()
     }
 
     fn unconfirmed(&self) -> bool {
@@ -514,8 +536,11 @@ impl Core {
         let game = self.game()?;
         let mut entries = read_profile(&game.exe);
         entries.retain(|e| e.name != name);
-        let entry = Entry { name: name.to_owned(), kind: loc.kind, sites, paths, candidates, run: Some(pid), limit: None };
-        let (followed, confirmed) = (entry.followed(), !entry.unconfirmed());
+        let mut entry = Entry { name: name.to_owned(), kind: loc.kind, sites, paths, candidates, run: Some(pid), limit: None };
+        let known = entry.known(&entries);
+        entry.candidates.sort_by_key(|p| std::cmp::Reverse(shared_start(p, &known)));
+        let likely = entry.followed(&entries).len();
+        let (followed, confirmed) = (entry.followed(&entries), !entry.unconfirmed());
         entries.push(entry);
         let path = write_profile(&game.exe, &entries)?;
         game.entries.retain(|(n, _)| n != name);
@@ -523,6 +548,9 @@ impl Core {
         game.paths.retain(|(n, _)| n != name);
         if !followed.is_empty() {
             game.paths.push((name.to_owned(), followed));
+        }
+        if !confirmed && likely < entries.last().map_or(0, |e| e.candidates.len()) {
+            self.say(&format!("{likely} of them start like other saved values' confirmed paths: Ferret follows those"));
         }
         self.say(&format!("saved {name} ({how}) to {}", path.display()));
         Ok(confirmed)
@@ -603,14 +631,15 @@ impl Core {
         let limit = entry.limit.as_deref().ok_or("no limit set")?;
         let game = self.game()?;
         let (_, loc) = *game.entries.iter().find(|(n, _)| *n == entry.name).ok_or("value not found in this run")?;
-        if entry.sites.is_empty() && entry.followed().is_empty() {
+        let followed = entry.followed(&read_profile(&game.exe));
+        if entry.sites.is_empty() && followed.is_empty() {
             return Err("no saved code pattern or pointer path".into());
         }
         let sites: Vec<String> = entry
             .sites
             .iter()
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(":"))
-            .chain(entry.followed())
+            .chain(followed)
             .collect();
         let reply = self.helper.call(&format!("limit {} {loc} {limit} {}", entry.name, sites.join(" ")));
         first_error(&reply).map_or(Ok(()), Err)
@@ -678,8 +707,8 @@ impl Core {
                 }
                 self.say(&format!("{name}: {}", reply.join(" ")));
             }
-            if resolved.is_none() && !entry.followed().is_empty() {
-                let paths = entry.followed();
+            let paths = entry.followed(&entries);
+            if resolved.is_none() && !paths.is_empty() {
                 let (ends, best) = self.follow(entry.kind, &paths);
                 // Keep following them: before a save is loaded they may lead nowhere yet.
                 let game = self.game()?;
@@ -690,6 +719,9 @@ impl Core {
                         let agree = ends.iter().filter(|e| **e == Some(loc.addr)).count();
                         self.say(&format!("{name}: {agree} of {} pointer paths lead to it", paths.len()));
                         if entry.unconfirmed() {
+                            if paths.len() < entry.candidates.len() {
+                                self.say(&format!("{name}: following the {} unconfirmed paths that start like other values' confirmed ones", paths.len()));
+                            }
                             self.say(&format!("{name}: its pointer paths aren't confirmed yet; if the number is wrong, find it again and save it as {name}"));
                         }
                         resolved = Some((loc, v));

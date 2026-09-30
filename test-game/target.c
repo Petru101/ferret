@@ -2,10 +2,10 @@
  * and scrap (int XOR-encoded with a per-object key, like Infested Planet's BP)
  * on the heap, plus coins and wood (doubles in their own blocks, read through one
  * shared function like GameMaker games read every variable, and coins also directly),
- * plus gems (a double at the end of a chain from a static pointer: world -> room -> stats,
+ * plus gems and ore (doubles at the end of a chain from a static pointer: world -> room -> stats,
  * only ever read and written through shared functions, so only pointer paths find it again),
  * and changes them on commands (earn N, spend N, hit N, gain X, shield X, scrap N,
- * coins N, wood N, gems N, show, respawn, newroom) dropped into a command file, so it
+ * coins N, wood N, gems N, ore N, show, respawn, newroom) dropped into a command file, so it
  * can be driven the same way natively, under Proton and inside the Steam
  * runtime. "respawn" moves the player to a new object and frees the old one,
  * like a new mission; "newroom" does the same with the room and its stats.
@@ -38,6 +38,7 @@ struct stats {
     const char *type;
     double seen[3];
     double gems;
+    double ore;
 };
 
 struct room {
@@ -89,7 +90,7 @@ __attribute__((noinline, noipa)) static void write_real(double *v, double x)
     *v = x;
 }
 
-static struct room *new_room(double gems)
+static struct room *new_room(double gems, double ore)
 {
     struct room *r = malloc(sizeof *r);
 
@@ -98,6 +99,7 @@ static struct room *new_room(double gems)
     r->stats = malloc(sizeof *r->stats);
     r->stats->type = "stats";
     write_real(&r->stats->gems, gems);
+    write_real(&r->stats->ore, ore);
     return r;
 }
 
@@ -106,8 +108,9 @@ static void report(const char *log, const struct player *p, const double *coins,
     FILE *f = fopen(log, "a");
 
     if (f) {
-        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f\n", p->gold, p->hp,
-                p->energy, p->shield, scrap(p), *coins, *wood, read_real(&world->room->stats->gems));
+        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f\n", p->gold,
+                p->hp, p->energy, p->shield, scrap(p), *coins, *wood, read_real(&world->room->stats->gems),
+                read_real(&world->room->stats->ore));
         fclose(f);
     }
 }
@@ -137,7 +140,7 @@ int main(int argc, char **argv)
     *wood = 12;
     world = malloc(sizeof *world);
     world->type = "world";
-    world->room = new_room(77);
+    world->room = new_room(77, 40);
     report(argv[2], p, coins, wood);
     for (;;) {
         sleep_ms(100);
@@ -178,11 +181,13 @@ int main(int argc, char **argv)
             *wood += n;
         else if (sscanf(line, "gems %d", &n) == 1)
             write_real(&world->room->stats->gems, read_real(&world->room->stats->gems) + n);
+        else if (sscanf(line, "ore %d", &n) == 1)
+            write_real(&world->room->stats->ore, read_real(&world->room->stats->ore) + n);
         else if (strncmp(line, "newroom", 7) == 0) {
             struct room *r = world->room;
 
             padding = malloc(4096);
-            world->room = new_room(read_real(&r->stats->gems));
+            world->room = new_room(read_real(&r->stats->gems), read_real(&r->stats->ore));
             free(r->stats);
             free(r);
         } else if (sscanf(line, "quit %d", &n) == 1)

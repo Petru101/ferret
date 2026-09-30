@@ -3,7 +3,8 @@
 # (world -> room -> stats) and is only touched through shared functions, like GameMaker games,
 # so save must fall back to a pointer scan. Then the paths must follow gems when the game moves
 # its room to new memory, keep a limit on it across that move, and find it again after the game
-# restarts. Runs in its own Ferret session. Run on the host.
+# restarts. Then ore, saved once, must come back after a restart through the paths that start
+# like gems' confirmed ones. Runs in its own Ferret session. Run on the host.
 #   paths-test.sh [target|proton|proton32]
 # proton runs target.exe (64-bit), proton32 target32.exe (32-bit, like Forager) under Proton.
 set -eu
@@ -51,13 +52,13 @@ stop_game() {
     sleep 1.5
 }
 # Save watches the value, scans and re-checks the paths: wait until it is really done.
-save_gems() {
+save_value() {
     out="$here/run/$FERRET_SESSION/out"
-    done_before=$(grep -c "^saved gems\|^error" "$out" || true)
-    "$live" save gems >/dev/null
-    until [ "$(grep -c "^saved gems\|^error" "$out" || true)" -gt "$done_before" ]; do sleep 0.5; done
-    echo "> save gems"
-    awk '/^> save gems/ { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' "$out"
+    done_before=$(grep -c "^saved $1\|^error" "$out" || true)
+    "$live" save "$1" >/dev/null
+    until [ "$(grep -c "^saved $1\|^error" "$out" || true)" -gt "$done_before" ]; do sleep 0.5; done
+    echo "> save $1"
+    awk -v cmd="> save $1" '$0 == cmd { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' "$out"
 }
 # The other matches are copies (on the stack); with no screen to read, probe can't tell them
 # apart, so ask the game: write a marker to each and see which one it reports.
@@ -65,13 +66,13 @@ keep_real_match() {
     for loc in $("$live" list | grep '^0x' | cut -d' ' -f1); do
         "$live" write "$loc" 4242 >/dev/null
         game "show" >/dev/null
-        "$live" write "$loc" "$1" >/dev/null
-        if tail -n1 "$log" | grep -q "gems=4242"; then
+        "$live" write "$loc" "$2" >/dev/null
+        if tail -n1 "$log" | grep -q " $1=4242"; then
             "$live" keep "${loc%%:*}"
             return
         fi
     done
-    echo "no match is the real gems" >&2
+    echo "no match is the real $1" >&2
     exit 1
 }
 cleanup() {
@@ -95,8 +96,8 @@ game "coins 3"
 game "gems -2"
 "$live" next 84
 "$live" list
-keep_real_match 84
-save_gems
+keep_real_match gems 84
+save_value gems
 grep -A3 "^entry gems" "$profile" || true
 echo "--- the game moves gems to new memory: the paths follow it"
 game "newroom"
@@ -125,6 +126,20 @@ game "gems 7"
 "$live" scan 102
 game "gems 1"
 "$live" next 103
-keep_real_match 103
-save_gems
+keep_real_match gems 103
+save_value gems
 grep -A3 "^entry gems" "$profile" || true
+echo "--- save ore (next to gems): its unconfirmed paths that start like gems' confirmed ones are followed"
+"$live" scan 40
+game "ore 3"
+"$live" next 43
+game "ore 2"
+"$live" next 45
+keep_real_match ore 45
+save_value ore
+echo "--- restart: ore comes back without being found again"
+stop_game
+start_game
+"$live" attach "$pid"
+game "ore 5"
+"$live" values
