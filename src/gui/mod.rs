@@ -27,7 +27,7 @@ pub enum Event {
     Attached(Result<String, String>),
     Values(Result<Vec<ValueRow>, String>),
     Numbers(Result<(PathBuf, Vec<Word>), String>),
-    Read(Result<Option<i64>, String>),
+    Read(Result<Option<(i64, bool)>, String>),
     Auto(Result<AutoResult, String>),
     Typed(Result<AutoResult, String>),
     Saved(Result<String, String>),

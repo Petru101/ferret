@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::capture::WindowCapture;
+use crate::font::Font;
 use crate::ocr::{self, Rect, Word};
 
 fn flatpak_app_path() -> Option<String> {
@@ -195,6 +196,11 @@ fn profile_path(exe: &str) -> PathBuf {
     base.join("profiles").join(format!("{}.profile", exe.to_lowercase()))
 }
 
+/// The game's learned digit shapes, next to its profile.
+fn digits_path(exe: &str) -> PathBuf {
+    profile_path(exe).with_extension("digits")
+}
+
 struct Entry {
     name: String,
     kind: Kind,
@@ -298,6 +304,8 @@ pub struct Core {
     words: Vec<Word>,
     area: Option<Rect>,
     game: Option<Game>,
+    /// The attached game's digits, as learned so far.
+    font: Font,
     /// A search driven by typed numbers: matches left, and how many numbers in a row left
     /// the count unchanged.
     typed: Option<(usize, usize)>,
@@ -314,6 +322,7 @@ impl Core {
             words: Vec::new(),
             area: None,
             game: None,
+            font: Font::default(),
             typed: None,
             log,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -364,6 +373,10 @@ impl Core {
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
         self.game = Some(Game { exe: exe.clone(), entries: Vec::new() });
         self.typed = None;
+        self.font = Font::load(&digits_path(&exe));
+        if !self.font.is_empty() {
+            self.say(&format!("knows how {exe} draws the digits {}", self.font.known()));
+        }
         if !read_profile(&exe).is_empty() {
             self.say(&format!("found saved values for {exe}, restoring:"));
             self.restore()?;
@@ -572,7 +585,7 @@ impl Core {
     /// Captures a frame and finds every number in it.
     pub fn numbers(&mut self) -> Result<(PathBuf, Vec<Word>), String> {
         let frame = self.frame()?;
-        self.words = ocr::numbers(&frame)?;
+        self.words = ocr::numbers(&frame, Some(&self.font))?;
         Ok((frame, self.words.clone()))
     }
 
@@ -588,7 +601,48 @@ impl Core {
     pub fn read(&mut self) -> Result<Option<i64>, String> {
         let area = self.area.ok_or("no area picked yet")?;
         let frame = self.frame()?;
-        ocr::read_number(&frame, area, &cache_dir().join("area.png"))
+        Ok(ocr::read_number(&frame, area, &cache_dir().join("area.png"), Some(&self.font))?.map(|(n, _)| n))
+    }
+
+    /// Reads the number just picked, and whether the game's learned digits read it. A read
+    /// they didn't make is a guess to confirm; its frame is kept for `confirm`.
+    pub fn read_picked(&mut self) -> Result<Option<(i64, bool)>, String> {
+        let area = self.area.ok_or("no area picked yet")?;
+        let frame = self.frame()?;
+        let read = ocr::read_number(&frame, area, &cache_dir().join("area.png"), Some(&self.font))?;
+        fs::rename(&frame, cache_dir().join("picked.png")).map_err(|e| e.to_string())?;
+        Ok(read)
+    }
+
+    /// The player says the picked number read right: learn the game's digits from it.
+    pub fn confirm(&mut self, n: i64) {
+        self.learn(&cache_dir().join("picked.png"), n, false);
+    }
+
+    /// Learns the game's digits from the watched area of `frame`, which shows `n`. Failing to
+    /// learn only gets logged.
+    fn learn(&mut self, frame: &Path, n: i64, trusted: bool) {
+        let (Some(area), Some(game)) = (self.area, self.game.as_ref()) else { return };
+        let path = digits_path(&game.exe);
+        let msg = match ocr::learn(frame, area, n, &mut self.font, trusted) {
+            Ok(msg) => self.font.save(&path).map(|_| msg).unwrap_or_else(|e| format!("could not save the digits: {e}")),
+            Err(e) => format!("digits not learned: {e}"),
+        };
+        self.say(&msg);
+    }
+
+    /// With the value's address known, memory tells what the screen shows: learn from that.
+    fn learn_from_memory(&mut self, loc: Loc) {
+        if self.area.is_none() {
+            return;
+        }
+        let before = self.peek(&[loc])[0];
+        let Ok(frame) = self.frame() else { return };
+        // A value that changed while the frame was taken could show either.
+        match (before, self.peek(&[loc])[0]) {
+            (Some(a), Some(b)) if a == b => self.learn(&frame, a, true),
+            _ => {}
+        }
     }
 
     /// Current scan candidates (at most 20 are listed by the helper).
@@ -709,12 +763,14 @@ impl Core {
         if count == 1 {
             let loc = self.candidates()[0].0;
             self.say(&format!("stored as {}", loc.kind.with_article()));
+            self.learn_from_memory(loc);
             return Ok(AutoResult::Found(loc));
         }
         if (2..=20).contains(&count) && !cancelled(&self.cancel) {
             self.say("checking which one is the real value:");
             if let Some(loc) = self.probe()? {
                 self.say(&format!("stored as {}", loc.kind.with_article()));
+                self.learn_from_memory(loc);
                 return Ok(AutoResult::Found(loc));
             }
         }
@@ -722,9 +778,18 @@ impl Core {
     }
 
     /// The same search driven by numbers the player types, for when the screen can't be read:
-    /// the first number starts it, each one after narrows it down.
+    /// the first number starts it, each one after narrows it down. With a watched area, the
+    /// number also teaches Ferret how the game draws its digits.
     pub fn typed(&mut self, n: i64) -> Result<AutoResult, String> {
         self.game()?;
+        if self.area.is_some() {
+            let frame = self.frame()?;
+            self.learn(&frame, n, false);
+        }
+        self.typed_search(n)
+    }
+
+    fn typed_search(&mut self, n: i64) -> Result<AutoResult, String> {
         let (count, unchanged) = match self.typed {
             Some((before, unchanged)) => {
                 let reply = self.helper.call(&format!("next {n}"));
@@ -733,7 +798,7 @@ impl Core {
                 if count == 0 {
                     self.say("nothing went from the last number to this one, starting over");
                     self.typed = None;
-                    return self.typed(n);
+                    return self.typed_search(n);
                 }
                 (count, if count == before { unchanged + 1 } else { 0 })
             }
@@ -761,6 +826,7 @@ impl Core {
             Some(loc) => {
                 self.typed = None;
                 self.say(&format!("stored as {}", loc.kind.with_article()));
+                self.learn_from_memory(loc);
                 Ok(AutoResult::Found(loc))
             }
             None => Ok(AutoResult::Several(count)),

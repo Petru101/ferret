@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::core::{self, AutoResult, Core};
 use crate::ocr::Rect;
 
-const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], probe
+const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, probe
 restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off";
 
 fn bound(v: &str) -> Result<Option<i64>, String> {
@@ -58,6 +58,10 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         }
         "read" => println!("{:?}", core.read()?),
         "auto" => match core.auto(Duration::from_secs(arg.parse().unwrap_or(600)))? {
+            AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
+            AutoResult::Several(n) => println!("{n} candidates left"),
+        },
+        "type" => match core.typed(arg.parse().map_err(|_| "usage: type <n>")?)? {
             AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
             AutoResult::Several(n) => println!("{n} candidates left"),
         },

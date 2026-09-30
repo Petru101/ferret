@@ -1,6 +1,7 @@
 mod capture;
 mod cli;
 mod core;
+mod font;
 mod gui;
 mod ocr;
 

@@ -3,7 +3,7 @@
 // narrows the scan down every time the number changes on screen. When it can't
 // read the number, the player types it instead.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,8 @@ pub struct FindView {
     texture: RefCell<Option<gdk::Texture>>,
     words: RefCell<Vec<Word>>,
     selection: RefCell<Option<Rect>>,
+    /// A read the player hasn't confirmed yet (Tesseract's, not the learned digits').
+    unconfirmed: Cell<Option<i64>>,
     /// Drag start and current point, in widget coordinates.
     drag: RefCell<Option<(f64, f64, f64, f64)>>,
     status: gtk::Label,
@@ -164,6 +166,7 @@ impl FindView {
             texture: RefCell::default(),
             words: RefCell::default(),
             selection: RefCell::default(),
+            unconfirmed: Cell::default(),
             drag: RefCell::default(),
             status,
             crop,
@@ -187,7 +190,11 @@ impl FindView {
             let view_ = view.clone();
             type_instead.connect_clicked(move |_| {
                 view_.root.set_visible_child_name("pick");
-                view_.status.set_label("Type the number the game shows, change it in the game, type the new one.");
+                view_.status.set_label(if view_.selection.borrow().is_some() {
+                    "Type the number the game shows, change it in the game, type the new one. Ferret learns the game's digits from it."
+                } else {
+                    "Click the number or drag a box around it, so Ferret can learn the game's digits. Then type the number the game shows, change it in the game, type the new one."
+                });
                 view_.typed.grab_focus();
             });
             let view_ = view.clone();
@@ -358,22 +365,31 @@ impl FindView {
         self.status.set_label("Reading…");
         self.worker.run(move |core| {
             core.set_area(area);
-            Event::Read(core.read())
+            Event::Read(core.read_picked())
         });
     }
 
-    pub fn read(&self, r: Result<Option<i64>, String>) {
+    pub fn read(&self, r: Result<Option<(i64, bool)>, String>) {
         self.busy(false);
         if let Ok(t) = gdk::Texture::from_filename(core::cache_dir().join("area.png")) {
             self.crop.set_paintable(Some(&t));
         }
+        self.unconfirmed.set(None);
+        self.start.set_label("Start");
         match r {
-            Ok(Some(n)) => {
+            Ok(Some((n, true))) => {
                 self.status.set_label(&format!("Reads {n}. Press Start, then play until the number changes a couple of times."));
                 self.start.set_sensitive(true);
             }
+            // Tesseract's guess: ask, and learn the game's digits from the answer.
+            Ok(Some((n, false))) => {
+                self.status.set_label(&format!("Reads {n}. Is that what the game shows? If not, type the right number below."));
+                self.unconfirmed.set(Some(n));
+                self.start.set_label("Yes, Start");
+                self.start.set_sensitive(true);
+            }
             Ok(None) => {
-                self.status.set_label("No number there. Try a tighter box around just the digits.");
+                self.status.set_label("Can't read a number there. Type the number the game shows below; Ferret learns the game's digits from it. Or try a tighter box.");
                 self.start.set_sensitive(false);
             }
             Err(e) => self.status.set_label(&e),
@@ -387,7 +403,14 @@ impl FindView {
         self.stop.set_visible(true);
         self.busy(true);
         self.status.set_label("Watching the number. Play normally; every change narrows it down.");
-        self.worker.run(|core| Event::Auto(core.auto(Duration::from_secs(600))));
+        self.start.set_label("Start");
+        let confirmed = self.unconfirmed.take();
+        self.worker.run(move |core| {
+            if let Some(n) = confirmed {
+                core.confirm(n);
+            }
+            Event::Auto(core.auto(Duration::from_secs(600)))
+        });
     }
 
     pub fn auto_done(&self, r: Result<AutoResult, String>) {
@@ -421,6 +444,8 @@ impl FindView {
         };
         self.result.set_visible(false);
         self.typed_row.set_sensitive(false);
+        self.unconfirmed.set(None);
+        self.start.set_label("Start");
         self.busy(true);
         self.status.set_label(&format!("Looking for {n}…"));
         self.worker.run(move |core| Event::Typed(core.typed(n)));
