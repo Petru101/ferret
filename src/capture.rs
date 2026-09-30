@@ -122,15 +122,21 @@ impl WindowCapture {
             .map_err(|e| e.to_string())?;
         let raw = fd.as_raw_fd();
         unsafe { libc::fcntl(raw, libc::F_SETFD, 0) };
+        // A new connection first gets the last frame the previous one saw (after a resize: the
+        // old size), so keep the second. keepalive-time resends a frame when the game doesn't
+        // draw a new one.
+        let each = format!("{}.%d", out.display());
         let status = Command::new("timeout")
             .args(["10", "gst-launch-1.0", "-q"])
-            .args(["pipewiresrc", &format!("fd={raw}"), &format!("path={}", self.node), "num-buffers=1"])
-            .args(["!", "videoconvert", "!", "video/x-raw,format=RGB", "!", "pngenc", "!", "filesink"])
-            .arg(format!("location={}", out.display()))
+            .args(["pipewiresrc", &format!("fd={raw}"), &format!("path={}", self.node), "num-buffers=2", "keepalive-time=250"])
+            .args(["!", "videoconvert", "!", "video/x-raw,format=RGB", "!", "pngenc", "!", "multifilesink"])
+            .arg(format!("location={each}"))
             .status()
             .map_err(|e| e.to_string())?;
         drop(fd);
-        if status.success() && out.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        let kept = fs::rename(each.replace("%d", "1"), out).is_ok();
+        fs::remove_file(each.replace("%d", "0")).ok();
+        if status.success() && kept && out.metadata().map(|m| m.len() > 0).unwrap_or(false) {
             Ok(())
         } else {
             Err(format!("could not grab a frame ({status})"))
