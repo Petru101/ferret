@@ -1,9 +1,12 @@
 /* Stand-in "game": keeps gold and hp on the heap and changes them on commands
- * (earn N, spend N, hit N, show) dropped into a command file, so it can be
- * driven the same way natively, under Proton and inside the Steam runtime.
- * Usage: target <command file> <log file>. Built for Linux and Windows. */
+ * (earn N, spend N, hit N, show, respawn) dropped into a command file, so it
+ * can be driven the same way natively, under Proton and inside the Steam
+ * runtime. "respawn" moves the player to a new object and frees the old one,
+ * like a new mission. Usage: target <command file> <log file>. Built for Linux
+ * and Windows. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #ifdef _WIN32
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
@@ -12,10 +15,23 @@
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
+static const char player_type[] = "player";
+
 struct player {
+    const char *type;
     int hp;
     int gold;
 };
+
+static struct player *spawn(void)
+{
+    struct player *p = malloc(sizeof *p);
+
+    p->type = player_type;
+    p->hp = 100;
+    p->gold = 1000;
+    return p;
+}
 
 static void report(const char *log, const struct player *p)
 {
@@ -30,7 +46,9 @@ static void report(const char *log, const struct player *p)
 int main(int argc, char **argv)
 {
     char *padding = malloc(123456);
-    struct player *p = malloc(sizeof *p);
+    struct player *p = spawn();
+    struct player *old;
+    volatile int richest = 0;
     char line[64];
     FILE *f;
     int n;
@@ -38,11 +56,11 @@ int main(int argc, char **argv)
     if (argc < 3)
         return 1;
     padding[0] = 1;
-    p->hp = 100;
-    p->gold = 1000;
     report(argv[2], p);
     for (;;) {
         sleep_ms(100);
+        if (p->gold > richest)
+            richest = p->gold;
         f = fopen(argv[1], "r");
         if (!f)
             continue;
@@ -58,6 +76,12 @@ int main(int argc, char **argv)
             p->hp -= n;
         else if (sscanf(line, "quit %d", &n) == 1)
             break;
+        else if (strncmp(line, "respawn", 7) == 0) {
+            old = p;
+            padding = malloc(4096);
+            p = spawn();
+            free(old);
+        }
         report(argv[2], p);
     }
     return 0;

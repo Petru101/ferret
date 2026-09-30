@@ -184,21 +184,42 @@ fn cmd_save(game: &mut Option<Game>, helper: &mut Helper, name: &str) -> Result<
     Ok(())
 }
 
-/// Hands a saved limit to the helper, which enforces it in the background.
+/// Hands a saved limit to the helper, which enforces it in the background and
+/// finds the value again through its code patterns if the game moves it.
 fn apply_limit(game: &Game, helper: &mut Helper, entry: &Entry) -> Result<(), String> {
     let limit = entry.limit.as_deref().ok_or("no limit set")?;
     let (_, addr) = game.entries.iter().find(|(n, _)| *n == entry.name).ok_or("value not found in this run")?;
-    // Every saved pattern reads [object + displacement]; the object starts at addr - displacement.
-    let disp: i64 = entry
-        .sites
-        .first()
-        .and_then(|s| s.split_whitespace().last()?.parse().ok())
-        .ok_or("no saved code pattern")?;
-    let object = addr.wrapping_sub(disp as u64);
-    let reply = helper.call(&format!("limit {addr:x} {limit} {object:x}"));
+    if entry.sites.is_empty() {
+        return Err("no saved code pattern".into());
+    }
+    let sites: Vec<String> = entry.sites.iter().map(|s| s.split_whitespace().collect::<Vec<_>>().join(":")).collect();
+    let reply = helper.call(&format!("limit {} {addr:x} {limit} {}", entry.name, sites.join(" ")));
     match reply.iter().find(|l| l.starts_with("error:")) {
         Some(e) => Err(e.trim_start_matches("error: ").to_owned()),
         None => Ok(()),
+    }
+}
+
+/// Limits the helper enforces: name, current address, and the rest of its line.
+fn limits(helper: &mut Helper) -> Vec<(String, u64, String)> {
+    helper
+        .call("limits")
+        .iter()
+        .filter_map(|l| {
+            let mut f = l.splitn(3, ' ');
+            let name = f.next()?.to_owned();
+            let addr = u64::from_str_radix(f.next()?.trim_start_matches("0x"), 16).ok()?;
+            Some((name, addr, f.next()?.to_owned()))
+        })
+        .collect()
+}
+
+/// The helper may have found a limited value at a new address; use that one.
+fn sync_addresses(game: &mut Game, helper: &mut Helper) {
+    for (name, addr, _) in limits(helper) {
+        if let Some(e) = game.entries.iter_mut().find(|(n, _)| *n == name) {
+            e.1 = addr;
+        }
     }
 }
 
@@ -233,9 +254,7 @@ fn cmd_limit(game: &mut Option<Game>, helper: &mut Helper, arg: &str) -> Result<
             println!("{name} is kept {} (written only when the game goes past it)", limit_text(l));
         }
         None => {
-            if let Some((_, addr)) = game.entries.iter().find(|(n, _)| n == name) {
-                helper.call(&format!("unlimit {addr:x}"));
-            }
+            helper.call(&format!("unlimit {name}"));
             println!("{name} is no longer limited");
         }
     }
@@ -281,15 +300,15 @@ fn cmd_restore(game: &mut Option<Game>, helper: &mut Helper) -> Result<(), Strin
     Ok(())
 }
 
-fn cmd_values(game: &Option<Game>, helper: &mut Helper) -> Result<(), String> {
-    let game = game.as_ref().ok_or("attach to a game first")?;
+fn cmd_values(game: &mut Option<Game>, helper: &mut Helper) -> Result<(), String> {
+    let game = game.as_mut().ok_or("attach to a game first")?;
+    sync_addresses(game, helper);
     let addrs: Vec<u64> = game.entries.iter().map(|(_, a)| *a).collect();
-    let limits = helper.call("limits");
+    let limits = limits(helper);
     for ((name, addr), v) in game.entries.iter().zip(peek(helper, &addrs)) {
-        let prefix = format!("0x{addr:012x} ");
-        let limit = limits.iter().find_map(|l| l.strip_prefix(&prefix)).map(|l| {
-            let (range, rest) = l.split_once(" fixed ").unwrap_or((l, ""));
-            format!("  kept {}, fixed {rest}", limit_text(range))
+        let limit = limits.iter().find(|(n, _, _)| n == name).map(|(_, _, rest)| {
+            let (range, state) = rest.split_once(" fixed ").unwrap_or((rest, ""));
+            format!("  kept {}, fixed {state}", limit_text(range))
         });
         println!(
             "{name:<12} {} (at 0x{addr:x}){}",
@@ -514,7 +533,7 @@ pub fn run() {
             "probe" => cmd_probe(&mut vision, &mut helper),
             "save" => cmd_save(&mut game, &mut helper, arg.trim()),
             "restore" => cmd_restore(&mut game, &mut helper),
-            "values" => cmd_values(&game, &mut helper),
+            "values" => cmd_values(&mut game, &mut helper),
             "limit" => cmd_limit(&mut game, &mut helper, arg.trim()),
             "attach" => {
                 let reply = helper.call(&line);
@@ -534,6 +553,9 @@ pub fn run() {
             "set" if arg.split_whitespace().next().is_some_and(|n| n.parse::<i64>().is_err()) => {
                 let mut it = arg.split_whitespace();
                 let (name, value) = (it.next().unwrap_or_default(), it.next().unwrap_or_default());
+                if let Some(g) = game.as_mut() {
+                    sync_addresses(g, &mut helper);
+                }
                 match game.as_ref().and_then(|g| g.entries.iter().find(|(n, _)| n == name)) {
                     Some((_, addr)) => {
                         for l in helper.call(&format!("write {addr:x} {value}")) {

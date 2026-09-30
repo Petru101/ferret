@@ -4,18 +4,20 @@
 #   live.sh start        start the session
 #   live.sh <command>    send a command (e.g. "scan 120") and print the reply
 #   live.sh stop         end the session
+# FERRET_SESSION=<name> runs a separate session next to the default one.
 set -eu
-dir="$(cd "$(dirname "$0")/.." && pwd)/run/live"
+session=${FERRET_SESSION:-live}
+dir="$(cd "$(dirname "$0")/.." && pwd)/run/$session"
 case ${1:-} in
 start)
     rm -rf "$dir" && mkdir -p "$dir" && mkfifo "$dir/in"
-    systemctl --user stop ferret-live 2>/dev/null || true
-    systemd-run --user --quiet --collect --unit=ferret-live sh -c \
+    systemctl --user stop "ferret-$session" 2>/dev/null || true
+    systemd-run --user --quiet --collect --unit="ferret-$session" sh -c \
         "sleep infinity > '$dir/in' & flatpak run io.github.Petru101.Ferret < '$dir/in' > '$dir/out' 2>&1; kill \$!"
     echo "session started"
     ;;
 stop)
-    systemctl --user stop ferret-live
+    systemctl --user stop "ferret-$session"
     echo "session stopped"
     ;;
 *)

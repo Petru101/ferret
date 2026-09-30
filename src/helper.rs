@@ -106,50 +106,102 @@ fn scannable(r: &Region) -> bool {
 // --- Limits: keep a value within a range, writing only when the game moves it out.
 
 struct Limit {
+    name: String,
     addr: u64,
     min: Option<i32>,
     max: Option<i32>,
+    sites: Vec<Site>,
     // First bytes of the object holding the value (its type pointer). If they
     // change, the object is gone and writing would corrupt unrelated memory.
     guard_addr: u64,
     guard: [u8; 4],
     fixes: u64,
+    restores: u64,
     paused: Option<&'static str>,
+    retry_at: Instant,
 }
 
 #[derive(Default)]
 struct Limiter {
+    pid: u32,
     mem: Option<File>,
     limits: Vec<Limit>,
 }
 
 type SharedLimiter = Arc<Mutex<Limiter>>;
 
+const RETRY_EVERY: Duration = Duration::from_secs(5);
+const RESOLVE_WAIT: Duration = Duration::from_secs(2);
+
+fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
+    let mut g = [0u8; 4];
+    mem.read_exact_at(&mut g, addr).ok().map(|_| g)
+}
+
+/// Keeps limited values in range; paused limits are found again through their
+/// saved code patterns and then resume.
 fn limiter_loop(shared: SharedLimiter) {
     loop {
         std::thread::sleep(Duration::from_millis(250));
-        let mut guard = shared.lock().unwrap();
-        let Limiter { mem, limits } = &mut *guard;
-        let Some(mem) = mem.as_ref() else { continue };
-        for l in limits.iter_mut().filter(|l| l.paused.is_none()) {
-            let mut g = [0u8; 4];
-            if mem.read_exact_at(&mut g, l.guard_addr).is_err() || g != l.guard {
-                l.paused = Some("the object holding it changed (new mission?), run restore");
-                continue;
+        let due: Vec<(String, Vec<Site>)>;
+        let (pid, mem) = {
+            let mut guard = shared.lock().unwrap();
+            let Limiter { pid, mem, limits } = &mut *guard;
+            let Some(mem) = mem.as_ref() else { continue };
+            for l in limits.iter_mut().filter(|l| l.paused.is_none()) {
+                if read_guard(mem, l.guard_addr) != Some(l.guard) {
+                    l.paused = Some("the object holding it changed, finding it again");
+                    l.retry_at = Instant::now();
+                    continue;
+                }
+                let mut b = [0u8; 4];
+                if mem.read_exact_at(&mut b, l.addr).is_err() {
+                    l.paused = Some("unreadable, finding it again");
+                    l.retry_at = Instant::now();
+                    continue;
+                }
+                let v = i32::from_le_bytes(b);
+                let target = match (l.min, l.max) {
+                    (_, Some(max)) if v > max => max,
+                    (Some(min), _) if v < min => min,
+                    _ => continue,
+                };
+                if mem.write_all_at(&target.to_le_bytes(), l.addr).is_ok() {
+                    l.fixes += 1;
+                }
             }
-            let mut b = [0u8; 4];
-            if mem.read_exact_at(&mut b, l.addr).is_err() {
-                l.paused = Some("unreadable");
-                continue;
+            let now = Instant::now();
+            due = limits
+                .iter()
+                .filter(|l| l.paused.is_some() && l.retry_at <= now)
+                .map(|l| (l.name.clone(), l.sites.clone()))
+                .collect();
+            let Ok(mem) = mem.try_clone() else { continue };
+            (*pid, mem)
+        };
+        // Resolving traces the game for a moment, so it runs without holding the lock.
+        for (name, sites) in due {
+            let found = sites
+                .iter()
+                .find_map(|site| Some((resolve_site(pid, &mem, site, RESOLVE_WAIT).ok()?, site.disp)));
+            let mut guard = shared.lock().unwrap();
+            if guard.pid != pid {
+                break;
             }
-            let v = i32::from_le_bytes(b);
-            let target = match (l.min, l.max) {
-                (_, Some(max)) if v > max => max,
-                (Some(min), _) if v < min => min,
-                _ => continue,
-            };
-            if mem.write_all_at(&target.to_le_bytes(), l.addr).is_ok() {
-                l.fixes += 1;
+            let Some(l) = guard.limits.iter_mut().find(|l| l.name == name) else { continue };
+            let object = found.and_then(|(addr, disp)| {
+                let object = addr.wrapping_sub(disp as u64);
+                Some((addr, object, read_guard(&mem, object)?))
+            });
+            match object {
+                Some((addr, object, g)) => {
+                    l.addr = addr;
+                    l.guard_addr = object;
+                    l.guard = g;
+                    l.restores += 1;
+                    l.paused = None;
+                }
+                None => l.retry_at = Instant::now() + RETRY_EVERY,
             }
         }
     }
@@ -163,44 +215,65 @@ fn bound(v: Option<&&str>) -> Result<Option<i32>, ()> {
     }
 }
 
+/// limit <name> <hex addr> <min|-> <max|-> <site>... where a site is
+/// "pattern:offset:register:displacement" as saved in the profile.
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
-    let (Some(addr), Ok(min), Ok(max), Some(guard_addr)) =
-        (f.first().and_then(|a| parse_addr(a)), bound(f.get(1)), bound(f.get(2)), f.get(3).and_then(|a| parse_addr(a)))
+    let sites: Option<Vec<Site>> = f
+        .get(4..)
+        .map(|s| s.iter().map(|s| Site::parse(&s.split(':').collect::<Vec<_>>())).collect())
+        .unwrap_or(None);
+    let (Some(name), Some(addr), Ok(min), Ok(max), Some(sites)) =
+        (f.first(), f.get(1).and_then(|a| parse_addr(a)), bound(f.get(2)), bound(f.get(3)), sites)
     else {
-        return writeln!(out, "error: usage: limit <hex addr> <min|-> <max|-> <hex object addr>");
+        return writeln!(out, "error: usage: limit <name> <hex addr> <min|-> <max|-> <pattern:offset:register:displacement>...");
+    };
+    let Some(disp) = sites.first().map(|s| s.disp) else {
+        return writeln!(out, "error: a limit needs at least one saved code pattern");
     };
     let mut l = limiter.lock().unwrap();
     let Some(mem) = l.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
-    let mut guard = [0u8; 4];
-    if mem.read_exact_at(&mut guard, guard_addr).is_err() {
+    let guard_addr = addr.wrapping_sub(disp as u64);
+    let Some(guard) = read_guard(mem, guard_addr) else {
         return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}");
-    }
-    l.limits.retain(|l| l.addr != addr);
-    l.limits.push(Limit { addr, min, max, guard_addr, guard, fixes: 0, paused: None });
-    writeln!(out, "limiting 0x{addr:x}")
-}
-
-fn cmd_unlimit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
-    let Some(addr) = parse_addr(arg) else {
-        return writeln!(out, "error: usage: unlimit <hex addr>");
     };
-    limiter.lock().unwrap().limits.retain(|l| l.addr != addr);
-    writeln!(out, "no longer limiting 0x{addr:x}")
+    l.limits.retain(|l| l.name != *name);
+    l.limits.push(Limit {
+        name: name.to_string(),
+        addr,
+        min,
+        max,
+        sites,
+        guard_addr,
+        guard,
+        fixes: 0,
+        restores: 0,
+        paused: None,
+        retry_at: Instant::now(),
+    });
+    writeln!(out, "limiting {name} at 0x{addr:x}")
 }
 
+fn cmd_unlimit(out: &mut impl Write, limiter: &SharedLimiter, name: &str) -> io::Result<()> {
+    limiter.lock().unwrap().limits.retain(|l| l.name != name);
+    writeln!(out, "no longer limiting {name}")
+}
+
+/// One line per limit: <name> <hex addr> <min|-> <max|-> fixed N times, restored M times, <state>
 fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
     let show = |b: Option<i32>| b.map_or("-".to_owned(), |b| b.to_string());
     for l in &limiter.lock().unwrap().limits {
         writeln!(
             out,
-            "0x{:012x} {} {} fixed {} times, {}",
+            "{} 0x{:012x} {} {} fixed {} times, restored {} times, {}",
+            l.name,
             l.addr,
             show(l.min),
             show(l.max),
             l.fixes,
+            l.restores,
             l.paused.unwrap_or("active")
         )?;
     }
@@ -277,7 +350,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
     }
     match OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem")) {
         Ok(f) => {
-            *limiter.lock().unwrap() = Limiter { mem: f.try_clone().ok(), limits: Vec::new() };
+            *limiter.lock().unwrap() = Limiter { pid, mem: f.try_clone().ok(), limits: Vec::new() };
             *s = Session { pid, mem: Some(f), candidates: Vec::new() };
             let regions = maps(pid)?;
             let rw: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
@@ -499,6 +572,7 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let secs = it.next().and_then(|v| v.parse().ok()).unwrap_or(5);
     let mut hits: Vec<(u64, trace::Regs)> = Vec::new();
     {
+        let _tracing = TRACING.lock().unwrap();
         let mut tracer = match trace::Tracer::attach(s.pid) {
             Ok(t) => t,
             Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
@@ -548,43 +622,61 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     writeln!(out, "{} instructions accessed it", hits.len())
 }
 
+/// Only one tracer may run at a time: two would steal each other's events.
+static TRACING: Mutex<()> = Mutex::new(());
+
+/// A saved code pattern: the instruction at `off` reads [`base` + `disp`].
+#[derive(Clone)]
+struct Site {
+    pat: Vec<Option<u8>>,
+    off: u64,
+    base: u8,
+    disp: i64,
+}
+
+impl Site {
+    fn parse(f: &[&str]) -> Option<Self> {
+        let reg = f.get(2)?;
+        Some(Site {
+            pat: parse_pattern(f.first()?)?,
+            off: f.get(1)?.parse().ok()?,
+            base: trace::REG_NAMES.iter().position(|n| n == reg)? as u8,
+            disp: f.get(3)?.parse().ok()?,
+        })
+    }
+}
+
 /// Finds a saved pattern in the game's code, waits for that instruction to
 /// run and reads its base register: the value's address in this run.
+fn resolve_site(pid: u32, mem: &File, site: &Site, timeout: Duration) -> Result<u64, String> {
+    let found = find_pattern(pid, mem, &site.pat, 2).map_err(|e| e.to_string())?;
+    let [code] = found.as_slice() else {
+        return Err(format!("pattern found {} times (the game may not have run that code yet)", found.len()));
+    };
+    let instr = code + site.off;
+    let _tracing = TRACING.lock().unwrap();
+    let mut value_addr = None;
+    let mut tracer = trace::Tracer::attach(pid).map_err(|e| format!("cannot trace the game: {e}"))?;
+    tracer.arm(instr, trace::DR7_EXECUTE);
+    tracer.watch(timeout, |hit| {
+        value_addr = Some(trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64));
+        false
+    });
+    value_addr.ok_or(format!("the code at 0x{instr:x} did not run within {} s", timeout.as_secs()))
+}
+
 fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
-    let (Some(pat), Some(off), Some(base), Some(disp), Some(mem)) = (
-        f.first().and_then(|p| parse_pattern(p)),
-        f.get(1).and_then(|v| v.parse::<u64>().ok()),
-        f.get(2).and_then(|r| trace::REG_NAMES.iter().position(|n| n == r)),
-        f.get(3).and_then(|v| v.parse::<i64>().ok()),
-        s.mem.as_ref(),
-    ) else {
+    let (Some(site), Some(mem)) = (Site::parse(&f), s.mem.as_ref()) else {
         return writeln!(out, "error: usage: resolve <pattern> <offset> <register> <displacement> [seconds]");
     };
     let secs = f.get(4).and_then(|v| v.parse().ok()).unwrap_or(10);
-    let found = find_pattern(s.pid, mem, &pat, 2)?;
-    let [code] = found.as_slice() else {
-        return writeln!(out, "error: pattern found {} times (the game may not have run that code yet)", found.len());
-    };
-    let instr = code + off;
-    let mut value_addr = None;
-    {
-        let mut tracer = match trace::Tracer::attach(s.pid) {
-            Ok(t) => t,
-            Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
-        };
-        tracer.arm(instr, trace::DR7_EXECUTE);
-        tracer.watch(Duration::from_secs(secs), |hit| {
-            value_addr = Some(trace::reg(&hit.regs, base as u8).wrapping_add(disp as u64));
-            false
-        });
-    }
-    match value_addr {
-        Some(addr) => match s.read_i32(addr) {
+    match resolve_site(s.pid, mem, &site, Duration::from_secs(secs)) {
+        Ok(addr) => match s.read_i32(addr) {
             Some(v) => writeln!(out, "0x{addr:012x} = {v}"),
             None => writeln!(out, "error: resolved to unreadable 0x{addr:x}"),
         },
-        None => writeln!(out, "error: the code at 0x{instr:x} did not run within {secs} s"),
+        Err(e) => writeln!(out, "error: {e}"),
     }
 }
 
@@ -620,7 +712,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], attach <pid>, scan <n>, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site>, limit <addr> <min> <max> <object>, unlimit <addr>, limits, write <addr> <n>, set <n>, quit"
+                "commands: sandbox, info, ps [filter], attach <pid>, scan <n>, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site>, limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit"
             ),
         };
         if res.and_then(|_| writeln!(out, "end")).and_then(|_| out.flush()).is_err() {
