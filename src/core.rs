@@ -388,9 +388,10 @@ pub struct Core {
     game: Option<Game>,
     /// The attached game's digits, as learned so far.
     font: Font,
-    /// A search driven by typed numbers: matches left, and how many numbers in a row left
-    /// the count unchanged.
-    typed: Option<(usize, usize)>,
+    /// The search in progress (Start or typed numbers, which continue each other): matches
+    /// left, and how many typed numbers in a row left the count unchanged. None = the next
+    /// number starts a new scan.
+    search: Option<(usize, usize)>,
     log: Box<dyn FnMut(&str) + Send>,
     /// Set to stop a running `auto`.
     pub cancel: Arc<AtomicBool>,
@@ -406,7 +407,7 @@ impl Core {
             area: None,
             game: None,
             font: Font::default(),
-            typed: None,
+            search: None,
             log,
             cancel: Arc::new(AtomicBool::new(false)),
         })
@@ -459,7 +460,7 @@ impl Core {
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
         self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new() });
-        self.typed = None;
+        self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
             self.say(&format!("knows how {exe} draws the digits {}", self.font.known()));
@@ -836,8 +837,21 @@ impl Core {
         self.words.get(i).map(|w| ocr::watch_area(w.rect))
     }
 
+    /// Picks the number to watch. A different number (not just a tighter box around the same
+    /// one) starts the next search over.
     pub fn set_area(&mut self, area: Rect) {
+        if self.search.is_some() && self.area.is_some_and(|a| !ocr::overlaps(a, area)) {
+            self.say("another number picked: the next search starts over");
+            self.search = None;
+        }
         self.area = Some(area);
+    }
+
+    /// Forgets the search in progress, so the next number starts from scratch.
+    pub fn reset(&mut self) {
+        self.search = None;
+        self.helper.call("track");
+        self.say("search cleared");
     }
 
     /// Reads the number inside the watched area of a fresh frame.
@@ -948,9 +962,8 @@ impl Core {
 
     /// The automated scan loop: read the number off the window, scan for it, and
     /// keep narrowing down whenever it changes on screen. Stops early when
-    /// `cancel` is set.
+    /// `cancel` is set. Continues a search that was stopped or typed into.
     pub fn auto(&mut self, limit: Duration) -> Result<AutoResult, String> {
-        self.typed = None;
         self.cancel.store(false, Ordering::Relaxed);
         let cancelled = |c: &Arc<AtomicBool>| c.load(Ordering::Relaxed);
         let start = Instant::now();
@@ -962,11 +975,20 @@ impl Core {
                 return Err("could not read the number".into());
             }
         };
-        let reply = self.helper.call(&format!("scan {first}"));
-        self.say(&format!("screen shows {first}: {}", reply.join(" ")));
-        let Some(mut count) = match_count(&reply) else {
-            return Err(first_error(&reply).unwrap_or("scan failed".into()));
+        let mut count = match self.search {
+            Some((before, _)) => {
+                let reply = self.helper.call(&format!("next {first}"));
+                self.say(&format!("screen shows {first}, continuing from {before} matches: {}", reply.join(" ")));
+                match_count(&reply).unwrap_or(0)
+            }
+            None => 0,
         };
+        if count == 0 {
+            let reply = self.helper.call(&format!("scan {first}"));
+            self.say(&format!("screen shows {first}: {}", reply.join(" ")));
+            count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
+        }
+        self.search = Some((count, 0));
         let mut last = first;
         let mut unchanged_rounds = 0;
         while count > 1 && start.elapsed() < limit && !cancelled(&self.cancel) {
@@ -989,6 +1011,7 @@ impl Core {
                 unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
                 count = new_count;
             }
+            self.search = Some((count, 0));
             last = now;
             if unchanged_rounds >= 3 {
                 self.say(&format!("{count} addresses keep following the value (likely the value plus copies of it)"));
@@ -1003,7 +1026,11 @@ impl Core {
         for l in self.helper.call("list") {
             self.say(&l);
         }
+        if count == 0 {
+            self.search = None;
+        }
         if count == 1 {
+            self.search = None;
             let loc = self.candidates()[0].0;
             self.say(&format!("stored as {}", loc.kind.with_article()));
             self.learn_from_memory(loc);
@@ -1012,6 +1039,7 @@ impl Core {
         if (2..=20).contains(&count) && !cancelled(&self.cancel) {
             self.say("checking which one is the real value:");
             if let Some(loc) = self.probe()? {
+                self.search = None;
                 self.say(&format!("stored as {}", loc.kind.with_article()));
                 self.learn_from_memory(loc);
                 return Ok(AutoResult::Found(loc));
@@ -1033,14 +1061,14 @@ impl Core {
     }
 
     fn typed_search(&mut self, n: i64) -> Result<AutoResult, String> {
-        let (count, unchanged) = match self.typed {
+        let (count, unchanged) = match self.search {
             Some((before, unchanged)) => {
                 let reply = self.helper.call(&format!("next {n}"));
                 self.say(&format!("typed {n}: {}", reply.join(" ")));
                 let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
                 if count == 0 {
                     self.say("nothing went from the last number to this one, starting over");
-                    self.typed = None;
+                    self.search = None;
                     return self.typed_search(n);
                 }
                 (count, if count == before { unchanged + 1 } else { 0 })
@@ -1051,10 +1079,10 @@ impl Core {
                 (match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?, 0)
             }
         };
-        self.typed = Some((count, unchanged));
+        self.search = Some((count, unchanged));
         let found = match count {
             0 => {
-                self.typed = None;
+                self.search = None;
                 return Err(format!("{n} is nowhere in the game's memory"));
             }
             1 => Some(self.candidates()[0].0),
@@ -1067,7 +1095,7 @@ impl Core {
         };
         match found {
             Some(loc) => {
-                self.typed = None;
+                self.search = None;
                 self.say(&format!("stored as {}", loc.kind.with_article()));
                 self.learn_from_memory(loc);
                 Ok(AutoResult::Found(loc))

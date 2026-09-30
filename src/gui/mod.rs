@@ -24,7 +24,8 @@ pub enum Event {
     /// The core could not start (for example the host helper is missing).
     Failed(String),
     Games(Vec<GameProcess>),
-    Attached(Result<String, String>),
+    /// The game's pid and program name.
+    Attached(Result<(u32, String), String>),
     Values(Result<Vec<ValueRow>, String>),
     Numbers(Result<(PathBuf, Vec<Word>), String>),
     Read(Result<Option<(i64, bool)>, String>),
@@ -32,6 +33,8 @@ pub enum Event {
     Typed(Result<AutoResult, String>),
     /// The name, and whether Ferret is sure to find it again after a restart.
     Saved(Result<(String, bool), String>),
+    /// The search was cleared (the Find tab already shows it).
+    Reset,
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
 }
@@ -94,7 +97,8 @@ struct Ui {
     values: Rc<values::ValuesView>,
     find: Rc<find::FindView>,
     worker: Worker,
-    attached: Cell<bool>,
+    /// The game Ferret is attached to.
+    attached: Rc<Cell<Option<u32>>>,
 }
 
 impl Ui {
@@ -128,9 +132,18 @@ impl Ui {
             } else {
                 row.set_activatable(true);
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                let worker = self.worker.clone();
+                let (worker, find, nav, page, attached) =
+                    (self.worker.clone(), self.find.clone(), self.nav.clone(), self.game_page.clone(), self.attached.clone());
                 let pid = g.pid;
-                row.connect_activated(move |_| worker.run(move |core| Event::Attached(core.attach(pid))));
+                row.connect_activated(move |_| {
+                    // Back to the same game: everything (a search in progress too) is still there.
+                    if attached.get() == Some(pid) {
+                        nav.push(&page);
+                        return;
+                    }
+                    find.stop();
+                    worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
+                });
             }
             self.games.append(&row);
         }
@@ -147,8 +160,10 @@ impl Ui {
                 self.games_stack.set_visible_child_name("error");
             }
             Event::Games(games) => self.show_games(games),
-            Event::Attached(Ok(exe)) => {
-                self.attached.set(true);
+            Event::Attached(Ok((pid, exe))) => {
+                if self.attached.replace(Some(pid)) != Some(pid) {
+                    self.find.new_game();
+                }
                 self.game_page.set_title(&exe);
                 if !self.on_game_page() {
                     self.nav.push(&self.game_page);
@@ -171,6 +186,7 @@ impl Ui {
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));
             }
+            Event::Reset => {}
             Event::Done(Ok(msg)) => self.toast(&msg),
             Event::Attached(Err(e)) | Event::Saved(Err(e)) | Event::Done(Err(e)) => self.toast(&e),
         }
@@ -240,7 +256,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         "attach",
         Box::new(|ui, pid| {
             if let Ok(pid) = pid.parse() {
-                ui.worker.run(move |core| Event::Attached(core.attach(pid)));
+                ui.worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
             }
         }),
     );
@@ -272,6 +288,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("find", Box::new(|ui, _| ui.find.start()));
+    action("stop", Box::new(|ui, _| ui.find.stop()));
+    action("reset", Box::new(|ui, _| ui.find.start_over()));
     action(
         "type",
         Box::new(|ui, n| {
@@ -313,6 +331,8 @@ fn build(app: &adw::Application) {
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some("Refresh"));
     let nav = adw::NavigationView::new();
+    // Esc is for pausing the game; pressing it here by mistake shouldn't leave the game page.
+    nav.set_pop_on_escape(false);
     nav.add(&games_page(&games, &games_stack, &games_error, &refresh));
 
     let toasts = adw::ToastOverlay::new();
@@ -338,7 +358,7 @@ fn build(app: &adw::Application) {
         values,
         find,
         worker,
-        attached: Cell::new(false),
+        attached: Rc::default(),
     });
 
     {
@@ -358,7 +378,7 @@ fn build(app: &adw::Application) {
         let ui = ui.clone();
         glib::timeout_add_seconds_local(1, move || {
             if ui.worker.idle() {
-                if ui.on_game_page() && ui.attached.get() {
+                if ui.on_game_page() && ui.attached.get().is_some() {
                     ui.worker.run(|core| Event::Values(core.values()));
                 } else if !ui.on_game_page() {
                     ui.worker.run(|core| Event::Games(core.games()));

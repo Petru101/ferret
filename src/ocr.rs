@@ -66,7 +66,7 @@ fn has_digit(w: &Word) -> bool {
     w.text.chars().any(|c| c.is_ascii_digit())
 }
 
-fn overlaps(a: Rect, b: Rect) -> bool {
+pub fn overlaps(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 

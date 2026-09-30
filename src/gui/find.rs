@@ -32,6 +32,7 @@ pub struct FindView {
     crop: gtk::Picture,
     start: gtk::Button,
     stop: gtk::Button,
+    start_over: gtk::Button,
     spinner: gtk::Spinner,
     log: gtk::TextView,
     result: gtk::Box,
@@ -40,6 +41,44 @@ pub struct FindView {
     typed: gtk::Entry,
     worker: Worker,
     cancel: Arc<AtomicBool>,
+}
+
+/// 5040383 -> "5,040,383".
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Groups the digits of match counts in a log line ("5040383 -> 1200 matches (1200 i32, ...)"),
+/// leaving addresses and game values alone.
+fn group_counts(msg: &str) -> String {
+    let words: Vec<&str> = msg.split(' ').collect();
+    let is_count = |i: usize| {
+        let next = words.get(i + 1).copied().unwrap_or("");
+        next == "->"
+            || next.starts_with("matches")
+            || ["i32", "f32", "f64", "xor"].iter().any(|k| next.trim_end_matches([',', ')']) == *k)
+            || (i > 0 && words[i - 1] == "->")
+    };
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let (open, rest) = w.strip_prefix('(').map_or(("", *w), |r| ("(", r));
+            match rest.parse::<usize>() {
+                Ok(n) if is_count(i) => format!("{open}{}", grouped(n)),
+                _ => w.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn frame_box() -> gtk::Box {
@@ -77,9 +116,13 @@ impl FindView {
         let spinner = gtk::Spinner::new();
         let stop = gtk::Button::builder().label("Stop").css_classes(["destructive-action"]).visible(false).build();
         let start = gtk::Button::builder().label("Start").css_classes(["suggested-action"]).sensitive(false).build();
+        let start_over = gtk::Button::builder()
+            .label("Start Over")
+            .tooltip_text("Forget the matches so far and search from scratch")
+            .build();
         let top = frame_box();
         top.set_margin_top(12);
-        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop.upcast_ref(), spinner.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
+        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop.upcast_ref(), spinner.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
             top.append(w);
         }
 
@@ -172,6 +215,7 @@ impl FindView {
             crop,
             start,
             stop,
+            start_over,
             spinner,
             log,
             result,
@@ -214,8 +258,10 @@ impl FindView {
             view.start.connect_clicked(move |_| view_.start());
         }
         {
-            let cancel = view.cancel.clone();
-            view.stop.connect_clicked(move |_| cancel.store(true, Ordering::Relaxed));
+            let view_ = view.clone();
+            view.stop.connect_clicked(move |_| view_.stop());
+            let view_ = view.clone();
+            view.start_over.connect_clicked(move |_| view_.start_over());
         }
         {
             let view_ = view.clone();
@@ -321,7 +367,7 @@ impl FindView {
 
     pub fn log(&self, msg: &str) {
         let buffer = self.log.buffer();
-        buffer.insert(&mut buffer.end_iter(), &format!("{msg}\n"));
+        buffer.insert(&mut buffer.end_iter(), &format!("{}\n", group_counts(msg)));
         let mark = buffer.create_mark(None, &buffer.end_iter(), false);
         self.log.scroll_mark_onscreen(&mark);
         buffer.delete_mark(&mark);
@@ -400,6 +446,7 @@ impl FindView {
         self.result.set_visible(false);
         self.typed_row.set_sensitive(false);
         self.start.set_visible(false);
+        self.start_over.set_visible(false);
         self.stop.set_visible(true);
         self.busy(true);
         self.status.set_label("Watching the number. Play normally; every change narrows it down.");
@@ -417,11 +464,13 @@ impl FindView {
         self.busy(false);
         self.stop.set_visible(false);
         self.start.set_visible(true);
+        self.start_over.set_visible(true);
         self.typed_row.set_sensitive(true);
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => self.status.set_label(&format!(
-                "{n} places still match. Press Start again and let the number change a few more times."
+                "{} places still match. Press Start to continue and let the number change a few more times.",
+                grouped(n)
             )),
             Err(e) => self.status.set_label(&e),
         }
@@ -459,12 +508,49 @@ impl FindView {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => {
                 self.status.set_label(&format!(
-                    "{n} places match. Change the number in the game, then type the new one."
+                    "{} places match. Change the number in the game, then type the new one.",
+                    grouped(n)
                 ));
                 self.typed.grab_focus();
             }
             Err(e) => self.status.set_label(&e),
         }
+    }
+
+    /// Stops a running Start (the matches so far are kept).
+    pub fn stop(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Forgets the matches so far; the picked number and the captured frame stay.
+    pub fn start_over(&self) {
+        self.result.set_visible(false);
+        self.typed.set_text("");
+        self.status.set_label(if self.selection.borrow().is_some() {
+            "Starting over. Press Start, or type the number the game shows."
+        } else {
+            "Starting over. Click a number, or type the number the game shows."
+        });
+        self.worker.run(|core| {
+            core.reset();
+            Event::Reset
+        });
+    }
+
+    /// Attached to another game: nothing picked or found in the last one applies.
+    pub fn new_game(&self) {
+        self.picture.set_paintable(None::<&gdk::Paintable>);
+        self.crop.set_paintable(None::<&gdk::Paintable>);
+        *self.texture.borrow_mut() = None;
+        self.words.borrow_mut().clear();
+        *self.selection.borrow_mut() = None;
+        self.unconfirmed.set(None);
+        self.result.set_visible(false);
+        self.typed.set_text("");
+        self.start.set_label("Start");
+        self.start.set_sensitive(false);
+        self.status.set_label("Click a number, or drag a box around it.");
+        self.root.set_visible_child_name("intro");
     }
 
     pub fn save_as(&self, name: &str) {
@@ -482,5 +568,26 @@ impl FindView {
         self.result.set_visible(false);
         self.name.set_text("");
         self.status.set_label("Saved. Pick another number to find more.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_match_counts_only() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(5040383), "5,040,383");
+        assert_eq!(
+            group_counts("screen shows 1250: 5040383 -> 12000 matches (12000 i32, 0 f32, 1500 f64, 0 xor)"),
+            "screen shows 1250: 5,040,383 -> 12,000 matches (12,000 i32, 0 f32, 1,500 f64, 0 xor)"
+        );
+        assert_eq!(
+            group_counts("typed 1037: 1234567 matches (1234567 i32, 0 f32, 0 f64, 0 xor) in 1200 MiB (0 MiB unreadable) in 1500 ms"),
+            "typed 1037: 1,234,567 matches (1,234,567 i32, 0 f32, 0 f64, 0 xor) in 1200 MiB (0 MiB unreadable) in 1500 ms"
+        );
+        assert_eq!(group_counts("wrote 20000, reads back 0x00000e4ff978:f64 = 20000"), "wrote 20000, reads back 0x00000e4ff978:f64 = 20000");
     }
 }
