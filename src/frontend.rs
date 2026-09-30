@@ -109,27 +109,40 @@ fn profile_path(exe: &str) -> PathBuf {
     base.join("profiles").join(format!("{}.profile", exe.to_lowercase()))
 }
 
-/// Profile format: "entry <name>" followed by its "site ..." lines.
-fn read_profile(exe: &str) -> Vec<(String, Vec<String>)> {
-    let mut entries: Vec<(String, Vec<String>)> = Vec::new();
+struct Entry {
+    name: String,
+    sites: Vec<String>,
+    /// "<min|-> <max|->" when the value is kept within a range.
+    limit: Option<String>,
+}
+
+/// Profile format: "entry <name>" followed by its "site ..." lines and an
+/// optional "limit <min|-> <max|->" line.
+fn read_profile(exe: &str) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = Vec::new();
     for line in fs::read_to_string(profile_path(exe)).unwrap_or_default().lines() {
         if let Some(name) = line.strip_prefix("entry ") {
-            entries.push((name.trim().to_owned(), Vec::new()));
+            entries.push(Entry { name: name.trim().to_owned(), sites: Vec::new(), limit: None });
         } else if let (Some(site), Some(e)) = (line.strip_prefix("site "), entries.last_mut()) {
-            e.1.push(site.trim().to_owned());
+            e.sites.push(site.trim().to_owned());
+        } else if let (Some(limit), Some(e)) = (line.strip_prefix("limit "), entries.last_mut()) {
+            e.limit = Some(limit.trim().to_owned());
         }
     }
     entries
 }
 
-fn write_profile(exe: &str, entries: &[(String, Vec<String>)]) -> Result<PathBuf, String> {
+fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
     let path = profile_path(exe);
     fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     let mut text = String::new();
-    for (name, sites) in entries {
-        text.push_str(&format!("entry {name}\n"));
-        for s in sites {
+    for e in entries {
+        text.push_str(&format!("entry {}\n", e.name));
+        for s in &e.sites {
             text.push_str(&format!("site {s}\n"));
+        }
+        if let Some(l) = &e.limit {
+            text.push_str(&format!("limit {l}\n"));
         }
     }
     fs::write(&path, text).map_err(|e| e.to_string())?;
@@ -160,17 +173,77 @@ fn cmd_save(game: &mut Option<Game>, helper: &mut Helper, name: &str) -> Result<
     if sites.is_empty() {
         return Err("no usable code found; keep the game running (not paused) and try again".into());
     }
+    let count = sites.len();
     let mut entries = read_profile(&game.exe);
-    entries.retain(|(n, _)| n != name);
-    entries.push((name.to_owned(), sites.clone()));
+    entries.retain(|e| e.name != name);
+    entries.push(Entry { name: name.to_owned(), sites, limit: None });
     let path = write_profile(&game.exe, &entries)?;
     game.entries.retain(|(n, _)| n != name);
     game.entries.push((name.to_owned(), addr));
-    println!("saved {name} ({} code patterns) to {}", sites.len(), path.display());
+    println!("saved {name} ({count} code patterns) to {}", path.display());
     Ok(())
 }
 
-/// Finds every saved value of this game again.
+/// Hands a saved limit to the helper, which enforces it in the background.
+fn apply_limit(game: &Game, helper: &mut Helper, entry: &Entry) -> Result<(), String> {
+    let limit = entry.limit.as_deref().ok_or("no limit set")?;
+    let (_, addr) = game.entries.iter().find(|(n, _)| *n == entry.name).ok_or("value not found in this run")?;
+    // Every saved pattern reads [object + displacement]; the object starts at addr - displacement.
+    let disp: i64 = entry
+        .sites
+        .first()
+        .and_then(|s| s.split_whitespace().last()?.parse().ok())
+        .ok_or("no saved code pattern")?;
+    let object = addr.wrapping_sub(disp as u64);
+    let reply = helper.call(&format!("limit {addr:x} {limit} {object:x}"));
+    match reply.iter().find(|l| l.starts_with("error:")) {
+        Some(e) => Err(e.trim_start_matches("error: ").to_owned()),
+        None => Ok(()),
+    }
+}
+
+fn limit_text(limit: &str) -> String {
+    match limit.split_whitespace().collect::<Vec<_>>()[..] {
+        ["-", max] => format!("at most {max}"),
+        [min, "-"] => format!("at least {min}"),
+        [min, max] => format!("between {min} and {max}"),
+        _ => limit.to_owned(),
+    }
+}
+
+/// limit <name> <max> | limit <name> <min> <max> | limit <name> off
+fn cmd_limit(game: &mut Option<Game>, helper: &mut Helper, arg: &str) -> Result<(), String> {
+    let game = game.as_mut().ok_or("attach to a game first")?;
+    let usage = "usage: limit <name> <max> | limit <name> <min> <max> | limit <name> off";
+    let f: Vec<&str> = arg.split_whitespace().collect();
+    let name = *f.first().ok_or(usage)?;
+    let mut entries = read_profile(&game.exe);
+    let i = entries.iter().position(|e| e.name == name).ok_or(format!("no saved value called {name}"))?;
+    let is_num = |v: &str| v == "-" || v.parse::<i32>().is_ok();
+    let limit = match f[1..] {
+        ["off"] => None,
+        [max] if is_num(max) => Some(format!("- {max}")),
+        [min, max] if is_num(min) && is_num(max) => Some(format!("{min} {max}")),
+        _ => return Err(usage.into()),
+    };
+    entries[i].limit = limit;
+    match &entries[i].limit {
+        Some(l) => {
+            apply_limit(game, helper, &entries[i])?;
+            println!("{name} is kept {} (written only when the game goes past it)", limit_text(l));
+        }
+        None => {
+            if let Some((_, addr)) = game.entries.iter().find(|(n, _)| n == name) {
+                helper.call(&format!("unlimit {addr:x}"));
+            }
+            println!("{name} is no longer limited");
+        }
+    }
+    write_profile(&game.exe, &entries)?;
+    Ok(())
+}
+
+/// Finds every saved value of this game again, and re-applies saved limits.
 fn cmd_restore(game: &mut Option<Game>, helper: &mut Helper) -> Result<(), String> {
     let game = game.as_mut().ok_or("attach to a game first")?;
     let entries = read_profile(&game.exe);
@@ -178,9 +251,10 @@ fn cmd_restore(game: &mut Option<Game>, helper: &mut Helper) -> Result<(), Strin
         return Err(format!("nothing saved for {}", game.exe));
     }
     let t = Instant::now();
-    for (name, sites) in entries {
+    for entry in &entries {
+        let name = &entry.name;
         let mut resolved = None;
-        for site in &sites {
+        for site in &entry.sites {
             let reply = helper.call(&format!("resolve {site}"));
             if let Some((addr, Some(v))) = parse_values(&reply).first() {
                 resolved = Some((*addr, *v));
@@ -191,8 +265,14 @@ fn cmd_restore(game: &mut Option<Game>, helper: &mut Helper) -> Result<(), Strin
         match resolved {
             Some((addr, v)) => {
                 println!("{name} = {v} (at 0x{addr:x})");
-                game.entries.retain(|(n, _)| *n != name);
-                game.entries.push((name, addr));
+                game.entries.retain(|(n, _)| n != name);
+                game.entries.push((name.clone(), addr));
+                if let Some(l) = &entry.limit {
+                    match apply_limit(game, helper, entry) {
+                        Ok(()) => println!("{name} is kept {}", limit_text(l)),
+                        Err(e) => println!("{name}: limit not applied: {e}"),
+                    }
+                }
             }
             None => println!("{name}: not found yet, try `restore` again once the game has used it"),
         }
@@ -204,8 +284,18 @@ fn cmd_restore(game: &mut Option<Game>, helper: &mut Helper) -> Result<(), Strin
 fn cmd_values(game: &Option<Game>, helper: &mut Helper) -> Result<(), String> {
     let game = game.as_ref().ok_or("attach to a game first")?;
     let addrs: Vec<u64> = game.entries.iter().map(|(_, a)| *a).collect();
+    let limits = helper.call("limits");
     for ((name, addr), v) in game.entries.iter().zip(peek(helper, &addrs)) {
-        println!("{name:<12} {} (at 0x{addr:x})", v.map_or("??".into(), |v| v.to_string()));
+        let prefix = format!("0x{addr:012x} ");
+        let limit = limits.iter().find_map(|l| l.strip_prefix(&prefix)).map(|l| {
+            let (range, rest) = l.split_once(" fixed ").unwrap_or((l, ""));
+            format!("  kept {}, fixed {rest}", limit_text(range))
+        });
+        println!(
+            "{name:<12} {} (at 0x{addr:x}){}",
+            v.map_or("??".into(), |v| v.to_string()),
+            limit.unwrap_or_default()
+        );
     }
     Ok(())
 }
@@ -425,6 +515,7 @@ pub fn run() {
             "save" => cmd_save(&mut game, &mut helper, arg.trim()),
             "restore" => cmd_restore(&mut game, &mut helper),
             "values" => cmd_values(&game, &mut helper),
+            "limit" => cmd_limit(&mut game, &mut helper, arg.trim()),
             "attach" => {
                 let reply = helper.call(&line);
                 for l in &reply {
@@ -458,7 +549,7 @@ pub fn run() {
                     println!("{l}");
                 }
                 if cmd == "help" || cmd == "?" {
-                    println!("vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], probe\nrestarts: save <name>, restore, values, set <name> <n>");
+                    println!("vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], probe\nrestarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off");
                 }
                 Ok(())
             }

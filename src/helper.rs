@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::FileExt;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::trace;
@@ -102,6 +103,110 @@ fn scannable(r: &Region) -> bool {
     r.perms.starts_with("rw") && !matches!(r.path.as_str(), "[vvar]" | "[vvar_vclock]" | "[vsyscall]")
 }
 
+// --- Limits: keep a value within a range, writing only when the game moves it out.
+
+struct Limit {
+    addr: u64,
+    min: Option<i32>,
+    max: Option<i32>,
+    // First bytes of the object holding the value (its type pointer). If they
+    // change, the object is gone and writing would corrupt unrelated memory.
+    guard_addr: u64,
+    guard: [u8; 4],
+    fixes: u64,
+    paused: Option<&'static str>,
+}
+
+#[derive(Default)]
+struct Limiter {
+    mem: Option<File>,
+    limits: Vec<Limit>,
+}
+
+type SharedLimiter = Arc<Mutex<Limiter>>;
+
+fn limiter_loop(shared: SharedLimiter) {
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let mut guard = shared.lock().unwrap();
+        let Limiter { mem, limits } = &mut *guard;
+        let Some(mem) = mem.as_ref() else { continue };
+        for l in limits.iter_mut().filter(|l| l.paused.is_none()) {
+            let mut g = [0u8; 4];
+            if mem.read_exact_at(&mut g, l.guard_addr).is_err() || g != l.guard {
+                l.paused = Some("the object holding it changed (new mission?), run restore");
+                continue;
+            }
+            let mut b = [0u8; 4];
+            if mem.read_exact_at(&mut b, l.addr).is_err() {
+                l.paused = Some("unreadable");
+                continue;
+            }
+            let v = i32::from_le_bytes(b);
+            let target = match (l.min, l.max) {
+                (_, Some(max)) if v > max => max,
+                (Some(min), _) if v < min => min,
+                _ => continue,
+            };
+            if mem.write_all_at(&target.to_le_bytes(), l.addr).is_ok() {
+                l.fixes += 1;
+            }
+        }
+    }
+}
+
+fn bound(v: Option<&&str>) -> Result<Option<i32>, ()> {
+    match v {
+        Some(&"-") => Ok(None),
+        Some(v) => v.parse().map(Some).map_err(drop),
+        None => Err(()),
+    }
+}
+
+fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
+    let f: Vec<&str> = arg.split_whitespace().collect();
+    let (Some(addr), Ok(min), Ok(max), Some(guard_addr)) =
+        (f.first().and_then(|a| parse_addr(a)), bound(f.get(1)), bound(f.get(2)), f.get(3).and_then(|a| parse_addr(a)))
+    else {
+        return writeln!(out, "error: usage: limit <hex addr> <min|-> <max|-> <hex object addr>");
+    };
+    let mut l = limiter.lock().unwrap();
+    let Some(mem) = l.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let mut guard = [0u8; 4];
+    if mem.read_exact_at(&mut guard, guard_addr).is_err() {
+        return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}");
+    }
+    l.limits.retain(|l| l.addr != addr);
+    l.limits.push(Limit { addr, min, max, guard_addr, guard, fixes: 0, paused: None });
+    writeln!(out, "limiting 0x{addr:x}")
+}
+
+fn cmd_unlimit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
+    let Some(addr) = parse_addr(arg) else {
+        return writeln!(out, "error: usage: unlimit <hex addr>");
+    };
+    limiter.lock().unwrap().limits.retain(|l| l.addr != addr);
+    writeln!(out, "no longer limiting 0x{addr:x}")
+}
+
+fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
+    let show = |b: Option<i32>| b.map_or("-".to_owned(), |b| b.to_string());
+    for l in &limiter.lock().unwrap().limits {
+        writeln!(
+            out,
+            "0x{:012x} {} {} fixed {} times, {}",
+            l.addr,
+            show(l.min),
+            show(l.max),
+            l.fixes,
+            l.paused.unwrap_or("active")
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct Session {
     pid: u32,
@@ -163,7 +268,7 @@ fn cmd_ps(out: &mut impl Write, filter: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn cmd_attach(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let Ok(pid) = arg.parse::<u32>() else {
         return writeln!(out, "error: usage: attach <pid>");
     };
@@ -172,6 +277,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()
     }
     match OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem")) {
         Ok(f) => {
+            *limiter.lock().unwrap() = Limiter { mem: f.try_clone().ok(), limits: Vec::new() };
             *s = Session { pid, mem: Some(f), candidates: Vec::new() };
             let regions = maps(pid)?;
             let rw: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
@@ -486,6 +592,11 @@ pub fn run() {
     let stdin = io::stdin();
     let mut out = io::stdout().lock();
     let mut session = Session::default();
+    let limiter = SharedLimiter::default();
+    {
+        let limiter = limiter.clone();
+        std::thread::spawn(move || limiter_loop(limiter));
+    }
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let (cmd, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
@@ -493,7 +604,7 @@ pub fn run() {
         let res = match cmd {
             "info" => cmd_info(&mut out),
             "ps" => cmd_ps(&mut out, arg),
-            "attach" => cmd_attach(&mut out, &mut session, arg),
+            "attach" => cmd_attach(&mut out, &mut session, &limiter, arg),
             "scan" => cmd_scan(&mut out, &mut session, arg),
             "next" => cmd_next(&mut out, &mut session, arg),
             "list" => cmd_list(&mut out, &session),
@@ -504,9 +615,12 @@ pub fn run() {
             "track" => cmd_track(&mut out, &mut session, arg),
             "sites" => cmd_sites(&mut out, &session, arg),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
+            "limit" => cmd_limit(&mut out, &limiter, arg),
+            "unlimit" => cmd_unlimit(&mut out, &limiter, arg),
+            "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], attach <pid>, scan <n>, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site>, write <addr> <n>, set <n>, quit"
+                "commands: sandbox, info, ps [filter], attach <pid>, scan <n>, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site>, limit <addr> <min> <max> <object>, unlimit <addr>, limits, write <addr> <n>, set <n>, quit"
             ),
         };
         if res.and_then(|_| writeln!(out, "end")).and_then(|_| out.flush()).is_err() {
