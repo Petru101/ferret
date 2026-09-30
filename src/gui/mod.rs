@@ -30,7 +30,8 @@ pub enum Event {
     Read(Result<Option<(i64, bool)>, String>),
     Auto(Result<AutoResult, String>),
     Typed(Result<AutoResult, String>),
-    Saved(Result<String, String>),
+    /// The name, and whether Ferret is sure to find it again after a restart.
+    Saved(Result<(String, bool), String>),
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
 }
@@ -160,8 +161,12 @@ impl Ui {
             Event::Read(r) => self.find.read(r),
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
-            Event::Saved(Ok(name)) => {
-                self.toast(&format!("Saved {name}. Ferret finds it again every time you attach."));
+            Event::Saved(Ok((name, confirmed))) => {
+                self.toast(&if confirmed {
+                    format!("Saved {name}. Ferret finds it again every time you attach.")
+                } else {
+                    format!("Saved {name}. If it's wrong after restarting the game, find it again and save it as {name}.")
+                });
                 self.find.saved();
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));

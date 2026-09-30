@@ -205,25 +205,45 @@ struct Entry {
     name: String,
     kind: Kind,
     sites: Vec<String>,
-    /// Pointer paths, "<module>+<offset> <offset>...", best first.
+    /// Pointer paths that led to the value in more than one run of the game,
+    /// "<module>+<offset> <offset>...".
     paths: Vec<String>,
+    /// Pointer paths from a scan, best first, not confirmed by another run yet: most of them
+    /// go through things that change when the game restarts. Saving the value again in a
+    /// later run keeps the ones that still lead to it as `paths`.
+    candidates: Vec<String>,
+    /// The game process the candidates were found in.
+    run: Option<u32>,
     /// "<min|-> <max|->" when the value is kept within a range.
     limit: Option<String>,
 }
 
 /// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
-/// missing), its "site ..." and "path ..." lines and an optional "limit <min|-> <max|->" line.
+/// missing), its "site ...", "path ..." and "candidate ..." lines, "run <pid>" (where the
+/// candidates came from) and an optional "limit <min|-> <max|->" line.
 fn read_profile(exe: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for line in fs::read_to_string(profile_path(exe)).unwrap_or_default().lines() {
         if let Some(name) = line.strip_prefix("entry ") {
-            entries.push(Entry { name: name.trim().to_owned(), kind: Kind::I32, sites: Vec::new(), paths: Vec::new(), limit: None });
+            entries.push(Entry {
+                name: name.trim().to_owned(),
+                kind: Kind::I32,
+                sites: Vec::new(),
+                paths: Vec::new(),
+                candidates: Vec::new(),
+                run: None,
+                limit: None,
+            });
         } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
             e.kind = kind;
         } else if let (Some(site), Some(e)) = (line.strip_prefix("site "), entries.last_mut()) {
             e.sites.push(site.trim().to_owned());
         } else if let (Some(path), Some(e)) = (line.strip_prefix("path "), entries.last_mut()) {
             e.paths.push(path.trim().to_owned());
+        } else if let (Some(path), Some(e)) = (line.strip_prefix("candidate "), entries.last_mut()) {
+            e.candidates.push(path.trim().to_owned());
+        } else if let (Some(pid), Some(e)) = (line.strip_prefix("run "), entries.last_mut()) {
+            e.run = pid.trim().parse().ok();
         } else if let (Some(limit), Some(e)) = (line.strip_prefix("limit "), entries.last_mut()) {
             e.limit = Some(limit.trim().to_owned());
         }
@@ -246,12 +266,30 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         for p in &e.paths {
             text.push_str(&format!("path {p}\n"));
         }
+        if let Some(pid) = e.run {
+            text.push_str(&format!("run {pid}\n"));
+        }
+        for p in &e.candidates {
+            text.push_str(&format!("candidate {p}\n"));
+        }
         if let Some(l) = &e.limit {
             text.push_str(&format!("limit {l}\n"));
         }
     }
     fs::write(&path, text).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+impl Entry {
+    /// The pointer paths to follow, as the helper takes them: the confirmed ones, else the candidates.
+    fn followed(&self) -> Vec<String> {
+        let paths = if self.paths.is_empty() { &self.candidates } else { &self.paths };
+        paths.iter().map(|p| path_arg(p)).collect()
+    }
+
+    fn unconfirmed(&self) -> bool {
+        self.paths.is_empty() && !self.candidates.is_empty()
+    }
 }
 
 fn parse_range(limit: &str) -> (Option<i64>, Option<i64>) {
@@ -291,6 +329,8 @@ pub struct ValueRow {
     pub max: Option<i64>,
     /// "fixed N times, restored M times, active" while a limit is enforced.
     pub limit_state: Option<String>,
+    /// Found through pointer paths no other run of the game has confirmed yet.
+    pub unconfirmed: bool,
 }
 
 pub enum AutoResult {
@@ -301,6 +341,7 @@ pub enum AutoResult {
 }
 
 struct Game {
+    pid: u32,
     exe: String,
     entries: Vec<(String, Loc)>,
     /// Values found through pointer paths (as the helper takes them), followed again on every
@@ -308,8 +349,9 @@ struct Game {
     paths: Vec<(String, Vec<String>)>,
 }
 
-/// Most pointer paths kept per value. The best ones come first.
-const MAX_PATHS: usize = 50;
+/// Most pointer paths kept from a scan. The real one can rank far down (Forager's gems: 590th
+/// of 81235), and only a later run tells which it is.
+const MAX_CANDIDATES: usize = 3000;
 
 /// A profile path line as the helper takes it: "Forager.exe+177a64c 44 2c" -> "Forager.exe+177a64c,44,2c".
 fn path_arg(p: &str) -> String {
@@ -394,7 +436,7 @@ impl Core {
             return Err(e);
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
-        self.game = Some(Game { exe: exe.clone(), entries: Vec::new(), paths: Vec::new() });
+        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new() });
         self.typed = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -420,7 +462,8 @@ impl Core {
 
     /// The "survive restarts" button: finds the code that accesses the current
     /// value and saves it under `name`, so the value can be found again next time.
-    pub fn save(&mut self, name: &str) -> Result<PathBuf, String> {
+    /// Returns false when that still needs confirming in a later run (unconfirmed pointer paths).
+    pub fn save(&mut self, name: &str) -> Result<bool, String> {
         if name.is_empty() || name.contains(char::is_whitespace) {
             return Err("the name must be one word".into());
         }
@@ -434,7 +477,8 @@ impl Core {
             self.say(l);
         }
         let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
-        let mut paths = Vec::new();
+        let (mut paths, mut candidates) = (Vec::new(), Vec::new());
+        let pid = self.game()?.pid;
         if sites.is_empty() {
             let accessed = reply.iter().find_map(|l| l.strip_suffix(" instructions accessed it")).and_then(|n| n.parse::<usize>().ok());
             let shared = reply.iter().any(|l| l.contains(": shared code,"));
@@ -445,22 +489,34 @@ impl Core {
             };
             self.say(&format!("{why}; looking for pointers that lead to it instead"));
             let exe = self.game()?.exe.clone();
-            let saved = read_profile(&exe).into_iter().find(|e| e.name == name).map(|e| e.paths).unwrap_or_default();
-            paths = self.proven_paths(loc, &saved);
+            if let Some(saved) = read_profile(&exe).into_iter().find(|e| e.name == name) {
+                // Candidates from this same run all still lead here: that proves nothing.
+                let mut old = saved.paths;
+                if saved.run != Some(pid) {
+                    old.extend(saved.candidates);
+                }
+                paths = self.proven_paths(loc, &old);
+            }
             if paths.is_empty() {
-                paths = self.pointer_paths(loc).map_err(|e| format!("{why}, and {e}"))?;
+                candidates = self.pointer_paths(loc).map_err(|e| format!("{why}, and {e}"))?;
             }
         }
-        let how = if sites.is_empty() {
-            format!("{} pointer paths", paths.len())
-        } else {
+        let how = if !sites.is_empty() {
             format!("{} code patterns", sites.len())
+        } else if !paths.is_empty() {
+            format!("{} pointer paths that held up since the last run", paths.len())
+        } else {
+            format!(
+                "{} pointer paths; after the next restart, if it's wrong, find it again and save it as {name}: that picks the right path",
+                candidates.len()
+            )
         };
         let game = self.game()?;
         let mut entries = read_profile(&game.exe);
         entries.retain(|e| e.name != name);
-        let followed: Vec<String> = paths.iter().map(|p| path_arg(p)).collect();
-        entries.push(Entry { name: name.to_owned(), kind: loc.kind, sites, paths, limit: None });
+        let entry = Entry { name: name.to_owned(), kind: loc.kind, sites, paths, candidates, run: Some(pid), limit: None };
+        let (followed, confirmed) = (entry.followed(), !entry.unconfirmed());
+        entries.push(entry);
         let path = write_profile(&game.exe, &entries)?;
         game.entries.retain(|(n, _)| n != name);
         game.entries.push((name.to_owned(), loc));
@@ -469,14 +525,14 @@ impl Core {
             game.paths.push((name.to_owned(), followed));
         }
         self.say(&format!("saved {name} ({how}) to {}", path.display()));
-        Ok(path)
+        Ok(confirmed)
     }
 
     /// Pointer paths from the game's static memory to the value (see helper/src/pointers.rs),
     /// in profile form, best first. Paths through memory that changes within a few seconds
     /// would not survive a restart either, so they are dropped.
     fn pointer_paths(&mut self, loc: Loc) -> Result<Vec<String>, String> {
-        let reply = self.helper.call(&format!("ptrscan {loc}"));
+        let reply = self.helper.call(&format!("ptrscan {loc} 5 1000 {MAX_CANDIDATES}"));
         if let Some(e) = first_error(&reply) {
             return Err(format!("the pointer scan failed: {e}"));
         }
@@ -495,7 +551,6 @@ impl Core {
             return Err("every pointer path to it changed within seconds".into());
         }
         self.say(&format!("{} of {before} pointer paths still lead to it after 3 s", paths.len()));
-        paths.truncate(MAX_PATHS);
         Ok(paths.iter().map(|p| p.replace(',', " ")).collect())
     }
 
@@ -509,7 +564,8 @@ impl Core {
         let args: Vec<String> = saved.iter().map(|p| path_arg(p)).collect();
         let (ends, _) = self.follow(loc.kind, &args);
         let kept: Vec<String> = saved.iter().zip(ends).filter(|(_, e)| *e == Some(loc.addr)).map(|(p, _)| p.clone()).collect();
-        self.say(&format!("{} of {} saved pointer paths lead to it here{}", kept.len(), saved.len(), if kept.is_empty() { ", scanning again" } else { ", keeping those" }));
+        let then = if kept.is_empty() { ", scanning again" } else { ", keeping those" };
+        self.say(&format!("{} of {} saved pointer paths lead to it here{then}", kept.len(), saved.len()));
         kept
     }
 
@@ -547,14 +603,14 @@ impl Core {
         let limit = entry.limit.as_deref().ok_or("no limit set")?;
         let game = self.game()?;
         let (_, loc) = *game.entries.iter().find(|(n, _)| *n == entry.name).ok_or("value not found in this run")?;
-        if entry.sites.is_empty() && entry.paths.is_empty() {
+        if entry.sites.is_empty() && entry.followed().is_empty() {
             return Err("no saved code pattern or pointer path".into());
         }
         let sites: Vec<String> = entry
             .sites
             .iter()
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(":"))
-            .chain(entry.paths.iter().map(|p| path_arg(p)))
+            .chain(entry.followed())
             .collect();
         let reply = self.helper.call(&format!("limit {} {loc} {limit} {}", entry.name, sites.join(" ")));
         first_error(&reply).map_or(Ok(()), Err)
@@ -622,8 +678,8 @@ impl Core {
                 }
                 self.say(&format!("{name}: {}", reply.join(" ")));
             }
-            if resolved.is_none() && !entry.paths.is_empty() {
-                let paths: Vec<String> = entry.paths.iter().map(|p| path_arg(p)).collect();
+            if resolved.is_none() && !entry.followed().is_empty() {
+                let paths = entry.followed();
                 let (ends, best) = self.follow(entry.kind, &paths);
                 // Keep following them: before a save is loaded they may lead nowhere yet.
                 let game = self.game()?;
@@ -633,6 +689,9 @@ impl Core {
                     Some((loc, Some(v))) => {
                         let agree = ends.iter().filter(|e| **e == Some(loc.addr)).count();
                         self.say(&format!("{name}: {agree} of {} pointer paths lead to it", paths.len()));
+                        if entry.unconfirmed() {
+                            self.say(&format!("{name}: its pointer paths aren't confirmed yet; if the number is wrong, find it again and save it as {name}"));
+                        }
                         resolved = Some((loc, v));
                     }
                     _ => {
@@ -692,7 +751,8 @@ impl Core {
                     .iter()
                     .find(|(n, _, _)| *n == name)
                     .and_then(|(_, _, rest)| rest.split_once(" fixed ").map(|(_, s)| format!("fixed {s}")));
-                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, limit_state }
+                let unconfirmed = saved.iter().any(|e| e.name == name && e.unconfirmed());
+                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, limit_state, unconfirmed }
             })
             .collect())
     }

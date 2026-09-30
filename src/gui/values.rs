@@ -92,7 +92,11 @@ impl ValuesView {
                 rows.insert(v.name.clone(), w);
             }
             let w = &rows[&v.name];
-            w.group.set_description(Some(&format!("At 0x{:x}, {}", v.addr, v.kind.describe())));
+            let mut about = format!("At 0x{:x}, {}", v.addr, v.kind.describe());
+            if v.unconfirmed {
+                about.push_str(". Not confirmed yet: if this number is wrong after restarting the game, find it again and save it under the same name");
+            }
+            w.group.set_description(Some(&about));
             w.value.set_label(&v.value.map_or("?".into(), |n| n.to_string()));
             w.limit.set_subtitle(&limit_subtitle(v));
         }

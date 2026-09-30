@@ -70,6 +70,16 @@ fn exe_name(pid: u32) -> String {
     first.rsplit(['/', '\\']).next().unwrap_or_default().to_owned()
 }
 
+/// GameMaker games keep every number as a double; they ship their assets as data.win (or
+/// game.unx on Linux) next to the program.
+fn is_gamemaker(pid: u32, exe: &str) -> bool {
+    let Ok(regions) = maps(pid) else { return false };
+    regions.iter().filter(|r| r.path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(exe))).any(|r| {
+        let dir = std::path::Path::new(&r.path).with_file_name("");
+        ["data.win", "game.unx", "assets/game.unx"].iter().any(|f| dir.join(f).exists())
+    })
+}
+
 fn anti_cheat(pid: u32) -> Option<&'static str> {
     let maps = maps(pid).ok()?;
     maps.iter().find_map(|r| {
@@ -456,6 +466,8 @@ struct Session {
     exe: String,
     /// Pointer size in the game: 4 or 8 bytes.
     width: usize,
+    /// The game stores numbers only as doubles: scans look for nothing else.
+    doubles_only: bool,
     candidates: Vec<Candidate>,
 }
 
@@ -567,12 +579,17 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             let modules = pointers::modules(pid, &f);
             let width = pointers::pointer_width(pid, &f, &modules, &exe);
             *limiter.lock().unwrap() = Limiter { pid, mem: f.try_clone().ok(), width, modules, limits: Vec::new() };
-            *s = Session { pid, mem: Some(f), exe: exe.clone(), width, candidates: Vec::new() };
+            let doubles_only = is_gamemaker(pid, &exe);
+            *s = Session { pid, mem: Some(f), exe: exe.clone(), width, doubles_only, candidates: Vec::new() };
             let regions = maps(pid)?;
             let rw: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
             writeln!(out, "attached to {pid}: {}", cmdline(pid))?;
             writeln!(out, "exe: {exe}")?;
-            writeln!(out, "{} mappings, {} MiB writable, {}-bit", regions.len(), rw >> 20, width * 8)
+            writeln!(out, "{} mappings, {} MiB writable, {}-bit", regions.len(), rw >> 20, width * 8)?;
+            if doubles_only {
+                writeln!(out, "GameMaker game: it keeps numbers as doubles, searching only those")?;
+            }
+            Ok(())
         }
         Err(e) => writeln!(out, "error: cannot open /proc/{pid}/mem: {e}"),
     }
@@ -589,6 +606,7 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     };
     let t = Instant::now();
     let n = n as f64;
+    let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|k| !s.doubles_only || *k == Kind::F64).collect();
     let mut found = Vec::new();
     let (mut bytes, mut unreadable) = (0u64, 0u64);
     let mut buf = vec![0u8; 4 << 20];
@@ -602,7 +620,7 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
                     for off in (0..len.saturating_sub(3)).step_by(4) {
                         // Doubles are 8-aligned. Integers and pointers read as floats come out
                         // as zero or next to nothing (1e-40, 1e-300), never a number on screen.
-                        for kind in Kind::ALL {
+                        for &kind in &kinds {
                             let b = &buf[off..(off + kind.size()).min(len)];
                             if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
                                 continue;
