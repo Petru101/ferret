@@ -582,9 +582,10 @@ pub fn learn(frame: &Path, area: Rect, n: i64, font: &mut Font, trusted: bool) -
         (lo * 4 >= hi * 3 && extra <= 2).then_some(extra)
     };
     let cands = candidates(&img, area, false);
-    // Only the biggest text: other colour groups can hold a piece of it (the slash of a 0).
+    // Only the biggest text that could be the number: other colour groups can hold a piece of
+    // it (the slash of a 0), or something taller that isn't (Forager's item slot border).
     // Of that, the solid glyphs: anti-aliased edges make a group of thin outlines.
-    let tallest = cands.iter().map(|c| c.glyph_h).max().unwrap_or(0);
+    let tallest = cands.iter().filter(|c| fits(c).is_some()).map(|c| c.glyph_h).max().unwrap_or(0);
     let ink = |c: &Candidate| c.glyphs.iter().map(|g| g.ink.iter().filter(|p| **p).count()).sum::<usize>();
     let mut fitting: Vec<(&Candidate, usize)> =
         cands.iter().filter(|c| c.glyph_h * 4 >= tallest * 3).filter_map(|c| Some((c, fits(c)?))).collect();

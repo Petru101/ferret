@@ -1,5 +1,7 @@
 // A game's digits, learned from numbers the player types and from values found in memory.
 // Reading a number then matches each glyph against these shapes; Tesseract is the fallback.
+// Pixel fonts are also kept on their own grid of font pixels, which reads them at any size
+// (the player resizes the game window; a game draws the same font at several sizes).
 
 use std::fs;
 use std::path::Path;
@@ -127,9 +129,82 @@ impl Shape {
     }
 }
 
+/// A glyph of a pixel font, one cell per font pixel.
+#[derive(Clone, PartialEq)]
+struct Grid {
+    w: u32,
+    h: u32,
+    cells: Vec<bool>,
+}
+
+impl Grid {
+    /// The glyph as `rows` font pixels tall, if it is drawn on such a grid: redrawn from its
+    /// cells, it must give back the glyph (anti-aliased or smooth fonts don't). Pixels within
+    /// half a frame pixel of a cell edge aren't checked: scaled pixel art rounds font pixels to
+    /// 2 or 3 screen pixels. `scale`: mask pixels per frame pixel.
+    fn of(g: &Glyph, rows: u32, scale: u32) -> Option<Grid> {
+        if rows == 0 || g.h < rows {
+            return None;
+        }
+        let uy = g.h as f32 / rows as f32;
+        let cols = ((g.w as f32 / uy).round() as u32).max(1);
+        let ux = g.w as f32 / cols as f32;
+        if (ux / uy).ln().abs() > 0.35 {
+            return None;
+        }
+        let at = |x: u32, y: u32| g.ink[(y.min(g.h - 1) * g.w + x.min(g.w - 1)) as usize];
+        let cells: Vec<bool> = (0..rows * cols)
+            .map(|i| at(((i % cols) as f32 * ux + ux / 2.0) as u32, ((i / cols) as f32 * uy + uy / 2.0) as u32))
+            .collect();
+        let margin = scale as f32 / 2.0;
+        // The cell a pixel is in, unless it's near an edge.
+        let inner = |p: u32, u: f32, n: u32| {
+            let c = p as f32 + 0.5;
+            let i = ((c / u) as u32).min(n - 1);
+            (c - i as f32 * u >= margin && (i + 1) as f32 * u - c >= margin).then_some(i)
+        };
+        let (mut checked, mut wrong) = (0, 0);
+        for i in 0..g.w * g.h {
+            let (Some(cx), Some(cy)) = (inner(i % g.w, ux, cols), inner(i / g.w, uy, rows)) else { continue };
+            checked += 1;
+            wrong += (g.ink[i as usize] != cells[(cy * cols + cx) as usize]) as usize;
+        }
+        (checked * 5 >= (g.w * g.h) as usize && wrong * 20 <= checked).then_some(Grid { w: cols, h: rows, cells })
+    }
+
+    /// Cells that differ; `None` when the sizes do.
+    fn distance(&self, other: &Grid) -> Option<usize> {
+        (self.w == other.w && self.h == other.h).then(|| self.cells.iter().zip(&other.cells).filter(|(a, b)| a != b).count())
+    }
+
+    /// Differences still counted as the same digit: none on small grids (a 0 and an 8 of a 3x5
+    /// font differ by one cell).
+    fn tolerance(&self) -> usize {
+        self.cells.len() / 40
+    }
+
+    /// All ink: a bar. Only a 1 looks like that; anything else is a mislearned edge or border.
+    fn is_bar(&self) -> bool {
+        self.cells.iter().all(|c| *c)
+    }
+
+    fn to_text(&self) -> String {
+        let bits: String = self.cells.iter().map(|c| if *c { '1' } else { '0' }).collect();
+        format!("{}x{} {bits}", self.w, self.h)
+    }
+
+    fn from_text(size: &str, bits: &str) -> Option<Grid> {
+        let (w, h) = size.split_once('x')?;
+        let (w, h): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
+        let cells: Vec<bool> = bits.chars().map(|c| c == '1').collect();
+        (cells.len() == (w * h) as usize && w > 0 && h > 0).then_some(Grid { w, h, cells })
+    }
+}
+
 #[derive(Default)]
 pub struct Font {
     samples: Vec<(u8, Shape)>,
+    grids: Vec<(u8, Grid)>,
 }
 
 /// A number read through the font: its value, and the worst glyph's distance.
@@ -140,24 +215,31 @@ pub struct FontRead {
 }
 
 impl Font {
-    /// File format: one learned glyph per line, "<digit> <height> <aspect> <cells as hex>".
+    /// File format: one learned glyph per line, "<digit> <height> <aspect> <cells as hex>", and
+    /// pixel-font glyphs as "<digit> grid <w>x<h> <cells as 0/1>" (older builds skip those).
     pub fn load(path: &Path) -> Font {
         let text = fs::read_to_string(path).unwrap_or_default();
-        let samples = text
-            .lines()
-            .filter_map(|l| {
-                let f: Vec<&str> = l.split_whitespace().collect();
-                let [d, h, a, hex] = f[..] else { return None };
-                let d: u8 = d.parse().ok().filter(|d| *d <= 9)?;
-                Shape::from_hex(h.parse().ok()?, a.parse().ok()?, hex).filter(|s| !s.is_faint()).map(|s| (d, s))
-            })
-            .collect();
-        Font { samples }
+        let mut font = Font::default();
+        for l in text.lines() {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let [d, h, a, hex] = f[..] else { continue };
+            let Some(d) = d.parse::<u8>().ok().filter(|d| *d <= 9) else { continue };
+            if h == "grid" {
+                font.grids.extend(Grid::from_text(a, hex).filter(|g| d == 1 || !g.is_bar()).map(|g| (d, g)));
+            } else if let (Ok(h), Ok(a)) = (h.parse(), a.parse()) {
+                font.samples.extend(Shape::from_hex(h, a, hex).filter(|s| !s.is_faint()).map(|s| (d, s)));
+            }
+        }
+        font
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let text: String =
-            self.samples.iter().map(|(d, s)| format!("{d} {:.2} {:.3} {}\n", s.height, s.aspect, s.to_hex())).collect();
+        let text: String = self
+            .samples
+            .iter()
+            .map(|(d, s)| format!("{d} {:.2} {:.3} {}\n", s.height, s.aspect, s.to_hex()))
+            .chain(self.grids.iter().map(|(d, g)| format!("{d} grid {}\n", g.to_text())))
+            .collect();
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
@@ -165,19 +247,43 @@ impl Font {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.samples.is_empty()
+        self.samples.is_empty() && self.grids.is_empty()
     }
 
     /// The digits it knows, e.g. "0 1 3 9".
     pub fn known(&self) -> String {
-        let mut d: Vec<u8> = self.samples.iter().map(|(d, _)| *d).collect();
+        let mut d: Vec<u8> = self.samples.iter().map(|(d, _)| *d).chain(self.grids.iter().map(|(d, _)| *d)).collect();
         d.sort();
         d.dedup();
         d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(" ")
     }
 
-    /// The closest digit and its distance, if close enough.
-    fn digit(&self, s: &Shape) -> Option<(u8, usize)> {
+    /// Row counts of the learned grids, most common first.
+    fn grid_rows(&self) -> Vec<u32> {
+        let mut rows: Vec<u32> = self.grids.iter().map(|(_, g)| g.h).collect();
+        rows.sort();
+        rows.dedup();
+        rows.sort_by_key(|r| std::cmp::Reverse(self.grids.iter().filter(|(_, g)| g.h == *r).count()));
+        rows
+    }
+
+    /// The closest digit and its distance, if close enough: on the grid when it's a pixel font
+    /// (any size), else by shape (about the size it was learned at).
+    fn digit(&self, g: &Glyph, scale: u32) -> Option<(u8, usize)> {
+        let mut best: Option<(u8, usize)> = None;
+        for grid in self.grid_rows().into_iter().filter_map(|rows| Grid::of(g, rows, scale)) {
+            for (d, t) in &self.grids {
+                if let Some(dist) = grid.distance(t).filter(|&x| x <= grid.tolerance()) {
+                    if best.is_none_or(|(_, b)| dist < b) {
+                        best = Some((*d, dist));
+                    }
+                }
+            }
+        }
+        if best.is_some() {
+            return best;
+        }
+        let s = Shape::of(g, scale);
         if s.is_faint() {
             return None;
         }
@@ -190,7 +296,12 @@ impl Font {
 
     /// How many glyphs (not cut off) are the size of a known digit.
     pub fn digit_sized(&self, glyphs: &[Glyph], scale: u32) -> usize {
-        let sized = |g: &&Glyph| self.samples.iter().any(|(_, s)| (g.h as f32 / scale as f32 / s.height).ln().abs() < 0.3);
+        let rows = self.grid_rows();
+        let on_grid = |g: &Glyph| {
+            rows.iter().filter_map(|r| Grid::of(g, *r, scale)).any(|a| self.grids.iter().any(|(_, b)| a.w == b.w && a.h == b.h))
+        };
+        let sized =
+            |g: &&Glyph| self.samples.iter().any(|(_, s)| (g.h as f32 / scale as f32 / s.height).ln().abs() < 0.3) || on_grid(g);
         glyphs.iter().filter(|g| !g.cut).filter(sized).count()
     }
 
@@ -198,17 +309,22 @@ impl Font {
     /// glyphs cut off by the crop's edge, which are left out when they aren't digits.
     /// A glyph wider than any known digit may be digits drawn touching: tried as equal slices.
     pub fn read(&self, glyphs: &[Glyph], scale: u32) -> Option<FontRead> {
-        if self.samples.is_empty() || glyphs.is_empty() {
+        if self.is_empty() || glyphs.is_empty() {
             return None;
         }
-        let widest = self.samples.iter().map(|(_, s)| s.aspect).fold(0.0, f32::max);
+        let widest = self
+            .samples
+            .iter()
+            .map(|(_, s)| s.aspect)
+            .chain(self.grids.iter().map(|(_, g)| g.w as f32 / g.h as f32))
+            .fold(0.0, f32::max);
         let mut text = String::new();
         let mut worst = 0;
         let mut count = 0;
         for g in glyphs {
-            let read = self.digit(&Shape::of(g, scale)).map(|r| vec![r]).or_else(|| {
+            let read = self.digit(g, scale).map(|r| vec![r]).or_else(|| {
                 let parts = (g.w as f32 / g.h as f32 / widest).round() as u32;
-                (2..=4).contains(&parts).then(|| g.split(parts).iter().map(|p| self.digit(&Shape::of(p, scale))).collect::<Option<Vec<_>>>()).flatten()
+                (2..=4).contains(&parts).then(|| g.split(parts).iter().map(|p| self.digit(p, scale)).collect::<Option<Vec<_>>>()).flatten()
             });
             let Some(read) = read else {
                 if g.cut {
@@ -230,8 +346,28 @@ impl Font {
     /// Returns how many new shapes were kept.
     pub fn learn(&mut self, glyphs: &[Glyph], scale: u32, label: &str, trusted: bool) -> usize {
         let mut added = 0;
+        // Pixel font: the fewest rows every glyph fits on. Bars (a 1) fit any, so they don't
+        // count; a lone 1 goes on the rows the font already uses.
+        let fits = |rows: u32| {
+            let grids: Option<Vec<Grid>> = glyphs.iter().map(|g| Grid::of(g, rows, scale)).collect();
+            grids.is_some_and(|grids| grids.iter().any(|g| !g.is_bar()))
+        };
+        let rows = (3..=16).find(|&r| fits(r)).or(self.grid_rows().first().copied());
         for (g, c) in glyphs.iter().zip(label.bytes()) {
             let d = c - b'0';
+            if let Some(grid) = rows.and_then(|r| Grid::of(g, r, scale)).filter(|grid| d == 1 || !grid.is_bar()) {
+                if trusted {
+                    self.grids.retain(|(od, t)| *od == d || grid.distance(t).is_none_or(|x| x > grid.tolerance()));
+                }
+                if !self.grids.iter().any(|(od, t)| *od == d && *t == grid) {
+                    self.grids.push((d, grid));
+                    added += 1;
+                    let same: Vec<usize> = (0..self.grids.len()).filter(|&i| self.grids[i].0 == d).collect();
+                    if same.len() > PER_DIGIT {
+                        self.grids.remove(same[0]);
+                    }
+                }
+            }
             let s = Shape::of(g, scale);
             if s.is_faint() {
                 continue;
@@ -250,5 +386,53 @@ impl Font {
             }
         }
         added
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    /// Digits of a 3x5 pixel font drawn with font pixels `u` screen pixels wide (nearest
+    /// neighbour, so pixels round to uneven sizes), 4 mask pixels per screen pixel.
+    fn draw(rows: [&str; 5], u: f32) -> Glyph {
+        let (w, h) = ((3.0 * u).round() as u32 * 4, (5.0 * u).round() as u32 * 4);
+        let ink = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32 / 4.0, (i / w) as f32 / 4.0);
+                rows[((y / u) as usize).min(4)].as_bytes()[((x / u) as usize).min(2)] == b'#'
+            })
+            .collect();
+        Glyph { x: 0, w, h, ink, cut: false }
+    }
+
+    const TWO: [&str; 5] = ["###", "..#", "###", "#..", "###"];
+    const FIVE: [&str; 5] = ["###", "#..", "###", "..#", "###"];
+    const EIGHT: [&str; 5] = ["###", "#.#", "###", "#.#", "###"];
+    const ZERO: [&str; 5] = ["###", "#.#", "#.#", "#.#", "###"];
+
+    #[test]
+    fn reads_a_pixel_font_at_other_sizes() {
+        let mut font = Font::default();
+        let at = |u: f32| [draw(TWO, u), draw(FIVE, u), draw(EIGHT, u), draw(ZERO, u)];
+        font.learn(&at(3.2), 4, "2580", false);
+        assert_eq!(font.grids.len(), 4);
+        for u in [2.2, 3.0, 4.6, 7.0] {
+            let read = font.read(&at(u), 4).map(|r| r.n);
+            assert_eq!(read, Some(2580), "font pixel {u}");
+        }
+        // 0 and 8 differ by one cell: never confused.
+        assert_eq!(font.read(&[draw(ZERO, 5.0), draw(EIGHT, 5.0)], 4).map(|r| r.n), Some(8));
+    }
+
+    #[test]
+    fn keeps_grids_in_the_file() {
+        let path = std::env::temp_dir().join("ferret-grid-test.digits");
+        let mut font = Font::default();
+        font.learn(&[draw(TWO, 3.2), draw(FIVE, 3.2)], 4, "25", false);
+        font.save(&path).unwrap();
+        let back = Font::load(&path);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(back.read(&[draw(FIVE, 6.0), draw(TWO, 6.0)], 4).map(|r| r.n), Some(52));
     }
 }
