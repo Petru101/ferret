@@ -1,0 +1,86 @@
+id: io.github.Petru101.CheatPoc
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: cheat-poc
+finish-args:
+  - --talk-name=org.freedesktop.Flatpak
+  - --env=TESSDATA_PREFIX=/app/share/tessdata
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - '*.a'
+modules:
+  - name: leptonica
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_PROG=OFF
+      - -DSW_BUILD=OFF
+      - -DENABLE_GIF=OFF
+      - -DENABLE_WEBP=OFF
+      - -DENABLE_OPENJPEG=OFF
+      - -DENABLE_TIFF=OFF
+    sources:
+      - type: archive
+        url: https://github.com/DanBloomberg/leptonica/releases/download/1.87.0/leptonica-1.87.0.tar.gz
+        sha256: c73363397f96eb1295602bf44d708a994ad42046c791bf03ea0505d829bdb6a7
+
+  - name: tesseract
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_TRAINING_TOOLS=OFF
+      - -DBUILD_TESTS=OFF
+      - -DGRAPHICS_DISABLED=ON
+      - -DDISABLE_ARCHIVE=ON
+      - -DDISABLE_CURL=ON
+      - -DOPENMP_BUILD=OFF
+      - -DENABLE_NATIVE=OFF
+      - -DSW_BUILD=OFF
+    sources:
+      - type: archive
+        url: https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.3.tar.gz
+        sha256: 9218e62793116d42a9f6d14cd9348518b27f382096eea3d0f2d1a24616bb5884
+
+  - name: tessdata
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 eng.traineddata /app/share/tessdata/eng.traineddata
+    sources:
+      - type: file
+        url: https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata
+        sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+
+  - name: cheat-poc
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --offline --bin cheat-poc
+      - install -Dm755 target/release/cheat-poc /app/bin/cheat-poc
+      # The helper runs on the host, outside the runtime, so it is linked
+      # statically. The SDK has no static libm; std only needs its name.
+      - mkdir -p stub && ar rc stub/libm.a
+      - >-
+        RUSTFLAGS="-C target-feature=+crt-static -L native=$PWD/stub"
+        cargo build --release --offline --target x86_64-unknown-linux-gnu --bin cheat-poc-helper
+      - install -Dm755 target/x86_64-unknown-linux-gnu/release/cheat-poc-helper /app/bin/cheat-poc-helper
+    sources:
+      - type: dir
+        path: .
+        skip:
+          - target
+          - build-dir
+          - repo
+          - test-game
+          - run
+          - stub
+          - .flatpak-builder

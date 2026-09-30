@@ -1,0 +1,9 @@
+target/
+build-dir/
+repo/
+run/
+stub/
+.flatpak-builder/
+test-game/target
+test-game/target.exe
+vendor/
