@@ -809,9 +809,23 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
             continue;
         }
         let Some(acc) = trace::decode_access(&code, after - before, *after, target, regs) else {
-            writeln!(out, "instruction before 0x{after:x}: not a [register+offset] access, skipped")?;
+            let tail: Vec<String> = code[before as usize - 16..before as usize].iter().map(|b| format!("{b:02x}")).collect();
+            writeln!(out, "instruction before 0x{after:x}: not a [register+offset] access, skipped (bytes before it: {})", tail.join(" "))?;
             continue;
         };
+        // Shared code (a runtime function every variable goes through, as in GameMaker games)
+        // reads other addresses too: a pattern for it would find some other value next time.
+        let read = site_targets(s.pid, acc.start, acc.base, acc.disp, Duration::from_secs(1));
+        let others = read.iter().filter(|a| *a & 0xFFFF_FFFF != target & 0xFFFF_FFFF).count();
+        if others > 0 {
+            writeln!(
+                out,
+                "instruction at 0x{:x}: shared code, it also reads {others}{} other addresses, skipped",
+                acc.start,
+                if read.len() >= SITE_TARGETS_MAX { "+" } else { "" }
+            )?;
+            continue;
+        }
         let instr = (acc.start - (after - before)) as usize;
         // Grow the pattern backwards until it matches only this spot.
         let mut site = None;
@@ -835,6 +849,27 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         }
     }
     writeln!(out, "{} instructions accessed it", hits.len())
+}
+
+const SITE_TARGETS_MAX: usize = 8;
+
+/// The distinct addresses the instruction at `instr` reads as [base + disp] while the game runs
+/// for up to `timeout` (stops early after enough of them).
+fn site_targets(pid: u32, instr: u64, base: u8, disp: i64, timeout: Duration) -> Vec<u64> {
+    let _tracing = TRACING.lock().unwrap();
+    let Ok(mut tracer) = trace::Tracer::attach(pid) else { return Vec::new() };
+    tracer.arm(instr, trace::DR7_EXECUTE);
+    let mut read: Vec<u64> = Vec::new();
+    let mut hits = 0;
+    tracer.watch(timeout, |hit| {
+        let addr = trace::reg(&hit.regs, base).wrapping_add(disp as u64);
+        if !read.contains(&addr) {
+            read.push(addr);
+        }
+        hits += 1;
+        hits < 200 && read.len() < SITE_TARGETS_MAX
+    });
+    read
 }
 
 /// Only one tracer may run at a time: two would steal each other's events.

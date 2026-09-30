@@ -316,6 +316,7 @@ pub struct Core {
 
 impl Core {
     pub fn new(log: Box<dyn FnMut(&str) + Send>) -> Result<Self, String> {
+        fs::write(cache_dir().join("ferret.log"), "").ok();
         Ok(Self {
             helper: Helper::start()?,
             capture: None,
@@ -331,6 +332,10 @@ impl Core {
 
     fn say(&mut self, msg: &str) {
         (self.log)(msg);
+        // Also kept on disk, for looking into problems after the fact.
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(cache_dir().join("ferret.log")) {
+            let _ = writeln!(f, "{msg}");
+        }
     }
 
     /// Sends a command straight to the host helper.
@@ -412,7 +417,13 @@ impl Core {
         }
         let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
         if sites.is_empty() {
-            return Err("no usable code found; keep the game running (not paused) and try again".into());
+            let accessed = reply.iter().find_map(|l| l.strip_suffix(" instructions accessed it")).and_then(|n| n.parse::<usize>().ok());
+            let shared = reply.iter().any(|l| l.contains(": shared code,"));
+            return Err(match accessed {
+                Some(0) => "nothing in the game touched the value while Ferret watched; keep the game running (not paused) and try again".into(),
+                _ if shared => "the game only reads this value through code it shares with other values (GameMaker games do this), so Ferret can't save it by code yet".into(),
+                _ => "the game uses the value in a way Ferret can't save yet (details in the log)".into(),
+            });
         }
         let count = sites.len();
         let game = self.game()?;

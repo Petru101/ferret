@@ -7,5 +7,6 @@ stub/
 test-game/target
 test-game/target.exe
 test-game/target-x87
+test-game/target32.exe
 vendor/
 CLAUDE.md
