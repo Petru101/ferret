@@ -113,6 +113,14 @@ impl FindView {
             .width_request(120)
             .tooltip_text("What Ferret reads")
             .build();
+        // A picture asks for its image's size: without a cap, a tall box drawn around a number
+        // made the whole top row that tall and squeezed the game picture.
+        let crop_box = adw::Clamp::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .maximum_size(40)
+            .valign(gtk::Align::Center)
+            .child(&adw::Clamp::builder().maximum_size(160).child(&crop).build())
+            .build();
         let spinner = gtk::Spinner::new();
         let stop = gtk::Button::builder().label("Stop").css_classes(["destructive-action"]).visible(false).build();
         let start = gtk::Button::builder().label("Start").css_classes(["suggested-action"]).sensitive(false).build();
@@ -122,7 +130,7 @@ impl FindView {
             .build();
         let top = frame_box();
         top.set_margin_top(12);
-        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop.upcast_ref(), spinner.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
+        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
             top.append(w);
         }
 
