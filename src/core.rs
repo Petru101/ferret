@@ -395,6 +395,8 @@ pub struct Core {
     log: Box<dyn FnMut(&str) + Send>,
     /// Set to stop a running `auto`.
     pub cancel: Arc<AtomicBool>,
+    /// The last read `read_stable` ignored, to log it once.
+    ignored: Option<i64>,
 }
 
 impl Core {
@@ -410,6 +412,7 @@ impl Core {
             search: None,
             log,
             cancel: Arc::new(AtomicBool::new(false)),
+            ignored: None,
         })
     }
 
@@ -856,9 +859,14 @@ impl Core {
 
     /// Reads the number inside the watched area of a fresh frame.
     pub fn read(&mut self) -> Result<Option<i64>, String> {
+        Ok(self.read_learned()?.map(|(n, _)| n))
+    }
+
+    /// Reads the number inside the watched area, and whether the learned digits read it.
+    fn read_learned(&mut self) -> Result<Option<(i64, bool)>, String> {
         let area = self.area.ok_or("no area picked yet")?;
         let frame = self.frame()?;
-        Ok(ocr::read_number(&frame, area, &cache_dir().join("area.png"), Some(&self.font))?.map(|(n, _)| n))
+        ocr::read_number(&frame, area, &cache_dir().join("area.png"), Some(&self.font))
     }
 
     /// Reads the number just picked, and whether the game's learned digits read it. A read
@@ -954,10 +962,35 @@ impl Core {
         Ok(None)
     }
 
+    /// Two reads in a row that agree. Once the learned digits know every digit, a number only
+    /// Tesseract reads is something else in the watched spot (a menu opened over it): no read.
     fn read_stable(&mut self) -> Result<Option<i64>, String> {
-        let a = self.read()?;
-        let b = self.read()?;
-        Ok(if a == b { a } else { None })
+        let a = self.read_learned()?;
+        let b = self.read_learned()?;
+        let (Some((n, learned)), true) = (a, a == b) else { return Ok(None) };
+        if !learned && self.font.knows_all() {
+            if self.ignored != Some(n) {
+                self.say(&format!("the watched spot shows something the learned digits don't read (Tesseract: {n}), ignored"));
+            }
+            self.ignored = Some(n);
+            return Ok(None);
+        }
+        self.ignored = None;
+        Ok(Some(n))
+    }
+
+    /// Whether the one match left holds what the screen shows (`n`); a match reached through
+    /// misreads can be anything.
+    fn holds(&mut self, loc: Loc, n: i64) -> bool {
+        let v = self.peek(&[loc])[0];
+        let ok = v.is_some_and(|v| (v - n).abs() <= 1);
+        if !ok {
+            self.say(&format!(
+                "the last match holds {} but the screen shows {n}: not it, starting over",
+                v.map_or("nothing".into(), |v| v.to_string())
+            ));
+        }
+        ok
     }
 
     /// The automated scan loop: read the number off the window, scan for it, and
@@ -991,6 +1024,9 @@ impl Core {
         self.search = Some((count, 0));
         let mut last = first;
         let mut unchanged_rounds = 0;
+        // A number nothing fits: a misread or something covering the number, unless it's read
+        // again right after.
+        let mut unfit = None;
         while count > 1 && start.elapsed() < limit && !cancelled(&self.cancel) {
             std::thread::sleep(Duration::from_millis(300));
             // Values that change while the screen is read may show either end of that change.
@@ -1003,14 +1039,20 @@ impl Core {
             let new_count = match_count(&reply).unwrap_or(0);
             self.say(&format!("screen shows {now}: {}", reply.join(" ")));
             if new_count == 0 {
+                if unfit != Some(now) {
+                    self.say(&format!("nothing fits {now} (a misread?), keeping the {count} matches"));
+                    unfit = Some(now);
+                    continue;
+                }
                 let reply = self.helper.call(&format!("scan {now}"));
-                self.say(&format!("lost it (the screen lags memory or OCR misread), rescanning: {}", reply.join(" ")));
+                self.say(&format!("{now} again: lost it, rescanning: {}", reply.join(" ")));
                 count = match_count(&reply).unwrap_or(0);
                 unchanged_rounds = 0;
             } else {
                 unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
                 count = new_count;
             }
+            unfit = None;
             self.search = Some((count, 0));
             last = now;
             if unchanged_rounds >= 3 {
@@ -1032,6 +1074,10 @@ impl Core {
         if count == 1 {
             self.search = None;
             let loc = self.candidates()[0].0;
+            if !self.holds(loc, last) {
+                self.helper.call("track");
+                return Err("the only match left doesn't hold the number on screen (misreads?); press Start to search again".into());
+            }
             self.say(&format!("stored as {}", loc.kind.with_article()));
             self.learn_from_memory(loc);
             return Ok(AutoResult::Found(loc));
@@ -1085,7 +1131,15 @@ impl Core {
                 self.search = None;
                 return Err(format!("{n} is nowhere in the game's memory"));
             }
-            1 => Some(self.candidates()[0].0),
+            1 => {
+                let loc = self.candidates()[0].0;
+                if !self.holds(loc, n) {
+                    self.search = None;
+                    self.helper.call("track");
+                    return Err(format!("the only match left doesn't hold {n}; type the number again to start over"));
+                }
+                Some(loc)
+            }
             // The same few keep following the value: copies of it. Find the real one.
             2..=20 if unchanged >= 2 => {
                 self.say("checking which one is the real value:");

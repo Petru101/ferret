@@ -690,6 +690,11 @@ fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
             keep(c.kind(), c.value, new).then_some(Candidate { value: new, ..*c })
         })
         .collect();
+    // Nothing fitting is usually a misread (or something covering the number): keep the matches,
+    // the caller decides whether to start over.
+    if next.is_empty() {
+        return writeln!(out, "{before} -> 0 matches (kept the {before} from before)");
+    }
     s.candidates = next;
     writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))
 }

@@ -250,6 +250,11 @@ impl Font {
         self.samples.is_empty() && self.grids.is_empty()
     }
 
+    /// Knows every digit: then what it can't read isn't a number (a menu over the watched spot).
+    pub fn knows_all(&self) -> bool {
+        self.known().len() == 19
+    }
+
     /// The digits it knows, e.g. "0 1 3 9".
     pub fn known(&self) -> String {
         let mut d: Vec<u8> = self.samples.iter().map(|(d, _)| *d).chain(self.grids.iter().map(|(d, _)| *d)).collect();
