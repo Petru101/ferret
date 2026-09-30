@@ -207,6 +207,14 @@ pub struct Font {
     grids: Vec<(u8, Grid)>,
 }
 
+/// A learned shape, for showing: one cell per font pixel for pixel fonts, else stretched to 16x20.
+#[derive(Clone)]
+pub struct DigitShape {
+    pub w: u32,
+    pub h: u32,
+    pub cells: Vec<bool>,
+}
+
 /// A number read through the font: its value, and the worst glyph's distance.
 pub struct FontRead {
     pub n: i64,
@@ -248,6 +256,30 @@ impl Font {
 
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty() && self.grids.is_empty()
+    }
+
+    /// The shapes learned for `d`, grids first.
+    pub fn shapes(&self, d: u8) -> Vec<DigitShape> {
+        let grids = self.grids.iter().filter(|(e, _)| *e == d).map(|(_, g)| DigitShape { w: g.w, h: g.h, cells: g.cells.clone() });
+        let shapes = self.samples.iter().filter(|(e, _)| *e == d).map(|(_, s)| DigitShape { w: GW as u32, h: GH as u32, cells: s.cells.clone() });
+        grids.chain(shapes).collect()
+    }
+
+    /// Drops every shape learned for `d`; returns how many there were.
+    pub fn forget(&mut self, d: u8) -> usize {
+        let before = self.samples.len() + self.grids.len();
+        self.samples.retain(|(e, _)| *e != d);
+        self.grids.retain(|(e, _)| *e != d);
+        before - self.samples.len() - self.grids.len()
+    }
+
+    /// Whether a number Tesseract read agrees with the glyphs the learned digits do know (when
+    /// the glyphs line up with its digits; otherwise there's nothing to compare).
+    pub fn agrees(&self, glyphs: &[Glyph], scale: u32, n: i64) -> bool {
+        let whole: Vec<&Glyph> = glyphs.iter().filter(|g| !g.cut).collect();
+        let text = n.unsigned_abs().to_string();
+        whole.len() != text.len()
+            || whole.iter().zip(text.bytes()).all(|(g, c)| self.digit(g, scale).is_none_or(|(d, _)| d == c - b'0'))
     }
 
     /// Knows every digit: then what it can't read isn't a number (a menu over the watched spot).

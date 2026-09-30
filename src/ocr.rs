@@ -477,6 +477,10 @@ fn read_areas(img: &RgbImage, areas: &[Rect], padded: bool, dir: &Path, font: Op
         if sized > n.unsigned_abs().to_string().len() && !letters {
             continue;
         }
+        // A digit the learned ones read differently: Tesseract misread it.
+        if font.is_some_and(|f| !f.agrees(&per_area[a][c].glyphs, SCALE, n)) {
+            continue;
+        }
         found[a].push((glyph_h, Read { n, conf, file, rect, learned: false }));
     }
     // The number is normally the biggest text in the box; among reads of about that size (edge

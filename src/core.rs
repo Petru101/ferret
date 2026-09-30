@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::capture::WindowCapture;
-use crate::font::Font;
+use crate::font::{self, Font};
 use crate::ocr::{self, Rect, Word};
 
 fn flatpak_app_path() -> Option<String> {
@@ -894,6 +894,21 @@ impl Core {
             Err(e) => format!("digits not learned: {e}"),
         };
         self.say(&msg);
+    }
+
+    /// The attached game's learned digits: the shapes of 0 to 9 (empty = not learned yet).
+    pub fn digits(&self) -> Vec<Vec<font::DigitShape>> {
+        (0..10).map(|d| self.font.shapes(d)).collect()
+    }
+
+    /// Forgets the shapes learned for one digit (a wrongly learned one reads numbers wrong).
+    pub fn forget_digit(&mut self, d: u8) -> Result<(), String> {
+        let game = self.game.as_ref().ok_or("attach to a game first")?;
+        let path = digits_path(&game.exe);
+        let n = self.font.forget(d);
+        self.font.save(&path)?;
+        self.say(&format!("forgot the {n} learned shapes of {d}"));
+        Ok(())
     }
 
     /// With the value's address known, memory tells what the screen shows: learn from that.

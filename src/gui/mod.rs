@@ -35,6 +35,8 @@ pub enum Event {
     Saved(Result<(String, bool), String>),
     /// The search was cleared (the Find tab already shows it).
     Reset,
+    /// The attached game's learned digits, 0 to 9.
+    Digits(Vec<Vec<crate::font::DigitShape>>),
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
 }
@@ -153,6 +155,10 @@ impl Ui {
         if !matches!(event, Event::Log(_) | Event::Failed(_)) {
             self.worker.pending.set(self.worker.pending.get().saturating_sub(1));
         }
+        // These can teach Ferret digits.
+        if matches!(event, Event::Attached(Ok(_)) | Event::Auto(_) | Event::Typed(_)) {
+            self.worker.run(|core| Event::Digits(core.digits()));
+        }
         match event {
             Event::Log(msg) => self.find.log(&msg),
             Event::Failed(e) => {
@@ -187,6 +193,7 @@ impl Ui {
                 self.worker.run(|core| Event::Values(core.values()));
             }
             Event::Reset => {}
+            Event::Digits(shapes) => self.find.show_digits(shapes),
             Event::Done(Ok(msg)) => self.toast(&msg),
             Event::Attached(Err(e)) | Event::Saved(Err(e)) | Event::Done(Err(e)) => self.toast(&e),
         }
@@ -299,6 +306,17 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
+    action(
+        "forget",
+        Box::new(|ui, d| {
+            if let Ok(d) = d.parse::<u8>() {
+                ui.worker.run(move |core| {
+                    core.forget_digit(d).ok();
+                    Event::Digits(core.digits())
+                });
+            }
+        }),
+    );
 }
 
 fn build(app: &adw::Application) {

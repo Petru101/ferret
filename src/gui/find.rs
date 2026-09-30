@@ -15,6 +15,7 @@ use gtk::gdk;
 
 use super::{Event, Worker};
 use crate::core::{self, AutoResult};
+use crate::font::DigitShape;
 use crate::ocr::{self, Rect, Word};
 
 pub struct FindView {
@@ -39,6 +40,8 @@ pub struct FindView {
     name: gtk::Entry,
     typed_row: gtk::Box,
     typed: gtk::Entry,
+    digits: gtk::Box,
+    digits_hint: gtk::Label,
     worker: Worker,
     cancel: Arc<AtomicBool>,
 }
@@ -79,6 +82,19 @@ fn group_counts(msg: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Draws a learned digit, one square per cell, in the text colour.
+fn draw_shape(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: i32, h: i32, s: &DigitShape) {
+    let c = area.color();
+    cr.set_source_rgba(c.red() as f64, c.green() as f64, c.blue() as f64, c.alpha() as f64);
+    let cell = (w as f64 / s.w as f64).min(h as f64 / s.h as f64);
+    let (ox, oy) = ((w as f64 - cell * s.w as f64) / 2.0, (h as f64 - cell * s.h as f64) / 2.0);
+    for (i, _) in s.cells.iter().enumerate().filter(|(_, on)| **on) {
+        let (x, y) = (i as u32 % s.w, i as u32 / s.w);
+        cr.rectangle(ox + x as f64 * cell, oy + y as f64 * cell, cell, cell);
+    }
+    cr.fill().ok();
 }
 
 fn frame_box() -> gtk::Box {
@@ -178,10 +194,18 @@ impl FindView {
         typed_row.append(&typed);
         typed_row.append(&typed_go);
 
+        let digits = gtk::Box::builder().spacing(2).build();
+        let digits_hint = gtk::Label::builder().xalign(0.0).hexpand(true).wrap(true).css_classes(["dim-label"]).build();
+        let digits_row = frame_box();
+        digits_row.append(&gtk::Label::new(Some("Learned digits:")));
+        digits_row.append(&digits);
+        digits_row.append(&digits_hint);
+
         let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_bottom(12).build();
         page.append(&top);
         page.append(&scroll);
         page.append(&typed_row);
+        page.append(&digits_row);
         page.append(&result);
         page.append(&log_scroll);
 
@@ -230,6 +254,8 @@ impl FindView {
             name,
             typed_row,
             typed,
+            digits,
+            digits_hint,
             worker,
             cancel,
         });
@@ -530,6 +556,61 @@ impl FindView {
             }
             Err(e) => self.status.set_label(&e),
         }
+    }
+
+    /// Shows the attached game's learned digits (index = digit); click one to forget it.
+    pub fn show_digits(&self, shapes: Vec<Vec<DigitShape>>) {
+        while let Some(c) = self.digits.first_child() {
+            self.digits.remove(&c);
+        }
+        let missing: Vec<String> = (0..shapes.len()).filter(|&d| shapes[d].is_empty()).map(|d| d.to_string()).collect();
+        for (d, shapes) in shapes.into_iter().enumerate() {
+            let Some(first) = shapes.first().cloned() else {
+                let unknown = gtk::Label::builder()
+                    .label("?")
+                    .width_chars(2)
+                    .css_classes(["dim-label"])
+                    .tooltip_text(format!("{d} isn't learned yet"))
+                    .build();
+                self.digits.append(&unknown);
+                continue;
+            };
+            let area = gtk::DrawingArea::builder().content_width(14).content_height(20).build();
+            area.set_draw_func(move |a, cr, w, h| draw_shape(a, cr, w, h, &first));
+            let n = shapes.len();
+            let what = format!("{n} learned shape{} of {d}", if n == 1 { "" } else { "s" });
+            let forget = gtk::Button::builder().label(format!("Forget {d}")).css_classes(["destructive-action"]).build();
+            let content = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(8)
+                .margin_top(6)
+                .margin_bottom(6)
+                .margin_start(6)
+                .margin_end(6)
+                .build();
+            content.append(&gtk::Label::new(Some(&format!("{what}.\nForget it if it reads numbers wrong,\nthen type a number with a {d} to learn it again."))));
+            content.append(&forget);
+            let popover = gtk::Popover::builder().child(&content).build();
+            let button = gtk::MenuButton::builder().child(&area).popover(&popover).css_classes(["flat"]).tooltip_text(&what).build();
+            let worker = self.worker.clone();
+            forget.connect_clicked(move |_| {
+                popover.popdown();
+                worker.run(move |core| {
+                    core.forget_digit(d as u8).ok();
+                    Event::Digits(core.digits())
+                });
+            });
+            self.digits.append(&button);
+        }
+        self.digits_hint.set_label(&match missing.len() {
+            10 => "None yet: Tesseract reads the numbers. Typing the number the game shows teaches Ferret its digits.".to_owned(),
+            0 => "All ten: while searching, Ferret only trusts reads made with these.".to_owned(),
+            _ => format!(
+                "Missing {}: Tesseract fills in, checked against the known ones. Type a number that has {} once.",
+                missing.join(", "),
+                if missing.len() == 1 { "it" } else { "them" }
+            ),
+        });
     }
 
     /// Stops a running Start (the matches so far are kept).
