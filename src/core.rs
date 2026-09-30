@@ -263,10 +263,6 @@ impl Core {
         self.game.as_mut().ok_or_else(|| "attach to a game first".into())
     }
 
-    pub fn attached_exe(&self) -> Option<&str> {
-        self.game.as_ref().map(|g| g.exe.as_str())
-    }
-
     // --- Games
 
     pub fn games(&mut self) -> Vec<GameProcess> {

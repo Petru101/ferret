@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ferret
+Comment=Find and change values in your games
+Exec=ferret
+Icon=io.github.Petru101.Ferret
+Terminal=false
+Categories=Game;Utility;
+Keywords=cheat;trainer;memory;game;
+StartupNotify=true

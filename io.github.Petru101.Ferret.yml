@@ -6,6 +6,10 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: ferret
 finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
   - --talk-name=org.freedesktop.Flatpak
   - --env=TESSDATA_PREFIX=/app/share/tessdata
 build-options:
@@ -73,6 +77,8 @@ modules:
         RUSTFLAGS="-C target-feature=+crt-static -L native=$PWD/stub"
         cargo build --release --offline --target x86_64-unknown-linux-gnu -p ferret-helper
       - install -Dm755 target/x86_64-unknown-linux-gnu/release/ferret-helper /app/bin/ferret-helper
+      - install -Dm644 data/io.github.Petru101.Ferret.desktop /app/share/applications/io.github.Petru101.Ferret.desktop
+      - install -Dm644 data/io.github.Petru101.Ferret.svg /app/share/icons/hicolor/scalable/apps/io.github.Petru101.Ferret.svg
     sources:
       - type: dir
         path: .
