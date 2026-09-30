@@ -201,7 +201,7 @@ fn colour_groups(img: &RgbImage) -> Vec<[f32; 3]> {
     let (sum, n) = buckets.into_values().max_by_key(|b| b.1).unwrap();
     let mut centers = vec![[sum[0] / n as f32, sum[1] / n as f32, sum[2] / n as f32]];
     // Farthest-point start: each new centre is the pixel least like the existing ones.
-    while centers.len() < 4 {
+    while centers.len() < 6 {
         let (p, d) = px
             .iter()
             .map(|p| (*p, centers.iter().map(|c| dist2(*p, *c)).fold(f32::MAX, f32::min)))
