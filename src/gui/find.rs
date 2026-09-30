@@ -428,6 +428,13 @@ impl FindView {
         if let Ok(t) = gdk::Texture::from_filename(core::cache_dir().join("area.png")) {
             self.crop.set_paintable(Some(&t));
         }
+        // The read comes from a fresh frame: show that one, the game may have changed since the
+        // capture (Forager's furnace used up ore while the player picked numbers).
+        if let Ok(t) = gdk::Texture::from_filename(core::cache_dir().join("picked.png")) {
+            self.picture.set_paintable(Some(&t));
+            *self.texture.borrow_mut() = Some(t);
+            self.area.queue_draw();
+        }
         self.unconfirmed.set(None);
         self.start.set_label("Start");
         match r {
