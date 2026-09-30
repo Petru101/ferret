@@ -473,7 +473,7 @@ impl FindView {
             return;
         }
         self.busy(true);
-        self.status.set_label("Saving: finding the code that uses it…");
+        self.status.set_label("Saving: finding how the game gets to it (takes about 10 seconds)…");
         self.worker.run(move |core| Event::Saved(core.save(&name).map(|_| name)));
     }
 

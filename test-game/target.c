@@ -2,12 +2,14 @@
  * and scrap (int XOR-encoded with a per-object key, like Infested Planet's BP)
  * on the heap, plus coins and wood (doubles in their own blocks, read through one
  * shared function like GameMaker games read every variable, and coins also directly),
+ * plus gems (a double at the end of a chain from a static pointer: world -> room -> stats,
+ * only ever read and written through shared functions, so only pointer paths find it again),
  * and changes them on commands (earn N, spend N, hit N, gain X, shield X, scrap N,
- * coins N, wood N, show, respawn) dropped into a command file, so it
+ * coins N, wood N, gems N, show, respawn, newroom) dropped into a command file, so it
  * can be driven the same way natively, under Proton and inside the Steam
  * runtime. "respawn" moves the player to a new object and frees the old one,
- * like a new mission. Usage: target <command file> <log file>. Built for Linux
- * and Windows. */
+ * like a new mission; "newroom" does the same with the room and its stats.
+ * Usage: target <command file> <log file>. Built for Linux and Windows. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +33,26 @@ struct player {
     int scrap_enc;
     int scrap_key;
 };
+
+struct stats {
+    const char *type;
+    double seen[3];
+    double gems;
+};
+
+struct room {
+    const char *type;
+    char name[48];
+    struct stats *stats;
+};
+
+struct world {
+    const char *type;
+    int ticks;
+    struct room *room;
+};
+
+static struct world *world;
 
 static int scrap(const struct player *p)
 {
@@ -62,13 +84,30 @@ __attribute__((noinline, noipa)) static double read_real(const double *v)
     return *v;
 }
 
+__attribute__((noinline, noipa)) static void write_real(double *v, double x)
+{
+    *v = x;
+}
+
+static struct room *new_room(double gems)
+{
+    struct room *r = malloc(sizeof *r);
+
+    r->type = "room";
+    strcpy(r->name, "cave");
+    r->stats = malloc(sizeof *r->stats);
+    r->stats->type = "stats";
+    write_real(&r->stats->gems, gems);
+    return r;
+}
+
 static void report(const char *log, const struct player *p, const double *coins, const double *wood)
 {
     FILE *f = fopen(log, "a");
 
     if (f) {
-        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f\n", p->gold, p->hp,
-                p->energy, p->shield, scrap(p), *coins, *wood);
+        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f\n", p->gold, p->hp,
+                p->energy, p->shield, scrap(p), *coins, *wood, read_real(&world->room->stats->gems));
         fclose(f);
     }
 }
@@ -96,6 +135,9 @@ int main(int argc, char **argv)
     padding[0] = 1;
     *coins = 30;
     *wood = 12;
+    world = malloc(sizeof *world);
+    world->type = "world";
+    world->room = new_room(77);
     report(argv[2], p, coins, wood);
     for (;;) {
         sleep_ms(100);
@@ -107,7 +149,8 @@ int main(int argc, char **argv)
             most_shield = p->shield;
         if (scrap(p) > most_scrap)
             most_scrap = scrap(p);
-        total = read_real(coins) + read_real(wood);
+        total = read_real(coins) + read_real(wood) + read_real(&world->room->stats->gems);
+        world->ticks++;
         if (*coins > most_coins)
             most_coins = *coins;
         f = fopen(argv[1], "r");
@@ -133,7 +176,16 @@ int main(int argc, char **argv)
             *coins += n;
         else if (sscanf(line, "wood %d", &n) == 1)
             *wood += n;
-        else if (sscanf(line, "quit %d", &n) == 1)
+        else if (sscanf(line, "gems %d", &n) == 1)
+            write_real(&world->room->stats->gems, read_real(&world->room->stats->gems) + n);
+        else if (strncmp(line, "newroom", 7) == 0) {
+            struct room *r = world->room;
+
+            padding = malloc(4096);
+            world->room = new_room(read_real(&r->stats->gems));
+            free(r->stats);
+            free(r);
+        } else if (sscanf(line, "quit %d", &n) == 1)
             break;
         else if (strncmp(line, "respawn", 7) == 0) {
             old = p;

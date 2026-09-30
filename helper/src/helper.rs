@@ -9,16 +9,17 @@ use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::pointers::{self, Module, PtrPath};
 use crate::trace;
 
-struct Region {
-    start: u64,
-    end: u64,
-    perms: String,
-    path: String,
+pub struct Region {
+    pub start: u64,
+    pub end: u64,
+    pub perms: String,
+    pub path: String,
 }
 
-fn maps(pid: u32) -> io::Result<Vec<Region>> {
+pub fn maps(pid: u32) -> io::Result<Vec<Region>> {
     let text = fs::read_to_string(format!("/proc/{pid}/maps"))?;
     Ok(text
         .lines()
@@ -191,7 +192,7 @@ fn parse_loc(a: &str) -> Option<(u64, Kind)> {
     Some((parse_addr(addr)?, kind))
 }
 
-fn scannable(r: &Region) -> bool {
+pub fn scannable(r: &Region) -> bool {
     r.perms.starts_with("rw") && !matches!(r.path.as_str(), "[vvar]" | "[vvar_vclock]" | "[vsyscall]")
 }
 
@@ -204,6 +205,9 @@ struct Limit {
     min: Option<f64>,
     max: Option<f64>,
     sites: Vec<Site>,
+    /// Pointer paths to the value; when there are any, the value is found through them on
+    /// every check instead of through `sites` and the guard.
+    paths: Vec<PtrPath>,
     // First bytes of the object holding the value (its type pointer). If they
     // change, the object is gone and writing would corrupt unrelated memory.
     guard_addr: u64,
@@ -218,6 +222,8 @@ struct Limit {
 struct Limiter {
     pid: u32,
     mem: Option<File>,
+    width: usize,
+    modules: Vec<Module>,
     limits: Vec<Limit>,
 }
 
@@ -239,10 +245,30 @@ fn limiter_loop(shared: SharedLimiter) {
         let due: Vec<(String, Vec<Site>)>;
         let (pid, mem) = {
             let mut guard = shared.lock().unwrap();
-            let Limiter { pid, mem, limits } = &mut *guard;
+            let Limiter { pid, mem, width, modules, limits } = &mut *guard;
             let Some(mem) = mem.as_ref() else { continue };
+            let now = Instant::now();
+            // Pointer paths are cheap to follow: re-find the value on every check.
+            if limits.iter().any(|l| !l.paths.is_empty() && l.paused.is_some() && l.retry_at <= now) {
+                *modules = pointers::modules(*pid, mem);
+            }
+            for l in limits.iter_mut().filter(|l| !l.paths.is_empty() && (l.paused.is_none() || l.retry_at <= now)) {
+                match pointers::vote(mem, modules, *width, &l.paths) {
+                    Some((addr, _)) => {
+                        if addr != l.addr || l.paused.is_some() {
+                            l.restores += 1;
+                        }
+                        l.addr = addr;
+                        l.paused = None;
+                    }
+                    None => {
+                        l.paused = Some("its pointer paths lead nowhere right now, waiting");
+                        l.retry_at = now + Duration::from_secs(1);
+                    }
+                }
+            }
             for l in limits.iter_mut().filter(|l| l.paused.is_none()) {
-                if read_guard(mem, l.guard_addr) != Some(l.guard) {
+                if l.paths.is_empty() && read_guard(mem, l.guard_addr) != Some(l.guard) {
                     l.paused = Some("the object holding it changed, finding it again");
                     l.retry_at = Instant::now();
                     continue;
@@ -264,7 +290,7 @@ fn limiter_loop(shared: SharedLimiter) {
             let now = Instant::now();
             due = limits
                 .iter()
-                .filter(|l| l.paused.is_some() && l.retry_at <= now)
+                .filter(|l| l.paths.is_empty() && l.paused.is_some() && l.retry_at <= now)
                 .map(|l| (l.name.clone(), l.sites.clone()))
                 .collect();
             let Ok(mem) = mem.try_clone() else { continue };
@@ -306,30 +332,34 @@ fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
     }
 }
 
-/// limit <name> <hex addr[:type]> <min|-> <max|-> <site>... where a site is
-/// "pattern:offset:register:displacement" as saved in the profile.
+/// limit <name> <hex addr[:type]> <min|-> <max|-> <site or path>... where a site is
+/// "pattern:offset:register:displacement" as saved in the profile, and a path
+/// "module+offset,offset,...".
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
-    let sites: Option<Vec<Site>> = f
-        .get(4..)
-        .map(|s| s.iter().map(|s| Site::parse(&s.split(':').collect::<Vec<_>>())).collect())
-        .unwrap_or(None);
-    let (Some(name), Some(addr), Ok(min), Ok(max), Some(sites)) =
-        (f.first(), f.get(1).and_then(|a| parse_loc(a)), bound(f.get(2)), bound(f.get(3)), sites)
+    let rest = f.get(4..).unwrap_or_default();
+    let paths: Option<Vec<PtrPath>> = rest.iter().filter(|s| s.contains(',')).map(|s| PtrPath::parse(s)).collect();
+    let sites: Option<Vec<Site>> =
+        rest.iter().filter(|s| !s.contains(',')).map(|s| Site::parse(&s.split(':').collect::<Vec<_>>())).collect();
+    let (Some(name), Some(addr), Ok(min), Ok(max), Some(sites), Some(paths)) =
+        (f.first(), f.get(1).and_then(|a| parse_loc(a)), bound(f.get(2)), bound(f.get(3)), sites, paths)
     else {
-        return writeln!(out, "error: usage: limit <name> <hex addr[:type]> <min|-> <max|-> <pattern:offset:register:displacement>...");
+        return writeln!(out, "error: usage: limit <name> <hex addr[:type]> <min|-> <max|-> <pattern:offset:register:displacement | module+offset,offset,...>...");
     };
-    let Some(disp) = sites.first().map(|s| s.disp) else {
-        return writeln!(out, "error: a limit needs at least one saved code pattern");
-    };
+    if sites.is_empty() && paths.is_empty() {
+        return writeln!(out, "error: a limit needs at least one saved code pattern or pointer path");
+    }
     let mut l = limiter.lock().unwrap();
     let Some(mem) = l.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
     let (addr, kind) = addr;
-    let guard_addr = addr.wrapping_sub(disp as u64);
-    let Some(guard) = read_guard(mem, guard_addr) else {
-        return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}");
+    let guard_addr = addr.wrapping_sub(sites.first().map_or(0, |s| s.disp) as u64);
+    // Paths are followed on every check, so they need no guard (and the value may not exist yet).
+    let guard = match read_guard(mem, guard_addr) {
+        Some(g) => g,
+        None if !paths.is_empty() => [0; 4],
+        None => return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}"),
     };
     l.limits.retain(|l| l.name != *name);
     l.limits.push(Limit {
@@ -339,6 +369,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         min,
         max,
         sites,
+        paths,
         guard_addr,
         guard,
         fixes: 0,
@@ -422,6 +453,9 @@ fn read_all(mem: &File, cands: &[Candidate]) -> Vec<Option<f64>> {
 struct Session {
     pid: u32,
     mem: Option<File>,
+    exe: String,
+    /// Pointer size in the game: 4 or 8 bytes.
+    width: usize,
     candidates: Vec<Candidate>,
 }
 
@@ -529,13 +563,16 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
     }
     match OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem")) {
         Ok(f) => {
-            *limiter.lock().unwrap() = Limiter { pid, mem: f.try_clone().ok(), limits: Vec::new() };
-            *s = Session { pid, mem: Some(f), candidates: Vec::new() };
+            let exe = exe_name(pid);
+            let modules = pointers::modules(pid, &f);
+            let width = pointers::pointer_width(pid, &f, &modules, &exe);
+            *limiter.lock().unwrap() = Limiter { pid, mem: f.try_clone().ok(), width, modules, limits: Vec::new() };
+            *s = Session { pid, mem: Some(f), exe: exe.clone(), width, candidates: Vec::new() };
             let regions = maps(pid)?;
             let rw: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
             writeln!(out, "attached to {pid}: {}", cmdline(pid))?;
-            writeln!(out, "exe: {}", exe_name(pid))?;
-            writeln!(out, "{} mappings, {} MiB writable", regions.len(), rw >> 20)
+            writeln!(out, "exe: {exe}")?;
+            writeln!(out, "{} mappings, {} MiB writable, {}-bit", regions.len(), rw >> 20, width * 8)
         }
         Err(e) => writeln!(out, "error: cannot open /proc/{pid}/mem: {e}"),
     }
@@ -915,6 +952,59 @@ fn resolve_site(pid: u32, mem: &File, site: &Site, timeout: Duration) -> Result<
     value_addr.ok_or(format!("the code at 0x{instr:x} did not run within {} s", timeout.as_secs()))
 }
 
+/// ptrscan <hex addr[:type]> [depth] [max offset, hex] [max paths]: pointer paths to the address, best
+/// first, as lines "path <module>+<offset>,<offset>,...".
+fn cmd_ptrscan(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let mut it = arg.split_whitespace();
+    let (Some((target, _)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: ptrscan <hex addr[:type]> [depth] [max offset] [max paths] (after attach)");
+    };
+    let depth = it.next().and_then(|v| v.parse().ok()).unwrap_or(5);
+    let max_off = it.next().and_then(parse_addr).unwrap_or(0x1000);
+    let max_paths = it.next().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let t = Instant::now();
+    let r = pointers::scan(s.pid, mem, s.width, &s.exe, target, depth, max_off, max_paths)?;
+    for p in &r.paths {
+        writeln!(out, "path {}", p.text())?;
+    }
+    let levels: Vec<String> = r.levels.iter().map(|n| n.to_string()).collect();
+    writeln!(
+        out,
+        "{} paths ({} from {}; {} more that step from one object into the next more than {} times dropped), {} pointers in {} MiB, addresses per step back: {}, in {} ms",
+        r.paths.len(),
+        r.paths.iter().filter(|p| p.module.eq_ignore_ascii_case(&s.exe)).count(),
+        s.exe,
+        r.dropped,
+        r.crossings,
+        r.pointers,
+        r.bytes >> 20,
+        levels.join(" "),
+        t.elapsed().as_millis()
+    )
+}
+
+/// follow <type> <path>...: where each path leads now ("<n>: 0x<addr>:<type> = <value>" or
+/// "<n>: broken"), then the address most of them agree on: "best 0x<addr>:<type> = <value>".
+fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let mut it = arg.split_whitespace();
+    let kind = it.next().and_then(Kind::parse);
+    let paths: Option<Vec<PtrPath>> = it.map(PtrPath::parse).collect();
+    let (Some(kind), Some(paths), Some(mem)) = (kind, paths, s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: follow <type> <module+offset,offset,...>... (after attach)");
+    };
+    let mods = pointers::modules(s.pid, mem);
+    for (i, p) in paths.iter().enumerate() {
+        match p.follow(mem, &mods, s.width) {
+            Some(addr) => writeln!(out, "{i}: {}", s.describe(addr, kind))?,
+            None => writeln!(out, "{i}: broken")?,
+        }
+    }
+    match pointers::vote(mem, &mods, s.width, &paths) {
+        Some((addr, _)) => writeln!(out, "best {}", s.describe(addr, kind)),
+        None => writeln!(out, "none of the paths lead anywhere now"),
+    }
+}
+
 fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
     let (Some(site), Some(mem)) = (Site::parse(&f), s.mem.as_ref()) else {
@@ -960,12 +1050,14 @@ pub fn run() {
             "track" => cmd_track(&mut out, &mut session, arg),
             "sites" => cmd_sites(&mut out, &session, arg),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
+            "ptrscan" => cmd_ptrscan(&mut out, &session, arg),
+            "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site> [type], limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         if res.and_then(|_| writeln!(out, "end")).and_then(|_| out.flush()).is_err() {
