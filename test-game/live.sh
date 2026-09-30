@@ -13,7 +13,7 @@ start)
     rm -rf "$dir" && mkdir -p "$dir" && mkfifo "$dir/in"
     systemctl --user stop "ferret-$session" 2>/dev/null || true
     systemd-run --user --quiet --collect --unit="ferret-$session" sh -c \
-        "sleep infinity > '$dir/in' & flatpak run io.github.Petru101.Ferret < '$dir/in' > '$dir/out' 2>&1; kill \$!"
+        "sleep infinity > '$dir/in' & flatpak run io.github.Petru101.Ferret --cli < '$dir/in' > '$dir/out' 2>&1; kill \$!"
     echo "session started"
     ;;
 stop)

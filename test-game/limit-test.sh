@@ -11,7 +11,8 @@ game_dir="$here/run/limit-test-game"
 cmd="$game_dir/cmd"
 log="$game_dir/log"
 rm -rf "$game_dir" && mkdir -p "$game_dir"
-rm -f "$HOME/.var/app/io.github.Petru101.Ferret/data/profiles/target.profile"
+profile="$HOME/.var/app/io.github.Petru101.Ferret/data/profiles/target.profile"
+rm -f "$profile"
 
 game() {
     printf '%s\n' "$1" > "$cmd.tmp" && mv "$cmd.tmp" "$cmd"
@@ -21,6 +22,7 @@ game() {
 cleanup() {
     printf 'quit 1\n' > "$cmd" 2>/dev/null || true
     "$live" stop >/dev/null 2>&1 || true
+    rm -f "$profile"
 }
 trap cleanup EXIT
 

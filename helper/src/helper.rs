@@ -341,6 +341,39 @@ fn cmd_ps(out: &mut impl Write, filter: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Processes that come with Wine, Proton or Steam rather than with a game.
+const NOT_GAMES: &[&str] = &[
+    "steam.exe", "services.exe", "winedevice.exe", "explorer.exe", "plugplay.exe", "rpcss.exe", "svchost.exe",
+    "conhost.exe", "tabtip.exe", "start.exe", "wineboot.exe", "winemenubuilder.exe", "rundll32.exe",
+    "steamwebhelper.exe", "mscorsvw.exe", "ngen.exe", "reaper", "pressure-vessel-wrap", "pv-adverb", "python3",
+    "srt-bwrap", "bwrap", "steam-runtime-launcher-service", "x86_64-linux-gnu-srt-launch", "wineserver", "sh",
+    "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep",
+];
+
+/// Running games, one per line: pid, program name, Steam app ID and anti-cheat
+/// (tab-separated, "-" when unknown).
+fn cmd_games(out: &mut impl Write) -> io::Result<()> {
+    let uid = my_uid();
+    let mut pids: Vec<u32> = fs::read_dir("/proc")?
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        .filter(|pid| owner_uid(*pid) == Some(uid))
+        .collect();
+    pids.sort();
+    for pid in pids {
+        let exe = exe_name(pid);
+        let lower = exe.to_ascii_lowercase();
+        let env = environ(pid);
+        let app_id = env.get("SteamAppId").or_else(|| env.get("SteamGameId")).filter(|id| *id != "0");
+        let windows = lower.ends_with(".exe");
+        if !(windows || app_id.is_some()) || NOT_GAMES.contains(&lower.as_str()) || lower.contains("crashhandler") {
+            continue;
+        }
+        let dash = |s: Option<&str>| s.unwrap_or("-").to_owned();
+        writeln!(out, "{pid}\t{exe}\t{}\t{}", dash(app_id.map(String::as_str)), dash(anti_cheat(pid)))?;
+    }
+    Ok(())
+}
+
 fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let Ok(pid) = arg.parse::<u32>() else {
         return writeln!(out, "error: usage: attach <pid>");
@@ -696,6 +729,7 @@ pub fn run() {
         let res = match cmd {
             "info" => cmd_info(&mut out),
             "ps" => cmd_ps(&mut out, arg),
+            "games" => cmd_games(&mut out),
             "attach" => cmd_attach(&mut out, &mut session, &limiter, arg),
             "scan" => cmd_scan(&mut out, &mut session, arg),
             "next" => cmd_next(&mut out, &mut session, arg),
@@ -712,7 +746,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], attach <pid>, scan <n>, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site>, limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site>, limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit"
             ),
         };
         if res.and_then(|_| writeln!(out, "end")).and_then(|_| out.flush()).is_err() {

@@ -1,7 +1,7 @@
 id: io.github.Petru101.Ferret
-runtime: org.freedesktop.Platform
-runtime-version: '26.08'
-sdk: org.freedesktop.Sdk
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: ferret
@@ -64,14 +64,14 @@ modules:
   - name: ferret
     buildsystem: simple
     build-commands:
-      - cargo build --release --offline --bin ferret
+      - cargo build --release --offline -p ferret
       - install -Dm755 target/release/ferret /app/bin/ferret
       # The helper runs on the host, outside the runtime, so it is linked
       # statically. The SDK has no static libm; std only needs its name.
       - mkdir -p stub && ar rc stub/libm.a
       - >-
         RUSTFLAGS="-C target-feature=+crt-static -L native=$PWD/stub"
-        cargo build --release --offline --target x86_64-unknown-linux-gnu --bin ferret-helper
+        cargo build --release --offline --target x86_64-unknown-linux-gnu -p ferret-helper
       - install -Dm755 target/x86_64-unknown-linux-gnu/release/ferret-helper /app/bin/ferret-helper
     sources:
       - type: dir

@@ -1,7 +1,12 @@
 mod capture;
-mod frontend;
+mod cli;
+mod core;
 mod ocr;
 
 fn main() {
-    frontend::run();
+    if std::env::args().any(|a| a == "--cli") {
+        cli::run();
+    } else {
+        cli::run();
+    }
 }

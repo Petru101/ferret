@@ -13,6 +13,7 @@ pub struct Rect {
     pub h: u32,
 }
 
+#[derive(Clone)]
 pub struct Word {
     pub text: String,
     pub rect: Rect,

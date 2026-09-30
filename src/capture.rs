@@ -21,7 +21,6 @@ pub struct WindowCapture {
     conn: Connection,
     session: String,
     node: u32,
-    pub size: Option<(i32, i32)>,
 }
 
 fn data_dir() -> PathBuf {
@@ -110,21 +109,7 @@ impl WindowCapture {
         let Some(Value::U32(node)) = stream.fields().first() else {
             return Err("stream has no PipeWire node".into());
         };
-        let size = match stream.fields().get(1) {
-            Some(Value::Dict(props)) => props
-                .get::<&str, Value>(&"size")
-                .ok()
-                .flatten()
-                .and_then(|v| match v {
-                    Value::Structure(s) => match s.fields() {
-                        [Value::I32(w), Value::I32(h)] => Some((*w, *h)),
-                        _ => None,
-                    },
-                    _ => None,
-                }),
-            _ => None,
-        };
-        Ok(Self { conn, session, node: *node, size })
+        Ok(Self { conn, session, node: *node })
     }
 
     /// Saves the window's current frame as a PNG.
