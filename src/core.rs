@@ -112,13 +112,72 @@ fn match_count(reply: &[String]) -> Option<usize> {
     words.get(i.checked_sub(1)?)?.parse().ok()
 }
 
-/// Parses helper lines of the form "0x00003795366c = 96".
-fn parse_values(lines: &[String]) -> Vec<(u64, Option<i64>)> {
+/// How the game stores a value.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    I32,
+    F32,
+    F64,
+    /// XOR-encoded 4-byte integer (the next word is the key).
+    Xor,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::I32 => "i32",
+            Kind::F32 => "f32",
+            Kind::F64 => "f64",
+            Kind::Xor => "xor",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Kind> {
+        [Kind::I32, Kind::F32, Kind::F64, Kind::Xor].into_iter().find(|k| k.name() == s)
+    }
+
+    fn with_article(self) -> String {
+        let d = self.describe();
+        format!("{} {d}", if d.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" })
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Kind::I32 => "whole number",
+            Kind::F32 => "float",
+            Kind::F64 => "double",
+            Kind::Xor => "encoded whole number",
+        }
+    }
+}
+
+/// Where a value is and how it is stored; shown the way the helper takes it: "<hex>:<type>".
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Loc {
+    pub addr: u64,
+    pub kind: Kind,
+}
+
+impl std::fmt::Display for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:x}:{}", self.addr, self.kind.name())
+    }
+}
+
+fn parse_loc(a: &str) -> Option<Loc> {
+    let (addr, kind) = a.split_once(':').map_or((a, Some(Kind::I32)), |(a, k)| (a, Kind::parse(k)));
+    Some(Loc { addr: u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok()?, kind: kind? })
+}
+
+/// Parses helper lines of the form "0x00003795366c:f32 = 96.5". Values are shown as whole
+/// numbers, cut off the way games usually display them.
+fn parse_values(lines: &[String]) -> Vec<(Loc, Option<i64>)> {
     lines
         .iter()
         .filter_map(|l| {
             let (a, v) = l.split_once(" = ")?;
-            Some((u64::from_str_radix(a.trim_start_matches("0x"), 16).ok()?, v.trim().parse().ok()))
+            let v = v.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (v + 1e-6).floor() as i64);
+            Some((parse_loc(a)?, v))
         })
         .collect()
 }
@@ -138,18 +197,21 @@ fn profile_path(exe: &str) -> PathBuf {
 
 struct Entry {
     name: String,
+    kind: Kind,
     sites: Vec<String>,
     /// "<min|-> <max|->" when the value is kept within a range.
     limit: Option<String>,
 }
 
-/// Profile format: "entry <name>" followed by its "site ..." lines and an
-/// optional "limit <min|-> <max|->" line.
+/// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
+/// missing), its "site ..." lines and an optional "limit <min|-> <max|->" line.
 fn read_profile(exe: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for line in fs::read_to_string(profile_path(exe)).unwrap_or_default().lines() {
         if let Some(name) = line.strip_prefix("entry ") {
-            entries.push(Entry { name: name.trim().to_owned(), sites: Vec::new(), limit: None });
+            entries.push(Entry { name: name.trim().to_owned(), kind: Kind::I32, sites: Vec::new(), limit: None });
+        } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
+            e.kind = kind;
         } else if let (Some(site), Some(e)) = (line.strip_prefix("site "), entries.last_mut()) {
             e.sites.push(site.trim().to_owned());
         } else if let (Some(limit), Some(e)) = (line.strip_prefix("limit "), entries.last_mut()) {
@@ -165,6 +227,9 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
     let mut text = String::new();
     for e in entries {
         text.push_str(&format!("entry {}\n", e.name));
+        if e.kind != Kind::I32 {
+            text.push_str(&format!("type {}\n", e.kind.name()));
+        }
         for s in &e.sites {
             text.push_str(&format!("site {s}\n"));
         }
@@ -207,6 +272,7 @@ pub struct GameProcess {
 pub struct ValueRow {
     pub name: String,
     pub addr: u64,
+    pub kind: Kind,
     pub value: Option<i64>,
     pub min: Option<i64>,
     pub max: Option<i64>,
@@ -216,14 +282,14 @@ pub struct ValueRow {
 
 pub enum AutoResult {
     /// One address left: the value.
-    Found(u64),
+    Found(Loc),
     /// Several addresses still follow the value and none could be confirmed.
     Several(usize),
 }
 
 struct Game {
     exe: String,
-    entries: Vec<(String, u64)>,
+    entries: Vec<(String, Loc)>,
 }
 
 pub struct Core {
@@ -232,6 +298,9 @@ pub struct Core {
     words: Vec<Word>,
     area: Option<Rect>,
     game: Option<Game>,
+    /// A search driven by typed numbers: matches left, and how many numbers in a row left
+    /// the count unchanged.
+    typed: Option<(usize, usize)>,
     log: Box<dyn FnMut(&str) + Send>,
     /// Set to stop a running `auto`.
     pub cancel: Arc<AtomicBool>,
@@ -245,6 +314,7 @@ impl Core {
             words: Vec::new(),
             area: None,
             game: None,
+            typed: None,
             log,
             cancel: Arc::new(AtomicBool::new(false)),
         })
@@ -293,6 +363,7 @@ impl Core {
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
         self.game = Some(Game { exe: exe.clone(), entries: Vec::new() });
+        self.typed = None;
         if !read_profile(&exe).is_empty() {
             self.say(&format!("found saved values for {exe}, restoring:"));
             self.restore()?;
@@ -302,8 +373,8 @@ impl Core {
 
     // --- Saved values
 
-    fn peek(&mut self, addrs: &[u64]) -> Vec<Option<i64>> {
-        let arg: Vec<String> = addrs.iter().map(|a| format!("{a:x}")).collect();
+    fn peek(&mut self, addrs: &[Loc]) -> Vec<Option<i64>> {
+        let arg: Vec<String> = addrs.iter().map(|a| a.to_string()).collect();
         let values = parse_values(&self.helper.call(&format!("peek {}", arg.join(" "))));
         addrs
             .iter()
@@ -319,10 +390,10 @@ impl Core {
         }
         self.game()?;
         let listed = self.helper.call("list");
-        let [(addr, _)] = parse_values(&listed)[..] else {
+        let [(loc, _)] = parse_values(&listed)[..] else {
             return Err("narrow down to exactly one address first".into());
         };
-        let reply = self.helper.call(&format!("sites {addr:x}"));
+        let reply = self.helper.call(&format!("sites {loc}"));
         for l in reply.iter().filter(|l| !l.starts_with("site ")) {
             self.say(l);
         }
@@ -334,10 +405,10 @@ impl Core {
         let game = self.game()?;
         let mut entries = read_profile(&game.exe);
         entries.retain(|e| e.name != name);
-        entries.push(Entry { name: name.to_owned(), sites, limit: None });
+        entries.push(Entry { name: name.to_owned(), kind: loc.kind, sites, limit: None });
         let path = write_profile(&game.exe, &entries)?;
         game.entries.retain(|(n, _)| n != name);
-        game.entries.push((name.to_owned(), addr));
+        game.entries.push((name.to_owned(), loc));
         self.say(&format!("saved {name} ({count} code patterns) to {}", path.display()));
         Ok(path)
     }
@@ -347,13 +418,13 @@ impl Core {
     fn apply_limit(&mut self, entry: &Entry) -> Result<(), String> {
         let limit = entry.limit.as_deref().ok_or("no limit set")?;
         let game = self.game()?;
-        let (_, addr) = *game.entries.iter().find(|(n, _)| *n == entry.name).ok_or("value not found in this run")?;
+        let (_, loc) = *game.entries.iter().find(|(n, _)| *n == entry.name).ok_or("value not found in this run")?;
         if entry.sites.is_empty() {
             return Err("no saved code pattern".into());
         }
         let sites: Vec<String> =
             entry.sites.iter().map(|s| s.split_whitespace().collect::<Vec<_>>().join(":")).collect();
-        let reply = self.helper.call(&format!("limit {} {addr:x} {limit} {}", entry.name, sites.join(" ")));
+        let reply = self.helper.call(&format!("limit {} {loc} {limit} {}", entry.name, sites.join(" ")));
         first_error(&reply).map_or(Ok(()), Err)
     }
 
@@ -377,7 +448,7 @@ impl Core {
         if let Some(game) = self.game.as_mut() {
             for (name, addr, _) in limits {
                 if let Some(e) = game.entries.iter_mut().find(|(n, _)| *n == name) {
-                    e.1 = addr;
+                    e.1.addr = addr;
                 }
             }
         }
@@ -412,19 +483,19 @@ impl Core {
             let name = &entry.name;
             let mut resolved = None;
             for site in &entry.sites {
-                let reply = self.helper.call(&format!("resolve {site}"));
-                if let Some((addr, Some(v))) = parse_values(&reply).first() {
-                    resolved = Some((*addr, *v));
+                let reply = self.helper.call(&format!("resolve {site} {}", entry.kind.name()));
+                if let Some((loc, Some(v))) = parse_values(&reply).first() {
+                    resolved = Some((*loc, *v));
                     break;
                 }
                 self.say(&format!("{name}: {}", reply.join(" ")));
             }
             match resolved {
-                Some((addr, v)) => {
-                    self.say(&format!("{name} = {v} (at 0x{addr:x})"));
+                Some((loc, v)) => {
+                    self.say(&format!("{name} = {v} (at 0x{:x}, {})", loc.addr, loc.kind.describe()));
                     let game = self.game()?;
                     game.entries.retain(|(n, _)| n != name);
-                    game.entries.push((name.clone(), addr));
+                    game.entries.push((name.clone(), loc));
                     if let Some(l) = &entry.limit {
                         let (min, max) = parse_range(l);
                         match self.apply_limit(entry) {
@@ -443,15 +514,15 @@ impl Core {
     pub fn values(&mut self) -> Result<Vec<ValueRow>, String> {
         let exe = self.game()?.exe.clone();
         self.sync_addresses();
-        let entries: Vec<(String, u64)> = self.game()?.entries.clone();
-        let addrs: Vec<u64> = entries.iter().map(|(_, a)| *a).collect();
+        let entries: Vec<(String, Loc)> = self.game()?.entries.clone();
+        let addrs: Vec<Loc> = entries.iter().map(|(_, a)| *a).collect();
         let values = self.peek(&addrs);
         let limits = self.limits();
         let saved = read_profile(&exe);
         Ok(entries
             .into_iter()
             .zip(values)
-            .map(|((name, addr), value)| {
+            .map(|((name, loc), value)| {
                 let (min, max) = saved
                     .iter()
                     .find(|e| e.name == name)
@@ -461,20 +532,20 @@ impl Core {
                     .iter()
                     .find(|(n, _, _)| *n == name)
                     .and_then(|(_, _, rest)| rest.split_once(" fixed ").map(|(_, s)| format!("fixed {s}")));
-                ValueRow { name, addr, value, min, max, limit_state }
+                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, limit_state }
             })
             .collect())
     }
 
     pub fn set(&mut self, name: &str, value: i64) -> Result<(), String> {
         self.sync_addresses();
-        let (_, addr) = *self
+        let (_, loc) = *self
             .game()?
             .entries
             .iter()
             .find(|(n, _)| n == name)
             .ok_or(format!("no saved value called {name}"))?;
-        let reply = self.helper.call(&format!("write {addr:x} {value}"));
+        let reply = self.helper.call(&format!("write {loc} {value}"));
         for l in &reply {
             self.say(l);
         }
@@ -521,26 +592,32 @@ impl Core {
     }
 
     /// Current scan candidates (at most 20 are listed by the helper).
-    pub fn candidates(&mut self) -> Vec<(u64, Option<i64>)> {
+    pub fn candidates(&mut self) -> Vec<(Loc, Option<i64>)> {
         parse_values(&self.helper.call("list"))
     }
 
     /// Tells the real value apart from copies of it: writes a test value to one
     /// candidate at a time and checks whether it sticks, whether the other
     /// candidates follow it, and whether the screen shows it. Test writes are undone.
-    pub fn probe(&mut self) -> Result<Option<u64>, String> {
+    pub fn probe(&mut self) -> Result<Option<Loc>, String> {
         let listed = self.helper.call("list");
         if listed.iter().any(|l| l.starts_with("...")) {
             return Err("too many candidates to probe; narrow down first".into());
         }
-        let addrs: Vec<u64> = parse_values(&listed).into_iter().map(|(a, _)| a).collect();
+        let addrs: Vec<Loc> = parse_values(&listed).into_iter().map(|(a, _)| a).collect();
         if addrs.is_empty() {
             return Err("no candidates to probe".into());
         }
-        for (i, &addr) in addrs.iter().enumerate() {
-            let Some(orig) = self.peek(&[addr])[0] else { continue };
-            let test = orig + 10;
-            self.helper.call(&format!("write {addr:x} {test}"));
+        for (i, &loc) in addrs.iter().enumerate() {
+            let addr = loc.addr;
+            // The exact original, fraction included, to put back afterwards.
+            let listed = self.helper.call(&format!("peek {loc}"));
+            let Some(orig) = listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()) else {
+                continue;
+            };
+            let Some(Some(shown)) = self.peek(&[loc]).first().copied() else { continue };
+            let test = shown + 10;
+            self.helper.call(&format!("write {loc} {test}"));
             std::thread::sleep(Duration::from_millis(1500));
             let after = self.peek(&addrs);
             let stuck = after[i] == Some(test);
@@ -554,12 +631,12 @@ impl Core {
                 screen.map_or("?".into(), |n| n.to_string()),
             ));
             if stuck {
-                self.helper.call(&format!("write {addr:x} {orig}"));
+                self.helper.call(&format!("write {loc} {orig}"));
             }
             if stuck && (followers > 0 || shown) {
                 self.helper.call(&format!("keep {addr:x}"));
                 self.say(&format!("real value at 0x{addr:012x} (test write undone)"));
-                return Ok(Some(addr));
+                return Ok(Some(loc));
             }
         }
         self.say("no candidate behaved like the real value (is the game paused?)");
@@ -576,6 +653,7 @@ impl Core {
     /// keep narrowing down whenever it changes on screen. Stops early when
     /// `cancel` is set.
     pub fn auto(&mut self, limit: Duration) -> Result<AutoResult, String> {
+        self.typed = None;
         self.cancel.store(false, Ordering::Relaxed);
         let cancelled = |c: &Arc<AtomicBool>| c.load(Ordering::Relaxed);
         let start = Instant::now();
@@ -596,6 +674,8 @@ impl Core {
         let mut unchanged_rounds = 0;
         while count > 1 && start.elapsed() < limit && !cancelled(&self.cancel) {
             std::thread::sleep(Duration::from_millis(300));
+            // Values that change while the screen is read may show either end of that change.
+            self.helper.call("mark");
             let Some(now) = self.read_stable()? else { continue };
             if now == last {
                 continue;
@@ -627,14 +707,63 @@ impl Core {
             self.say(&l);
         }
         if count == 1 {
-            return Ok(AutoResult::Found(self.candidates()[0].0));
+            let loc = self.candidates()[0].0;
+            self.say(&format!("stored as {}", loc.kind.with_article()));
+            return Ok(AutoResult::Found(loc));
         }
         if (2..=20).contains(&count) && !cancelled(&self.cancel) {
             self.say("checking which one is the real value:");
-            if let Some(addr) = self.probe()? {
-                return Ok(AutoResult::Found(addr));
+            if let Some(loc) = self.probe()? {
+                self.say(&format!("stored as {}", loc.kind.with_article()));
+                return Ok(AutoResult::Found(loc));
             }
         }
         Ok(AutoResult::Several(count))
+    }
+
+    /// The same search driven by numbers the player types, for when the screen can't be read:
+    /// the first number starts it, each one after narrows it down.
+    pub fn typed(&mut self, n: i64) -> Result<AutoResult, String> {
+        self.game()?;
+        let (count, unchanged) = match self.typed {
+            Some((before, unchanged)) => {
+                let reply = self.helper.call(&format!("next {n}"));
+                self.say(&format!("typed {n}: {}", reply.join(" ")));
+                let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
+                if count == 0 {
+                    self.say("nothing went from the last number to this one, starting over");
+                    self.typed = None;
+                    return self.typed(n);
+                }
+                (count, if count == before { unchanged + 1 } else { 0 })
+            }
+            None => {
+                let reply = self.helper.call(&format!("scan {n}"));
+                self.say(&format!("typed {n}: {}", reply.join(" ")));
+                (match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?, 0)
+            }
+        };
+        self.typed = Some((count, unchanged));
+        let found = match count {
+            0 => {
+                self.typed = None;
+                return Err(format!("{n} is nowhere in the game's memory"));
+            }
+            1 => Some(self.candidates()[0].0),
+            // The same few keep following the value: copies of it. Find the real one.
+            2..=20 if unchanged >= 2 => {
+                self.say("checking which one is the real value:");
+                self.probe()?
+            }
+            _ => None,
+        };
+        match found {
+            Some(loc) => {
+                self.typed = None;
+                self.say(&format!("stored as {}", loc.kind.with_article()));
+                Ok(AutoResult::Found(loc))
+            }
+            None => Ok(AutoResult::Several(count)),
+        }
     }
 }

@@ -58,7 +58,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         }
         "read" => println!("{:?}", core.read()?),
         "auto" => match core.auto(Duration::from_secs(arg.parse().unwrap_or(600)))? {
-            AutoResult::Found(addr) => println!("found it at 0x{addr:x}"),
+            AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
             AutoResult::Several(n) => println!("{n} candidates left"),
         },
         "probe" => {
@@ -75,7 +75,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                     .map(|s| format!("  kept {}, {s}", core::limit_text(v.min, v.max)))
                     .unwrap_or_default();
                 let value = v.value.map_or("??".into(), |v| v.to_string());
-                println!("{:<12} {value} (at 0x{:x}){limit}", v.name, v.addr);
+                println!("{:<12} {value} (at 0x{:x}, {}){limit}", v.name, v.addr, v.kind.describe());
             }
         }
         "limit" => {

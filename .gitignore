@@ -6,5 +6,6 @@ stub/
 .flatpak-builder/
 test-game/target
 test-game/target.exe
+test-game/target-x87
 vendor/
 CLAUDE.md

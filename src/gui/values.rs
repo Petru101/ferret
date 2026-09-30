@@ -92,7 +92,7 @@ impl ValuesView {
                 rows.insert(v.name.clone(), w);
             }
             let w = &rows[&v.name];
-            w.group.set_description(Some(&format!("At 0x{:x}", v.addr)));
+            w.group.set_description(Some(&format!("At 0x{:x}, {}", v.addr, v.kind.describe())));
             w.value.set_label(&v.value.map_or("?".into(), |n| n.to_string()));
             w.limit.set_subtitle(&limit_subtitle(v));
         }

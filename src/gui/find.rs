@@ -1,6 +1,7 @@
 // The Find tab: shows the captured game window with the numbers OCR found.
 // Click one (or drag a box around a number), press Start, and play; Ferret
-// narrows the scan down every time the number changes on screen.
+// narrows the scan down every time the number changes on screen. When it can't
+// read the number, the player types it instead.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -33,6 +34,8 @@ pub struct FindView {
     log: gtk::TextView,
     result: gtk::Box,
     name: gtk::Entry,
+    typed_row: gtk::Box,
+    typed: gtk::Entry,
     worker: Worker,
     cancel: Arc<AtomicBool>,
 }
@@ -105,9 +108,27 @@ impl FindView {
         result.append(&name);
         result.append(&save);
 
+        let typed_label = gtk::Label::builder()
+            .label("Can't read it? Type the number the game shows:")
+            .xalign(0.0)
+            .hexpand(true)
+            .wrap(true)
+            .build();
+        let typed = gtk::Entry::builder()
+            .placeholder_text("Number")
+            .input_purpose(gtk::InputPurpose::Number)
+            .width_chars(10)
+            .build();
+        let typed_go = gtk::Button::builder().label("Search").build();
+        let typed_row = frame_box();
+        typed_row.append(&typed_label);
+        typed_row.append(&typed);
+        typed_row.append(&typed_go);
+
         let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_bottom(12).build();
         page.append(&top);
         page.append(&scroll);
+        page.append(&typed_row);
         page.append(&result);
         page.append(&log_scroll);
 
@@ -116,11 +137,21 @@ impl FindView {
             .halign(gtk::Align::Center)
             .css_classes(["pill", "suggested-action"])
             .build();
+        let type_instead = gtk::Button::builder()
+            .label("Type the Number Instead")
+            .halign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .build();
         let intro = adw::StatusPage::builder()
             .icon_name("edit-find-symbolic")
             .title("Find a Value")
             .description("Ferret looks at the game window, you pick the number, and then you just play. Only the game window is captured; the first time, your desktop asks which window to share.")
-            .child(&begin)
+            .child(&{
+                let buttons = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
+                buttons.append(&begin);
+                buttons.append(&type_instead);
+                buttons
+            })
             .build();
         let root = gtk::Stack::new();
         root.add_named(&intro, Some("intro"));
@@ -142,6 +173,8 @@ impl FindView {
             log,
             result,
             name,
+            typed_row,
+            typed,
             worker,
             cancel,
         });
@@ -149,6 +182,18 @@ impl FindView {
         for b in [&begin, &capture] {
             let view = view.clone();
             b.connect_clicked(move |_| view.capture());
+        }
+        {
+            let view_ = view.clone();
+            type_instead.connect_clicked(move |_| {
+                view_.root.set_visible_child_name("pick");
+                view_.status.set_label("Type the number the game shows, change it in the game, type the new one.");
+                view_.typed.grab_focus();
+            });
+            let view_ = view.clone();
+            typed_go.connect_clicked(move |_| view_.type_number(&view_.typed.text()));
+            let view_ = view.clone();
+            view.typed.connect_activate(move |e| view_.type_number(&e.text()));
         }
         {
             let view_ = view.clone();
@@ -337,6 +382,7 @@ impl FindView {
 
     pub fn start(&self) {
         self.result.set_visible(false);
+        self.typed_row.set_sensitive(false);
         self.start.set_visible(false);
         self.stop.set_visible(true);
         self.busy(true);
@@ -348,15 +394,50 @@ impl FindView {
         self.busy(false);
         self.stop.set_visible(false);
         self.start.set_visible(true);
+        self.typed_row.set_sensitive(true);
         match r {
-            Ok(AutoResult::Found(addr)) => {
-                self.status.set_label(&format!("Found it at 0x{addr:x}. Give it a name to keep it."));
-                self.result.set_visible(true);
-                self.name.grab_focus();
-            }
+            Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => self.status.set_label(&format!(
                 "{n} places still match. Press Start again and let the number change a few more times."
             )),
+            Err(e) => self.status.set_label(&e),
+        }
+    }
+
+    fn found(&self, loc: core::Loc) {
+        self.status.set_label(&format!(
+            "Found it at 0x{:x} ({}). Give it a name to keep it.",
+            loc.addr,
+            loc.kind.describe()
+        ));
+        self.result.set_visible(true);
+        self.name.grab_focus();
+    }
+
+    pub fn type_number(&self, text: &str) {
+        let Ok(n) = text.trim().parse::<i64>() else {
+            self.status.set_label("Type the number as digits only, for example 1250.");
+            return;
+        };
+        self.result.set_visible(false);
+        self.typed_row.set_sensitive(false);
+        self.busy(true);
+        self.status.set_label(&format!("Looking for {n}…"));
+        self.worker.run(move |core| Event::Typed(core.typed(n)));
+    }
+
+    pub fn typed_done(&self, r: Result<AutoResult, String>) {
+        self.busy(false);
+        self.typed_row.set_sensitive(true);
+        self.typed.set_text("");
+        match r {
+            Ok(AutoResult::Found(loc)) => self.found(loc),
+            Ok(AutoResult::Several(n)) => {
+                self.status.set_label(&format!(
+                    "{n} places match. Change the number in the game, then type the new one."
+                ));
+                self.typed.grab_focus();
+            }
             Err(e) => self.status.set_label(&e),
         }
     }

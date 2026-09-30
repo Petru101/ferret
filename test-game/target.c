@@ -1,5 +1,7 @@
-/* Stand-in "game": keeps gold and hp on the heap and changes them on commands
- * (earn N, spend N, hit N, show, respawn) dropped into a command file, so it
+/* Stand-in "game": keeps gold and hp (int), energy (float), shield (double)
+ * and scrap (int XOR-encoded with a per-object key, like Infested Planet's BP)
+ * on the heap and changes them on commands (earn N, spend N, hit N, gain X,
+ * shield X, scrap N, show, respawn) dropped into a command file, so it
  * can be driven the same way natively, under Proton and inside the Steam
  * runtime. "respawn" moves the player to a new object and frees the old one,
  * like a new mission. Usage: target <command file> <log file>. Built for Linux
@@ -7,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef _WIN32
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
@@ -21,7 +24,21 @@ struct player {
     const char *type;
     int hp;
     int gold;
+    float energy;
+    double shield;
+    int scrap_enc;
+    int scrap_key;
 };
+
+static int scrap(const struct player *p)
+{
+    return p->scrap_enc ^ p->scrap_key;
+}
+
+static void add_scrap(struct player *p, int n)
+{
+    p->scrap_enc = (scrap(p) + n) ^ p->scrap_key;
+}
 
 static struct player *spawn(void)
 {
@@ -30,6 +47,10 @@ static struct player *spawn(void)
     p->type = player_type;
     p->hp = 100;
     p->gold = 1000;
+    p->energy = 1.5f;
+    p->shield = 250.25;
+    p->scrap_key = (rand() << 16 ^ rand()) | 1;
+    p->scrap_enc = 50 ^ p->scrap_key;
     return p;
 }
 
@@ -38,7 +59,8 @@ static void report(const char *log, const struct player *p)
     FILE *f = fopen(log, "a");
 
     if (f) {
-        fprintf(f, "gold=%d hp=%d\n", p->gold, p->hp);
+        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d\n", p->gold, p->hp, p->energy, p->shield,
+                scrap(p));
         fclose(f);
     }
 }
@@ -49,18 +71,29 @@ int main(int argc, char **argv)
     struct player *p = spawn();
     struct player *old;
     volatile int richest = 0;
+    volatile float most_energy = 0;
+    volatile double most_shield = 0;
+    volatile int most_scrap = 0;
+    float x;
     char line[64];
     FILE *f;
     int n;
 
     if (argc < 3)
         return 1;
+    srand((unsigned)time(NULL));
     padding[0] = 1;
     report(argv[2], p);
     for (;;) {
         sleep_ms(100);
         if (p->gold > richest)
             richest = p->gold;
+        if (p->energy > most_energy)
+            most_energy = p->energy;
+        if (p->shield > most_shield)
+            most_shield = p->shield;
+        if (scrap(p) > most_scrap)
+            most_scrap = scrap(p);
         f = fopen(argv[1], "r");
         if (!f)
             continue;
@@ -74,6 +107,12 @@ int main(int argc, char **argv)
             p->gold -= n;
         else if (sscanf(line, "hit %d", &n) == 1)
             p->hp -= n;
+        else if (sscanf(line, "gain %f", &x) == 1)
+            p->energy += x;
+        else if (sscanf(line, "shield %f", &x) == 1)
+            p->shield += x;
+        else if (sscanf(line, "scrap %d", &n) == 1)
+            add_scrap(p, n);
         else if (sscanf(line, "quit %d", &n) == 1)
             break;
         else if (strncmp(line, "respawn", 7) == 0) {

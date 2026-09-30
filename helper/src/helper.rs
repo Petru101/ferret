@@ -99,6 +99,98 @@ fn owner_uid(pid: u32) -> Option<u32> {
     fs::metadata(format!("/proc/{pid}")).ok().map(|m| m.uid())
 }
 
+// --- How a value is stored. Addresses in commands are "<hex>[:type]", i32 when left out.
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    I32,
+    F32,
+    F64,
+    /// A 4-byte integer hidden from cheat tools: the word at the address XOR the next word
+    /// (the key). The game re-encodes it with the same key on every change.
+    Xor,
+}
+
+impl Kind {
+    const ALL: [Kind; 4] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor];
+
+    fn name(self) -> &'static str {
+        match self {
+            Kind::I32 => "i32",
+            Kind::F32 => "f32",
+            Kind::F64 => "f64",
+            Kind::Xor => "xor",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Kind> {
+        Kind::ALL.into_iter().find(|k| k.name() == s)
+    }
+
+    fn size(self) -> usize {
+        match self {
+            Kind::I32 | Kind::F32 => 4,
+            Kind::F64 | Kind::Xor => 8,
+        }
+    }
+
+    fn decode(self, b: &[u8]) -> f64 {
+        match self {
+            Kind::I32 => i32::from_le_bytes(b[..4].try_into().unwrap()) as f64,
+            Kind::F32 => f32::from_le_bytes(b[..4].try_into().unwrap()) as f64,
+            Kind::F64 => f64::from_le_bytes(b[..8].try_into().unwrap()),
+            Kind::Xor => {
+                (i32::from_le_bytes(b[..4].try_into().unwrap()) ^ i32::from_le_bytes(b[4..8].try_into().unwrap())) as f64
+            }
+        }
+    }
+
+    /// Whether a value that went from `lo` to `hi` (either way round) meanwhile can be what the
+    /// screen showed as the whole number `n`. Games show fractions rounded or cut off.
+    fn fits(self, lo: f64, hi: f64, n: f64) -> bool {
+        let (lo, hi) = (lo.min(hi), lo.max(hi));
+        match self {
+            Kind::I32 | Kind::Xor => lo <= n && n <= hi,
+            Kind::F32 | Kind::F64 => lo < n + 1.0 && hi >= n - 0.5,
+        }
+    }
+
+    fn show(self, v: f64) -> String {
+        match self {
+            Kind::F32 => (v as f32).to_string(),
+            _ => v.to_string(),
+        }
+    }
+}
+
+fn read_value(mem: &File, addr: u64, kind: Kind) -> Option<f64> {
+    let mut b = [0u8; 8];
+    mem.read_exact_at(&mut b[..kind.size()], addr).ok()?;
+    Some(kind.decode(&b))
+}
+
+fn write_value(mem: &File, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
+    match kind {
+        Kind::I32 => mem.write_all_at(&(v.round() as i32).to_le_bytes(), addr),
+        Kind::F32 => mem.write_all_at(&(v as f32).to_le_bytes(), addr),
+        Kind::F64 => mem.write_all_at(&v.to_le_bytes(), addr),
+        Kind::Xor => {
+            let mut key = [0u8; 4];
+            mem.read_exact_at(&mut key, addr + 4)?;
+            mem.write_all_at(&((v.round() as i32) ^ i32::from_le_bytes(key)).to_le_bytes(), addr)
+        }
+    }
+}
+
+/// "<hex>[:type]"
+fn parse_loc(a: &str) -> Option<(u64, Kind)> {
+    let (addr, kind) = match a.split_once(':') {
+        Some((addr, kind)) => (addr, Kind::parse(kind)?),
+        None => (a, Kind::I32),
+    };
+    Some((parse_addr(addr)?, kind))
+}
+
 fn scannable(r: &Region) -> bool {
     r.perms.starts_with("rw") && !matches!(r.path.as_str(), "[vvar]" | "[vvar_vclock]" | "[vsyscall]")
 }
@@ -108,8 +200,9 @@ fn scannable(r: &Region) -> bool {
 struct Limit {
     name: String,
     addr: u64,
-    min: Option<i32>,
-    max: Option<i32>,
+    kind: Kind,
+    min: Option<f64>,
+    max: Option<f64>,
     sites: Vec<Site>,
     // First bytes of the object holding the value (its type pointer). If they
     // change, the object is gone and writing would corrupt unrelated memory.
@@ -154,19 +247,17 @@ fn limiter_loop(shared: SharedLimiter) {
                     l.retry_at = Instant::now();
                     continue;
                 }
-                let mut b = [0u8; 4];
-                if mem.read_exact_at(&mut b, l.addr).is_err() {
+                let Some(v) = read_value(mem, l.addr, l.kind) else {
                     l.paused = Some("unreadable, finding it again");
                     l.retry_at = Instant::now();
                     continue;
-                }
-                let v = i32::from_le_bytes(b);
+                };
                 let target = match (l.min, l.max) {
                     (_, Some(max)) if v > max => max,
                     (Some(min), _) if v < min => min,
                     _ => continue,
                 };
-                if mem.write_all_at(&target.to_le_bytes(), l.addr).is_ok() {
+                if write_value(mem, l.addr, l.kind, target).is_ok() {
                     l.fixes += 1;
                 }
             }
@@ -207,7 +298,7 @@ fn limiter_loop(shared: SharedLimiter) {
     }
 }
 
-fn bound(v: Option<&&str>) -> Result<Option<i32>, ()> {
+fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
     match v {
         Some(&"-") => Ok(None),
         Some(v) => v.parse().map(Some).map_err(drop),
@@ -215,7 +306,7 @@ fn bound(v: Option<&&str>) -> Result<Option<i32>, ()> {
     }
 }
 
-/// limit <name> <hex addr> <min|-> <max|-> <site>... where a site is
+/// limit <name> <hex addr[:type]> <min|-> <max|-> <site>... where a site is
 /// "pattern:offset:register:displacement" as saved in the profile.
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
@@ -224,9 +315,9 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         .map(|s| s.iter().map(|s| Site::parse(&s.split(':').collect::<Vec<_>>())).collect())
         .unwrap_or(None);
     let (Some(name), Some(addr), Ok(min), Ok(max), Some(sites)) =
-        (f.first(), f.get(1).and_then(|a| parse_addr(a)), bound(f.get(2)), bound(f.get(3)), sites)
+        (f.first(), f.get(1).and_then(|a| parse_loc(a)), bound(f.get(2)), bound(f.get(3)), sites)
     else {
-        return writeln!(out, "error: usage: limit <name> <hex addr> <min|-> <max|-> <pattern:offset:register:displacement>...");
+        return writeln!(out, "error: usage: limit <name> <hex addr[:type]> <min|-> <max|-> <pattern:offset:register:displacement>...");
     };
     let Some(disp) = sites.first().map(|s| s.disp) else {
         return writeln!(out, "error: a limit needs at least one saved code pattern");
@@ -235,6 +326,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
     let Some(mem) = l.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
+    let (addr, kind) = addr;
     let guard_addr = addr.wrapping_sub(disp as u64);
     let Some(guard) = read_guard(mem, guard_addr) else {
         return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}");
@@ -243,6 +335,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
     l.limits.push(Limit {
         name: name.to_string(),
         addr,
+        kind,
         min,
         max,
         sites,
@@ -263,7 +356,7 @@ fn cmd_unlimit(out: &mut impl Write, limiter: &SharedLimiter, name: &str) -> io:
 
 /// One line per limit: <name> <hex addr> <min|-> <max|-> fixed N times, restored M times, <state>
 fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
-    let show = |b: Option<i32>| b.map_or("-".to_owned(), |b| b.to_string());
+    let show = |b: Option<f64>| b.map_or("-".to_owned(), |b| b.to_string());
     for l in &limiter.lock().unwrap().limits {
         writeln!(
             out,
@@ -280,18 +373,71 @@ fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
     Ok(())
 }
 
+/// A scan can keep millions of these: address and type share one word (addresses fit in 62
+/// bits), next to the value at the last scan, mark or next.
+#[derive(Clone, Copy)]
+struct Candidate {
+    tagged: u64,
+    value: f64,
+}
+
+impl Candidate {
+    fn new(addr: u64, kind: Kind, value: f64) -> Self {
+        Candidate { tagged: addr | (kind as u64) << 62, value }
+    }
+
+    fn addr(&self) -> u64 {
+        self.tagged & ((1 << 62) - 1)
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::ALL[(self.tagged >> 62) as usize]
+    }
+}
+
+/// Current values of candidates sorted by address, reading memory a block at a time.
+fn read_all(mem: &File, cands: &[Candidate]) -> Vec<Option<f64>> {
+    const BLOCK: u64 = 1 << 16;
+    let mut buf = vec![0u8; BLOCK as usize + 8];
+    let (mut start, mut len) = (u64::MAX, 0u64);
+    cands
+        .iter()
+        .map(|c| {
+            let (addr, kind) = (c.addr(), c.kind());
+            let size = kind.size() as u64;
+            if addr < start || addr + size > start + len {
+                start = addr & !(BLOCK - 1);
+                len = mem.read_at(&mut buf, start).unwrap_or(0) as u64;
+                if addr + size > start + len {
+                    return read_value(mem, addr, kind);
+                }
+            }
+            let off = (addr - start) as usize;
+            Some(kind.decode(&buf[off..off + size as usize]))
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct Session {
     pid: u32,
     mem: Option<File>,
-    candidates: Vec<(u64, i32)>,
+    candidates: Vec<Candidate>,
 }
 
 impl Session {
-    fn read_i32(&self, addr: u64) -> Option<i32> {
-        let mut b = [0u8; 4];
-        self.mem.as_ref()?.read_exact_at(&mut b, addr).ok()?;
-        Some(i32::from_le_bytes(b))
+    fn read(&self, addr: u64, kind: Kind) -> Option<f64> {
+        read_value(self.mem.as_ref()?, addr, kind)
+    }
+
+    fn read_all(&self) -> Vec<Option<f64>> {
+        self.mem.as_ref().map_or_else(|| vec![None; self.candidates.len()], |m| read_all(m, &self.candidates))
+    }
+
+    /// "0x<addr>:<type> = <value>"
+    fn describe(&self, addr: u64, kind: Kind) -> String {
+        let v = self.read(addr, kind).map_or("??".to_owned(), |v| kind.show(v));
+        format!("0x{addr:012x}:{} = {v}", kind.name())
     }
 }
 
@@ -395,15 +541,17 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
     }
 }
 
+/// scan <n>: every value that can be what the screen shows as n, stored as a 4-byte integer
+/// (plain or XOR-encoded) or as a float/double (fractions are cut off or rounded on screen).
 fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
-    let Ok(value) = arg.parse::<i32>() else {
-        return writeln!(out, "error: usage: scan <int32>");
+    let Ok(n) = arg.parse::<i32>() else {
+        return writeln!(out, "error: usage: scan <whole number>");
     };
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
     let t = Instant::now();
-    let needle = value.to_le_bytes();
+    let n = n as f64;
     let mut found = Vec::new();
     let (mut bytes, mut unreadable) = (0u64, 0u64);
     let mut buf = vec![0u8; 4 << 20];
@@ -412,11 +560,34 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
         while addr < r.end {
             let len = ((r.end - addr) as usize).min(buf.len());
             match mem.read_at(&mut buf[..len], addr) {
-                Ok(n) if n > 0 => {
-                    bytes += n as u64;
-                    for off in (0..n.saturating_sub(3)).step_by(4) {
-                        if buf[off..off + 4] == needle {
-                            found.push((addr + off as u64, value));
+                Ok(len) if len > 0 => {
+                    bytes += len as u64;
+                    for off in (0..len.saturating_sub(3)).step_by(4) {
+                        // Doubles are 8-aligned. Integers and pointers read as floats come out
+                        // as zero or next to nothing (1e-40, 1e-300), never a number on screen.
+                        for kind in Kind::ALL {
+                            let b = &buf[off..(off + kind.size()).min(len)];
+                            if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
+                                continue;
+                            }
+                            // A real key is never 0; skipping those also leaves plain integers
+                            // next to a zero to the i32 check.
+                            if kind == Kind::Xor && (b[..4] == [0; 4] || b[4..] == [0; 4]) {
+                                continue;
+                            }
+                            let value = kind.decode(b);
+                            if matches!(kind, Kind::F32 | Kind::F64) && !(value.abs() >= 1e-3) {
+                                continue;
+                            }
+                            // The scan runs after the screen was read: allow for a fraction
+                            // that has moved on by up to 1 since.
+                            let hit = match kind {
+                                Kind::I32 | Kind::Xor => value == n,
+                                Kind::F32 | Kind::F64 => kind.fits(value - 1.0, value + 1.0, n),
+                            };
+                            if hit {
+                                found.push(Candidate::new(addr + off as u64, kind, value));
+                            }
                         }
                     }
                 }
@@ -428,44 +599,58 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     s.candidates = found;
     writeln!(
         out,
-        "{} matches in {} MiB ({} MiB unreadable) in {} ms",
+        "{} matches ({}) in {} MiB ({} MiB unreadable) in {} ms",
         s.candidates.len(),
+        kinds_text(&s.candidates),
         bytes >> 20,
         unreadable >> 20,
         t.elapsed().as_millis()
     )
 }
 
+/// "12 i32, 3 f32, 0 f64"
+fn kinds_text(c: &[Candidate]) -> String {
+    let count = |k: Kind| c.iter().filter(|c| c.kind() == k).count();
+    Kind::ALL.iter().map(|k| format!("{} {}", count(*k), k.name())).collect::<Vec<_>>().join(", ")
+}
+
 fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
-    let keep: Box<dyn Fn(i32, i32) -> bool> = match arg {
-        "+" => Box::new(|old, new| new > old),
-        "-" => Box::new(|old, new| new < old),
-        "=" => Box::new(|old, new| new == old),
-        "!" => Box::new(|old, new| new != old),
+    let keep: Box<dyn Fn(Kind, f64, f64) -> bool> = match arg {
+        "+" => Box::new(|_, old, new| new > old),
+        "-" => Box::new(|_, old, new| new < old),
+        "=" => Box::new(|_, old, new| new == old),
+        "!" => Box::new(|_, old, new| new != old),
         v => match v.parse::<i32>() {
-            Ok(want) => Box::new(move |_, new| new == want),
-            Err(_) => return writeln!(out, "error: usage: next <int32>|+|-|=|!"),
+            Ok(n) => Box::new(move |kind, old, new| kind.fits(old, new, n as f64)),
+            Err(_) => return writeln!(out, "error: usage: next <whole number>|+|-|=|!"),
         },
     };
     let before = s.candidates.len();
-    let next: Vec<(u64, i32)> = s
+    let next: Vec<Candidate> = s
         .candidates
         .iter()
-        .filter_map(|&(addr, old)| {
-            let new = s.read_i32(addr)?;
-            keep(old, new).then_some((addr, new))
+        .zip(s.read_all())
+        .filter_map(|(c, new)| {
+            let new = new?;
+            keep(c.kind(), c.value, new).then_some(Candidate { value: new, ..*c })
         })
         .collect();
     s.candidates = next;
-    writeln!(out, "{before} -> {} matches", s.candidates.len())
+    writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))
+}
+
+/// Remembers every candidate's current value, right before the screen is read: `next` then
+/// accepts values that showed the number at any point in between (the screen lags memory).
+fn cmd_mark(out: &mut impl Write, s: &mut Session) -> io::Result<()> {
+    let marked: Vec<Candidate> =
+        s.candidates.iter().zip(s.read_all()).map(|(c, v)| Candidate { value: v.unwrap_or(c.value), ..*c }).collect();
+    s.candidates = marked;
+    writeln!(out, "marked {} matches", s.candidates.len())
 }
 
 fn cmd_list(out: &mut impl Write, s: &Session) -> io::Result<()> {
-    for &(addr, _) in s.candidates.iter().take(20) {
-        match s.read_i32(addr) {
-            Some(v) => writeln!(out, "0x{addr:012x} = {v}")?,
-            None => writeln!(out, "0x{addr:012x} = ??")?,
-        }
+    for c in s.candidates.iter().take(20) {
+        writeln!(out, "{}", s.describe(c.addr(), c.kind()))?;
     }
     if s.candidates.len() > 20 {
         writeln!(out, "... {} more", s.candidates.len() - 20)?;
@@ -475,26 +660,22 @@ fn cmd_list(out: &mut impl Write, s: &Session) -> io::Result<()> {
 
 fn cmd_write(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
-    let addr = it.next().and_then(parse_addr);
-    let value = it.next().and_then(|v| v.parse::<i32>().ok());
-    let (Some(addr), Some(value), Some(mem)) = (addr, value, s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: write <hex addr> <int32> (after attach)");
+    let loc = it.next().and_then(parse_loc);
+    let value = it.next().and_then(|v| v.parse::<f64>().ok());
+    let (Some((addr, kind)), Some(value), Some(mem)) = (loc, value, s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: write <hex addr[:type]> <n> (after attach)");
     };
-    match mem.write_all_at(&value.to_le_bytes(), addr) {
-        Ok(()) => writeln!(out, "wrote {value} to 0x{addr:x}, reads back {:?}", s.read_i32(addr)),
+    match write_value(mem, addr, kind, value) {
+        Ok(()) => writeln!(out, "wrote {value}, reads back {}", s.describe(addr, kind)),
         Err(e) => writeln!(out, "error: write failed: {e}"),
     }
 }
 
 fn cmd_set(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
-    let (Ok(value), Some(mem)) = (arg.parse::<i32>(), s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: set <int32> (after attach)");
+    let (Ok(value), Some(mem)) = (arg.parse::<f64>(), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: set <n> (after attach)");
     };
-    let written = s
-        .candidates
-        .iter()
-        .filter(|(addr, _)| mem.write_all_at(&value.to_le_bytes(), *addr).is_ok())
-        .count();
+    let written = s.candidates.iter().filter(|c| write_value(mem, c.addr(), c.kind(), value).is_ok()).count();
     writeln!(out, "wrote {value} to {written} of {} matches", s.candidates.len())
 }
 
@@ -504,8 +685,8 @@ fn parse_addr(a: &str) -> Option<u64> {
 
 fn cmd_peek(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     for a in arg.split_whitespace() {
-        match parse_addr(a).and_then(|addr| Some((addr, s.read_i32(addr)?))) {
-            Some((addr, v)) => writeln!(out, "0x{addr:012x} = {v}")?,
+        match parse_loc(a) {
+            Some((addr, kind)) => writeln!(out, "{}", s.describe(addr, kind))?,
             None => writeln!(out, "{a} = ??")?,
         }
     }
@@ -515,18 +696,19 @@ fn cmd_peek(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 fn cmd_track(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     s.candidates = arg
         .split_whitespace()
-        .filter_map(parse_addr)
-        .filter_map(|addr| Some((addr, s.read_i32(addr)?)))
+        .filter_map(parse_loc)
+        .filter_map(|(addr, kind)| Some(Candidate::new(addr, kind, s.read(addr, kind)?)))
         .collect();
+    s.candidates.sort_by_key(|c| c.addr());
     writeln!(out, "tracking {} matches", s.candidates.len())
 }
 
 fn cmd_keep(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
-    let Some(addr) = parse_addr(arg) else {
-        return writeln!(out, "error: usage: keep <hex addr>");
+    let Some((addr, _)) = parse_loc(arg) else {
+        return writeln!(out, "error: usage: keep <hex addr[:type]>");
     };
     let before = s.candidates.len();
-    s.candidates.retain(|(a, _)| *a == addr);
+    s.candidates.retain(|c| c.addr() == addr);
     writeln!(out, "{before} -> {} matches", s.candidates.len())
 }
 
@@ -599,8 +781,8 @@ fn find_pattern(pid: u32, mem: &File, pat: &[Option<u8>], limit: usize) -> io::R
 /// Output lines: site <pattern> <offset of instruction in pattern> <base register> <displacement>
 fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
-    let (Some(target), Some(mem)) = (it.next().and_then(parse_addr), s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: sites <hex addr> [seconds] (after attach)");
+    let (Some((target, _)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: sites <hex addr[:type]> [seconds] (after attach)");
     };
     let secs = it.next().and_then(|v| v.parse().ok()).unwrap_or(5);
     let mut hits: Vec<(u64, trace::Regs)> = Vec::new();
@@ -701,12 +883,13 @@ fn resolve_site(pid: u32, mem: &File, site: &Site, timeout: Duration) -> Result<
 fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
     let (Some(site), Some(mem)) = (Site::parse(&f), s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: resolve <pattern> <offset> <register> <displacement> [seconds]");
+        return writeln!(out, "error: usage: resolve <pattern> <offset> <register> <displacement> [type] [seconds]");
     };
-    let secs = f.get(4).and_then(|v| v.parse().ok()).unwrap_or(10);
+    let kind = f.get(4..).unwrap_or_default().iter().find_map(|v| Kind::parse(v)).unwrap_or(Kind::I32);
+    let secs = f.get(4..).unwrap_or_default().iter().find_map(|v| v.parse().ok()).unwrap_or(10);
     match resolve_site(s.pid, mem, &site, Duration::from_secs(secs)) {
-        Ok(addr) => match s.read_i32(addr) {
-            Some(v) => writeln!(out, "0x{addr:012x} = {v}"),
+        Ok(addr) => match s.read(addr, kind) {
+            Some(_) => writeln!(out, "{}", s.describe(addr, kind)),
             None => writeln!(out, "error: resolved to unreadable 0x{addr:x}"),
         },
         Err(e) => writeln!(out, "error: {e}"),
@@ -733,6 +916,7 @@ pub fn run() {
             "attach" => cmd_attach(&mut out, &mut session, &limiter, arg),
             "scan" => cmd_scan(&mut out, &mut session, arg),
             "next" => cmd_next(&mut out, &mut session, arg),
+            "mark" => cmd_mark(&mut out, &mut session),
             "list" => cmd_list(&mut out, &session),
             "write" => cmd_write(&mut out, &session, arg),
             "set" => cmd_set(&mut out, &session, arg),
@@ -746,7 +930,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site>, limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site> [type], limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         if res.and_then(|_| writeln!(out, "end")).and_then(|_| out.flush()).is_err() {

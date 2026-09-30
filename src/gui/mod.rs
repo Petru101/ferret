@@ -29,6 +29,7 @@ pub enum Event {
     Numbers(Result<(PathBuf, Vec<Word>), String>),
     Read(Result<Option<i64>, String>),
     Auto(Result<AutoResult, String>),
+    Typed(Result<AutoResult, String>),
     Saved(Result<String, String>),
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
@@ -158,6 +159,7 @@ impl Ui {
             Event::Numbers(r) => self.find.numbers(r),
             Event::Read(r) => self.find.read(r),
             Event::Auto(r) => self.find.auto_done(r),
+            Event::Typed(r) => self.find.typed_done(r),
             Event::Saved(Ok(name)) => {
                 self.toast(&format!("Saved {name}. Ferret finds it again every time you attach."));
                 self.find.saved();
@@ -265,6 +267,14 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("find", Box::new(|ui, _| ui.find.start()));
+    action(
+        "type",
+        Box::new(|ui, n| {
+            ui.stack.set_visible_child_name("find");
+            ui.find.root.set_visible_child_name("pick");
+            ui.find.type_number(&n);
+        }),
+    );
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
 }
 
