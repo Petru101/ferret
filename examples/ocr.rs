@@ -6,6 +6,8 @@
 //   ... learn frame.png <x> <y> <w> <h> <n> digits-file
 //   ... follow <x> <y> <w> <h> digits-file frame.png... (watched reads over a series of frames)
 //   ... fontnumbers frame.png digits-file
+//   ... crop frame.png <x> <y> <w> <h> (the colour-group reader's candidates and glyphs)
+//   ... glyphs frame.png <x> <y> <w> <h> digits-file (the glyph-sized shapes there, and what they read as)
 // A digits file holds learned digit shapes (as in profiles/<game>.digits).
 
 #[path = "../src/font.rs"]
@@ -52,6 +54,23 @@ fn main() {
                 area = to.unwrap_or(area);
                 let read = read.map_or("-".into(), |(n, l)| format!("{n}{}", if l { "" } else { " (tesseract)" }));
                 println!("{frame}: {read:<12} area {},{} {}x{}{}", area.x, area.y, area.w, area.h, if moved { "  MOVED" } else { "" });
+            }
+        }
+        Some("glyphs") if args.len() == 7 => {
+            let (Some(x), Some(y), Some(w), Some(h)) = (n(2), n(3), n(4), n(5)) else {
+                return eprintln!("x y w h must be numbers");
+            };
+            let f = font(6).unwrap();
+            for l in ocr::glyphs_in(Path::new(&args[1]), &f, ocr::Rect { x, y, w, h }).unwrap_or_else(|e| panic!("{e}")) {
+                println!("{l}");
+            }
+        }
+        Some("crop") if args.len() == 6 => {
+            let (Some(x), Some(y), Some(w), Some(h)) = (n(2), n(3), n(4), n(5)) else {
+                return eprintln!("x y w h must be numbers");
+            };
+            for l in ocr::crop_glyphs(Path::new(&args[1]), ocr::Rect { x, y, w, h }).unwrap_or_else(|e| panic!("{e}")) {
+                println!("{l}");
             }
         }
         Some("fontnumbers") if args.len() == 3 => {

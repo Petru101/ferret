@@ -181,20 +181,29 @@ pub fn numbers(frame: &Path, font: Option<&Font>) -> Result<Vec<Word>, String> {
 /// learned digits, side by side at the same height. A row that also has other shapes of that
 /// colour and size is a word ("GOLD" has an O), not a number.
 fn font_numbers(img: &RgbImage, font: &Font) -> Vec<Word> {
+    let blobs = glyph_blobs(img, font);
+    font_rows(&blobs)
+}
+
+/// A shape of one quantised colour (8-connected), as a glyph candidate.
+struct Blob {
+    colour: (u8, u8, u8),
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    /// Glyph-sized and solid enough, not touching the frame's edge; else never part of a row.
+    glyph: Option<Glyph>,
+    digit: Option<u8>,
+}
+
+/// The frame's same-colour shapes, glyph-sized ones read by the learned digits.
+fn glyph_blobs(img: &RgbImage, font: &Font) -> Vec<Blob> {
     let (w, h) = img.dimensions();
     let colour = |i: usize| {
         let p = img.as_raw();
         (p[i * 3] >> 5, p[i * 3 + 1] >> 5, p[i * 3 + 2] >> 5)
     };
-    // Same-colour shapes (4-connected), as glyph candidates.
-    struct Blob {
-        colour: (u8, u8, u8),
-        x0: u32,
-        y0: u32,
-        x1: u32,
-        y1: u32,
-        digit: Option<u8>,
-    }
     let mut label = vec![0u32; (w * h) as usize];
     let mut blobs: Vec<Blob> = Vec::new();
     let mut stack = Vec::new();
@@ -231,27 +240,127 @@ fn font_numbers(img: &RgbImage, font: &Font) -> Vec<Word> {
             if y + 1 < h {
                 visit(i + w as usize);
             }
+            // Corners too: anti-aliased diagonals (a slash, the 4's stroke) only touch at corners
+            // in the flat colour, and would fall apart into slivers.
+            let wu = w as usize;
+            if x > 0 && y > 0 {
+                visit(i - wu - 1);
+            }
+            if x + 1 < w && y > 0 {
+                visit(i - wu + 1);
+            }
+            if x > 0 && y + 1 < h {
+                visit(i + wu - 1);
+            }
+            if x + 1 < w && y + 1 < h {
+                visit(i + wu + 1);
+            }
         }
         let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
         // Glyph-sized and solid enough; not touching the frame's edge.
-        let sized = (6..=80).contains(&bh) && bw * 2 <= bh * 3 && pixels.len() as u32 * 10 >= bw * bh * 3;
+        // 20%: anti-aliased fonts with 2-px strokes leave only a thin core of flat colour
+        // (Creeper World's 4 fills 23% of its box).
+        let sized = (6..=80).contains(&bh) && bw * 2 <= bh * 3 && pixels.len() as u32 * 10 >= bw * bh * 2;
         let inside = x0 > 0 && y0 > 0 && x1 + 1 < w && y1 + 1 < h;
-        let digit = (sized && inside).then(|| {
+        let glyph = (sized && inside).then(|| {
             let mut ink = vec![false; (bw * bh) as usize];
             for &i in &pixels {
                 let (x, y) = ((i as u32) % w, (i as u32) / w);
                 ink[((y - y0) * bw + x - x0) as usize] = true;
             }
-            font.digit_of(&Glyph { x: x0, w: bw, h: bh, ink, cut: false }, 1)
+            Glyph { x: x0, w: bw, h: bh, ink, cut: false }
         });
-        blobs.push(Blob { colour: c, x0, y0, x1, y1, digit: digit.flatten() });
-        if !(sized && inside) {
-            blobs.last_mut().unwrap().x1 = u32::MAX; // not a glyph: never part of a row
-        }
+        let digit = glyph.as_ref().and_then(|g| font.digit_of(g, 1));
+        blobs.push(Blob { colour: c, x0, y0, x1, y1, glyph, digit });
     }
+    blobs
+}
+
+/// A slash: a thin stroke leaning right, from the bottom left to the top right ("13/40").
+fn is_slash(g: &Glyph) -> bool {
+    let (w, h) = (g.w as usize, g.h as usize);
+    if w * 10 > h * 7 || w < 3 {
+        return false;
+    }
+    // Each row's ink: narrow, and its middle moving left going down.
+    let mut mids = Vec::new();
+    for y in 0..h {
+        let xs: Vec<usize> = (0..w).filter(|&x| g.ink[y * w + x]).collect();
+        let (Some(&a), Some(&b)) = (xs.first(), xs.last()) else { continue };
+        if b - a + 1 > (w / 2).max(3) {
+            return false;
+        }
+        mids.push((a + b) as i32);
+    }
+    mids.len() * 5 >= h * 4 && mids.windows(2).all(|m| m[1] <= m[0] + 1) && mids[0] - mids[mids.len() - 1] >= (w as i32 - 1)
+}
+
+/// The colour-group reader's candidates for `area` and their glyphs, in frame pixels, "/" for
+/// slashes (for examples/ocr.rs).
+#[allow(dead_code)]
+pub fn crop_glyphs(frame: &Path, area: Rect) -> Result<Vec<String>, String> {
+    let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
+    Ok(candidates(&img, area, false)
+        .iter()
+        .map(|c| {
+            let g: Vec<String> = c
+                .glyphs
+                .iter()
+                .map(|g| format!("{}{}+{}x{}{}", if is_slash(g) { "/" } else { "" }, area.x + g.x / SCALE, g.w / SCALE, g.h / SCALE, if g.cut { "cut" } else { "" }))
+                .collect();
+            format!("glyph h {}: {}", c.glyph_h / SCALE, g.join(" "))
+        })
+        .collect())
+}
+
+/// The ways to read glyphs as one number: all of them, or for "13/40" (current/most) the part
+/// before the slash, then the part after it. Glyphs are in reading order.
+fn number_parts(glyphs: &[Glyph]) -> Vec<Vec<Glyph>> {
+    let Some(s) = glyphs.iter().position(|g| !g.cut && is_slash(g)) else { return vec![glyphs.to_vec()] };
+    [&glyphs[..s], &glyphs[s + 1..]].into_iter().filter(|p| p.iter().any(|g| !g.cut)).map(<[Glyph]>::to_vec).collect()
+}
+
+/// The glyphs of the number a crop shows: for "13/40" the first part (the current value).
+fn number_glyphs(glyphs: &[Glyph]) -> Vec<Glyph> {
+    number_parts(glyphs).into_iter().next().unwrap_or_default()
+}
+
+/// The glyph-sized shapes inside `region` of a frame: where, colour, and the digit they read
+/// as (for examples/ocr.rs, to see why a number isn't found).
+#[allow(dead_code)]
+pub fn glyphs_in(frame: &Path, font: &Font, region: Rect) -> Result<Vec<String>, String> {
+    let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
+    let inside = |b: &Blob| b.x0 >= region.x && b.y0 >= region.y && b.x1 < region.x + region.w && b.y1 < region.y + region.h;
+    Ok(glyph_blobs(&img, font)
+        .iter()
+        .filter(|b| b.glyph.is_some() && inside(b))
+        .map(|b| {
+            let g = b.glyph.as_ref().unwrap();
+            let fill = g.ink.iter().filter(|i| **i).count() * 100 / g.ink.len();
+            let digit = b.digit.map_or(if is_slash(g) { "/".into() } else { "-".into() }, |d| d.to_string());
+            format!("{},{} {}x{} colour {:?} fill {fill}% digit {digit}", b.x0, b.y0, g.w, g.h, b.colour)
+        })
+        .collect())
+}
+
+/// Rows of glyphs that are all learned digits: the numbers on the frame.
+fn font_rows(blobs: &[Blob]) -> Vec<Word> {
     // Rows: glyphs of one colour, about the same top and height, close together.
-    let mut glyphs: Vec<&Blob> = blobs.iter().filter(|b| b.x1 != u32::MAX).collect();
+    // Slashes and other ink of a glyph's colour and about its height (too thin to be a glyph)
+    // separate numbers: "13/40" is 13 and 40, never 1340, and not a word either.
+    let slash = |b: &Blob| b.digit.is_none() && b.glyph.as_ref().is_some_and(is_slash);
+    let mut glyphs: Vec<&Blob> = blobs.iter().filter(|b| b.glyph.is_some() && !slash(b)).collect();
     glyphs.sort_by_key(|b| (b.colour, b.y0, b.x0));
+    let mut marks: std::collections::HashMap<(u8, u8, u8), Vec<&Blob>> = Default::default();
+    for b in blobs.iter().filter(|b| (b.glyph.is_none() || slash(b)) && (6..=80).contains(&(b.y1 - b.y0 + 1))) {
+        marks.entry(b.colour).or_default().push(b);
+    }
+    let between = |a: &Blob, b: &Blob| {
+        let h = a.y1 - a.y0 + 1;
+        marks.get(&a.colour).is_some_and(|m| {
+            m.iter().any(|s| s.x0 > a.x1 && s.x1 < b.x0 && s.y1 - s.y0 + 1 >= h / 2 && s.y0 <= a.y1 && s.y1 >= a.y0)
+        })
+    };
     let next_to = |a: &Blob, b: &Blob| {
         let (ha, hb) = (a.y1 - a.y0 + 1, b.y1 - b.y0 + 1);
         a.colour == b.colour
@@ -259,6 +368,7 @@ fn font_numbers(img: &RgbImage, font: &Font) -> Vec<Word> {
             && a.y0.abs_diff(b.y0) <= ha / 4 + 1
             && b.x0 > a.x1
             && b.x0 - a.x1 <= ha * 4 / 5
+            && !between(a, b)
     };
     let mut used = vec![false; glyphs.len()];
     let mut words = Vec::new();
@@ -595,13 +705,19 @@ fn read_areas(img: &RgbImage, areas: &[Rect], padded: bool, dir: &Path, font: Op
         // Tesseract drops digits it can't read (a blocky "2" in "26" gives 6). When the crop has
         // more glyphs the size of the learned digits than the read has digits, and no letters,
         // it is missing some: better no number than a wrong one.
-        let sized = font.map_or(0, |f| f.digit_sized(&per_area[a][c].glyphs, SCALE));
+        let glyphs = number_glyphs(&per_area[a][c].glyphs);
+        // "13/40" read as 1340 or 13140: Tesseract took the slash for digits.
+        let slash = per_area[a][c].glyphs.iter().any(|g| !g.cut && is_slash(g));
+        if slash && glyphs.iter().filter(|g| !g.cut).count() != n.unsigned_abs().to_string().len() {
+            continue;
+        }
+        let sized = font.map_or(0, |f| f.digit_sized(&glyphs, SCALE));
         let letters = free.iter().any(|w| w.text.chars().any(char::is_alphabetic));
         if sized > n.unsigned_abs().to_string().len() && !letters {
             continue;
         }
         // A digit the learned ones read differently: Tesseract misread it.
-        if font.is_some_and(|f| !f.agrees(&per_area[a][c].glyphs, SCALE, n)) {
+        if font.is_some_and(|f| !f.agrees(&glyphs, SCALE, n)) {
             continue;
         }
         found[a].push((glyph_h, Read { n, conf, file, rect, learned: false }));
@@ -629,7 +745,7 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, i64)> {
     let reads: Vec<(usize, FontRead)> = cands
         .iter()
         .enumerate()
-        .filter_map(|(i, c)| Some((i, font.read(&c.glyphs, SCALE)?)))
+        .filter_map(|(i, c)| Some((i, font.read(&number_glyphs(&c.glyphs), SCALE)?)))
         .filter(|(_, r)| !bars(r))
         .collect();
     let tallest = reads.iter().map(|(i, _)| cands[*i].glyph_h).max()?;
@@ -646,6 +762,15 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, i64)> {
 /// If that leaves nothing, a confident free read means it really is just letters; if not, the
 /// free read may have misread odd digits.
 fn number_in(digit_words: &[Word], free: &[Word]) -> Option<(i64, f32)> {
+    // "13/40" (current/most): the current value. The digits-only read would make it 1340.
+    let fraction = |w: &Word| {
+        let (a, b) = w.text.split_once('/')?;
+        let all = |t: &str| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit());
+        (w.conf >= 60.0 && all(a) && all(b)).then(|| a.parse().ok()).flatten()
+    };
+    if let Some((n, w)) = free.iter().find_map(|w| Some((fraction(w)?, w))) {
+        return Some((n, w.conf));
+    }
     let is_letters = |f: &Word| f.text.chars().any(char::is_alphabetic) && !has_digit(f);
     let is_number = |f: &Word| f.conf >= 80.0 && f.text.chars().all(|c| c.is_ascii_digit() || ",.".contains(c));
     if free.iter().any(is_number) && free.iter().all(|f| is_letters(f) || is_number(f)) {
@@ -749,11 +874,11 @@ pub fn read_number_at(
             let h = (r.y + r.h).min(area.y + area.h).saturating_sub(r.y.max(area.y));
             w * h
         };
-        // Most of the number inside the area, then the most of it.
+        // Most of the number inside the area, then the leftmost ("13/40" in the box: 13).
         let best = now
             .into_iter()
             .filter(|w| inside(w.rect) > 0)
-            .max_by_key(|w| (inside(w.rect) * 100 / (w.rect.w * w.rect.h).max(1), inside(w.rect)));
+            .max_by_key(|w| (inside(w.rect) * 100 / (w.rect.w * w.rect.h).max(1), std::cmp::Reverse(w.rect.x)));
         if let Some((w, n)) = best.and_then(|w| w.text.parse::<i64>().ok().map(|n| (w, n))) {
             let r = w.rect;
             let (x, y) = (r.x.saturating_sub(2), r.y.saturating_sub(2));
@@ -782,22 +907,33 @@ pub fn learn(frame: &Path, area: Rect, n: i64, font: &mut Font, trusted: bool) -
     }
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
     let text = n.to_string();
-    // Glyphs the crop's edge cuts off are something else.
-    let whole = |c: &Candidate| -> Vec<Glyph> { c.glyphs.iter().filter(|g| !g.cut).cloned().collect() };
-    let fits = |c: &Candidate| {
-        let glyphs = whole(c);
+    // Glyphs the crop's edge cuts off are something else. "13/40" is two numbers: the part
+    // the learned digits don't contradict, the current value (before the slash) first.
+    let parts = |c: &Candidate| -> Vec<Vec<Glyph>> {
+        number_parts(&c.glyphs)
+            .into_iter()
+            .map(|p| p.into_iter().filter(|g| !g.cut).collect::<Vec<_>>())
+            .filter(|p| trusted || font.agrees(p, SCALE, n))
+            .collect()
+    };
+    let fits_part = |glyphs: &[Glyph]| {
         let (lo, hi) = (glyphs.iter().map(|g| g.h).min()?, glyphs.iter().map(|g| g.h).max()?);
         let extra = glyphs.len().checked_sub(text.len())?;
         (lo * 4 >= hi * 3 && extra <= 2).then_some(extra)
     };
+    let fit = |c: &Candidate| parts(c).into_iter().find_map(|p| Some((fits_part(&p)?, p)));
+    let fits = |c: &Candidate| fit(c).map(|(extra, _)| extra);
     let cands = candidates(&img, area, false);
     // Only the biggest text that could be the number: other colour groups can hold a piece of
     // it (the slash of a 0), or something taller that isn't (Forager's item slot border).
     // Of that, the solid glyphs: anti-aliased edges make a group of thin outlines.
-    let tallest = cands.iter().filter(|c| fits(c).is_some()).map(|c| c.glyph_h).max().unwrap_or(0);
+    // Heights of the glyphs that would be learned: a cut-off shape at the edge (Creeper World's
+    // energy bar) can be taller than the number.
+    let height = |c: &Candidate| fit(c).and_then(|(_, p)| p.iter().map(|g| g.h).max());
+    let tallest = cands.iter().filter_map(height).max().unwrap_or(0);
     let ink = |c: &Candidate| c.glyphs.iter().map(|g| g.ink.iter().filter(|p| **p).count()).sum::<usize>();
     let mut fitting: Vec<(&Candidate, usize)> =
-        cands.iter().filter(|c| c.glyph_h * 4 >= tallest * 3).filter_map(|c| Some((c, fits(c)?))).collect();
+        cands.iter().filter(|c| height(c).is_some_and(|h| h * 4 >= tallest * 3)).filter_map(|c| Some((c, fits(c)?))).collect();
     fitting.sort_by_key(|(c, extra)| (*extra, std::cmp::Reverse(ink(c))));
     // Labels near the number ("AMMO") can be as big as it: skip glyphs Tesseract reads as words.
     let dir = frame.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -814,7 +950,7 @@ pub fn learn(frame: &Path, area: Rect, n: i64, font: &mut Font, trusted: bool) -
     }
     std::fs::remove_file(&file).ok();
     let (cand, extra) = chosen.ok_or(format!("could not split the number into the {} digits of {n}", text.len()))?;
-    let glyphs = whole(cand);
+    let glyphs = fit(cand).map(|(_, p)| p).unwrap_or_default();
     if !trusted {
         if let Some(r) = font.read(&glyphs, SCALE).filter(|r| r.n != n) {
             return Err(format!("the learned digits read {} there, not {n}; not learning from it", r.n));
@@ -832,6 +968,39 @@ pub fn learn(frame: &Path, area: Rect, n: i64, font: &mut Font, trusted: bool) -
         return Err(format!("{extra} glyph(s) left of {n} that may not be zeros; not learning from it"));
     }
     let label = format!("{}{text}", "0".repeat(extra));
-    let added = font.learn(&glyphs, SCALE, &label, trusted);
+    let mut added = font.learn(&glyphs, SCALE, &label, trusted);
+    if let Some(seen) = finder_glyphs(&img, font, area, &glyphs) {
+        added += font.learn(&seen, 1, &label, trusted);
+    }
     Ok(format!("learned the digits of {label}: {added} new shapes (knows {})", font.known()))
+}
+
+/// The full-frame finder's glyphs (`glyph_blobs`) where the learned `glyphs` (4x crop
+/// pixels of `area`) are, one per glyph, all of one colour. Learned too, so numbers are found
+/// on the whole frame: for anti-aliased text the finder only sees the flat-colour core, thinner
+/// than the crop's shapes (Creeper World's 3 and 4 didn't match).
+fn finder_glyphs(img: &RgbImage, font: &Font, area: Rect, glyphs: &[Glyph]) -> Option<Vec<Glyph>> {
+    // A margin, so glyphs at the area's edge don't touch the crop's.
+    let x = area.x.min(img.width().saturating_sub(1)).saturating_sub(4);
+    let y = area.y.min(img.height().saturating_sub(1)).saturating_sub(4);
+    let (w, h) = ((area.w + 8).min(img.width() - x), (area.h + 8).min(img.height() - y));
+    let crop = imageops::crop_imm(img, x, y, w, h).to_image();
+    let blobs = glyph_blobs(&crop, font);
+    let ax = area.x.min(img.width().saturating_sub(1)) - x;
+    let spots: Vec<(u32, u32)> = glyphs.iter().map(|g| (ax + g.x / SCALE, ax + (g.x + g.w).div_ceil(SCALE))).collect();
+    let at = |colour: (u8, u8, u8), (lo, hi): (u32, u32)| {
+        blobs
+            .iter()
+            .filter(|b| b.colour == colour && b.x0 + 1 >= lo && b.x1 <= hi + 1)
+            .filter_map(|b| b.glyph.as_ref())
+            .filter(|g| !is_slash(g))
+            .max_by_key(|g| g.ink.iter().filter(|i| **i).count())
+    };
+    let mut colours: Vec<(u8, u8, u8)> = blobs.iter().filter(|b| b.glyph.is_some()).map(|b| b.colour).collect();
+    colours.sort();
+    colours.dedup();
+    colours
+        .into_iter()
+        .filter_map(|c| spots.iter().map(|s| at(c, *s).cloned()).collect::<Option<Vec<Glyph>>>())
+        .max_by_key(|gs| gs.iter().map(|g| g.ink.iter().filter(|i| **i).count()).sum::<usize>())
 }
