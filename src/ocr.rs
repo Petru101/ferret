@@ -682,20 +682,75 @@ fn remove_candidates(dir: &Path) {
     }
 }
 
-/// Reads the number inside `area` of the frame, whether the learned digits read it (rather
-/// than Tesseract), and where the number is when they found it. `debug` receives the
-/// cleaned-up crop that was read. With learned digits the area is only a hint: of the numbers they find on the whole frame (where other numbers vouch
-/// for a lone 1), the one overlapping it most, whole even when the area cuts it.
-pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font>) -> Result<Option<(i64, bool, Option<Rect>)>, String> {
+/// Numbers the learned digits find on the whole frame (for examples/ocr.rs).
+#[allow(dead_code)]
+pub fn learned_numbers(frame: &Path, font: &Font) -> Result<Vec<Word>, String> {
+    Ok(font_numbers(&image::open(frame).map_err(|e| e.to_string())?.to_rgb8(), font))
+}
+
+/// How far the numbers around `area` moved since the previous frame (`before`), when they moved
+/// together: Forager's item info panel shifts the whole inventory sideways. Each of the numbers
+/// nearest the area votes for where the same digits at the same height are now; the shift needs
+/// two votes and more than "stayed put" gets (a menu over the number moves nothing).
+fn layout_shift(before: &[Word], now: &[Word], area: Rect) -> Option<(i32, i32)> {
+    let centre = |r: Rect| (2 * r.x as i64 + r.w as i64, 2 * r.y as i64 + r.h as i64);
+    let (ax, ay) = centre(area);
+    let mut near: Vec<&Word> = before.iter().collect();
+    near.sort_by_key(|w| {
+        let (x, y) = centre(w.rect);
+        (x - ax).pow(2) + (y - ay).pow(2)
+    });
+    near.truncate(8);
+    let mut votes: Vec<((i32, i32), usize)> = Vec::new();
+    for b in near {
+        for n in now.iter().filter(|n| n.text == b.text && n.rect.h.abs_diff(b.rect.h) <= 1) {
+            let s = (n.rect.x as i32 - b.rect.x as i32, n.rect.y as i32 - b.rect.y as i32);
+            match votes.iter_mut().find(|(v, _)| v.0.abs_diff(s.0) <= 2 && v.1.abs_diff(s.1) <= 2) {
+                Some((_, count)) => *count += 1,
+                None => votes.push((s, 1)),
+            }
+        }
+    }
+    let still = |s: (i32, i32)| s.0.abs() <= 2 && s.1.abs() <= 2;
+    let stayed = votes.iter().filter(|(s, _)| still(*s)).map(|(_, n)| *n).sum::<usize>();
+    let (shift, n) = votes.into_iter().filter(|(s, _)| !still(*s)).max_by_key(|(_, n)| *n)?;
+    (n >= 2 && n > stayed).then_some(shift)
+}
+
+fn moved(r: Rect, (dx, dy): (i32, i32)) -> Rect {
+    Rect { x: (r.x as i32 + dx).max(0) as u32, y: (r.y as i32 + dy).max(0) as u32, ..r }
+}
+
+/// Reads the number inside `area` of the frame, and whether the learned digits read it (rather
+/// than Tesseract); `debug` receives the cleaned-up crop that was read. Also returns where to
+/// watch from now on, when that changed. With learned digits the area is only a hint: of the
+/// numbers they find on the whole frame (where other numbers vouch for a lone 1), the one
+/// overlapping it most, whole even when the area cuts it; the area moves onto it. `before` has
+/// the numbers they found in the previous frame: when the numbers around the area all moved
+/// (see `layout_shift`), the area moves with them first. It gets this frame's numbers.
+pub fn read_number_at(
+    frame: &Path,
+    mut area: Rect,
+    debug: &Path,
+    font: Option<&Font>,
+    before: &mut Vec<Word>,
+) -> Result<(Option<(i64, bool)>, Option<Rect>), String> {
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
+    let mut moved_to = None;
     if let Some(f) = font.filter(|f| !f.is_empty()) {
+        let now = font_numbers(&img, f);
+        if let Some(shift) = layout_shift(before, &now, area) {
+            area = moved(area, shift);
+            moved_to = Some(area);
+        }
+        *before = now.clone();
         let inside = |r: Rect| {
             let w = (r.x + r.w).min(area.x + area.w).saturating_sub(r.x.max(area.x));
             let h = (r.y + r.h).min(area.y + area.h).saturating_sub(r.y.max(area.y));
             w * h
         };
         // Most of the number inside the area, then the most of it.
-        let best = font_numbers(&img, f)
+        let best = now
             .into_iter()
             .filter(|w| inside(w.rect) > 0)
             .max_by_key(|w| (inside(w.rect) * 100 / (w.rect.w * w.rect.h).max(1), inside(w.rect)));
@@ -704,7 +759,7 @@ pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font
             let (x, y) = (r.x.saturating_sub(2), r.y.saturating_sub(2));
             let crop = imageops::crop_imm(&img, x, y, (r.w + 4).min(img.width() - x), (r.h + 4).min(img.height() - y)).to_image();
             imageops::resize(&crop, crop.width() * 4, crop.height() * 4, imageops::FilterType::Nearest).save(debug).ok();
-            return Ok(Some((n, true, Some(r))));
+            return Ok((Some((n, true)), Some(watch_area(r))));
         }
     }
     let dir = debug.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -715,7 +770,7 @@ pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font
         std::fs::remove_file(debug).ok();
     }
     remove_candidates(dir);
-    Ok(read.map(|r| (r.n, r.learned, None)))
+    Ok((read.map(|r| (r.n, r.learned)), moved_to))
 }
 
 /// Learns the game's digits from `area` showing `n`. The glyphs must split into the number's

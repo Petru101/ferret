@@ -4,6 +4,8 @@
 //       io.github.Petru101.Ferret numbers frame.png [digits-file]
 //   ... read frame.png <x> <y> <w> <h> crop.png [digits-file]
 //   ... learn frame.png <x> <y> <w> <h> <n> digits-file
+//   ... follow <x> <y> <w> <h> digits-file frame.png... (watched reads over a series of frames)
+//   ... fontnumbers frame.png digits-file
 // A digits file holds learned digit shapes (as in profiles/<game>.digits).
 
 #[path = "../src/font.rs"]
@@ -33,10 +35,31 @@ fn main() {
                 return eprintln!("x y w h must be numbers");
             };
             let area = ocr::Rect { x, y, w, h };
-            match ocr::read_number_at(Path::new(&args[1]), area, Path::new(&args[6]), font(7).as_ref()) {
-                Ok(Some((n, learned, _))) => println!("{n}{}", if learned { " (learned digits)" } else { "" }),
+            match ocr::read_number_at(Path::new(&args[1]), area, Path::new(&args[6]), font(7).as_ref(), &mut Vec::new()) {
+                Ok((Some((n, learned)), _)) => println!("{n}{}", if learned { " (learned digits)" } else { "" }),
                 r => println!("{r:?}"),
             }
+        }
+        Some("follow") if args.len() >= 7 => {
+            let (Some(x), Some(y), Some(w), Some(h)) = (n(1), n(2), n(3), n(4)) else {
+                return eprintln!("x y w h must be numbers");
+            };
+            let (mut area, f, mut seen) = (ocr::Rect { x, y, w, h }, font(5), Vec::new());
+            for frame in &args[6..] {
+                let crop = std::env::temp_dir().join("ocr-follow.png");
+                let (read, to) = ocr::read_number_at(Path::new(frame), area, &crop, f.as_ref(), &mut seen).unwrap_or_else(|e| panic!("{e}"));
+                let moved = to.is_some_and(|to| !ocr::overlaps(to, area));
+                area = to.unwrap_or(area);
+                let read = read.map_or("-".into(), |(n, l)| format!("{n}{}", if l { "" } else { " (tesseract)" }));
+                println!("{frame}: {read:<12} area {},{} {}x{}{}", area.x, area.y, area.w, area.h, if moved { "  MOVED" } else { "" });
+            }
+        }
+        Some("fontnumbers") if args.len() == 3 => {
+            let f = font(2).unwrap();
+            let mut words = ocr::learned_numbers(Path::new(&args[1]), &f).unwrap_or_else(|e| panic!("{e}"));
+            words.sort_by_key(|w| (w.rect.y / 20, w.rect.x));
+            let list: Vec<String> = words.iter().map(|w| format!("{}@{},{}", w.text, w.rect.x, w.rect.y)).collect();
+            println!("{}", list.join(" "));
         }
         Some("learn") if args.len() == 8 => {
             let (Some(x), Some(y), Some(w), Some(h), Ok(v)) = (n(2), n(3), n(4), n(5), args[6].parse::<i64>()) else {

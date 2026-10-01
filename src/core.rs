@@ -477,6 +477,9 @@ pub struct Core {
     pub cancel: Arc<AtomicBool>,
     /// The last read `read_stable` ignored, to log it once.
     ignored: Option<i64>,
+    /// Numbers the learned digits found in the last frame read, to follow the watched number
+    /// when the layout shifts.
+    seen: Vec<Word>,
 }
 
 impl Core {
@@ -493,6 +496,7 @@ impl Core {
             log,
             cancel: Arc::new(AtomicBool::new(false)),
             ignored: None,
+            seen: Vec::new(),
         })
     }
 
@@ -965,6 +969,7 @@ impl Core {
             self.search = None;
         }
         self.area = Some(area);
+        self.seen.clear();
     }
 
     /// Forgets the search in progress, so the next number starts from scratch.
@@ -986,14 +991,18 @@ impl Core {
     }
 
     /// Reads the watched number in `frame`. When the learned digits find it, the watched area
-    /// follows it: the whole number with room to grow, wherever the old area cut it.
+    /// follows it: the whole number with room to grow, wherever the old area cut it, and along
+    /// with the numbers around it when they all move.
     fn read_frame(&mut self, frame: &Path) -> Result<Option<(i64, bool)>, String> {
         let area = self.area.ok_or("no area picked yet")?;
-        let read = ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font))?;
-        if let Some(rect) = read.and_then(|r| r.2) {
-            self.area = Some(ocr::watch_area(rect));
+        let (read, moved) = ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font), &mut self.seen)?;
+        if let Some(to) = moved {
+            if !ocr::overlaps(to, area) {
+                self.say("the numbers around the watched one moved: following them");
+            }
+            self.area = Some(to);
         }
-        Ok(read.map(|(n, learned, _)| (n, learned)))
+        Ok(read)
     }
 
     /// The area being watched (it follows the number).
