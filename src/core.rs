@@ -14,11 +14,44 @@ use crate::capture::WindowCapture;
 use crate::font::{self, Font};
 use crate::ocr::{self, Rect, Word};
 
-fn flatpak_app_path() -> Option<String> {
+fn flatpak_info(key: &str) -> Option<String> {
     let info = fs::read_to_string("/.flatpak-info").ok()?;
-    info.lines()
-        .find_map(|l| l.strip_prefix("app-path="))
-        .map(str::to_owned)
+    info.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(str::to_owned)
+}
+
+fn flatpak_app_path() -> Option<String> {
+    flatpak_info("app-path")
+}
+
+const APP_ID: &str = "io.github.Petru101.Ferret";
+
+/// Whether a newer build of Ferret was installed since this one started: a running app keeps
+/// its build until it's restarted, and an old build drops what it doesn't know when it saves.
+/// The running build is `<deploy dir>/<commit>/files`; `<deploy dir>/active` is the installed one.
+pub fn newer_install() -> bool {
+    let (Some(path), Some(commit)) = (flatpak_app_path(), flatpak_info("app-commit")) else { return false };
+    let Some(active) = Path::new(&path).parent().and_then(Path::parent).map(|d| d.join("active")) else { return false };
+    let Ok(out) = Command::new("flatpak-spawn").args(["--host", "readlink"]).arg(&active).output() else { return false };
+    let installed = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    out.status.success() && !installed.is_empty() && installed != commit
+}
+
+/// Starts Ferret again on the host once this instance has left the session bus (a second
+/// instance would only hand over to this one); call right before quitting. Detached on the
+/// host, so flatpak-spawn returns at once instead of keeping this sandbox alive meanwhile.
+pub fn restart_after_quit() -> Result<(), String> {
+    let script = format!(
+        "for i in $(seq 50); do gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+         --method org.freedesktop.DBus.NameHasOwner {APP_ID} | grep -q true || break; sleep 0.2; done; exec flatpak run {APP_ID}"
+    );
+    Command::new("flatpak-spawn")
+        .args(["--host", "setsid", "-f", "sh", "-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 pub fn sandbox_report() -> Vec<String> {
@@ -216,11 +249,14 @@ struct Entry {
     run: Option<u32>,
     /// "<min|-> <max|->" when the value is kept within a range.
     limit: Option<String>,
+    /// Lines this build doesn't understand (from a newer one), saved back unchanged.
+    other: Vec<String>,
 }
 
 /// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
 /// missing), its "site ...", "path ..." and "candidate ..." lines, "run <pid>" (where the
-/// candidates came from) and an optional "limit <min|-> <max|->" line.
+/// candidates came from) and an optional "limit <min|-> <max|->" line. Other lines are kept
+/// with their entry, so a build older than the profile doesn't drop what it doesn't know.
 fn read_profile(exe: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for line in fs::read_to_string(profile_path(exe)).unwrap_or_default().lines() {
@@ -233,6 +269,7 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 candidates: Vec::new(),
                 run: None,
                 limit: None,
+                other: Vec::new(),
             });
         } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
             e.kind = kind;
@@ -246,6 +283,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.run = pid.trim().parse().ok();
         } else if let (Some(limit), Some(e)) = (line.strip_prefix("limit "), entries.last_mut()) {
             e.limit = Some(limit.trim().to_owned());
+        } else if let (false, Some(e)) = (line.trim().is_empty(), entries.last_mut()) {
+            e.other.push(line.to_owned());
         }
     }
     entries
@@ -274,6 +313,9 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         if let Some(l) = &e.limit {
             text.push_str(&format!("limit {l}\n"));
+        }
+        for l in &e.other {
+            text.push_str(&format!("{l}\n"));
         }
     }
     fs::write(&path, text).map_err(|e| e.to_string())?;
@@ -307,6 +349,12 @@ impl Entry {
         let likely: Vec<&String> = self.candidates.iter().filter(|p| shared_start(p, &known) >= SHARED_START).collect();
         let paths = if likely.is_empty() { self.candidates.iter().collect() } else { likely };
         paths.into_iter().map(|p| path_arg(p)).collect()
+    }
+
+    /// Saved by a newer build with a value type this one doesn't know: reading or writing it
+    /// as an i32 would be wrong.
+    fn foreign_type(&self) -> Option<&str> {
+        self.other.iter().find_map(|l| l.strip_prefix("type ")).map(str::trim)
     }
 
     fn unconfirmed(&self) -> bool {
@@ -572,7 +620,7 @@ impl Core {
         let game = self.game()?;
         let mut entries = read_profile(&game.exe);
         entries.retain(|e| e.name != name);
-        let mut entry = Entry { name: name.to_owned(), kind: loc.kind, sites, paths, candidates, run: Some(pid), limit: None };
+        let mut entry = Entry { name: name.to_owned(), kind: loc.kind, sites, paths, candidates, run: Some(pid), limit: None, other: Vec::new() };
         let known = entry.known(&entries);
         entry.candidates.sort_by_key(|p| std::cmp::Reverse(shared_start(p, &known)));
         let likely = entry.followed(&entries).len();
@@ -756,6 +804,10 @@ impl Core {
         let t = Instant::now();
         for entry in &entries {
             let name = &entry.name;
+            if let Some(kind) = entry.foreign_type() {
+                self.say(&format!("{name}: saved by a newer Ferret (value type {kind}), which this one can't read; restart Ferret"));
+                continue;
+            }
             let mut resolved = None;
             for site in &entry.sites {
                 let reply = self.helper.call(&format!("resolve {site} {}", entry.kind.name()));

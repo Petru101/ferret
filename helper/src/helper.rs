@@ -543,7 +543,7 @@ const NOT_GAMES: &[&str] = &[
     "conhost.exe", "tabtip.exe", "start.exe", "wineboot.exe", "winemenubuilder.exe", "rundll32.exe",
     "steamwebhelper.exe", "mscorsvw.exe", "ngen.exe", "reaper", "pressure-vessel-wrap", "pv-adverb", "python3",
     "srt-bwrap", "bwrap", "steam-runtime-launcher-service", "x86_64-linux-gnu-srt-launch", "wineserver", "sh",
-    "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep",
+    "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep", "umu.exe", "xalia.exe",
 ];
 
 /// Running games, one per line: pid, program name, Steam app ID and anti-cheat
@@ -559,7 +559,11 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let exe = exe_name(pid);
         let lower = exe.to_ascii_lowercase();
         let env = environ(pid);
-        let app_id = env.get("SteamAppId").or_else(|| env.get("SteamGameId")).filter(|id| *id != "0");
+        // umu (Lutris, Heroic) sets "default" for games that aren't on Steam.
+        let app_id = ["SteamAppId", "SteamGameId"]
+            .iter()
+            .filter_map(|k| env.get(*k))
+            .find(|id| *id != "0" && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
         let windows = lower.ends_with(".exe");
         if !(windows || app_id.is_some()) || NOT_GAMES.contains(&lower.as_str()) || lower.contains("crashhandler") {
             continue;

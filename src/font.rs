@@ -205,6 +205,8 @@ impl Grid {
 pub struct Font {
     samples: Vec<(u8, Shape)>,
     grids: Vec<(u8, Grid)>,
+    /// Lines this build doesn't understand (from a newer one), saved back unchanged.
+    other: Vec<String>,
 }
 
 /// A learned shape, for showing: one cell per font pixel for pixel fonts, else stretched to 16x20.
@@ -225,17 +227,31 @@ pub struct FontRead {
 impl Font {
     /// File format: one learned glyph per line, "<digit> <height> <aspect> <cells as hex>", and
     /// pixel-font glyphs as "<digit> grid <w>x<h> <cells as 0/1>" (older builds skip those).
+    /// Other lines are kept as they are.
     pub fn load(path: &Path) -> Font {
         let text = fs::read_to_string(path).unwrap_or_default();
         let mut font = Font::default();
-        for l in text.lines() {
+        for l in text.lines().filter(|l| !l.trim().is_empty()) {
             let f: Vec<&str> = l.split_whitespace().collect();
-            let [d, h, a, hex] = f[..] else { continue };
-            let Some(d) = d.parse::<u8>().ok().filter(|d| *d <= 9) else { continue };
-            if h == "grid" {
-                font.grids.extend(Grid::from_text(a, hex).filter(|g| d == 1 || !g.is_bar()).map(|g| (d, g)));
-            } else if let (Ok(h), Ok(a)) = (h.parse(), a.parse()) {
-                font.samples.extend(Shape::from_hex(h, a, hex).filter(|s| !s.is_faint()).map(|s| (d, s)));
+            let known = match f[..] {
+                [d, "grid", a, hex] => d.parse::<u8>().ok().filter(|d| *d <= 9).zip(Grid::from_text(a, hex)).map(|(d, g)| {
+                    if d == 1 || !g.is_bar() {
+                        font.grids.push((d, g));
+                    }
+                }),
+                [d, h, a, hex] => {
+                    let d = d.parse::<u8>().ok().filter(|d| *d <= 9);
+                    let shape = h.parse().ok().zip(a.parse().ok()).and_then(|(h, a)| Shape::from_hex(h, a, hex));
+                    d.zip(shape).map(|(d, s)| {
+                        if !s.is_faint() {
+                            font.samples.push((d, s));
+                        }
+                    })
+                }
+                _ => None,
+            };
+            if known.is_none() {
+                font.other.push(l.to_owned());
             }
         }
         font
@@ -247,6 +263,7 @@ impl Font {
             .iter()
             .map(|(d, s)| format!("{d} {:.2} {:.3} {}\n", s.height, s.aspect, s.to_hex()))
             .chain(self.grids.iter().map(|(d, g)| format!("{d} grid {}\n", g.to_text())))
+            .chain(self.other.iter().map(|l| format!("{l}\n")))
             .collect();
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -280,6 +297,7 @@ impl Font {
         let before = self.samples.len() + self.grids.len();
         self.samples.retain(|(e, _)| *e != d);
         self.grids.retain(|(e, _)| *e != d);
+        self.other.retain(|l| l.split_whitespace().next() != Some(&d.to_string()));
         before - self.samples.len() - self.grids.len()
     }
 
@@ -481,5 +499,24 @@ mod grid_tests {
         let back = Font::load(&path);
         std::fs::remove_file(&path).ok();
         assert_eq!(back.read(&[draw(FIVE, 6.0), draw(TWO, 6.0)], 4).map(|r| r.n), Some(52));
+    }
+
+    #[test]
+    fn keeps_lines_from_newer_builds() {
+        let path = std::env::temp_dir().join("ferret-other-test.digits");
+        let mut font = Font::default();
+        font.learn(&[draw(TWO, 3.2), draw(FIVE, 3.2)], 4, "25", false);
+        font.save(&path).unwrap();
+        let future = "2 vector 3 1,2,3\n5 vector 3 4,5,6\n";
+        std::fs::write(&path, std::fs::read_to_string(&path).unwrap() + future).unwrap();
+        let mut back = Font::load(&path);
+        assert_eq!(back.grids.len(), 2);
+        back.save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with(future));
+        back.forget(5);
+        back.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(text.contains("2 vector") && !text.contains("5 vector") && !text.contains("5 grid"));
     }
 }

@@ -201,7 +201,7 @@ impl Ui {
     }
 }
 
-fn games_page(ui_list: &gtk::ListBox, stack: &gtk::Stack, error: &adw::StatusPage, refresh: &gtk::Button) -> adw::NavigationPage {
+fn games_page(ui_list: &gtk::ListBox, stack: &gtk::Stack, error: &adw::StatusPage, refresh: &gtk::Button, banner: &adw::Banner) -> adw::NavigationPage {
     let group = adw::PreferencesGroup::builder()
         .title("Running games")
         .description("Pick the game to attach to. Ferret only works with single-player games.")
@@ -234,6 +234,7 @@ fn games_page(ui_list: &gtk::ListBox, stack: &gtk::Stack, error: &adw::StatusPag
     header.pack_start(refresh);
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(banner);
     toolbar.set_content(Some(stack));
     adw::NavigationPage::builder().title("Ferret").tag("games").child(&toolbar).build()
 }
@@ -349,8 +350,21 @@ fn build(app: &adw::Application) {
     let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&switcher));
+    // One per page (a widget has one parent), shown together.
+    let banners = [(); 2].map(|_| adw::Banner::builder().title("A newer version of Ferret is installed").button_label("Restart").build());
+    banners.iter().for_each(|b| b.set_action_name(Some("app.restart")));
+    let restart = gio::SimpleAction::new("restart", None);
+    {
+        let app = app.clone();
+        restart.connect_activate(move |_, _| match crate::core::restart_after_quit() {
+            Ok(()) => app.quit(),
+            Err(e) => eprintln!("restart: {e}"),
+        });
+    }
+    app.add_action(&restart);
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&banners[0]);
     toolbar.set_content(Some(&stack));
     let game_page = adw::NavigationPage::builder().title("Game").tag("game").child(&toolbar).build();
 
@@ -365,7 +379,7 @@ fn build(app: &adw::Application) {
     let nav = adw::NavigationView::new();
     // Esc is for pausing the game; pressing it here by mistake shouldn't leave the game page.
     nav.set_pop_on_escape(false);
-    nav.add(&games_page(&games, &games_stack, &games_error, &refresh));
+    nav.add(&games_page(&games, &games_stack, &games_error, &refresh, &banners[1]));
 
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&nav));
@@ -416,6 +430,31 @@ fn build(app: &adw::Application) {
                     ui.worker.run(|core| Event::Games(core.games()));
                 }
             }
+            glib::ControlFlow::Continue
+        });
+    }
+    // Notice a newer install: when the window comes back to the front (after installing from a
+    // terminal) and every 30 s.
+    {
+        let check = Rc::new(move || {
+            if banners[0].is_revealed() {
+                return;
+            }
+            let banners = banners.clone();
+            glib::spawn_future_local(async move {
+                if gio::spawn_blocking(crate::core::newer_install).await.unwrap_or(false) {
+                    banners.iter().for_each(|b| b.set_revealed(true));
+                }
+            });
+        });
+        let on_active = check.clone();
+        ui.window.connect_is_active_notify(move |w| {
+            if w.is_active() {
+                on_active();
+            }
+        });
+        glib::timeout_add_seconds_local(30, move || {
+            check();
             glib::ControlFlow::Continue
         });
     }
