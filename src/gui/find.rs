@@ -123,6 +123,8 @@ impl FindView {
             .hexpand(true)
             .wrap(true)
             .build();
+        // Green only while it says a value was found: any new message clears it.
+        status.connect_label_notify(|l| l.remove_css_class("success"));
         let crop = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::ScaleDown)
             .height_request(40)
@@ -170,8 +172,10 @@ impl FindView {
 
         let name = gtk::Entry::builder().placeholder_text("Name, for example gems").hexpand(true).build();
         let save = gtk::Button::builder().label("Save").css_classes(["suggested-action"]).build();
-        let found = gtk::Label::builder().label("Found it.").css_classes(["heading"]).build();
+        let found = gtk::Label::builder().label("Found it!").css_classes(["heading", "success"]).build();
         let result = frame_box();
+        // Green, so it can't be missed (the user didn't notice a find, more than once).
+        result.add_css_class("found-row");
         result.set_visible(false);
         result.append(&found);
         result.append(&name);
@@ -399,6 +403,18 @@ impl FindView {
         self.select(area);
     }
 
+    /// A log line in bold green, for finds.
+    fn log_found(&self, msg: &str) {
+        let buffer = self.log.buffer();
+        if buffer.tag_table().lookup("found").is_none() {
+            buffer.tag_table().add(&gtk::TextTag::builder().name("found").foreground("#2ec27e").weight(700).build());
+        }
+        buffer.insert_with_tags_by_name(&mut buffer.end_iter(), &format!("{msg}\n"), &["found"]);
+        let mark = buffer.create_mark(None, &buffer.end_iter(), false);
+        self.log.scroll_mark_onscreen(&mark);
+        buffer.delete_mark(&mark);
+    }
+
     pub fn log(&self, msg: &str) {
         let buffer = self.log.buffer();
         buffer.insert(&mut buffer.end_iter(), &format!("{}\n", group_counts(msg)));
@@ -523,11 +539,10 @@ impl FindView {
     }
 
     fn found(&self, loc: core::Loc) {
-        self.status.set_label(&format!(
-            "Found it at 0x{:x} ({}). Give it a name to keep it.",
-            loc.addr,
-            loc.kind.describe()
-        ));
+        let at = format!("0x{:x} ({})", loc.addr, loc.kind.describe());
+        self.status.set_label(&format!("Found it! It's at {at}. Give it a name below to keep it."));
+        self.status.add_css_class("success");
+        self.log_found(&format!("Found it: {at}"));
         self.result.set_visible(true);
         self.name.grab_focus();
     }

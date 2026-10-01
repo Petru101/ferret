@@ -33,8 +33,8 @@ fn main() {
                 return eprintln!("x y w h must be numbers");
             };
             let area = ocr::Rect { x, y, w, h };
-            match ocr::read_number(Path::new(&args[1]), area, Path::new(&args[6]), font(7).as_ref()) {
-                Ok(Some((n, learned))) => println!("{n}{}", if learned { " (learned digits)" } else { "" }),
+            match ocr::read_number_at(Path::new(&args[1]), area, Path::new(&args[6]), font(7).as_ref()) {
+                Ok(Some((n, learned, _))) => println!("{n}{}", if learned { " (learned digits)" } else { "" }),
                 r => println!("{r:?}"),
             }
         }

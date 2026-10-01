@@ -682,14 +682,9 @@ fn remove_candidates(dir: &Path) {
     }
 }
 
-/// Reads the number inside `area` of the frame, and whether the learned digits read it (rather
-/// than Tesseract). `debug` receives the cleaned-up crop that was read.
-pub fn read_number(frame: &Path, area: Rect, debug: &Path, font: Option<&Font>) -> Result<Option<(i64, bool)>, String> {
-    Ok(read_number_at(frame, area, debug, font)?.map(|(n, learned, _)| (n, learned)))
-}
-
-/// Like `read_number`, plus where the number is when the learned digits found it. The area is
-/// only a hint then: of the numbers they find on the whole frame (where other numbers vouch
+/// Reads the number inside `area` of the frame, whether the learned digits read it (rather
+/// than Tesseract), and where the number is when they found it. `debug` receives the
+/// cleaned-up crop that was read. With learned digits the area is only a hint: of the numbers they find on the whole frame (where other numbers vouch
 /// for a lone 1), the one overlapping it most, whole even when the area cuts it.
 pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font>) -> Result<Option<(i64, bool, Option<Rect>)>, String> {
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();

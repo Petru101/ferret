@@ -320,7 +320,20 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     );
 }
 
+/// Ferret's own styles.
+fn load_css() {
+    let css = gtk::CssProvider::new();
+    css.load_from_string(
+        ".found-row { background-color: alpha(@success_color, 0.15); border: 1px solid alpha(@success_color, 0.6); \
+         border-radius: 12px; padding: 8px 12px; }",
+    );
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+}
+
 fn build(app: &adw::Application) {
+    load_css();
     let cancel = Arc::new(AtomicBool::new(false));
     let (worker, events) = start_worker(cancel.clone());
 
