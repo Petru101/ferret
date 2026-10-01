@@ -669,6 +669,16 @@ impl FindView {
         self.root.set_visible_child_name("intro");
     }
 
+    /// The game as the search last saw it, with the watched box where it is now.
+    pub fn show_frame(&self, texture: gdk::Texture, area: Option<Rect>) {
+        self.picture.set_paintable(Some(&texture));
+        *self.texture.borrow_mut() = Some(texture);
+        if area.is_some() {
+            *self.selection.borrow_mut() = area;
+        }
+        self.area.queue_draw();
+    }
+
     pub fn save_as(&self, name: &str) {
         let name = name.trim().to_owned();
         // One save at a time: a second Enter or click while it runs would save it all over again.

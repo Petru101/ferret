@@ -40,6 +40,9 @@ pub enum Event {
     Digits(Vec<Vec<crate::font::DigitShape>>),
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
+    /// A frame the watched number was just read from, and the watched area: shown while
+    /// searching (at most one a second).
+    Frame(gtk::gdk::Texture, Option<crate::ocr::Rect>),
 }
 
 type Job = Box<dyn FnOnce(&mut Core) -> Event + Send>;
@@ -78,6 +81,17 @@ fn start_worker(cancel: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Eve
             }
         };
         core.cancel = cancel;
+        let frames = events_tx.clone();
+        let mut shown = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        // Decoded here, so the window doesn't stall on big frames.
+        core.on_frame = Some(Box::new(move |path, area| {
+            if shown.elapsed() >= std::time::Duration::from_secs(1) {
+                if let Ok(t) = gtk::gdk::Texture::from_filename(path) {
+                    frames.send_blocking(Event::Frame(t, area)).ok();
+                    shown = std::time::Instant::now();
+                }
+            }
+        }));
         for job in jobs_rx {
             if events_tx.send_blocking(job(&mut core)).is_err() {
                 break;
@@ -153,7 +167,7 @@ impl Ui {
     }
 
     fn handle(self: &Rc<Self>, event: Event) {
-        if !matches!(event, Event::Log(_) | Event::Failed(_)) {
+        if !matches!(event, Event::Log(_) | Event::Failed(_) | Event::Frame(..)) {
             self.worker.pending.set(self.worker.pending.get().saturating_sub(1));
         }
         // These can teach Ferret digits.
@@ -181,6 +195,7 @@ impl Ui {
             Event::Values(Err(_)) => {}
             Event::Numbers(r) => self.find.numbers(r),
             Event::Read(r, area) => self.find.read(r, area),
+            Event::Frame(t, area) => self.find.show_frame(t, area),
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
             Event::Saved(Ok((name, confirmed))) => {

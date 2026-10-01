@@ -484,6 +484,9 @@ pub struct Core {
     /// Numbers the learned digits found in the last frame read, to follow the watched number
     /// when the layout shifts.
     seen: Vec<Word>,
+    /// Told about every frame the watched number is read from, and where the watched area is
+    /// after it (the interface shows the game as the search sees it).
+    pub on_frame: Option<Box<dyn FnMut(&Path, Option<Rect>) + Send>>,
 }
 
 impl Core {
@@ -501,6 +504,7 @@ impl Core {
             cancel: Arc::new(AtomicBool::new(false)),
             ignored: None,
             seen: Vec::new(),
+            on_frame: None,
         })
     }
 
@@ -1006,6 +1010,9 @@ impl Core {
             }
             self.area = Some(to);
         }
+        if let Some(f) = self.on_frame.as_mut() {
+            f(frame, self.area);
+        }
         Ok(read)
     }
 
@@ -1302,6 +1309,10 @@ impl Core {
         if self.area.is_some() {
             let frame = self.frame()?;
             self.learn(&frame, &n, false);
+            let area = self.area;
+            if let Some(f) = self.on_frame.as_mut() {
+                f(&frame, area);
+            }
         }
         self.typed_search(n)
     }
