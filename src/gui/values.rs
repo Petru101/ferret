@@ -96,6 +96,9 @@ impl ValuesView {
             if v.unconfirmed {
                 about.push_str(". Not confirmed yet: if this number is wrong after restarting the game, find it again and save it under the same name");
             }
+            if let Some(d) = &v.doubtful {
+                about.push_str(&format!(". Not written right now: {d}"));
+            }
             w.group.set_description(Some(&about));
             w.value.set_label(&v.value.map_or("?".into(), |n| n.to_string()));
             w.limit.set_subtitle(&limit_subtitle(v));

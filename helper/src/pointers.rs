@@ -143,9 +143,32 @@ impl PtrPath {
     }
 }
 
+/// Where most pointer paths lead now.
+pub struct Vote {
+    pub addr: u64,
+    /// Which paths lead there.
+    pub leads: Vec<bool>,
+    /// How many paths lead to the most common other address.
+    pub next: usize,
+}
+
+impl Vote {
+    pub fn agree(&self) -> usize {
+        self.leads.iter().filter(|l| **l).count()
+    }
+
+    /// Clear enough to write there: several paths agree (or the only path given leads there)
+    /// and far fewer lead anywhere else. One path out of thousands of unconfirmed ones leading
+    /// to some aligned address is no evidence: writing there corrupts the game's memory.
+    pub fn clear(&self) -> bool {
+        let agree = self.agree();
+        (agree >= 2 || self.leads.len() == 1) && agree > 2 * self.next
+    }
+}
+
 /// The address most of `paths` lead to now, and which paths lead there. Paths that stopped
 /// working or lead elsewhere went through something that changed.
-pub fn vote(mem: &File, mods: &[Module], width: usize, paths: &[PtrPath]) -> Option<(u64, Vec<bool>)> {
+pub fn vote(mem: &File, mods: &[Module], width: usize, paths: &[PtrPath]) -> Option<Vote> {
     let ends: Vec<Option<u64>> = paths.iter().map(|p| p.follow(mem, mods, width)).collect();
     let mut counts: Vec<(u64, usize)> = Vec::new();
     for e in ends.iter().flatten() {
@@ -159,7 +182,8 @@ pub fn vote(mem: &File, mods: &[Module], width: usize, paths: &[PtrPath]) -> Opt
         Some((_, bn)) if bn >= n => best,
         _ => Some((a, n)),
     })?;
-    Some((best.0, ends.iter().map(|e| *e == Some(best.0)).collect()))
+    let next = counts.iter().filter(|(a, _)| *a != best.0).map(|(_, n)| *n).max().unwrap_or(0);
+    Some(Vote { addr: best.0, leads: ends.iter().map(|e| *e == Some(best.0)).collect(), next })
 }
 
 /// Every aligned pointer-sized word in writable memory that points (aligned) into writable memory, as

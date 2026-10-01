@@ -264,11 +264,15 @@ fn limiter_loop(shared: SharedLimiter) {
             }
             for l in limits.iter_mut().filter(|l| !l.paths.is_empty() && (l.paused.is_none() || l.retry_at <= now)) {
                 match pointers::vote(mem, modules, *width, &l.paths) {
-                    Some((addr, _)) => {
-                        if addr != l.addr || l.paused.is_some() {
+                    Some(v) if !v.clear() => {
+                        l.paused = Some("its pointer paths don't agree on where it is, not writing");
+                        l.retry_at = now + Duration::from_secs(1);
+                    }
+                    Some(v) => {
+                        if v.addr != l.addr || l.paused.is_some() {
                             l.restores += 1;
                         }
-                        l.addr = addr;
+                        l.addr = v.addr;
                         l.paused = None;
                     }
                     None => {
@@ -1007,7 +1011,8 @@ fn cmd_ptrscan(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 }
 
 /// follow <type> <path>...: where each path leads now ("<n>: 0x<addr>:<type> = <value>" or
-/// "<n>: broken"), then the address most of them agree on: "best 0x<addr>:<type> = <value>".
+/// "<n>: broken"), then the address most of them agree on: "best 0x<addr>:<type> = <value>",
+/// and "votes <paths leading there> <most leading elsewhere> <paths> clear|unclear".
 fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
     let kind = it.next().and_then(Kind::parse);
@@ -1023,7 +1028,11 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         }
     }
     match pointers::vote(mem, &mods, s.width, &paths) {
-        Some((addr, _)) => writeln!(out, "best {}", s.describe(addr, kind)),
+        Some(v) => {
+            writeln!(out, "best {}", s.describe(v.addr, kind))?;
+            let clear = if v.clear() { "clear" } else { "unclear" };
+            writeln!(out, "votes {} {} {} {clear}", v.agree(), v.next, paths.len())
+        }
         None => writeln!(out, "none of the paths lead anywhere now"),
     }
 }

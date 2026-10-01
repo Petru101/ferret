@@ -353,6 +353,8 @@ pub struct ValueRow {
     pub limit_state: Option<String>,
     /// Found through pointer paths no other run of the game has confirmed yet.
     pub unconfirmed: bool,
+    /// Why Ferret won't write it right now: its pointer paths don't agree on where it is.
+    pub doubtful: Option<String>,
 }
 
 pub enum AutoResult {
@@ -369,6 +371,36 @@ struct Game {
     /// Values found through pointer paths (as the helper takes them), followed again on every
     /// look: the game may have moved them.
     paths: Vec<(String, Vec<String>)>,
+    /// How those paths agreed when last followed.
+    votes: Vec<(String, Votes)>,
+}
+
+/// How a value's pointer paths agreed when last followed (the helper's "votes" line).
+#[derive(Clone, Copy)]
+struct Votes {
+    agree: usize,
+    /// Paths leading to the most common other address.
+    elsewhere: usize,
+    total: usize,
+    /// Clear enough to write there (see helper/src/pointers.rs `Vote::clear`).
+    clear: bool,
+}
+
+impl Votes {
+    fn parse(reply: &[String]) -> Option<Votes> {
+        let line = reply.iter().find_map(|l| l.strip_prefix("votes "))?;
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let [agree, elsewhere, total, clear] = f[..] else { return None };
+        Some(Votes { agree: agree.parse().ok()?, elsewhere: elsewhere.parse().ok()?, total: total.parse().ok()?, clear: clear == "clear" })
+    }
+
+    fn doubt(&self) -> String {
+        if self.elsewhere > 0 {
+            format!("its pointer paths disagree ({} of {} lead to one place, {} to another)", self.agree, self.total, self.elsewhere)
+        } else {
+            format!("only {} of its {} pointer paths leads anywhere", self.agree, self.total)
+        }
+    }
 }
 
 /// Most pointer paths kept from a scan. The real one can rank far down (Forager's gems: 590th
@@ -462,7 +494,7 @@ impl Core {
             return Err(e);
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
-        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new() });
+        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new() });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -550,6 +582,7 @@ impl Core {
         game.entries.retain(|(n, _)| n != name);
         game.entries.push((name.to_owned(), loc));
         game.paths.retain(|(n, _)| n != name);
+        game.votes.retain(|(n, _)| n != name);
         if !followed.is_empty() {
             game.paths.push((name.to_owned(), followed));
         }
@@ -603,6 +636,12 @@ impl Core {
 
     /// Where each pointer path (helper form) leads now, and the address most of them agree on.
     fn follow(&mut self, kind: Kind, paths: &[String]) -> (Vec<Option<u64>>, Option<(Loc, Option<i64>)>) {
+        let (ends, best, _) = self.follow_votes(kind, paths);
+        (ends, best)
+    }
+
+    /// `follow`, plus how strongly the paths agree.
+    fn follow_votes(&mut self, kind: Kind, paths: &[String]) -> (Vec<Option<u64>>, Option<(Loc, Option<i64>)>, Option<Votes>) {
         let reply = self.helper.call(&format!("follow {} {}", kind.name(), paths.join(" ")));
         let ends = (0..paths.len())
             .map(|i| {
@@ -611,7 +650,21 @@ impl Core {
             })
             .collect();
         let best = reply.iter().find_map(|l| l.strip_prefix("best ")).and_then(|l| parse_values(&[l.to_owned()]).first().copied());
-        (ends, best)
+        (ends, best, Votes::parse(&reply))
+    }
+
+    fn set_votes(&mut self, name: &str, votes: Option<Votes>) {
+        if let Some(game) = self.game.as_mut() {
+            game.votes.retain(|(n, _)| n != name);
+            game.votes.extend(votes.map(|v| (name.to_owned(), v)));
+        }
+    }
+
+    /// The latest vote of a value found through pointer paths, when it wasn't clear.
+    fn doubtful(&self, name: &str) -> Option<Votes> {
+        let game = self.game.as_ref()?;
+        game.paths.iter().any(|(n, _)| n == name).then_some(())?;
+        game.votes.iter().find(|(n, _)| n == name).map(|(_, v)| *v).filter(|v| !v.clear)
     }
 
     /// Follows the pointer paths of values found through them again: the game may have moved them.
@@ -622,7 +675,8 @@ impl Core {
             let Some(kind) = self.game.as_ref().and_then(|g| g.entries.iter().find(|(n, _)| *n == name)).map(|(_, l)| l.kind) else {
                 continue;
             };
-            let (_, best) = self.follow(kind, &paths);
+            let (_, best, votes) = self.follow_votes(kind, &paths);
+            self.set_votes(&name, votes);
             if let Some(e) = self.game.as_mut().and_then(|g| g.entries.iter_mut().find(|(n, _)| *n == name)) {
                 e.1.addr = best.map_or(0, |(loc, _)| loc.addr);
             }
@@ -713,7 +767,8 @@ impl Core {
             }
             let paths = entry.followed(&entries);
             if resolved.is_none() && !paths.is_empty() {
-                let (ends, best) = self.follow(entry.kind, &paths);
+                let (ends, best, votes) = self.follow_votes(entry.kind, &paths);
+                self.set_votes(name, votes);
                 // Keep following them: before a save is loaded they may lead nowhere yet.
                 let game = self.game()?;
                 game.paths.retain(|(n, _)| n != name);
@@ -722,6 +777,9 @@ impl Core {
                     Some((loc, Some(v))) => {
                         let agree = ends.iter().filter(|e| **e == Some(loc.addr)).count();
                         self.say(&format!("{name}: {agree} of {} pointer paths lead to it", paths.len()));
+                        if let Some(v) = votes.filter(|v| !v.clear) {
+                            self.say(&format!("{name}: {}: Ferret won't write it until they agree", v.doubt()));
+                        }
                         if entry.unconfirmed() {
                             if paths.len() < entry.candidates.len() {
                                 self.say(&format!("{name}: following the {} unconfirmed paths that start like other values' confirmed ones", paths.len()));
@@ -788,7 +846,8 @@ impl Core {
                     .find(|(n, _, _)| *n == name)
                     .and_then(|(_, _, rest)| rest.split_once(" fixed ").map(|(_, s)| format!("fixed {s}")));
                 let unconfirmed = saved.iter().any(|e| e.name == name && e.unconfirmed());
-                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, limit_state, unconfirmed }
+                let doubtful = self.doubtful(&name).map(|v| v.doubt());
+                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, limit_state, unconfirmed, doubtful }
             })
             .collect())
     }
@@ -804,6 +863,12 @@ impl Core {
             .ok_or(format!("no saved value called {name}"))?;
         if loc.addr == 0 {
             return Err(format!("{name} can't be found right now (is a save loaded?)"));
+        }
+        if let Some(v) = self.doubtful(name) {
+            return Err(format!(
+                "not written: {}, so it could land in the wrong place. If the number shown is wrong, find it again and save it as {name}",
+                v.doubt()
+            ));
         }
         let reply = self.helper.call(&format!("write {loc} {value}"));
         for l in &reply {

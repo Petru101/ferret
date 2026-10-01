@@ -80,7 +80,8 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                     .map(|s| format!("  kept {}, {s}", core::limit_text(v.min, v.max)))
                     .unwrap_or_default();
                 let value = v.value.map_or("??".into(), |v| v.to_string());
-                println!("{:<12} {value} (at 0x{:x}, {}){limit}", v.name, v.addr, v.kind.describe());
+                let doubt = v.doubtful.map(|d| format!("  not written: {d}")).unwrap_or_default();
+                println!("{:<12} {value} (at 0x{:x}, {}){limit}{doubt}", v.name, v.addr, v.kind.describe());
             }
         }
         "limit" => {
