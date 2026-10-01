@@ -196,7 +196,11 @@ impl Ui {
             Event::Reset => {}
             Event::Digits(shapes) => self.find.show_digits(shapes),
             Event::Done(Ok(msg)) => self.toast(&msg),
-            Event::Attached(Err(e)) | Event::Saved(Err(e)) | Event::Done(Err(e)) => self.toast(&e),
+            Event::Saved(Err(e)) => {
+                self.find.save_failed(&e);
+                self.toast(&e);
+            }
+            Event::Attached(Err(e)) | Event::Done(Err(e)) => self.toast(&e),
         }
     }
 }

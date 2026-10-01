@@ -671,9 +671,11 @@ impl FindView {
 
     pub fn save_as(&self, name: &str) {
         let name = name.trim().to_owned();
-        if name.is_empty() {
+        // One save at a time: a second Enter or click while it runs would save it all over again.
+        if name.is_empty() || !self.result.is_sensitive() {
             return;
         }
+        self.result.set_sensitive(false);
         self.busy(true);
         self.status.set_label("Saving: finding how the game gets to it (takes about 10 seconds)…");
         self.worker.run(move |core| Event::Saved(core.save(&name).map(|confirmed| (name, confirmed))));
@@ -681,9 +683,16 @@ impl FindView {
 
     pub fn saved(&self) {
         self.busy(false);
+        self.result.set_sensitive(true);
         self.result.set_visible(false);
         self.name.set_text("");
         self.status.set_label("Saved. Pick another number to find more.");
+    }
+
+    pub fn save_failed(&self, e: &str) {
+        self.busy(false);
+        self.result.set_sensitive(true);
+        self.status.set_label(&format!("Not saved: {e}"));
     }
 }
 

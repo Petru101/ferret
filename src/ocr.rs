@@ -821,10 +821,12 @@ pub fn learn(frame: &Path, area: Rect, n: i64, font: &mut Font, trusted: bool) -
         }
     }
     // Leading zeros are a guess. Glyphs that read as other digits aren't zeros; ones the font
-    // can't read yet are taken as zeros only when the player typed the number.
+    // can't read are taken as zeros only when the player typed the number and no 0 is known
+    // yet (once it is, something that doesn't read as 0 is an icon or a symbol: Creeper World
+    // got a junk "0" from the shape left of a typed 40).
     let zeros = match font.read(&glyphs[..extra], SCALE) {
         Some(r) => r.n == 0 && r.glyphs == extra,
-        None => !trusted,
+        None => !trusted && font.shapes(0).is_empty(),
     };
     if extra > 0 && !zeros {
         return Err(format!("{extra} glyph(s) left of {n} that may not be zeros; not learning from it"));
