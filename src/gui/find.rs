@@ -445,12 +445,17 @@ impl FindView {
         self.status.set_label("Reading…");
         self.worker.run(move |core| {
             core.set_area(area);
-            Event::Read(core.read_picked())
+            let read = core.read_picked();
+            Event::Read(read, core.watched())
         });
     }
 
-    pub fn read(&self, r: Result<Option<(i64, bool)>, String>) {
+    pub fn read(&self, r: Result<Option<(i64, bool)>, String>, area: Option<Rect>) {
         self.busy(false);
+        // Show where Ferret now watches: the box snaps to the number it found.
+        if area.is_some() {
+            *self.selection.borrow_mut() = area;
+        }
         if let Ok(t) = gdk::Texture::from_filename(core::cache_dir().join("area.png")) {
             self.crop.set_paintable(Some(&t));
         }

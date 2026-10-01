@@ -864,17 +864,32 @@ impl Core {
 
     /// Reads the number inside the watched area, and whether the learned digits read it.
     fn read_learned(&mut self) -> Result<Option<(i64, bool)>, String> {
-        let area = self.area.ok_or("no area picked yet")?;
         let frame = self.frame()?;
-        ocr::read_number(&frame, area, &cache_dir().join("area.png"), Some(&self.font))
+        self.read_frame(&frame)
+    }
+
+    /// Reads the watched number in `frame`. When the learned digits find it, the watched area
+    /// follows it: the whole number with room to grow, wherever the old area cut it.
+    fn read_frame(&mut self, frame: &Path) -> Result<Option<(i64, bool)>, String> {
+        let area = self.area.ok_or("no area picked yet")?;
+        let read = ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font))?;
+        if let Some(rect) = read.and_then(|r| r.2) {
+            self.area = Some(ocr::watch_area(rect));
+        }
+        Ok(read.map(|(n, learned, _)| (n, learned)))
+    }
+
+    /// The area being watched (it follows the number).
+    pub fn watched(&self) -> Option<Rect> {
+        self.area
     }
 
     /// Reads the number just picked, and whether the game's learned digits read it. A read
     /// they didn't make is a guess to confirm; its frame is kept for `confirm`.
     pub fn read_picked(&mut self) -> Result<Option<(i64, bool)>, String> {
-        let area = self.area.ok_or("no area picked yet")?;
+        self.area.ok_or("no area picked yet")?;
         let frame = self.frame()?;
-        let read = ocr::read_number(&frame, area, &cache_dir().join("area.png"), Some(&self.font))?;
+        let read = self.read_frame(&frame)?;
         fs::rename(&frame, cache_dir().join("picked.png")).map_err(|e| e.to_string())?;
         Ok(read)
     }

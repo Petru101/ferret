@@ -258,6 +258,11 @@ impl Font {
         self.samples.is_empty() && self.grids.is_empty()
     }
 
+    /// Has pixel-font grids: then any solid bar of any size reads as a 1.
+    pub fn has_grids(&self) -> bool {
+        !self.grids.is_empty()
+    }
+
     /// The digit a glyph is, if any.
     pub fn digit_of(&self, g: &Glyph, scale: u32) -> Option<u8> {
         self.digit(g, scale).map(|(d, _)| d)

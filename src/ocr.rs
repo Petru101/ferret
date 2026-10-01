@@ -624,8 +624,14 @@ fn read_areas(img: &RgbImage, areas: &[Rect], padded: bool, dir: &Path, font: Op
 /// The candidate the learned digits read completely, and its number: among the tallest text,
 /// the one with the most digits, then the closest match.
 fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, i64)> {
-    let reads: Vec<(usize, FontRead)> =
-        cands.iter().enumerate().filter_map(|(i, c)| Some((i, font.read(&c.glyphs, SCALE)?))).collect();
+    // With pixel-font grids any bar is a 1: bars around the number (slot borders) read as 1s.
+    let bars = |r: &FontRead| font.has_grids() && r.glyphs == r.n.to_string().len() && r.n.to_string().bytes().all(|c| c == b'1');
+    let reads: Vec<(usize, FontRead)> = cands
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| Some((i, font.read(&c.glyphs, SCALE)?)))
+        .filter(|(_, r)| !bars(r))
+        .collect();
     let tallest = reads.iter().map(|(i, _)| cands[*i].glyph_h).max()?;
     reads
         .into_iter()
@@ -679,7 +685,33 @@ fn remove_candidates(dir: &Path) {
 /// Reads the number inside `area` of the frame, and whether the learned digits read it (rather
 /// than Tesseract). `debug` receives the cleaned-up crop that was read.
 pub fn read_number(frame: &Path, area: Rect, debug: &Path, font: Option<&Font>) -> Result<Option<(i64, bool)>, String> {
+    Ok(read_number_at(frame, area, debug, font)?.map(|(n, learned, _)| (n, learned)))
+}
+
+/// Like `read_number`, plus where the number is when the learned digits found it. The area is
+/// only a hint then: of the numbers they find on the whole frame (where other numbers vouch
+/// for a lone 1), the one overlapping it most, whole even when the area cuts it.
+pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font>) -> Result<Option<(i64, bool, Option<Rect>)>, String> {
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
+    if let Some(f) = font.filter(|f| !f.is_empty()) {
+        let inside = |r: Rect| {
+            let w = (r.x + r.w).min(area.x + area.w).saturating_sub(r.x.max(area.x));
+            let h = (r.y + r.h).min(area.y + area.h).saturating_sub(r.y.max(area.y));
+            w * h
+        };
+        // Most of the number inside the area, then the most of it.
+        let best = font_numbers(&img, f)
+            .into_iter()
+            .filter(|w| inside(w.rect) > 0)
+            .max_by_key(|w| (inside(w.rect) * 100 / (w.rect.w * w.rect.h).max(1), inside(w.rect)));
+        if let Some((w, n)) = best.and_then(|w| w.text.parse::<i64>().ok().map(|n| (w, n))) {
+            let r = w.rect;
+            let (x, y) = (r.x.saturating_sub(2), r.y.saturating_sub(2));
+            let crop = imageops::crop_imm(&img, x, y, (r.w + 4).min(img.width() - x), (r.h + 4).min(img.height() - y)).to_image();
+            imageops::resize(&crop, crop.width() * 4, crop.height() * 4, imageops::FilterType::Nearest).save(debug).ok();
+            return Ok(Some((n, true, Some(r))));
+        }
+    }
     let dir = debug.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let read = read_areas(&img, &[area], false, dir, font)?.pop().flatten();
     // With nothing read, show the first candidate instead.
@@ -688,7 +720,7 @@ pub fn read_number(frame: &Path, area: Rect, debug: &Path, font: Option<&Font>) 
         std::fs::remove_file(debug).ok();
     }
     remove_candidates(dir);
-    Ok(read.map(|r| (r.n, r.learned)))
+    Ok(read.map(|r| (r.n, r.learned, None)))
 }
 
 /// Learns the game's digits from `area` showing `n`. The glyphs must split into the number's

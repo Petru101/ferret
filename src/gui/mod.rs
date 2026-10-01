@@ -28,7 +28,8 @@ pub enum Event {
     Attached(Result<(u32, String), String>),
     Values(Result<Vec<ValueRow>, String>),
     Numbers(Result<(PathBuf, Vec<Word>), String>),
-    Read(Result<Option<(i64, bool)>, String>),
+    /// The read, and the watched area afterwards (it snaps to the number found).
+    Read(Result<Option<(i64, bool)>, String>, Option<crate::ocr::Rect>),
     Auto(Result<AutoResult, String>),
     Typed(Result<AutoResult, String>),
     /// The name, and whether Ferret is sure to find it again after a restart.
@@ -179,7 +180,7 @@ impl Ui {
             Event::Values(Ok(values)) => self.values.update(values),
             Event::Values(Err(_)) => {}
             Event::Numbers(r) => self.find.numbers(r),
-            Event::Read(r) => self.find.read(r),
+            Event::Read(r, area) => self.find.read(r, area),
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
             Event::Saved(Ok((name, confirmed))) => {
