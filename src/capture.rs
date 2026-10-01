@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{ObjectPath, OwnedFd, OwnedValue, Value};
@@ -126,20 +126,26 @@ impl WindowCapture {
         // old size), so keep the second. keepalive-time resends a frame when the game doesn't
         // draw a new one.
         let each = format!("{}.%d", out.display());
-        let status = Command::new("timeout")
+        let run = Command::new("timeout")
             .args(["10", "gst-launch-1.0", "-q"])
             .args(["pipewiresrc", &format!("fd={raw}"), &format!("path={}", self.node), "num-buffers=2", "keepalive-time=250"])
             .args(["!", "videoconvert", "!", "video/x-raw,format=RGB", "!", "pngenc", "!", "multifilesink"])
             .arg(format!("location={each}"))
-            .status()
+            .stdout(Stdio::null())
+            .output()
             .map_err(|e| e.to_string())?;
+        let status = run.status;
         drop(fd);
         let kept = fs::rename(each.replace("%d", "1"), out).is_ok();
         fs::remove_file(each.replace("%d", "0")).ok();
         if status.success() && kept && out.metadata().map(|m| m.len() > 0).unwrap_or(false) {
             Ok(())
         } else {
-            Err(format!("could not grab a frame ({status})"))
+            // PipeWire 1.6's pipewiresrc unrefs a NULL buffer on the first frame with
+            // keepalive-time (fixed upstream in 6c25924b): harmless, not the reason.
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            let why = stderr.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains("gst_mini_object_unref")).last();
+            Err(format!("could not grab a frame ({status}{})", why.map(|w| format!(": {w}")).unwrap_or_default()))
         }
     }
 }
