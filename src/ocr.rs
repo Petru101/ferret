@@ -26,6 +26,90 @@ pub struct Word {
     pub conf: f32,
 }
 
+/// A number as the game shows it: "1250", "1.2" (a decimal) or "3:17" (minutes:seconds).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shown(String);
+
+impl Shown {
+    /// "1,250" (thousands separators go), "1.2", "3:17", "1:02:03", "-5"; "13/40" (current/most)
+    /// is its first part, or its second when the first is missing ("/40"). None for anything else.
+    pub fn parse(text: &str) -> Option<Shown> {
+        let text = text.trim();
+        if let Some((a, b)) = text.split_once('/') {
+            return Shown::parse(a).or_else(|| a.trim().is_empty().then(|| Shown::parse(b)).flatten());
+        }
+        let t: String = text.chars().filter(|c| *c != ',').collect();
+        let (sign, body) = t.strip_prefix('-').map_or(("", t.as_str()), |b| ("-", b));
+        let digits = |p: &str| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit());
+        let ok = if body.contains(':') {
+            let parts: Vec<&str> = body.split(':').collect();
+            sign.is_empty() && (2..=3).contains(&parts.len()) && digits(parts[0]) && parts[1..].iter().all(|p| p.len() == 2 && digits(p))
+        } else if let Some((a, b)) = body.split_once('.') {
+            digits(a) && digits(b)
+        } else {
+            digits(body)
+        };
+        // Leading zeros ("01", "007") are drawn, not part of the value: learning takes glyphs
+        // left of the digits for zeros.
+        let lead = body.len() - body.trim_start_matches('0').len();
+        let lead = lead.min(body.find([':', '.']).unwrap_or(body.len()).saturating_sub(1));
+        ok.then(|| Shown(format!("{sign}{}", &body[lead..])))
+    }
+
+    pub fn whole(n: i64) -> Shown {
+        Shown(n.to_string())
+    }
+
+    /// The digits as drawn, for learning their shapes: "1.2" -> "12", "3:17" -> "317".
+    pub fn digits(&self) -> String {
+        self.0.chars().filter(char::is_ascii_digit).collect()
+    }
+
+    pub fn decimals(&self) -> u32 {
+        self.0.split_once('.').map_or(0, |(_, b)| b.len() as u32)
+    }
+
+    /// The value it stands for: "1.2" -> 1.2, "3:17" -> 197 (seconds; games keep timers that way).
+    pub fn value(&self) -> f64 {
+        if self.0.contains(':') {
+            return self.0.split(':').fold(0.0, |t, p| t * 60.0 + p.parse::<f64>().unwrap_or(0.0));
+        }
+        self.0.parse().unwrap_or(0.0)
+    }
+
+    /// What the helper searches for: "1.2" (floats near it, and 12 in whole numbers), "197".
+    pub fn search(&self) -> String {
+        if self.0.contains(':') { (self.value() as i64).to_string() } else { self.0.clone() }
+    }
+
+    /// The digits as one whole number: "1.2" -> 12 (how a game may keep tenths).
+    pub fn scaled(&self) -> i64 {
+        let n: i64 = self.digits().parse().unwrap_or(0);
+        if self.0.starts_with('-') { -n } else { n }
+    }
+}
+
+impl std::fmt::Display for Shown {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// What small marks between two digits make, from their boxes and the digits' top and bottom:
+/// "." (one dot at the bottom) or ":" (one in the middle and one at the bottom).
+fn separator(marks: &[(u32, u32, u32, u32)], top: u32, bottom: u32) -> Option<char> {
+    let h = bottom - top + 1;
+    let dots: Vec<&(u32, u32, u32, u32)> =
+        marks.iter().filter(|m| m.2 - m.0 < h / 3 + 1 && m.3 - m.1 < h / 3 + 1 && m.1 >= top && m.3 <= bottom + 1).collect();
+    let low = dots.iter().any(|m| m.3 + h / 6 >= bottom);
+    let middle = dots.iter().any(|m| m.1 > top + h / 5 && m.3 < top + h * 2 / 3);
+    match (low, middle) {
+        (true, true) => Some(':'),
+        (true, false) => Some('.'),
+        _ => None,
+    }
+}
+
 /// Runs Tesseract on an image, or on each image named in a list file: words with their page
 /// (1-based, the position in the list).
 fn tesseract(img: &Path, psm: u32, config: &[&str]) -> Result<Vec<(usize, Word)>, String> {
@@ -355,6 +439,19 @@ fn font_rows(blobs: &[Blob]) -> Vec<Word> {
     for b in blobs.iter().filter(|b| (b.glyph.is_none() || slash(b)) && (6..=80).contains(&(b.y1 - b.y0 + 1))) {
         marks.entry(b.colour).or_default().push(b);
     }
+    // Small marks of a glyph's colour: dots of a decimal point or a colon. Sorted by x.
+    let mut dots: std::collections::HashMap<(u8, u8, u8), Vec<&Blob>> = Default::default();
+    for b in blobs.iter().filter(|b| b.glyph.is_none() && b.y1 - b.y0 < 27 && b.x1 - b.x0 < 27) {
+        dots.entry(b.colour).or_default().push(b);
+    }
+    dots.values_mut().for_each(|d| d.sort_by_key(|b| b.x0));
+    let sep = |a: &Blob, b: &Blob| {
+        let d = dots.get(&a.colour)?;
+        let from = d.partition_point(|m| m.x0 <= a.x1);
+        let marks: Vec<(u32, u32, u32, u32)> =
+            d[from..].iter().take_while(|m| m.x1 < b.x0).map(|m| (m.x0, m.y0, m.x1, m.y1)).collect();
+        separator(&marks, a.y0.min(b.y0), a.y1.max(b.y1))
+    };
     let between = |a: &Blob, b: &Blob| {
         let h = a.y1 - a.y0 + 1;
         marks.get(&a.colour).is_some_and(|m| {
@@ -367,7 +464,7 @@ fn font_rows(blobs: &[Blob]) -> Vec<Word> {
             && ha.abs_diff(hb) <= ha / 4 + 1
             && a.y0.abs_diff(b.y0) <= ha / 4 + 1
             && b.x0 > a.x1
-            && b.x0 - a.x1 <= ha * 4 / 5
+            && (b.x0 - a.x1 <= ha * 4 / 5 || b.x0 - a.x1 <= ha * 3 / 2 && sep(a, b).is_some())
             && !between(a, b)
     };
     let mut used = vec![false; glyphs.len()];
@@ -387,8 +484,18 @@ fn font_rows(blobs: &[Blob]) -> Vec<Word> {
             row.push(j);
         }
         row.iter().for_each(|&j| used[j] = true);
-        let digits: Option<String> = row.iter().map(|&j| glyphs[j].digit.map(|d| char::from(b'0' + d))).collect();
-        let Some(text) = digits else { continue };
+        let mut text = String::new();
+        for (k, &j) in row.iter().enumerate() {
+            let Some(d) = glyphs[j].digit else { break };
+            if k > 0 {
+                text.extend(sep(glyphs[row[k - 1]], glyphs[j]));
+            }
+            text.push(char::from(b'0' + d));
+        }
+        // A glyph that isn't a digit makes it a word; "1.2.3" isn't a number either.
+        if text.chars().filter(char::is_ascii_digit).count() != row.len() || Shown::parse(&text).is_none() {
+            continue;
+        }
         let (x0, y0) = (row.iter().map(|&j| glyphs[j].x0).min().unwrap(), row.iter().map(|&j| glyphs[j].y0).min().unwrap());
         let (x1, y1) = (row.iter().map(|&j| glyphs[j].x1).max().unwrap(), row.iter().map(|&j| glyphs[j].y1).max().unwrap());
         let word = Word { text, rect: Rect { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }, conf: 99.0 };
@@ -468,6 +575,37 @@ struct Candidate {
     glyph_h: u32,
     rect: Rect,
     glyphs: Vec<Glyph>,
+    /// Marks too small to be glyphs (crop pixels x0, y0, x1, y1), by x: dots of "1.2" or "3:17".
+    marks: Vec<(u32, u32, u32, u32)>,
+    /// Top and bottom of the glyphs, crop pixels.
+    band: (u32, u32),
+}
+
+impl Candidate {
+    /// The separators between `glyphs` (some of this candidate's, in order): "." or ":" after
+    /// the glyph at each index.
+    fn separators(&self, glyphs: &[Glyph]) -> Vec<Option<char>> {
+        glyphs
+            .windows(2)
+            .map(|p| {
+                let (from, to) = (p[0].x + p[0].w, p[1].x);
+                let marks: Vec<(u32, u32, u32, u32)> = self.marks.iter().filter(|m| m.0 >= from && m.2 < to).copied().collect();
+                separator(&marks, self.band.0, self.band.1)
+            })
+            .collect()
+    }
+
+    /// `digits` (one per glyph) as the number shown, with the separators between the glyphs.
+    fn shown(&self, glyphs: &[Glyph], digits: &str) -> Option<Shown> {
+        let mut text = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 {
+                text.extend(self.separators(&glyphs[i - 1..=i]).into_iter().flatten());
+            }
+            text.push(c);
+        }
+        Shown::parse(&text)
+    }
 }
 
 /// Keeps the glyph-like blobs of a mask (4x crop size): drops lines running across the whole
@@ -517,6 +655,8 @@ fn glyphs(mask: &[bool], w: u32, h: u32, cut_off: bool) -> Option<Candidate> {
     let (x0, y0) = (kept.iter().map(|b| b.0).min()?, kept.iter().map(|b| b.1).min()?);
     let (x1, y1) = (kept.iter().map(|b| b.2).max()?, kept.iter().map(|b| b.3).max()?);
     let rect = Rect { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+    let mut marks: Vec<(u32, u32, u32, u32)> = blobs.iter().zip(&keep).filter(|(_, k)| !**k).map(|(b, _)| *b).collect();
+    marks.sort();
     // Blobs above one another (a digit broken in two) make one glyph.
     let mut boxes: Vec<((u32, u32, u32, u32), Vec<u32>)> = Vec::new();
     let mut order: Vec<usize> = (0..blobs.len()).filter(|i| keep[*i]).collect();
@@ -539,14 +679,19 @@ fn glyphs(mask: &[bool], w: u32, h: u32, cut_off: bool) -> Option<Candidate> {
             Glyph { x: bx0, w: gw, h: gh, ink, cut: bx0 == 0 || bx1 == w - 1 }
         })
         .collect();
-    // Tesseract wants a margin around the text.
+    // Tesseract wants a margin around the text. Small marks within the number's span go in too:
+    // the dots of "1.2" and "3:17".
+    let dot = |b: &(u32, u32, u32, u32)| {
+        b.0 > x0 && b.2 < x1 && b.1 >= y0 && b.3 <= y1 && (b.2 - b.0) * 3 < y1 - y0 && (b.3 - b.1) * 3 < y1 - y0
+    };
+    let drawn: Vec<bool> = blobs.iter().zip(&keep).map(|(b, k)| *k || dot(b)).collect();
     let mut img = GrayImage::from_pixel(w + 40, h + 40, Luma([255]));
     for (i, l) in label.iter().enumerate() {
-        if *l != 0 && keep[*l as usize - 1] {
+        if *l != 0 && drawn[*l as usize - 1] {
             img.put_pixel(20 + i as u32 % w, 20 + i as u32 / w, Luma([0]));
         }
     }
-    Some(Candidate { img, glyph_h: tallest, rect, glyphs })
+    Some(Candidate { img, glyph_h: tallest, rect, glyphs, marks, band: (y0, y1) })
 }
 
 /// Turns a slashed zero (Ø, common in HUD fonts, and Tesseract can't read it) into a plain 0.
@@ -633,7 +778,7 @@ fn candidates(img: &RgbImage, area: Rect, cut_off: bool) -> Vec<Candidate> {
 }
 
 struct Read {
-    n: i64,
+    n: Shown,
     conf: f32,
     file: PathBuf,
     rect: Rect,
@@ -705,19 +850,26 @@ fn read_areas(img: &RgbImage, areas: &[Rect], padded: bool, dir: &Path, font: Op
         // Tesseract drops digits it can't read (a blocky "2" in "26" gives 6). When the crop has
         // more glyphs the size of the learned digits than the read has digits, and no letters,
         // it is missing some: better no number than a wrong one.
-        let glyphs = number_glyphs(&per_area[a][c].glyphs);
+        let cand = &per_area[a][c];
+        let glyphs = number_glyphs(&cand.glyphs);
+        let digits = n.digits();
         // "13/40" read as 1340 or 13140: Tesseract took the slash for digits.
-        let slash = per_area[a][c].glyphs.iter().any(|g| !g.cut && is_slash(g));
-        if slash && glyphs.iter().filter(|g| !g.cut).count() != n.unsigned_abs().to_string().len() {
+        let slash = cand.glyphs.iter().any(|g| !g.cut && is_slash(g));
+        if slash && glyphs.iter().filter(|g| !g.cut).count() != digits.len() {
+            continue;
+        }
+        // "1.2" read as 12: the crop has the dot, the read doesn't.
+        let whole: Vec<Glyph> = glyphs.iter().filter(|g| !g.cut).cloned().collect();
+        if whole.len() == digits.len() && cand.shown(&whole, &digits).is_some_and(|s| s != n) {
             continue;
         }
         let sized = font.map_or(0, |f| f.digit_sized(&glyphs, SCALE));
         let letters = free.iter().any(|w| w.text.chars().any(char::is_alphabetic));
-        if sized > n.unsigned_abs().to_string().len() && !letters {
+        if sized > digits.len() && !letters {
             continue;
         }
         // A digit the learned ones read differently: Tesseract misread it.
-        if font.is_some_and(|f| !f.agrees(&glyphs, SCALE, n)) {
+        if font.is_some_and(|f| !f.agrees(&glyphs, SCALE, &digits)) {
             continue;
         }
         found[a].push((glyph_h, Read { n, conf, file, rect, learned: false }));
@@ -739,7 +891,7 @@ fn read_areas(img: &RgbImage, areas: &[Rect], padded: bool, dir: &Path, font: Op
 
 /// The candidate the learned digits read completely, and its number: among the tallest text,
 /// the one with the most digits, then the closest match.
-fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, i64)> {
+fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, Shown)> {
     // With pixel-font grids any bar is a 1: bars around the number (slot borders) read as 1s.
     let bars = |r: &FontRead| font.has_grids() && r.glyphs == r.n.to_string().len() && r.n.to_string().bytes().all(|c| c == b'1');
     let reads: Vec<(usize, FontRead)> = cands
@@ -753,7 +905,10 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, i64)> {
         .into_iter()
         .filter(|(i, _)| cands[*i].glyph_h * 4 >= tallest * 3)
         .min_by_key(|(_, r)| (std::cmp::Reverse(r.glyphs), r.worst))
-        .map(|(i, r)| (i, r.n))
+        .and_then(|(i, r)| {
+            let glyphs = number_glyphs(&cands[i].glyphs);
+            Some((i, cands[i].shown(&glyphs, &format!("{:0w$}", r.n, w = r.glyphs))?))
+        })
 }
 
 /// The number in a crop and its confidence. When the free read is clear (confident numbers and
@@ -761,14 +916,11 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, i64)> {
 /// digits. Otherwise the digits-only read, leaving out the words the free read saw as letters.
 /// If that leaves nothing, a confident free read means it really is just letters; if not, the
 /// free read may have misread odd digits.
-fn number_in(digit_words: &[Word], free: &[Word]) -> Option<(i64, f32)> {
-    // "13/40" (current/most): the current value. The digits-only read would make it 1340.
-    let fraction = |w: &Word| {
-        let (a, b) = w.text.split_once('/')?;
-        let all = |t: &str| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit());
-        (w.conf >= 60.0 && all(a) && all(b)).then(|| a.parse().ok()).flatten()
-    };
-    if let Some((n, w)) = free.iter().find_map(|w| Some((fraction(w)?, w))) {
+fn number_in(digit_words: &[Word], free: &[Word]) -> Option<(Shown, f32)> {
+    // "13/40" (current/most), "1.2", "3:17": as shown. The digits-only read would make them
+    // 1340, 12 and 317.
+    let marked = |w: &Word| w.conf >= 60.0 && w.text.contains(['/', '.', ':']);
+    if let Some((n, w)) = free.iter().filter(|w| marked(w)).find_map(|w| Some((Shown::parse(&w.text)?, w))) {
         return Some((n, w.conf));
     }
     let is_letters = |f: &Word| f.text.chars().any(char::is_alphabetic) && !has_digit(f);
@@ -776,7 +928,7 @@ fn number_in(digit_words: &[Word], free: &[Word]) -> Option<(i64, f32)> {
     if free.iter().any(is_number) && free.iter().all(|f| is_letters(f) || is_number(f)) {
         let numbers: Vec<&Word> = free.iter().filter(|f| is_number(f)).collect();
         let text: String = numbers.iter().map(|w| w.text.as_str()).collect();
-        return Some((digits(&text)?, numbers.iter().map(|w| w.conf).fold(f32::MAX, f32::min)));
+        return Some((Shown::whole(digits(&text)?), numbers.iter().map(|w| w.conf).fold(f32::MAX, f32::min)));
     }
     let letters = |w: &&Word| {
         let seen = || free.iter().filter(|f| overlaps(f.rect, w.rect));
@@ -796,7 +948,7 @@ fn number_in(digit_words: &[Word], free: &[Word]) -> Option<(i64, f32)> {
         let same = free.iter().filter(|f| f.text == w.text && overlaps(f.rect, w.rect));
         same.map(|f| f.conf).fold(w.conf, f32::max)
     };
-    Some((digits(&text)?, kept.iter().map(conf).fold(f32::MAX, f32::min)))
+    Some((Shown::whole(digits(&text)?), kept.iter().map(conf).fold(f32::MAX, f32::min)))
 }
 
 fn remove_candidates(dir: &Path) {
@@ -859,7 +1011,7 @@ pub fn read_number_at(
     debug: &Path,
     font: Option<&Font>,
     before: &mut Vec<Word>,
-) -> Result<(Option<(i64, bool)>, Option<Rect>), String> {
+) -> Result<(Option<(Shown, bool)>, Option<Rect>), String> {
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
     let mut moved_to = None;
     if let Some(f) = font.filter(|f| !f.is_empty()) {
@@ -879,7 +1031,7 @@ pub fn read_number_at(
             .into_iter()
             .filter(|w| inside(w.rect) > 0)
             .max_by_key(|w| (inside(w.rect) * 100 / (w.rect.w * w.rect.h).max(1), std::cmp::Reverse(w.rect.x)));
-        if let Some((w, n)) = best.and_then(|w| w.text.parse::<i64>().ok().map(|n| (w, n))) {
+        if let Some((w, n)) = best.and_then(|w| Shown::parse(&w.text).map(|n| (w, n))) {
             let r = w.rect;
             let (x, y) = (r.x.saturating_sub(2), r.y.saturating_sub(2));
             let crop = imageops::crop_imm(&img, x, y, (r.w + 4).min(img.width() - x), (r.h + 4).min(img.height() - y)).to_image();
@@ -901,19 +1053,19 @@ pub fn read_number_at(
 /// Learns the game's digits from `area` showing `n`. The glyphs must split into the number's
 /// digits, or a couple more on the left (numbers shown with leading zeros, like "09"), all about
 /// the same height. `trusted`: `n` comes from memory, not from the player. Returns what it did.
-pub fn learn(frame: &Path, area: Rect, n: i64, font: &mut Font, trusted: bool) -> Result<String, String> {
-    if n < 0 {
+pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool) -> Result<String, String> {
+    if n.value() < 0.0 {
         return Err("only learns from numbers of 0 or more".into());
     }
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
-    let text = n.to_string();
+    let text = n.digits();
     // Glyphs the crop's edge cuts off are something else. "13/40" is two numbers: the part
     // the learned digits don't contradict, the current value (before the slash) first.
     let parts = |c: &Candidate| -> Vec<Vec<Glyph>> {
         number_parts(&c.glyphs)
             .into_iter()
             .map(|p| p.into_iter().filter(|g| !g.cut).collect::<Vec<_>>())
-            .filter(|p| trusted || font.agrees(p, SCALE, n))
+            .filter(|p| trusted || font.agrees(p, SCALE, &text))
             .collect()
     };
     let fits_part = |glyphs: &[Glyph]| {
@@ -952,7 +1104,7 @@ pub fn learn(frame: &Path, area: Rect, n: i64, font: &mut Font, trusted: bool) -
     let (cand, extra) = chosen.ok_or(format!("could not split the number into the {} digits of {n}", text.len()))?;
     let glyphs = fit(cand).map(|(_, p)| p).unwrap_or_default();
     if !trusted {
-        if let Some(r) = font.read(&glyphs, SCALE).filter(|r| r.n != n) {
+        if let Some(r) = font.read(&glyphs, SCALE).filter(|r| format!("{:0w$}", r.n, w = r.glyphs) != text) {
             return Err(format!("the learned digits read {} there, not {n}; not learning from it", r.n));
         }
     }
@@ -972,7 +1124,8 @@ pub fn learn(frame: &Path, area: Rect, n: i64, font: &mut Font, trusted: bool) -
     if let Some(seen) = finder_glyphs(&img, font, area, &glyphs) {
         added += font.learn(&seen, 1, &label, trusted);
     }
-    Ok(format!("learned the digits of {label}: {added} new shapes (knows {})", font.known()))
+    let shown = if extra > 0 { label } else { n.to_string() };
+    Ok(format!("learned the digits of {shown}: {added} new shapes (knows {})", font.known()))
 }
 
 /// The full-frame finder's glyphs (`glyph_blobs`) where the learned `glyphs` (4x crop
@@ -1003,4 +1156,30 @@ fn finder_glyphs(img: &RgbImage, font: &Font, area: Rect, glyphs: &[Glyph]) -> O
         .into_iter()
         .filter_map(|c| spots.iter().map(|s| at(c, *s).cloned()).collect::<Option<Vec<Glyph>>>())
         .max_by_key(|gs| gs.iter().map(|g| g.ink.iter().filter(|i| **i).count()).sum::<usize>())
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::Shown;
+
+    #[test]
+    fn parses_what_games_show() {
+        let p = |t: &str| Shown::parse(t).map(|s| (s.to_string(), s.digits(), s.value(), s.search()));
+        assert_eq!(p("1,250"), Some(("1250".into(), "1250".into(), 1250.0, "1250".into())));
+        assert_eq!(p("1.2"), Some(("1.2".into(), "12".into(), 1.2, "1.2".into())));
+        assert_eq!(p("0.05").map(|s| s.1), Some("005".into()));
+        assert_eq!(p("3:17"), Some(("3:17".into(), "317".into(), 197.0, "197".into())));
+        assert_eq!(p("1:02:03").map(|s| s.2), Some(3723.0));
+        assert_eq!(p("13/40").map(|s| s.0), Some("13".into()));
+        assert_eq!(p("/40").map(|s| s.0), Some("40".into()));
+        assert_eq!(p("-5").map(|s| s.2), Some(-5.0));
+        assert_eq!(p("09").map(|s| s.0), Some("9".into()));
+        assert_eq!(p("000").map(|s| s.0), Some("0".into()));
+        assert_eq!(p("0.5").map(|s| s.0), Some("0.5".into()));
+        assert_eq!(p("03:07").map(|s| s.0), Some("3:07".into()));
+        for bad in ["", "1.2.3", "3:7", "1:", ".5", "12a", "3:17.5"] {
+            assert_eq!(p(bad), None, "{bad}");
+        }
+        assert_eq!(Shown::parse("1.25").map(|s| (s.decimals(), s.scaled())), Some((2, 125)));
+    }
 }

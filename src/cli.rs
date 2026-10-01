@@ -61,7 +61,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
             AutoResult::Several(n) => println!("{n} candidates left"),
         },
-        "type" => match core.typed(arg.parse().map_err(|_| "usage: type <n>")?)? {
+        "type" => match core.typed(crate::ocr::Shown::parse(arg).ok_or("usage: type <n> (1250, 1.5, 3:17)")?)? {
             AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
             AutoResult::Several(n) => println!("{n} candidates left"),
         },

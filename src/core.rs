@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::capture::WindowCapture;
 use crate::font::{self, Font};
-use crate::ocr::{self, Rect, Word};
+use crate::ocr::{self, Rect, Shown, Word};
 
 fn flatpak_info(key: &str) -> Option<String> {
     let info = fs::read_to_string("/.flatpak-info").ok()?;
@@ -480,7 +480,7 @@ pub struct Core {
     /// Set to stop a running `auto`.
     pub cancel: Arc<AtomicBool>,
     /// The last read `read_stable` ignored, to log it once.
-    ignored: Option<i64>,
+    ignored: Option<Shown>,
     /// Numbers the learned digits found in the last frame read, to follow the watched number
     /// when the layout shifts.
     seen: Vec<Word>,
@@ -984,12 +984,12 @@ impl Core {
     }
 
     /// Reads the number inside the watched area of a fresh frame.
-    pub fn read(&mut self) -> Result<Option<i64>, String> {
+    pub fn read(&mut self) -> Result<Option<Shown>, String> {
         Ok(self.read_learned()?.map(|(n, _)| n))
     }
 
     /// Reads the number inside the watched area, and whether the learned digits read it.
-    fn read_learned(&mut self) -> Result<Option<(i64, bool)>, String> {
+    fn read_learned(&mut self) -> Result<Option<(Shown, bool)>, String> {
         let frame = self.frame()?;
         self.read_frame(&frame)
     }
@@ -997,7 +997,7 @@ impl Core {
     /// Reads the watched number in `frame`. When the learned digits find it, the watched area
     /// follows it: the whole number with room to grow, wherever the old area cut it, and along
     /// with the numbers around it when they all move.
-    fn read_frame(&mut self, frame: &Path) -> Result<Option<(i64, bool)>, String> {
+    fn read_frame(&mut self, frame: &Path) -> Result<Option<(Shown, bool)>, String> {
         let area = self.area.ok_or("no area picked yet")?;
         let (read, moved) = ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font), &mut self.seen)?;
         if let Some(to) = moved {
@@ -1016,7 +1016,7 @@ impl Core {
 
     /// Reads the number just picked, and whether the game's learned digits read it. A read
     /// they didn't make is a guess to confirm; its frame is kept for `confirm`.
-    pub fn read_picked(&mut self) -> Result<Option<(i64, bool)>, String> {
+    pub fn read_picked(&mut self) -> Result<Option<(Shown, bool)>, String> {
         self.area.ok_or("no area picked yet")?;
         let frame = self.frame()?;
         let read = self.read_frame(&frame)?;
@@ -1025,13 +1025,13 @@ impl Core {
     }
 
     /// The player says the picked number read right: learn the game's digits from it.
-    pub fn confirm(&mut self, n: i64) {
+    pub fn confirm(&mut self, n: &Shown) {
         self.learn(&cache_dir().join("picked.png"), n, false);
     }
 
     /// Learns the game's digits from the watched area of `frame`, which shows `n`. Failing to
     /// learn only gets logged.
-    fn learn(&mut self, frame: &Path, n: i64, trusted: bool) {
+    fn learn(&mut self, frame: &Path, n: &Shown, trusted: bool) {
         let (Some(area), Some(game)) = (self.area, self.game.as_ref()) else { return };
         let path = digits_path(&game.exe);
         let msg = match ocr::learn(frame, area, n, &mut self.font, trusted) {
@@ -1057,15 +1057,17 @@ impl Core {
     }
 
     /// With the value's address known, memory tells what the screen shows: learn from that.
-    fn learn_from_memory(&mut self, loc: Loc) {
-        if self.area.is_none() {
+    /// Only for whole numbers: a game may round or cut off a decimal it shows, and keep a timer
+    /// in ticks rather than seconds.
+    fn learn_from_memory(&mut self, loc: Loc, shown: &Shown) {
+        if self.area.is_none() || shown.decimals() > 0 || shown.to_string().contains(':') {
             return;
         }
         let before = self.peek(&[loc])[0];
         let Ok(frame) = self.frame() else { return };
         // A value that changed while the frame was taken could show either.
         match (before, self.peek(&[loc])[0]) {
-            (Some(a), Some(b)) if a == b => self.learn(&frame, a, true),
+            (Some(a), Some(b)) if a == b => self.learn(&frame, &Shown::whole(a), true),
             _ => {}
         }
     }
@@ -1102,12 +1104,12 @@ impl Core {
             let stuck = after[i] == Some(test);
             let followers = (0..addrs.len()).filter(|&j| j != i && after[j] == Some(test)).count();
             let screen = if self.area.is_some() { self.read().ok().flatten() } else { None };
-            let shown = screen == Some(test);
+            let shown = screen.as_ref().is_some_and(|s| s.value() as i64 == test || s.scaled() == test);
             self.say(&format!(
                 "0x{addr:012x}: wrote {test}: {}, {followers} of {} others followed, screen shows {}",
                 if stuck { "kept" } else { "game overwrote it" },
                 addrs.len() - 1,
-                screen.map_or("?".into(), |n| n.to_string()),
+                screen.as_ref().map_or("?".into(), |n| n.to_string()),
             ));
             if stuck {
                 self.helper.call(&format!("write {loc} {orig}"));
@@ -1124,12 +1126,12 @@ impl Core {
 
     /// Two reads in a row that agree. Once the learned digits know every digit, a number only
     /// Tesseract reads is something else in the watched spot (a menu opened over it): no read.
-    fn read_stable(&mut self) -> Result<Option<i64>, String> {
+    fn read_stable(&mut self) -> Result<Option<Shown>, String> {
         let a = self.read_learned()?;
         let b = self.read_learned()?;
-        let (Some((n, learned)), true) = (a, a == b) else { return Ok(None) };
+        let (Some((n, learned)), true) = (a.clone(), a == b) else { return Ok(None) };
         if !learned && self.font.knows_all() {
-            if self.ignored != Some(n) {
+            if self.ignored.as_ref() != Some(&n) {
                 self.say(&format!("the watched spot shows something the learned digits don't read (Tesseract: {n}), ignored"));
             }
             self.ignored = Some(n);
@@ -1174,9 +1176,10 @@ impl Core {
 
     /// Whether the one match left holds what the screen shows (`n`); a match reached through
     /// misreads can be anything.
-    fn holds(&mut self, loc: Loc, n: i64) -> bool {
+    fn holds(&mut self, loc: Loc, n: &Shown) -> bool {
         let v = self.peek(&[loc])[0];
-        let ok = v.is_some_and(|v| (v - n).abs() <= 1);
+        // A decimal may be kept as a whole number of tenths (12 for "1.2").
+        let ok = v.is_some_and(|v| (v as f64 - n.value()).abs() <= 1.0 || n.decimals() > 0 && (v - n.scaled()).abs() <= 1);
         if !ok {
             self.say(&format!(
                 "the last match holds {} but the screen shows {n}: not it, starting over",
@@ -1203,19 +1206,19 @@ impl Core {
         };
         let mut count = match self.search {
             Some((before, _)) => {
-                let reply = self.helper.call(&format!("next {first}"));
+                let reply = self.helper.call(&format!("next {}", first.search()));
                 self.say(&format!("screen shows {first}, continuing from {before} matches: {}", reply.join(" ")));
                 match_count(&reply).unwrap_or(0)
             }
             None => 0,
         };
         if count == 0 {
-            let reply = self.helper.call(&format!("scan {first}"));
+            let reply = self.helper.call(&format!("scan {}", first.search()));
             self.say(&format!("screen shows {first}: {}", reply.join(" ")));
             count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
         }
         self.search = Some((count, 0));
-        let mut last = first;
+        let mut last = first.clone();
         let mut unchanged_rounds = 0;
         // A number nothing fits: a misread or something covering the number, unless it's read
         // again right after.
@@ -1228,16 +1231,16 @@ impl Core {
             if now == last {
                 continue;
             }
-            let reply = self.helper.call(&format!("next {now}"));
+            let reply = self.helper.call(&format!("next {}", now.search()));
             let new_count = match_count(&reply).unwrap_or(0);
             self.say(&format!("screen shows {now}: {}", reply.join(" ")));
             if new_count == 0 {
-                if unfit != Some(now) {
+                if unfit.as_ref() != Some(&now) {
                     self.say(&format!("nothing fits {now} (a misread?), keeping the {count} matches"));
                     unfit = Some(now);
                     continue;
                 }
-                let reply = self.helper.call(&format!("scan {now}"));
+                let reply = self.helper.call(&format!("scan {}", now.search()));
                 self.say(&format!("{now} again: lost it, rescanning: {}", reply.join(" ")));
                 count = match_count(&reply).unwrap_or(0);
                 unchanged_rounds = 0;
@@ -1267,7 +1270,7 @@ impl Core {
         if count == 1 {
             self.search = None;
             let loc = self.candidates()[0].0;
-            if !self.holds(loc, last) {
+            if !self.holds(loc, &last) {
                 self.helper.call("track");
                 return Err("the only match left doesn't hold the number on screen (misreads?); press Start to search again".into());
             }
@@ -1276,7 +1279,7 @@ impl Core {
                 return Err(COPY_ONLY.into());
             }
             self.say(&format!("stored as {}", loc.kind.with_article()));
-            self.learn_from_memory(loc);
+            self.learn_from_memory(loc, &last);
             return Ok(AutoResult::Found(loc));
         }
         if (2..=20).contains(&count) && !cancelled(&self.cancel) {
@@ -1284,7 +1287,7 @@ impl Core {
             if let Some(loc) = self.probe()? {
                 self.search = None;
                 self.say(&format!("stored as {}", loc.kind.with_article()));
-                self.learn_from_memory(loc);
+                self.learn_from_memory(loc, &last);
                 return Ok(AutoResult::Found(loc));
             }
         }
@@ -1294,19 +1297,19 @@ impl Core {
     /// The same search driven by numbers the player types, for when the screen can't be read:
     /// the first number starts it, each one after narrows it down. With a watched area, the
     /// number also teaches Ferret how the game draws its digits.
-    pub fn typed(&mut self, n: i64) -> Result<AutoResult, String> {
+    pub fn typed(&mut self, n: Shown) -> Result<AutoResult, String> {
         self.game()?;
         if self.area.is_some() {
             let frame = self.frame()?;
-            self.learn(&frame, n, false);
+            self.learn(&frame, &n, false);
         }
         self.typed_search(n)
     }
 
-    fn typed_search(&mut self, n: i64) -> Result<AutoResult, String> {
+    fn typed_search(&mut self, n: Shown) -> Result<AutoResult, String> {
         let (count, unchanged) = match self.search {
             Some((before, unchanged)) => {
-                let reply = self.helper.call(&format!("next {n}"));
+                let reply = self.helper.call(&format!("next {}", n.search()));
                 self.say(&format!("typed {n}: {}", reply.join(" ")));
                 let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
                 if count == 0 {
@@ -1317,7 +1320,7 @@ impl Core {
                 (count, if count == before { unchanged + 1 } else { 0 })
             }
             None => {
-                let reply = self.helper.call(&format!("scan {n}"));
+                let reply = self.helper.call(&format!("scan {}", n.search()));
                 self.say(&format!("typed {n}: {}", reply.join(" ")));
                 (match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?, 0)
             }
@@ -1330,7 +1333,7 @@ impl Core {
             }
             1 => {
                 let loc = self.candidates()[0].0;
-                if !self.holds(loc, n) {
+                if !self.holds(loc, &n) {
                     self.search = None;
                     self.helper.call("track");
                     return Err(format!("the only match left doesn't hold {n}; type the number again to start over"));
@@ -1353,7 +1356,7 @@ impl Core {
             Some(loc) => {
                 self.search = None;
                 self.say(&format!("stored as {}", loc.kind.with_article()));
-                self.learn_from_memory(loc);
+                self.learn_from_memory(loc, &n);
                 Ok(AutoResult::Found(loc))
             }
             None => Ok(AutoResult::Several(count)),

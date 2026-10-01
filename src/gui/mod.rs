@@ -29,7 +29,7 @@ pub enum Event {
     Values(Result<Vec<ValueRow>, String>),
     Numbers(Result<(PathBuf, Vec<Word>), String>),
     /// The read, and the watched area afterwards (it snaps to the number found).
-    Read(Result<Option<(i64, bool)>, String>, Option<crate::ocr::Rect>),
+    Read(Result<Option<(crate::ocr::Shown, bool)>, String>, Option<crate::ocr::Rect>),
     Auto(Result<AutoResult, String>),
     Typed(Result<AutoResult, String>),
     /// The name, and whether Ferret is sure to find it again after a restart.

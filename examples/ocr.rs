@@ -81,12 +81,12 @@ fn main() {
             println!("{}", list.join(" "));
         }
         Some("learn") if args.len() == 8 => {
-            let (Some(x), Some(y), Some(w), Some(h), Ok(v)) = (n(2), n(3), n(4), n(5), args[6].parse::<i64>()) else {
+            let (Some(x), Some(y), Some(w), Some(h), Some(v)) = (n(2), n(3), n(4), n(5), ocr::Shown::parse(&args[6])) else {
                 return eprintln!("x y w h n must be numbers");
             };
             let path = Path::new(&args[7]);
             let mut f = font::Font::load(path);
-            let r = ocr::learn(Path::new(&args[1]), ocr::Rect { x, y, w, h }, v, &mut f, false);
+            let r = ocr::learn(Path::new(&args[1]), ocr::Rect { x, y, w, h }, &v, &mut f, false);
             println!("{r:?}");
             f.save(path).unwrap_or_else(|e| panic!("{e}"));
         }

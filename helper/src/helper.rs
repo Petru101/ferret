@@ -157,12 +157,13 @@ impl Kind {
     }
 
     /// Whether a value that went from `lo` to `hi` (either way round) meanwhile can be what the
-    /// screen showed as the whole number `n`. Games show fractions rounded or cut off.
-    fn fits(self, lo: f64, hi: f64, n: f64) -> bool {
+    /// screen showed as `n`. Games show fractions rounded or cut off; a decimal like 1.2 may
+    /// be kept as a whole number of tenths (12).
+    fn fits(self, lo: f64, hi: f64, n: Shown) -> bool {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
-            Kind::I32 | Kind::Xor => lo <= n && n <= hi,
-            Kind::F32 | Kind::F64 => lo < n + 1.0 && hi >= n - 0.5,
+            Kind::I32 | Kind::Xor => lo <= n.scaled && n.scaled <= hi,
+            Kind::F32 | Kind::F64 => lo < n.value + n.step && hi >= n.value - n.step / 2.0,
         }
     }
 
@@ -171,6 +172,28 @@ impl Kind {
             Kind::F32 => (v as f32).to_string(),
             _ => v.to_string(),
         }
+    }
+}
+
+/// A number read off the screen: "1250", "1.2", "-3".
+#[derive(Clone, Copy)]
+struct Shown {
+    value: f64,
+    /// The last shown digit's worth: 1, 0.1, 0.01...
+    step: f64,
+    /// All digits as one whole number: 1.2 -> 12.
+    scaled: f64,
+}
+
+impl Shown {
+    fn parse(s: &str) -> Option<Shown> {
+        let value: f64 = s.parse().ok().filter(|v: &f64| v.is_finite())?;
+        if !s.bytes().all(|c| c.is_ascii_digit() || c == b'.' || c == b'-') {
+            return None;
+        }
+        let decimals = s.split_once('.').map_or(0, |(_, b)| b.len() as i32);
+        let scaled = s.replace('.', "").parse::<f64>().ok()?;
+        Some(Shown { value, step: 10f64.powi(-decimals), scaled })
     }
 }
 
@@ -606,14 +629,13 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
 /// scan <n>: every value that can be what the screen shows as n, stored as a 4-byte integer
 /// (plain or XOR-encoded) or as a float/double (fractions are cut off or rounded on screen).
 fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
-    let Ok(n) = arg.parse::<i32>() else {
-        return writeln!(out, "error: usage: scan <whole number>");
+    let Some(n) = Shown::parse(arg.trim()) else {
+        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5>");
     };
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
     let t = Instant::now();
-    let n = n as f64;
     let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|k| !s.doubles_only || *k == Kind::F64).collect();
     let mut found = Vec::new();
     let (mut bytes, mut unreadable) = (0u64, 0u64);
@@ -645,8 +667,8 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
                             // The scan runs after the screen was read: allow for a fraction
                             // that has moved on by up to 1 since.
                             let hit = match kind {
-                                Kind::I32 | Kind::Xor => value == n,
-                                Kind::F32 | Kind::F64 => kind.fits(value - 1.0, value + 1.0, n),
+                                Kind::I32 | Kind::Xor => value == n.scaled,
+                                Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
                             };
                             if hit {
                                 found.push(Candidate::new(addr + off as u64, kind, value));
@@ -683,9 +705,9 @@ fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
         "-" => Box::new(|_, old, new| new < old),
         "=" => Box::new(|_, old, new| new == old),
         "!" => Box::new(|_, old, new| new != old),
-        v => match v.parse::<i32>() {
-            Ok(n) => Box::new(move |kind, old, new| kind.fits(old, new, n as f64)),
-            Err(_) => return writeln!(out, "error: usage: next <whole number>|+|-|=|!"),
+        v => match Shown::parse(v.trim()) {
+            Some(n) => Box::new(move |kind, old, new| kind.fits(old, new, n)),
+            None => return writeln!(out, "error: usage: next <number, e.g. 1250 or 1.5>|+|-|=|!"),
         },
     };
     let before = s.candidates.len();

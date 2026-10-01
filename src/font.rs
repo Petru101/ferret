@@ -303,9 +303,9 @@ impl Font {
 
     /// Whether a number Tesseract read agrees with the glyphs the learned digits do know (when
     /// the glyphs line up with its digits; otherwise there's nothing to compare).
-    pub fn agrees(&self, glyphs: &[Glyph], scale: u32, n: i64) -> bool {
+    pub fn agrees(&self, glyphs: &[Glyph], scale: u32, digits: &str) -> bool {
         let whole: Vec<&Glyph> = glyphs.iter().filter(|g| !g.cut).collect();
-        let text = n.unsigned_abs().to_string();
+        let text = digits;
         whole.len() != text.len()
             || whole.iter().zip(text.bytes()).all(|(g, c)| self.digit(g, scale).is_none_or(|(d, _)| d == c - b'0'))
     }

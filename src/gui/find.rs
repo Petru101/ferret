@@ -3,7 +3,7 @@
 // narrows the scan down every time the number changes on screen. When it can't
 // read the number, the player types it instead.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +16,7 @@ use gtk::gdk;
 use super::{Event, Worker};
 use crate::core::{self, AutoResult};
 use crate::font::DigitShape;
-use crate::ocr::{self, Rect, Word};
+use crate::ocr::{self, Rect, Shown, Word};
 
 pub struct FindView {
     pub root: gtk::Stack,
@@ -26,7 +26,7 @@ pub struct FindView {
     words: RefCell<Vec<Word>>,
     selection: RefCell<Option<Rect>>,
     /// A read the player hasn't confirmed yet (Tesseract's, not the learned digits').
-    unconfirmed: Cell<Option<i64>>,
+    unconfirmed: RefCell<Option<Shown>>,
     /// Drag start and current point, in widget coordinates.
     drag: RefCell<Option<(f64, f64, f64, f64)>>,
     status: gtk::Label,
@@ -245,7 +245,7 @@ impl FindView {
             texture: RefCell::default(),
             words: RefCell::default(),
             selection: RefCell::default(),
-            unconfirmed: Cell::default(),
+            unconfirmed: RefCell::default(),
             drag: RefCell::default(),
             status,
             crop,
@@ -466,7 +466,7 @@ impl FindView {
         });
     }
 
-    pub fn read(&self, r: Result<Option<(i64, bool)>, String>, area: Option<Rect>) {
+    pub fn read(&self, r: Result<Option<(Shown, bool)>, String>, area: Option<Rect>) {
         self.busy(false);
         // Show where Ferret now watches: the box snaps to the number it found.
         if area.is_some() {
@@ -482,7 +482,7 @@ impl FindView {
             *self.texture.borrow_mut() = Some(t);
             self.area.queue_draw();
         }
-        self.unconfirmed.set(None);
+        self.unconfirmed.replace(None);
         self.start.set_label("Start");
         match r {
             Ok(Some((n, true))) => {
@@ -492,7 +492,7 @@ impl FindView {
             // Tesseract's guess: ask, and learn the game's digits from the answer.
             Ok(Some((n, false))) => {
                 self.status.set_label(&format!("Reads {n}. Is that what the game shows? If not, type the right number below."));
-                self.unconfirmed.set(Some(n));
+                self.unconfirmed.replace(Some(n));
                 self.start.set_label("Yes, Start");
                 self.start.set_sensitive(true);
             }
@@ -516,7 +516,7 @@ impl FindView {
         let confirmed = self.unconfirmed.take();
         self.worker.run(move |core| {
             if let Some(n) = confirmed {
-                core.confirm(n);
+                core.confirm(&n);
             }
             Event::Auto(core.auto(Duration::from_secs(600)))
         });
@@ -548,13 +548,13 @@ impl FindView {
     }
 
     pub fn type_number(&self, text: &str) {
-        let Ok(n) = text.trim().parse::<i64>() else {
-            self.status.set_label("Type the number as digits only, for example 1250.");
+        let Some(n) = Shown::parse(text) else {
+            self.status.set_label("Type the number as the game shows it, for example 1250, 1.5 or 3:17.");
             return;
         };
         self.result.set_visible(false);
         self.typed_row.set_sensitive(false);
-        self.unconfirmed.set(None);
+        self.unconfirmed.replace(None);
         self.start.set_label("Start");
         self.busy(true);
         self.status.set_label(&format!("Looking for {n}…"));
@@ -660,7 +660,7 @@ impl FindView {
         *self.texture.borrow_mut() = None;
         self.words.borrow_mut().clear();
         *self.selection.borrow_mut() = None;
-        self.unconfirmed.set(None);
+        self.unconfirmed.replace(None);
         self.result.set_visible(false);
         self.typed.set_text("");
         self.start.set_label("Start");
