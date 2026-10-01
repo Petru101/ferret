@@ -5,7 +5,9 @@
  * plus gems and ore (doubles at the end of a chain from a static pointer: world -> room -> stats,
  * only ever read and written through shared functions, so only pointer paths find it again),
  * and changes them on commands (earn N, spend N, hit N, gain X, shield X, scrap N,
- * coins N, wood N, gems N, ore N, show, respawn, newroom) dropped into a command file, so it
+ * plus food (a 16-bit short, which Ferret doesn't search for) with a float copy of it for the HUD,
+ * refreshed every tick (a search can only end on that copy, which Ferret must reject),
+ * coins N, wood N, gems N, ore N, eat N, show, respawn, newroom) dropped into a command file, so it
  * can be driven the same way natively, under Proton and inside the Steam
  * runtime. "respawn" moves the player to a new object and frees the old one,
  * like a new mission; "newroom" does the same with the room and its stats.
@@ -103,14 +105,20 @@ static struct room *new_room(double gems, double ore)
     return r;
 }
 
+/* Food and a neighbour, so the pair doesn't read as an int holding food. */
+static struct {
+    short food;
+    short thirst;
+} needs = { 500, 999 };
+
 static void report(const char *log, const struct player *p, const double *coins, const double *wood)
 {
     FILE *f = fopen(log, "a");
 
     if (f) {
-        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f\n", p->gold,
-                p->hp, p->energy, p->shield, scrap(p), *coins, *wood, read_real(&world->room->stats->gems),
-                read_real(&world->room->stats->ore));
+        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f food=%d\n",
+                p->gold, p->hp, p->energy, p->shield, scrap(p), *coins, *wood, read_real(&world->room->stats->gems),
+                read_real(&world->room->stats->ore), needs.food);
         fclose(f);
     }
 }
@@ -121,6 +129,7 @@ int main(int argc, char **argv)
     struct player *p = spawn();
     double *coins = malloc(sizeof *coins);
     double *wood = malloc(sizeof *wood);
+    volatile float *hud_food = malloc(sizeof *hud_food);
     struct player *old;
     volatile int richest = 0;
     volatile float most_energy = 0;
@@ -144,6 +153,7 @@ int main(int argc, char **argv)
     report(argv[2], p, coins, wood);
     for (;;) {
         sleep_ms(100);
+        *hud_food = needs.food;
         if (p->gold > richest)
             richest = p->gold;
         if (p->energy > most_energy)
@@ -179,6 +189,8 @@ int main(int argc, char **argv)
             *coins += n;
         else if (sscanf(line, "wood %d", &n) == 1)
             *wood += n;
+        else if (sscanf(line, "eat %d", &n) == 1)
+            needs.food += n;
         else if (sscanf(line, "gems %d", &n) == 1)
             write_real(&world->room->stats->gems, read_real(&world->room->stats->gems) + n);
         else if (sscanf(line, "ore %d", &n) == 1)

@@ -451,6 +451,10 @@ impl Votes {
     }
 }
 
+/// A search that could only end on a display copy.
+const COPY_ONLY: &str = "only found a copy the game redraws its display from: it keeps the value itself in a form \
+    Ferret can't search for yet (for example a 2-byte number or an encoded one)";
+
 /// Most pointer paths kept from a scan. The real one can rank far down (Forager's gems: 590th
 /// of 81235), and only a later run tells which it is.
 const MAX_CANDIDATES: usize = 3000;
@@ -1135,6 +1139,39 @@ impl Core {
         Ok(Some(n))
     }
 
+    /// Whether the one match left is the value itself: a test write (undone right after) has to
+    /// stick. A game that keeps its own copy of a value for the HUD rewrites that copy every
+    /// frame, and a search for a value stored some way Ferret doesn't look for (a 2-byte int,
+    /// another encoding) ends on that copy; writing it changes nothing and saving it fails.
+    fn sticks(&mut self, loc: Loc) -> bool {
+        let listed = self.helper.call(&format!("peek {loc}"));
+        let (Some(orig), Some(Some(shown))) =
+            (listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()), self.peek(&[loc]).first().copied())
+        else {
+            return true;
+        };
+        let test = shown + 10;
+        self.helper.call(&format!("write {loc} {test}"));
+        std::thread::sleep(Duration::from_millis(1500));
+        let now = self.peek(&[loc])[0];
+        if now == Some(test) {
+            self.helper.call(&format!("write {loc} {orig}"));
+            return true;
+        }
+        // The game changed it meanwhile (the player gathered something): still the value, nearer
+        // the test value than where a copy would be put back to. Undo only the test's +10.
+        if let Some(v) = now.filter(|v| (v - test).abs() < (v - shown).abs()) {
+            self.helper.call(&format!("write {loc} {}", v - 10));
+            return true;
+        }
+        self.say(&format!(
+            "wrote {test} to the last match as a test and the game put back {}: it's a copy the game keeps \
+             refreshing (for its display), not where it keeps the value",
+            now.map_or("something else".into(), |v| v.to_string())
+        ));
+        false
+    }
+
     /// Whether the one match left holds what the screen shows (`n`); a match reached through
     /// misreads can be anything.
     fn holds(&mut self, loc: Loc, n: i64) -> bool {
@@ -1234,6 +1271,10 @@ impl Core {
                 self.helper.call("track");
                 return Err("the only match left doesn't hold the number on screen (misreads?); press Start to search again".into());
             }
+            if !self.sticks(loc) {
+                self.helper.call("track");
+                return Err(COPY_ONLY.into());
+            }
             self.say(&format!("stored as {}", loc.kind.with_article()));
             self.learn_from_memory(loc);
             return Ok(AutoResult::Found(loc));
@@ -1293,6 +1334,11 @@ impl Core {
                     self.search = None;
                     self.helper.call("track");
                     return Err(format!("the only match left doesn't hold {n}; type the number again to start over"));
+                }
+                if !self.sticks(loc) {
+                    self.search = None;
+                    self.helper.call("track");
+                    return Err(COPY_ONLY.into());
                 }
                 Some(loc)
             }
