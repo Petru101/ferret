@@ -288,22 +288,21 @@ fn glyph_blobs(img: &RgbImage, font: &Font) -> Vec<Blob> {
         let p = img.as_raw();
         (p[i * 3] >> 5, p[i * 3 + 1] >> 5, p[i * 3 + 2] >> 5)
     };
+    // Pieces: colour, box, pixel count.
     let mut label = vec![0u32; (w * h) as usize];
-    let mut blobs: Vec<Blob> = Vec::new();
+    let mut pieces: Vec<((u8, u8, u8), u32, u32, u32, u32, u32)> = Vec::new();
     let mut stack = Vec::new();
-    let mut pixels = Vec::new();
     for start in 0..label.len() {
         if label[start] != 0 {
             continue;
         }
         let c = colour(start);
-        let id = blobs.len() as u32 + 1;
+        let id = pieces.len() as u32 + 1;
         label[start] = id;
         stack.push(start);
-        pixels.clear();
-        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+        let (mut x0, mut y0, mut x1, mut y1, mut n) = (w, h, 0, 0, 0);
         while let Some(i) = stack.pop() {
-            pixels.push(i);
+            n += 1;
             let (x, y) = ((i as u32) % w, (i as u32) / w);
             (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
             let mut visit = |j: usize| {
@@ -340,22 +339,64 @@ fn glyph_blobs(img: &RgbImage, font: &Font) -> Vec<Blob> {
                 visit(i + wu + 1);
             }
         }
+        pieces.push((c, x0, y0, x1, y1, n));
+    }
+    // Pieces of one colour stacked with at most 2 empty rows between them make one shape: a
+    // small font's flat-colour core breaks where its strokes meet (Creeper World's 8: a top
+    // loop, two sides and a bottom bar). A colon's dots are further apart.
+    let mut root: Vec<usize> = (0..pieces.len()).collect();
+    fn find(root: &mut [usize], mut i: usize) -> usize {
+        while root[i] != i {
+            root[i] = root[root[i]];
+            i = root[i];
+        }
+        i
+    }
+    let small = |p: &((u8, u8, u8), u32, u32, u32, u32, u32)| p.3 - p.1 < 120 && p.4 - p.2 < 80;
+    let mut by_colour: std::collections::HashMap<(u8, u8, u8), Vec<usize>> = Default::default();
+    for (i, p) in pieces.iter().enumerate().filter(|(_, p)| small(p)) {
+        by_colour.entry(p.0).or_default().push(i);
+    }
+    for list in by_colour.values_mut() {
+        list.sort_by_key(|&i| pieces[i].2);
+        for (k, &i) in list.iter().enumerate() {
+            let a = pieces[i];
+            let start = k + list[k..].partition_point(|&j| pieces[j].2 <= a.4);
+            for &j in list[start..].iter().take_while(|&&j| pieces[j].2 <= a.4 + 3) {
+                let b = pieces[j];
+                // Within 2 px sideways: the 8's bottom bar sits between its two sides.
+                if b.1 <= a.3 + 2 && a.1 <= b.3 + 2 && b.4.max(a.4) - b.2.min(a.2) < 80 {
+                    let (ra, rb) = (find(&mut root, i), find(&mut root, j));
+                    root[ra] = rb;
+                }
+            }
+        }
+    }
+    let mut groups: std::collections::HashMap<usize, (u32, u32, u32, u32, u32)> = Default::default();
+    for i in 0..pieces.len() {
+        let p = pieces[i];
+        let g = groups.entry(find(&mut root, i)).or_insert((w, h, 0, 0, 0));
+        *g = (g.0.min(p.1), g.1.min(p.2), g.2.max(p.3), g.3.max(p.4), g.4 + p.5);
+    }
+    let mut blobs = Vec::with_capacity(groups.len());
+    for (r, (x0, y0, x1, y1, n)) in groups {
         let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
         // Glyph-sized and solid enough; not touching the frame's edge.
         // 20%: anti-aliased fonts with 2-px strokes leave only a thin core of flat colour
         // (Creeper World's 4 fills 23% of its box).
-        let sized = (6..=80).contains(&bh) && bw * 2 <= bh * 3 && pixels.len() as u32 * 10 >= bw * bh * 2;
+        let sized = (6..=80).contains(&bh) && bw * 2 <= bh * 3 && n * 10 >= bw * bh * 2;
         let inside = x0 > 0 && y0 > 0 && x1 + 1 < w && y1 + 1 < h;
         let glyph = (sized && inside).then(|| {
-            let mut ink = vec![false; (bw * bh) as usize];
-            for &i in &pixels {
-                let (x, y) = ((i as u32) % w, (i as u32) / w);
-                ink[((y - y0) * bw + x - x0) as usize] = true;
-            }
+            let ink = (0..bw * bh)
+                .map(|k| {
+                    let l = label[((y0 + k / bw) * w + x0 + k % bw) as usize];
+                    l != 0 && find(&mut root, l as usize - 1) == r
+                })
+                .collect();
             Glyph { x: x0, w: bw, h: bh, ink, cut: false }
         });
         let digit = glyph.as_ref().and_then(|g| font.digit_of(g, 1));
-        blobs.push(Blob { colour: c, x0, y0, x1, y1, glyph, digit });
+        blobs.push(Blob { colour: pieces[r].0, x0, y0, x1, y1, glyph, digit });
     }
     blobs
 }
@@ -868,6 +909,14 @@ fn read_areas(img: &RgbImage, areas: &[Rect], padded: bool, dir: &Path, font: Op
         if sized > digits.len() && !letters {
             continue;
         }
+        // Another colour group shows more glyphs of this size here: the read is part of the
+        // number ("1" of "1.8", the 8 in a colour this crop doesn't have).
+        let similar = |o: &Candidate| o.glyph_h * 4 >= glyph_h * 3 && o.glyph_h * 3 <= glyph_h * 4;
+        let most = per_area[a].iter().filter(|o| similar(o)).map(|o| number_glyphs(&o.glyphs).iter().filter(|g| !g.cut).count()).max();
+        // Only for a watched box: the padded boxes of full-frame finding take in neighbours.
+        if !padded && most.is_some_and(|m| m > digits.len()) && !letters {
+            continue;
+        }
         // A digit the learned ones read differently: Tesseract misread it.
         if font.is_some_and(|f| !f.agrees(&glyphs, SCALE, &digits)) {
             continue;
@@ -901,9 +950,14 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, Shown)> {
         .filter(|(_, r)| !bars(r))
         .collect();
     let tallest = reads.iter().map(|(i, _)| cands[*i].glyph_h).max()?;
+    // A candidate showing more glyphs of that size than a read has (one the digits couldn't
+    // read): the read is part of the number ("1" of "1.8").
+    let whole = |c: &Candidate| number_glyphs(&c.glyphs).iter().filter(|g| !g.cut).count();
+    let most = cands.iter().filter(|c| c.glyph_h * 4 >= tallest * 3 && c.glyph_h * 3 <= tallest * 4).map(whole).max()?;
     reads
         .into_iter()
         .filter(|(i, _)| cands[*i].glyph_h * 4 >= tallest * 3)
+        .filter(|(_, r)| r.glyphs >= most)
         .min_by_key(|(_, r)| (std::cmp::Reverse(r.glyphs), r.worst))
         .and_then(|(i, r)| {
             let glyphs = number_glyphs(&cands[i].glyphs);
@@ -1122,7 +1176,7 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
     let label = format!("{}{text}", "0".repeat(extra));
     let mut added = font.learn(&glyphs, SCALE, &label, trusted);
     if let Some(seen) = finder_glyphs(&img, font, area, &glyphs) {
-        added += font.learn(&seen, 1, &label, trusted);
+        added += font.learn_shapes(&seen, 1, &label, trusted);
     }
     let shown = if extra > 0 { label } else { n.to_string() };
     Ok(format!("learned the digits of {shown}: {added} new shapes (knows {})", font.known()))
@@ -1141,10 +1195,13 @@ fn finder_glyphs(img: &RgbImage, font: &Font, area: Rect, glyphs: &[Glyph]) -> O
     let blobs = glyph_blobs(&crop, font);
     let ax = area.x.min(img.width().saturating_sub(1)) - x;
     let spots: Vec<(u32, u32)> = glyphs.iter().map(|g| (ax + g.x / SCALE, ax + (g.x + g.w).div_ceil(SCALE))).collect();
+    let tall = glyphs.iter().map(|g| g.h / SCALE).max().unwrap_or(0);
     let at = |colour: (u8, u8, u8), (lo, hi): (u32, u32)| {
         blobs
             .iter()
             .filter(|b| b.colour == colour && b.x0 + 1 >= lo && b.x1 <= hi + 1)
+            // The whole digit, not a piece of it.
+            .filter(|b| (b.y1 - b.y0 + 1) * 4 >= tall * 3)
             .filter_map(|b| b.glyph.as_ref())
             .filter(|g| !is_slash(g))
             .max_by_key(|g| g.ink.iter().filter(|i| **i).count())

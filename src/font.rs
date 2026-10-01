@@ -410,6 +410,16 @@ impl Font {
     /// from memory: samples of other digits that look like them are wrong and get dropped.
     /// Returns how many new shapes were kept.
     pub fn learn(&mut self, glyphs: &[Glyph], scale: u32, label: &str, trusted: bool) -> usize {
+        self.learn_as(glyphs, scale, label, trusted, true)
+    }
+
+    /// `learn` without pixel-font grids: for the full-frame finder's shapes, where a smooth font's
+    /// thin flat-colour cores fit a coarse grid by chance.
+    pub fn learn_shapes(&mut self, glyphs: &[Glyph], scale: u32, label: &str, trusted: bool) -> usize {
+        self.learn_as(glyphs, scale, label, trusted, false)
+    }
+
+    fn learn_as(&mut self, glyphs: &[Glyph], scale: u32, label: &str, trusted: bool, grids: bool) -> usize {
         let mut added = 0;
         // Pixel font: the fewest rows every glyph fits on. Bars (a 1) fit any, so they don't
         // count; a lone 1 goes on the rows the font already uses.
@@ -417,7 +427,7 @@ impl Font {
             let grids: Option<Vec<Grid>> = glyphs.iter().map(|g| Grid::of(g, rows, scale)).collect();
             grids.is_some_and(|grids| grids.iter().any(|g| !g.is_bar()))
         };
-        let rows = (3..=16).find(|&r| fits(r)).or(self.grid_rows().first().copied());
+        let rows = if grids { (3..=16).find(|&r| fits(r)).or(self.grid_rows().first().copied()) } else { None };
         for (g, c) in glyphs.iter().zip(label.bytes()) {
             let d = c - b'0';
             if let Some(grid) = rows.and_then(|r| Grid::of(g, r, scale)).filter(|grid| d == 1 || !grid.is_bar()) {
