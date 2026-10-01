@@ -1079,6 +1079,43 @@ impl Core {
         }
     }
 
+    /// The places still matching (at most 20), with their values as the game holds them.
+    pub fn matches(&mut self) -> Vec<(Loc, String)> {
+        self.helper
+            .call("list")
+            .iter()
+            .filter_map(|l| {
+                let (a, v) = l.split_once(" = ")?;
+                Some((parse_loc(a)?, v.trim().to_owned()))
+            })
+            .collect()
+    }
+
+    /// Writes `value` to one of the places still matching, so the player can see whether the
+    /// game shows it (when Ferret couldn't tell from the screen); the places a second later
+    /// (a copy the game keeps rewriting is back to the old value by then).
+    pub fn try_match(&mut self, loc: Loc, value: &str) -> Result<Vec<(Loc, String)>, String> {
+        let v = Shown::parse(value).map(|s| s.value()).ok_or(format!("not a number: {value}"))?;
+        let reply = self.helper.call(&format!("write {loc} {v}"));
+        if let Some(e) = first_error(&reply) {
+            return Err(e);
+        }
+        self.say(&format!("wrote {v} to 0x{:x} ({}): does the game show it?", loc.addr, loc.kind.describe()));
+        std::thread::sleep(Duration::from_secs(1));
+        Ok(self.matches())
+    }
+
+    /// The player picked the value among the places still matching.
+    pub fn choose(&mut self, loc: Loc) -> Result<Loc, String> {
+        let reply = self.helper.call(&format!("keep {loc}"));
+        if match_count(&reply) != Some(1) {
+            return Err(format!("0x{:x} isn't among the matches any more", loc.addr));
+        }
+        self.search = None;
+        self.say(&format!("picked 0x{:x} ({}) as the value", loc.addr, loc.kind.describe()));
+        Ok(loc)
+    }
+
     /// Current scan candidates (at most 20 are listed by the helper).
     pub fn candidates(&mut self) -> Vec<(Loc, Option<i64>)> {
         parse_values(&self.helper.call("list"))

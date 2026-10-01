@@ -40,6 +40,10 @@ pub enum Event {
     Digits(Vec<Vec<crate::font::DigitShape>>),
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
+    /// The places still matching, with their values (the player tries them out).
+    Matches(Result<Vec<(crate::core::Loc, String)>, String>),
+    /// The player picked one of them as the value.
+    Chosen(Result<crate::core::Loc, String>),
     /// A frame the watched number was just read from, and the watched area: shown while
     /// searching (at most one a second).
     Frame(gtk::gdk::Texture, Option<crate::ocr::Rect>),
@@ -196,6 +200,9 @@ impl Ui {
             Event::Numbers(r) => self.find.numbers(r),
             Event::Read(r, area) => self.find.read(r, area),
             Event::Frame(t, area) => self.find.show_frame(t, area),
+            Event::Matches(Ok(list)) => self.find.show_matches(list),
+            Event::Chosen(Ok(loc)) => self.find.chosen(loc),
+            Event::Matches(Err(e)) | Event::Chosen(Err(e)) => self.toast(&e),
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
             Event::Saved(Ok((name, confirmed))) => {
@@ -316,6 +323,15 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("find", Box::new(|ui, _| ui.find.start()));
+    action(
+        "try",
+        Box::new(|ui, arg| {
+            if let Some((i, v)) = arg.split_once(',').and_then(|(i, v)| Some((i.trim().parse().ok()?, v.trim().to_owned()))) {
+                ui.find.try_listed(i, v);
+            }
+        }),
+    );
+    action("use", Box::new(|ui, i| ui.find.use_listed(i.trim().parse().unwrap_or(usize::MAX))));
     action("stop", Box::new(|ui, _| ui.find.stop()));
     action("reset", Box::new(|ui, _| ui.find.start_over()));
     action(

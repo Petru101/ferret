@@ -38,6 +38,12 @@ pub struct FindView {
     log: gtk::TextView,
     result: gtk::Box,
     name: gtk::Entry,
+    /// The places still matching when Ferret couldn't tell which is the value: the player
+    /// changes them and watches the game.
+    matches: gtk::Box,
+    matches_list: gtk::ListBox,
+    /// The places listed there, in order (for the D-Bus debug actions).
+    listed: RefCell<Vec<core::Loc>>,
     typed_row: gtk::Box,
     typed: gtk::Entry,
     digits: gtk::Box,
@@ -234,6 +240,24 @@ impl FindView {
                 buttons
             })
             .build();
+        let matches_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
+        let matches = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .margin_start(12)
+            .margin_end(12)
+            .visible(false)
+            .build();
+        matches.append(
+            &gtk::Label::builder()
+                .label("Ferret can't tell which of these is the value. Type a new value into one and press Try, then look at the game: if it shows that value, press Use This One.")
+                .wrap(true)
+                .xalign(0.0)
+                .build(),
+        );
+        matches.append(&gtk::ScrolledWindow::builder().child(&matches_list).max_content_height(220).propagate_natural_height(true).build());
+        page.append(&matches);
+        page.reorder_child_after(&matches, Some(&result));
         let root = gtk::Stack::new();
         root.add_named(&intro, Some("intro"));
         root.add_named(&page, Some("pick"));
@@ -256,6 +280,9 @@ impl FindView {
             log,
             result,
             name,
+            matches,
+            matches_list,
+            listed: RefCell::default(),
             typed_row,
             typed,
             digits,
@@ -455,6 +482,7 @@ impl FindView {
     }
 
     pub fn select(&self, area: Rect) {
+        self.matches.set_visible(false);
         *self.selection.borrow_mut() = Some(area);
         self.area.queue_draw();
         self.busy(true);
@@ -505,6 +533,7 @@ impl FindView {
     }
 
     pub fn start(&self) {
+        self.matches.set_visible(false);
         self.result.set_visible(false);
         self.typed_row.set_sensitive(false);
         self.start.set_visible(false);
@@ -530,15 +559,19 @@ impl FindView {
         self.typed_row.set_sensitive(true);
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
-            Ok(AutoResult::Several(n)) => self.status.set_label(&format!(
-                "{} places still match. Press Start to continue and let the number change a few more times.",
-                grouped(n)
-            )),
+            Ok(AutoResult::Several(n)) => {
+                self.status.set_label(&format!(
+                    "{} places still match. Press Start to continue and let the number change a few more times.",
+                    grouped(n)
+                ));
+                self.list_matches(n);
+            }
             Err(e) => self.status.set_label(&e),
         }
     }
 
     fn found(&self, loc: core::Loc) {
+        self.matches.set_visible(false);
         let at = format!("0x{:x} ({})", loc.addr, loc.kind.describe());
         self.status.set_label(&format!("Found it! It's at {at}. Give it a name below to keep it."));
         self.status.add_css_class("success");
@@ -548,6 +581,7 @@ impl FindView {
     }
 
     pub fn type_number(&self, text: &str) {
+        self.matches.set_visible(false);
         let Some(n) = Shown::parse(text) else {
             self.status.set_label("Type the number as the game shows it, for example 1250, 1.5 or 3:17.");
             return;
@@ -572,6 +606,7 @@ impl FindView {
                     "{} places match. Change the number in the game, then type the new one.",
                     grouped(n)
                 ));
+                self.list_matches(n);
                 self.typed.grab_focus();
             }
             Err(e) => self.status.set_label(&e),
@@ -640,6 +675,7 @@ impl FindView {
 
     /// Forgets the matches so far; the picked number and the captured frame stay.
     pub fn start_over(&self) {
+        self.matches.set_visible(false);
         self.result.set_visible(false);
         self.typed.set_text("");
         self.status.set_label(if self.selection.borrow().is_some() {
@@ -655,6 +691,7 @@ impl FindView {
 
     /// Attached to another game: nothing picked or found in the last one applies.
     pub fn new_game(&self) {
+        self.matches.set_visible(false);
         self.picture.set_paintable(None::<&gdk::Paintable>);
         self.crop.set_paintable(None::<&gdk::Paintable>);
         *self.texture.borrow_mut() = None;
@@ -667,6 +704,69 @@ impl FindView {
         self.start.set_sensitive(false);
         self.status.set_label("Click a number, or drag a box around it.");
         self.root.set_visible_child_name("intro");
+    }
+
+    /// Lists the places still matching, each with Try (write a value) and Use This One.
+    pub fn show_matches(&self, list: Vec<(core::Loc, String)>) {
+        while let Some(row) = self.matches_list.first_child() {
+            self.matches_list.remove(&row);
+        }
+        self.matches.set_visible(!list.is_empty());
+        *self.listed.borrow_mut() = list.iter().map(|(l, _)| *l).collect();
+        for (loc, value) in list {
+            let row = adw::ActionRow::builder().title(&value).subtitle(format!("0x{:x}, {}", loc.addr, loc.kind.describe())).build();
+            let entry = gtk::Entry::builder().placeholder_text("New value").width_chars(8).valign(gtk::Align::Center).build();
+            let try_it = gtk::Button::builder().label("Try").valign(gtk::Align::Center).build();
+            let pick = gtk::Button::builder().label("Use This One").valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
+            row.add_suffix(&entry);
+            row.add_suffix(&try_it);
+            row.add_suffix(&pick);
+            let apply = {
+                let (worker, entry) = (self.worker.clone(), entry.clone());
+                move || {
+                    let v = entry.text().to_string();
+                    if !v.trim().is_empty() {
+                        worker.run(move |core| Event::Matches(core.try_match(loc, &v)));
+                    }
+                }
+            };
+            {
+                let apply = apply.clone();
+                try_it.connect_clicked(move |_| apply());
+            }
+            entry.connect_activate(move |_| apply());
+            let worker = self.worker.clone();
+            pick.connect_clicked(move |_| worker.run(move |core| Event::Chosen(core.choose(loc))));
+            self.matches_list.append(&row);
+        }
+    }
+
+    /// With few places left, lists them: the player can try them out when Ferret can't tell.
+    fn list_matches(&self, n: usize) {
+        if n <= 20 {
+            self.worker.run(|core| Event::Matches(Ok(core.matches())));
+        } else {
+            self.matches.set_visible(false);
+        }
+    }
+
+    /// Debug actions: Try / Use This One on the listed place at `i`.
+    pub fn try_listed(&self, i: usize, value: String) {
+        if let Some(&loc) = self.listed.borrow().get(i) {
+            self.worker.run(move |core| Event::Matches(core.try_match(loc, &value)));
+        }
+    }
+
+    pub fn use_listed(&self, i: usize) {
+        if let Some(&loc) = self.listed.borrow().get(i) {
+            self.worker.run(move |core| Event::Chosen(core.choose(loc)));
+        }
+    }
+
+    /// The player picked the value among the matches.
+    pub fn chosen(&self, loc: core::Loc) {
+        self.matches.set_visible(false);
+        self.found(loc);
     }
 
     /// The game as the search last saw it, with the watched box where it is now.

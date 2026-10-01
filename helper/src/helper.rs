@@ -794,11 +794,13 @@ fn cmd_track(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
 }
 
 fn cmd_keep(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
-    let Some((addr, _)) = parse_loc(arg) else {
+    let Some((addr, kind)) = parse_loc(arg) else {
         return writeln!(out, "error: usage: keep <hex addr[:type]>");
     };
+    // With a type, only that one: an int and an XOR value can start at the same address.
+    let typed = arg.contains(':');
     let before = s.candidates.len();
-    s.candidates.retain(|c| c.addr() == addr);
+    s.candidates.retain(|c| c.addr() == addr && (!typed || c.kind() == kind));
     writeln!(out, "{before} -> {} matches", s.candidates.len())
 }
 
