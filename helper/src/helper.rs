@@ -101,16 +101,7 @@ fn anti_cheat(pid: u32) -> Option<String> {
     let inside = |p: &Path| root.join(p.strip_prefix("/").unwrap_or(p));
     let folder = match env.get("STEAM_COMPAT_INSTALL_PATH") {
         Some(dir) => PathBuf::from(dir),
-        None => {
-            // Wine maps the .exe by its Linux path; native programs are /proc/<pid>/exe.
-            let exe = exe_name(pid);
-            let mapped = maps.iter().map(|r| Path::new(&r.path)).find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(&*exe)));
-            let program = match mapped {
-                Some(p) => p.to_path_buf(),
-                None => fs::read_link(format!("/proc/{pid}/exe")).ok()?,
-            };
-            anticheat::game_folder(&program)
-        }
+        None => anticheat::game_folder(&program_path(pid, &maps)?),
     };
     if let Some(ac) = anticheat::in_folder(&inside(&folder)) {
         return Some(ac.to_owned());
@@ -122,6 +113,28 @@ fn anti_cheat(pid: u32) -> Option<String> {
     let names: Vec<String> =
         folders.chain(Path::new(&exe).file_stem()).map(|n| n.to_string_lossy().into_owned()).collect();
     launchers::listed_as(&env, &names)
+}
+
+/// The program's file, as the game's sandbox sees it: Wine maps the .exe by its Linux path,
+/// native programs are /proc/<pid>/exe.
+fn program_path(pid: u32, maps: &[Region]) -> Option<PathBuf> {
+    let exe = exe_name(pid);
+    let mapped = maps.iter().map(|r| Path::new(&r.path)).find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(&*exe)));
+    match mapped {
+        Some(p) => Some(p.to_path_buf()),
+        None => fs::read_link(format!("/proc/{pid}/exe")).ok(),
+    }
+}
+
+/// Unreal games start as <game>/<Project>.exe, a stub that only starts
+/// <game>/<Project>/Binaries/Win64/<Project>-Win64-Shipping.exe and waits for it: the stub's
+/// folder when `program` is such a game.
+fn unreal_stub_folder(program: &Path) -> Option<&Path> {
+    let binaries = program.parent()?.parent()?;
+    if !binaries.file_name()?.eq_ignore_ascii_case("binaries") {
+        return None;
+    }
+    binaries.parent()?.parent()
 }
 
 /// A game its store lists as played only with other people.
@@ -839,13 +852,14 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         .filter(|pid| owner_uid(*pid) == Some(uid))
         .collect();
     pids.sort();
+    let mut rows = Vec::new();
     for pid in pids {
         let exe = exe_name(pid);
         let lower = exe.to_ascii_lowercase();
         let env = environ(pid);
         let app_id = steam_id(&env);
         let windows = lower.ends_with(".exe");
-        if NOT_GAMES.contains(&lower.as_str()) || lower.contains("crashhandler") {
+        if NOT_GAMES.contains(&lower.as_str()) || lower.contains("crashhandler") || lower.contains("crashreport") {
             continue;
         }
         if !(windows || app_id.is_some() || draws_like_a_game(pid)) {
@@ -857,7 +871,17 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let play = if about.online_only { Some("online") } else { about.multiplayer.then_some("multiplayer") };
         let id = dash(app_id.map(String::as_str));
         let ac = dash(anti_cheat(pid).as_deref());
-        writeln!(out, "{pid}\t{exe}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(play))?;
+        let program = maps(pid).ok().and_then(|m| program_path(pid, &m));
+        rows.push((program, format!("{pid}\t{exe}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(play))));
+    }
+    // An Unreal stub holds none of the game's values (Astro Colony: two entries, a search in
+    // the stub found nothing).
+    let stub_folders: Vec<&Path> = rows.iter().filter_map(|(p, _)| unreal_stub_folder(p.as_deref()?)).collect();
+    for (program, row) in &rows {
+        let stub = program.as_deref().is_some_and(|p| p.parent().is_some_and(|dir| stub_folders.contains(&dir)));
+        if !stub {
+            writeln!(out, "{row}")?;
+        }
     }
     Ok(())
 }
