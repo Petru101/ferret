@@ -25,7 +25,9 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             for g in core.games() {
                 let id = g.app_id.map(|id| format!("  [SteamAppId={id}]")).unwrap_or_default();
                 let ac = g.anti_cheat.map(|ac| format!("  [{ac}]")).unwrap_or_default();
-                println!("{:>7}  {}{id}{ac}", g.pid, g.exe);
+                let name = g.name.map(|n| format!("  ({n})")).unwrap_or_default();
+                let mp = if g.multiplayer { "  [multiplayer]" } else { "" };
+                println!("{:>7}  {}{name}{id}{ac}{mp}", g.pid, g.exe);
             }
         }
         "attach" => {

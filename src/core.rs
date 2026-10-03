@@ -473,6 +473,10 @@ pub struct GameProcess {
     pub exe: String,
     pub app_id: Option<String>,
     pub anti_cheat: Option<String>,
+    /// The name Steam gives the game.
+    pub name: Option<String>,
+    /// Steam lists it as played online or with others.
+    pub multiplayer: bool,
 }
 
 pub struct ValueRow {
@@ -634,6 +638,8 @@ impl Core {
                     exe: f.get(1)?.to_string(),
                     app_id: opt(f.get(2)?),
                     anti_cheat: opt(f.get(3)?),
+                    name: f.get(4).and_then(|s| opt(s)),
+                    multiplayer: f.get(5) == Some(&"multiplayer"),
                 })
             })
             .collect()

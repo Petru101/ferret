@@ -2,6 +2,7 @@
 // flatpak runtime. Uses only std and libc.
 mod helper;
 mod pointers;
+mod steam;
 mod trace;
 
 fn main() {

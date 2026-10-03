@@ -146,7 +146,18 @@ impl Ui {
             if let Some(id) = &g.app_id {
                 subtitle = format!("Steam app {id} · {subtitle}");
             }
-            let row = adw::ActionRow::builder().title(&g.exe).subtitle(&subtitle).build();
+            let title = match &g.name {
+                Some(name) => {
+                    subtitle = format!("{} · {subtitle}", g.exe);
+                    name
+                }
+                None => &g.exe,
+            };
+            if g.multiplayer {
+                subtitle = format!("Multiplayer game: only change values when playing alone · {subtitle}");
+            }
+            let row = adw::ActionRow::builder().title(title).subtitle(&subtitle).build();
+            row.set_subtitle_lines(2);
             if let Some(ac) = &g.anti_cheat {
                 row.set_subtitle(&format!("{ac} detected. Ferret won't attach to games with anti-cheat."));
                 row.add_suffix(&gtk::Image::from_icon_name("action-unavailable-symbolic"));

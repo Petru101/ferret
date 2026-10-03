@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::pointers::{self, Module, PtrPath};
+use crate::steam;
 use crate::trace;
 
 pub struct Region {
@@ -82,7 +83,7 @@ fn is_gamemaker(pid: u32, exe: &str) -> bool {
 
 fn anti_cheat(pid: u32) -> Option<&'static str> {
     let maps = maps(pid).ok()?;
-    maps.iter().find_map(|r| {
+    let loaded = maps.iter().find_map(|r| {
         let p = r.path.to_ascii_lowercase();
         if p.contains("easyanticheat") {
             Some("Easy Anti-Cheat")
@@ -91,7 +92,27 @@ fn anti_cheat(pid: u32) -> Option<&'static str> {
         } else {
             None
         }
-    })
+    });
+    // VAC runs in the Steam client, so only Steam can tell. Source games started with
+    // -insecure run without it.
+    let vac = || {
+        let insecure = cmdline(pid).split(' ').any(|a| a == "-insecure");
+        (!insecure && steam_app(&environ(pid)).is_some_and(|a| a.vac)).then_some("Valve Anti-Cheat")
+    };
+    loaded.or_else(vac)
+}
+
+/// The Steam app ID a game was started with (umu sets 0 or "default" for games not on Steam).
+fn steam_id(env: &HashMap<String, String>) -> Option<&String> {
+    ["SteamAppId", "SteamGameId"]
+        .iter()
+        .filter_map(|k| env.get(*k))
+        .find(|id| *id != "0" && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn steam_app(env: &HashMap<String, String>) -> Option<steam::App> {
+    let id = steam_id(env)?.parse().ok()?;
+    steam::app(env.get("STEAM_COMPAT_CLIENT_INSTALL_PATH").map(String::as_str), id)
 }
 
 fn my_uid() -> u32 {
@@ -617,8 +638,8 @@ fn draws_like_a_game(pid: u32) -> bool {
     driver
 }
 
-/// Running games, one per line: pid, program name, Steam app ID and anti-cheat
-/// (tab-separated, "-" when unknown).
+/// Running games, one per line: pid, program name, Steam app ID, anti-cheat, the name Steam
+/// gives it and "multiplayer" (tab-separated, "-" when unknown or not).
 fn cmd_games(out: &mut impl Write) -> io::Result<()> {
     let uid = my_uid();
     let mut pids: Vec<u32> = fs::read_dir("/proc")?
@@ -630,11 +651,7 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let exe = exe_name(pid);
         let lower = exe.to_ascii_lowercase();
         let env = environ(pid);
-        // umu (Lutris, Heroic) sets "default" for games that aren't on Steam.
-        let app_id = ["SteamAppId", "SteamGameId"]
-            .iter()
-            .filter_map(|k| env.get(*k))
-            .find(|id| *id != "0" && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
+        let app_id = steam_id(&env);
         let windows = lower.ends_with(".exe");
         if NOT_GAMES.contains(&lower.as_str()) || lower.contains("crashhandler") {
             continue;
@@ -642,8 +659,13 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         if !(windows || app_id.is_some() || draws_like_a_game(pid)) {
             continue;
         }
-        let dash = |s: Option<&str>| s.unwrap_or("-").to_owned();
-        writeln!(out, "{pid}\t{exe}\t{}\t{}", dash(app_id.map(String::as_str)), dash(anti_cheat(pid)))?;
+        let dash = |s: Option<&str>| s.filter(|s| !s.is_empty()).unwrap_or("-").to_owned();
+        let steam = steam_app(&env);
+        let name = steam.as_ref().map(|a| a.name.replace('\t', " "));
+        let multiplayer = steam.as_ref().is_some_and(|a| a.multiplayer).then_some("multiplayer");
+        let id = dash(app_id.map(String::as_str));
+        let ac = dash(anti_cheat(pid));
+        writeln!(out, "{pid}\t{exe}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(multiplayer))?;
     }
     Ok(())
 }
@@ -653,7 +675,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
         return writeln!(out, "error: usage: attach <pid>");
     };
     if let Some(ac) = anti_cheat(pid) {
-        return writeln!(out, "error: refusing to attach, {ac} is loaded in this process");
+        return writeln!(out, "error: refusing to attach, the game runs with {ac}");
     }
     match OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem")) {
         Ok(f) => {
