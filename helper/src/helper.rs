@@ -110,7 +110,16 @@ fn anti_cheat(pid: u32) -> Option<String> {
             anticheat::game_folder(&program)
         }
     };
-    anticheat::in_folder(&inside(&folder)).map(str::to_owned)
+    if let Some(ac) = anticheat::in_folder(&inside(&folder)) {
+        return Some(ac.to_owned());
+    }
+    // Any launcher (or none): the folders and program named like a listed game.
+    let exe = exe_name(pid);
+    // Unreal: <game>/<project>/Binaries/Win64, so two folders up as well.
+    let folders = folder.ancestors().take(3).filter_map(Path::file_name);
+    let names: Vec<String> =
+        folders.chain(Path::new(&exe).file_stem()).map(|n| n.to_string_lossy().into_owned()).collect();
+    launchers::listed_as(&env, &names)
 }
 
 /// A game its store lists as played only with other people.

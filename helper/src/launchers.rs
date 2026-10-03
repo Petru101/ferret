@@ -127,6 +127,21 @@ fn heroic_game(dirs: &[PathBuf], runner: &str, app: &str, a: &mut About, ids: &m
     }
 }
 
+/// AreWeAntiCheatYet's anti-cheat for a game named like one of `names` (its folder and
+/// program), whatever started it. Kept per names: the games list asks every second.
+pub fn listed_as(env: &HashMap<String, String>, names: &[String]) -> Option<String> {
+    static CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+    let key = names.join("\n");
+    if let Some(found) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(&key) {
+        return found.clone();
+    }
+    let dirs = heroic_dirs(env);
+    let ids = Ids { steam: None, namespace: None };
+    let found = names.iter().find_map(|n| listed_anti_cheat(&dirs, &ids, Some(n)));
+    CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, found.clone());
+    found
+}
+
 /// AreWeAntiCheatYet's entry by Steam app ID, Epic namespace or name (letters and digits only).
 fn listed_anti_cheat(dirs: &[PathBuf], ids: &Ids, name: Option<&str>) -> Option<String> {
     static LIST: OnceLock<Option<Value>> = OnceLock::new();
