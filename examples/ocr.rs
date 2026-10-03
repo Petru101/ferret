@@ -4,11 +4,12 @@
 //       io.github.Petru101.Ferret numbers frame.png [digits-file]
 //   ... read frame.png <x> <y> <w> <h> crop.png [digits-file]
 //   ... learn frame.png <x> <y> <w> <h> <n> digits-file
-//   ... follow <x> <y> <w> <h> digits-file frame.png... (watched reads over a series of frames)
+//   ... follow <x> <y> <w> <h> digits-file frame.png... (reads of one box over a series of frames)
 //   ... fontnumbers frame.png digits-file
 //   ... crop frame.png <x> <y> <w> <h> (the colour-group reader's candidates and glyphs)
 //   ... glyphs frame.png <x> <y> <w> <h> digits-file (the glyph-sized shapes there, and what they read as)
-// A digits file holds learned digit shapes (as in profiles/<game>.digits).
+// A digits file holds learned digit shapes (as in profiles/<game>.digits). Outside the Ferret
+// flatpak, FERRET_OCR_MODELS names the folder with PaddleOCR's det.onnx, rec.onnx and rec.yml.
 
 #[path = "../src/font.rs"]
 #[allow(dead_code)]
@@ -16,6 +17,9 @@ mod font;
 #[path = "../src/ocr.rs"]
 #[allow(dead_code)]
 mod ocr;
+#[path = "../src/reader.rs"]
+#[allow(dead_code)]
+mod reader;
 
 use std::path::Path;
 
@@ -37,8 +41,8 @@ fn main() {
                 return eprintln!("x y w h must be numbers");
             };
             let area = ocr::Rect { x, y, w, h };
-            match ocr::read_number_at(Path::new(&args[1]), area, Path::new(&args[6]), font(7).as_ref(), &mut Vec::new()) {
-                Ok((Some((n, learned)), _)) => println!("{n}{}", if learned { " (learned digits)" } else { "" }),
+            match ocr::read_number_at(Path::new(&args[1]), area, Path::new(&args[6]), font(7).as_ref()) {
+                Ok(Some((n, learned))) => println!("{n}{}", if learned { " (learned digits)" } else { "" }),
                 r => println!("{r:?}"),
             }
         }
@@ -46,14 +50,12 @@ fn main() {
             let (Some(x), Some(y), Some(w), Some(h)) = (n(1), n(2), n(3), n(4)) else {
                 return eprintln!("x y w h must be numbers");
             };
-            let (mut area, f, mut seen) = (ocr::Rect { x, y, w, h }, font(5), Vec::new());
+            let (area, f) = (ocr::Rect { x, y, w, h }, font(5));
             for frame in &args[6..] {
                 let crop = std::env::temp_dir().join("ocr-follow.png");
-                let (read, to) = ocr::read_number_at(Path::new(frame), area, &crop, f.as_ref(), &mut seen).unwrap_or_else(|e| panic!("{e}"));
-                let moved = to.is_some_and(|to| !ocr::overlaps(to, area));
-                area = to.unwrap_or(area);
-                let read = read.map_or("-".into(), |(n, l)| format!("{n}{}", if l { "" } else { " (tesseract)" }));
-                println!("{frame}: {read:<12} area {},{} {}x{}{}", area.x, area.y, area.w, area.h, if moved { "  MOVED" } else { "" });
+                let read = ocr::read_number_at(Path::new(frame), area, &crop, f.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+                let read = read.map_or("-".into(), |(n, l)| format!("{n}{}", if l { "" } else { " (paddle)" }));
+                println!("{frame}: {read}");
             }
         }
         Some("glyphs") if args.len() == 7 => {

@@ -25,7 +25,7 @@ pub struct FindView {
     texture: RefCell<Option<gdk::Texture>>,
     words: RefCell<Vec<Word>>,
     selection: RefCell<Option<Rect>>,
-    /// A read the player hasn't confirmed yet (Tesseract's, not the learned digits').
+    /// A read the player hasn't confirmed yet (PaddleOCR's, not the learned digits').
     unconfirmed: RefCell<Option<Shown>>,
     /// Drag start and current point, in widget coordinates.
     drag: RefCell<Option<(f64, f64, f64, f64)>>,
@@ -617,7 +617,7 @@ impl FindView {
                 self.status.set_label(&format!("Reads {n}. Press Start, then play until the number changes a couple of times."));
                 self.start.set_sensitive(true);
             }
-            // Tesseract's guess: ask, and learn the game's digits from the answer.
+            // PaddleOCR's read: ask, and learn the game's digits from the answer.
             Ok(Some((n, false))) => {
                 self.status.set_label(&format!("Reads {n}. Is that what the game shows? If not, type the right number below."));
                 self.unconfirmed.replace(Some(n));
@@ -807,10 +807,10 @@ impl FindView {
             self.digits.append(&button);
         }
         self.digits_hint.set_label(&match missing.len() {
-            10 => "None yet: Tesseract reads the numbers. Typing the number the game shows teaches Ferret its digits.".to_owned(),
-            0 => "All ten: while searching, Ferret only trusts reads made with these.".to_owned(),
+            10 => "None yet: the general reader reads the numbers. Confirming or typing the number the game shows teaches Ferret its digits.".to_owned(),
+            0 => "All ten: Ferret reads the game's numbers with these first.".to_owned(),
             _ => format!(
-                "Missing {}: Tesseract fills in, checked against the known ones. Type a number that has {} once.",
+                "Missing {}: the general reader fills in. Type a number that has {} once.",
                 missing.join(", "),
                 if missing.len() == 1 { "it" } else { "them" }
             ),

@@ -1,5 +1,6 @@
 // A game's digits, learned from numbers the player types and from values found in memory.
-// Reading a number then matches each glyph against these shapes; Tesseract is the fallback.
+// Reading a number then matches each glyph against these shapes; PaddleOCR (`reader`) reads
+// what they don't.
 // Pixel fonts are also kept on their own grid of font pixels, which reads them at any size
 // (the player resizes the game window; a game draws the same font at several sizes).
 
@@ -319,18 +320,13 @@ impl Font {
         before - self.samples.len() - self.grids.len()
     }
 
-    /// Whether a number Tesseract read agrees with the glyphs the learned digits do know (when
+    /// Whether a number read another way agrees with the glyphs the learned digits do know (when
     /// the glyphs line up with its digits; otherwise there's nothing to compare).
     pub fn agrees(&self, glyphs: &[Glyph], scale: u32, digits: &str) -> bool {
         let whole: Vec<&Glyph> = glyphs.iter().filter(|g| !g.cut).collect();
         let text = digits;
         whole.len() != text.len()
             || whole.iter().zip(text.bytes()).all(|(g, c)| self.digit(g, scale).is_none_or(|(d, _)| d == c - b'0'))
-    }
-
-    /// Knows every digit: then what it can't read isn't a number (a menu over the watched spot).
-    pub fn knows_all(&self) -> bool {
-        self.known().len() == 19
     }
 
     /// The digits it knows, e.g. "0 1 3 9".
@@ -375,17 +371,6 @@ impl Font {
             .filter_map(|(d, t)| Some((*d, s.distance(t)?)))
             .min_by_key(|(_, dist)| *dist)
             .filter(|(_, dist)| *dist <= SAME)
-    }
-
-    /// How many glyphs (not cut off) are the size of a known digit.
-    pub fn digit_sized(&self, glyphs: &[Glyph], scale: u32) -> usize {
-        let rows = self.grid_rows();
-        let on_grid = |g: &Glyph| {
-            rows.iter().filter_map(|r| Grid::of(g, *r, scale)).any(|a| self.grids.iter().any(|(_, b)| a.w == b.w && a.h == b.h))
-        };
-        let sized =
-            |g: &&Glyph| self.samples.iter().any(|(_, s)| (g.h as f32 / scale as f32 / s.height).ln().abs() < 0.3) || on_grid(g);
-        glyphs.iter().filter(|g| !g.cut).filter(sized).count()
     }
 
     /// Reads glyphs (left to right) as a number, when every one of them is a known digit, except

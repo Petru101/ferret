@@ -12,6 +12,8 @@ async-channel = "2.5.0"
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_14"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
+rten = "0.26"
+rten-tensor = "0.26"
 zbus = "5"
 
 [profile.release]

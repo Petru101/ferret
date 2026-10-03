@@ -11,7 +11,6 @@ finish-args:
   - --share=ipc
   - --device=dri
   - --talk-name=org.freedesktop.Flatpak
-  - --env=TESSDATA_PREFIX=/app/share/tessdata
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 cleanup:
@@ -20,50 +19,30 @@ cleanup:
   - /lib/pkgconfig
   - '*.a'
 modules:
-  - name: leptonica
-    buildsystem: cmake-ninja
-    builddir: true
-    config-opts:
-      - -DCMAKE_BUILD_TYPE=Release
-      - -DBUILD_SHARED_LIBS=ON
-      - -DBUILD_PROG=OFF
-      - -DSW_BUILD=OFF
-      - -DENABLE_GIF=OFF
-      - -DENABLE_WEBP=OFF
-      - -DENABLE_OPENJPEG=OFF
-      - -DENABLE_TIFF=OFF
-    sources:
-      - type: archive
-        url: https://github.com/DanBloomberg/leptonica/releases/download/1.87.0/leptonica-1.87.0.tar.gz
-        sha256: c73363397f96eb1295602bf44d708a994ad42046c791bf03ea0505d829bdb6a7
-
-  - name: tesseract
-    buildsystem: cmake-ninja
-    builddir: true
-    config-opts:
-      - -DCMAKE_BUILD_TYPE=Release
-      - -DBUILD_SHARED_LIBS=ON
-      - -DBUILD_TRAINING_TOOLS=OFF
-      - -DBUILD_TESTS=OFF
-      - -DGRAPHICS_DISABLED=ON
-      - -DDISABLE_ARCHIVE=ON
-      - -DDISABLE_CURL=ON
-      - -DOPENMP_BUILD=OFF
-      - -DENABLE_NATIVE=OFF
-      - -DSW_BUILD=OFF
-    sources:
-      - type: archive
-        url: https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.3.tar.gz
-        sha256: 9218e62793116d42a9f6d14cd9348518b27f382096eea3d0f2d1a24616bb5884
-
-  - name: tessdata
+  # PaddleOCR PP-OCRv6 small (Apache-2.0): text detection and recognition, run by rten.
+  - name: ocr-models
     buildsystem: simple
     build-commands:
-      - install -Dm644 eng.traineddata /app/share/tessdata/eng.traineddata
+      - install -Dm644 det.onnx /app/share/ferret/ocr/det.onnx
+      - install -Dm644 rec.onnx /app/share/ferret/ocr/rec.onnx
+      - install -Dm644 rec.yml /app/share/ferret/ocr/rec.yml
+      - install -Dm644 LICENSE /app/share/licenses/io.github.Petru101.Ferret/PaddleOCR-LICENSE
     sources:
       - type: file
-        url: https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata
-        sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+        url: https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/28fe5895c24fd108c19eb3e8479f4ab385fbfc62/inference.onnx
+        sha256: d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e
+        dest-filename: det.onnx
+      - type: file
+        url: https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/b8f84f0b80c529de40b4fbb3544b84fa7233a513/inference.onnx
+        sha256: 5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634
+        dest-filename: rec.onnx
+      - type: file
+        url: https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/b8f84f0b80c529de40b4fbb3544b84fa7233a513/inference.yml
+        sha256: ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1
+        dest-filename: rec.yml
+      - type: file
+        url: https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/v3.7.0/LICENSE
+        sha256: 3840c5c0c61c294264d2dd77b8777be6ddd90121ef4e0e64abcd22edea581d6e
 
   - name: ferret
     buildsystem: simple
@@ -90,5 +69,8 @@ modules:
           - repo
           - test-game
           - run
+          - bench
+          - images
+          - images 2
           - stub
           - .flatpak-builder

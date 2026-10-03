@@ -4,6 +4,7 @@ mod core;
 mod font;
 mod gui;
 mod ocr;
+mod reader;
 mod shapes;
 
 fn main() {

@@ -644,11 +644,6 @@ pub struct Core {
     log: Box<dyn FnMut(&str) + Send>,
     /// Set to stop a running `auto`.
     pub cancel: Arc<AtomicBool>,
-    /// The last read `read_stable` ignored, to log it once.
-    ignored: Option<Shown>,
-    /// Numbers the learned digits found in the last frame read, to follow the watched number
-    /// when the layout shifts.
-    seen: Vec<Word>,
     /// Told about every frame the watched number is read from, and where the watched area is
     /// after it (the interface shows the game as the search sees it).
     pub on_frame: Option<Box<dyn FnMut(&Path, Option<Rect>) + Send>>,
@@ -692,8 +687,6 @@ impl Core {
             searched_decimals: 0,
             log,
             cancel: Arc::new(AtomicBool::new(false)),
-            ignored: None,
-            seen: Vec::new(),
             on_frame: None,
             on_status: None,
             on_matches: None,
@@ -1413,7 +1406,6 @@ impl Core {
             self.say(&format!("another number picked: keeping the {n} matches (Start Over clears them)"));
         }
         self.area = Some(area);
-        self.seen.clear();
         kept
     }
 
@@ -1455,25 +1447,17 @@ impl Core {
         self.read_frame(&frame)
     }
 
-    /// Reads the watched number in `frame`. When the learned digits find it, the watched area
-    /// follows it: the whole number with room to grow, wherever the old area cut it, and along
-    /// with the numbers around it when they all move.
+    /// Reads the watched number in `frame`, strictly inside the watched area.
     fn read_frame(&mut self, frame: &Path) -> Result<Option<(Shown, bool)>, String> {
         let area = self.area.ok_or("no area picked yet")?;
-        let (read, moved) = ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font), &mut self.seen)?;
-        if let Some(to) = moved {
-            if !ocr::overlaps(to, area) {
-                self.say("the numbers around the watched one moved: following them");
-            }
-            self.area = Some(to);
-        }
+        let read = ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font))?;
         if let Some(f) = self.on_frame.as_mut() {
             f(frame, self.area);
         }
         Ok(read)
     }
 
-    /// The area being watched (it follows the number).
+    /// The area being watched.
     pub fn watched(&self) -> Option<Rect> {
         self.area
     }
@@ -1799,21 +1783,11 @@ impl Core {
         Some(loc)
     }
 
-    /// Two reads in a row that agree. Once the learned digits know every digit, a number only
-    /// Tesseract reads is something else in the watched spot (a menu opened over it): no read.
+    /// Two reads in a row that agree.
     fn read_stable(&mut self) -> Result<Option<Shown>, String> {
-        let a = self.read_learned()?;
-        let b = self.read_learned()?;
-        let (Some((n, learned)), true) = (a.clone(), a == b) else { return Ok(None) };
-        if !learned && self.font.knows_all() {
-            if self.ignored.as_ref() != Some(&n) {
-                self.say(&format!("the watched spot shows something the learned digits don't read (Tesseract: {n}), ignored"));
-            }
-            self.ignored = Some(n);
-            return Ok(None);
-        }
-        self.ignored = None;
-        Ok(Some(n))
+        let a = self.read_learned()?.map(|(n, _)| n);
+        let b = self.read_learned()?.map(|(n, _)| n);
+        Ok(if a == b { a } else { None })
     }
 
     /// Whether the one match left is the value itself: a test write (undone right after) has to

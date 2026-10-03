@@ -8,8 +8,10 @@ Linux, packaged as a flatpak.
 - Never for online games: refuses games with anti-cheat (loaded, shipped in the game's folder, VAC
   per Steam, or listed by [AreWeAntiCheatYet](https://github.com/AreWeAntiCheatYet/AreWeAntiCheatYet))
   and games their store (Steam, Heroic) lists as online only.
-- `numbers` / `watch` / `auto`: reads a value off the game window (ScreenCast portal + Tesseract) and
-  narrows memory scans every time it changes; `probe` picks the real value out of its copies.
+- `numbers` / `watch` / `auto`: reads a value off the game window (ScreenCast portal; the number
+  inside the rectangle the player picks, read with PaddleOCR and the game's own digits once
+  learned) and narrows memory scans every time it changes; `probe` picks the real value out of
+  its copies.
 - `save <name>`: finds the code that accesses a value with hardware breakpoints and saves a code
   pattern, so the value is found again automatically after the game restarts.
 
@@ -33,3 +35,10 @@ actions) and `table-check.py` (resolves ParticleFleet.CT's gems pointer read-onl
 `data/areweanticheatyet/games.json` is a trimmed copy of AreWeAntiCheatYet's `games.json`
 (MIT License, Copyright © 2021 Starz0r, Curve; see `data/areweanticheatyet/LICENSE` and `SOURCE`).
 Refresh it with `data/areweanticheatyet/update.sh` before a release.
+
+Numbers are read with PaddlePaddle's PP-OCRv6 small text detection and recognition models
+([PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR), Apache License 2.0), downloaded from
+PaddlePaddle's Hugging Face repositories at build time and run with
+[rten](https://github.com/robertknight/rten).
+
+`bench/` compares OCR engines on saved game frames (its own cargo workspace; see `bench/run.sh`).

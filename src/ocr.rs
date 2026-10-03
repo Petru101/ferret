@@ -1,10 +1,9 @@
-// Reads numbers from captured frames with the bundled Tesseract.
+// Reads numbers from captured frames: PaddleOCR (`reader`) inside the player's rectangle, and the
+// game's own digits once learned (`font`), which also find its numbers on the whole frame.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::thread;
+use std::path::Path;
 
-use image::{imageops, GrayImage, Luma, RgbImage};
+use image::{imageops, RgbImage};
 
 use crate::font::{Font, FontRead, Glyph};
 
@@ -110,153 +109,21 @@ fn separator(marks: &[(u32, u32, u32, u32)], top: u32, bottom: u32) -> Option<ch
     }
 }
 
-/// Runs Tesseract on an image, or on each image named in a list file: words with their page
-/// (1-based, the position in the list).
-fn tesseract(img: &Path, psm: u32, config: &[&str]) -> Result<Vec<(usize, Word)>, String> {
-    let mut cmd = Command::new("tesseract");
-    cmd.arg(img).arg("stdout").args(["--psm", &psm.to_string()]);
-    for c in config {
-        cmd.args(["-c", c]);
-    }
-    let out = cmd.arg("tsv").output().map_err(|e| format!("tesseract: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("tesseract failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .skip(1)
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split('\t').collect();
-            if f.len() < 12 || f[0] != "5" || f[11].trim().is_empty() {
-                return None;
-            }
-            let n = |i: usize| f[i].parse::<u32>().ok();
-            let word = Word {
-                text: f[11].trim().to_owned(),
-                rect: Rect { x: n(6)?, y: n(7)?, w: n(8)?, h: n(9)? },
-                conf: f[10].parse().unwrap_or(0.0),
-            };
-            Some((f[1].parse().ok()?, word))
-        })
-        .collect())
-}
-
 pub fn digits(text: &str) -> Option<i64> {
     let d: String = text.chars().filter(char::is_ascii_digit).collect();
     d.parse().ok()
-}
-
-fn has_digit(w: &Word) -> bool {
-    w.text.chars().any(|c| c.is_ascii_digit())
 }
 
 pub fn overlaps(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-/// Brightest channel minus the local average, so dim text on a dark HUD stands out as much as
-/// bright text does. Returned 2x upscaled, dark text on white.
-fn local_contrast(img: &RgbImage) -> GrayImage {
-    const R: i64 = 12;
-    let (w, h) = (img.width() as i64, img.height() as i64);
-    let v: Vec<u8> = img.pixels().map(|p| p[0].max(p[1]).max(p[2])).collect();
-    // Summed-area table for the box average.
-    let mut sat = vec![0u64; ((w + 1) * (h + 1)) as usize];
-    for y in 0..h {
-        let mut row = 0u64;
-        for x in 0..w {
-            row += v[(y * w + x) as usize] as u64;
-            sat[((y + 1) * (w + 1) + x + 1) as usize] = sat[(y * (w + 1) + x + 1) as usize] + row;
-        }
-    }
-    let out = GrayImage::from_fn(w as u32, h as u32, |x, y| {
-        let (x, y) = (x as i64, y as i64);
-        let (x0, y0, x1, y1) = ((x - R).max(0), (y - R).max(0), (x + R + 1).min(w), (y + R + 1).min(h));
-        let sum = sat[(y1 * (w + 1) + x1) as usize] + sat[(y0 * (w + 1) + x0) as usize]
-            - sat[(y0 * (w + 1) + x1) as usize]
-            - sat[(y1 * (w + 1) + x0) as usize];
-        let mean = sum as f32 / ((x1 - x0) * (y1 - y0)) as f32;
-        let d = (v[(y * w + x) as usize] as f32 - mean).abs() * 4.0;
-        Luma([255 - d.min(255.0) as u8])
-    });
-    double(&out)
-}
-
-/// 2x bilinear upscale (imageops::resize takes over a second on a whole frame).
-fn double(img: &GrayImage) -> GrayImage {
-    let (w, h) = (img.width(), img.height());
-    let at = |x: u32, y: u32| img.get_pixel(x.min(w - 1), y.min(h - 1))[0] as u16;
-    GrayImage::from_fn(w * 2, h * 2, |x, y| {
-        let (sx, sy) = (x / 2, y / 2);
-        let (a, b) = (at(sx, sy), at(sx + x % 2, sy));
-        let (c, d) = (at(sx, sy + y % 2), at(sx + x % 2, sy + y % 2));
-        Luma([((a + b + c + d + 2) / 4) as u8])
-    })
-}
-
-/// Every number in the frame. The plain pass handles ordinary text; an automatic-layout pass
-/// finds text on light panels, an adaptive-threshold pass and a local-contrast pass catch dim
-/// text. Those also read plenty of fake digits into game textures, so what only they see is
-/// kept only if a careful re-read agrees.
+/// Every number in the frame, for the player to click: the learned digits' (exact, the game's
+/// own font) and PaddleOCR's where those found none.
 pub fn numbers(frame: &Path, font: Option<&Font>) -> Result<Vec<Word>, String> {
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
-    // The game's own digits find its numbers exactly; Tesseract adds what they don't read.
     let by_font = font.filter(|f| !f.is_empty()).map(|f| font_numbers(&img, f)).unwrap_or_default();
-    // PGM: encoding a PNG this size takes longer than reading it.
-    let contrast = frame.with_file_name("frame-contrast.pgm");
-    let c = local_contrast(&img);
-    let mut pgm = format!("P5\n{} {}\n255\n", c.width(), c.height()).into_bytes();
-    pgm.extend_from_slice(c.as_raw());
-    std::fs::write(&contrast, pgm).map_err(|e| e.to_string())?;
-    let (plain, layout, adaptive, contrast) = thread::scope(|s| {
-        let plain = s.spawn(|| tesseract(frame, 11, &[]));
-        let layout = s.spawn(|| tesseract(frame, 3, &[]));
-        let adaptive = s.spawn(|| tesseract(frame, 11, &["thresholding_method=1"]));
-        let contrast = tesseract(&contrast, 11, &[]);
-        (plain.join().unwrap(), layout.join().unwrap(), adaptive.join().unwrap(), contrast)
-    });
-    std::fs::remove_file(frame.with_file_name("frame-contrast.pgm")).ok();
-    let halve = |(_, mut w): (usize, Word)| {
-        w.rect = Rect { x: w.rect.x / 2, y: w.rect.y / 2, w: w.rect.w.div_ceil(2), h: w.rect.h.div_ceil(2) };
-        w
-    };
-    let mut found: Vec<Word> = plain?.into_iter().map(|(_, w)| w).filter(has_digit).collect();
-    let mut extra: Vec<Word> = Vec::new();
-    let others = layout?.into_iter().chain(adaptive?).map(|(_, w)| w).chain(contrast?.into_iter().map(halve));
-    for w in others.filter(has_digit) {
-        if !found.iter().chain(&extra).any(|f| overlaps(f.rect, w.rect)) {
-            extra.push(w);
-        }
-    }
-    // Re-read everything with `read_areas`: it gets dim text and unit labels right, and a box it
-    // can't read is no use for watching anyway. Words only the extra passes saw also need a
-    // confident read.
-    let areas: Vec<Rect> = found
-        .iter()
-        .chain(&extra)
-        .map(|w| {
-            // Generous: the other passes often box only part of the glyphs.
-            let pad = w.rect.h.max(8);
-            Rect { x: w.rect.x.saturating_sub(2 * pad), y: w.rect.y.saturating_sub(pad), w: w.rect.w + 4 * pad, h: w.rect.h + 2 * pad }
-        })
-        .collect();
-    let dir = frame.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let reads = read_areas(&img, &areas, true, dir, font);
-    remove_candidates(dir);
-    let mut reads = reads?.into_iter();
-    let plain: Vec<Word> = found.drain(..).collect();
-    for (w, r) in plain.into_iter().zip(reads.by_ref()) {
-        if let Some(r) = r.filter(|r| overlaps(r.rect, w.rect)) {
-            found.push(Word { text: r.n.to_string(), rect: r.rect, conf: r.conf });
-        }
-    }
-    for r in reads.flatten() {
-        // Under 7 pixels it's a texture more often than a number.
-        if r.conf >= 70.0 && r.rect.h >= 7 && !found.iter().any(|f| overlaps(f.rect, r.rect)) {
-            found.push(Word { text: r.n.to_string(), rect: r.rect, conf: r.conf });
-        }
-    }
-    found.retain(|w| !by_font.iter().any(|f| overlaps(f.rect, w.rect)));
+    let mut found: Vec<Word> = crate::reader::numbers(&img)?.into_iter().filter(|w| !by_font.iter().any(|f| overlaps(f.rect, w.rect))).collect();
     found.extend(by_font);
     Ok(found)
 }
@@ -609,10 +476,9 @@ fn colour_groups(img: &RgbImage) -> Vec<[f32; 3]> {
     centers
 }
 
-/// A black-on-white image of what might be the number, the height of its tallest glyph, where
+/// What might be the number in one colour group: the height of its tallest glyph, where
 /// its glyphs are (in the image, then in the frame) and the glyphs themselves, left to right.
 struct Candidate {
-    img: GrayImage,
     glyph_h: u32,
     rect: Rect,
     glyphs: Vec<Glyph>,
@@ -730,22 +596,10 @@ fn glyphs(mask: &[bool], w: u32, h: u32, cut_off: bool) -> Option<Candidate> {
             Glyph { x: bx0, w: gw, h: gh, ink, cut: bx0 == 0 || bx1 == w - 1 }
         })
         .collect();
-    // Tesseract wants a margin around the text. Small marks within the number's span go in too:
-    // the dots of "1.2" and "3:17".
-    let dot = |b: &(u32, u32, u32, u32)| {
-        b.0 > x0 && b.2 < x1 && b.1 >= y0 && b.3 <= y1 && (b.2 - b.0) * 3 < y1 - y0 && (b.3 - b.1) * 3 < y1 - y0
-    };
-    let drawn: Vec<bool> = blobs.iter().zip(&keep).map(|(b, k)| *k || dot(b)).collect();
-    let mut img = GrayImage::from_pixel(w + 40, h + 40, Luma([255]));
-    for (i, l) in label.iter().enumerate() {
-        if *l != 0 && drawn[*l as usize - 1] {
-            img.put_pixel(20 + i as u32 % w, 20 + i as u32 / w, Luma([0]));
-        }
-    }
-    Some(Candidate { img, glyph_h: tallest, rect, glyphs, marks, band: (y0, y1) })
+    Some(Candidate { glyph_h: tallest, rect, glyphs, marks, band: (y0, y1) })
 }
 
-/// Turns a slashed zero (Ø, common in HUD fonts, and Tesseract can't read it) into a plain 0.
+/// Turns a slashed zero (Ø, common in HUD fonts) into a plain 0.
 /// It has two holes placed diagonally; an 8 has them one above the other. Clearing the area
 /// spanned by both holes removes the slash and leaves the ring.
 fn unslash(label: &mut [u32], w: u32, id: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) {
@@ -828,124 +682,17 @@ fn candidates(img: &RgbImage, area: Rect, cut_off: bool) -> Vec<Candidate> {
     cands
 }
 
-struct Read {
-    n: Shown,
-    conf: f32,
-    file: PathBuf,
-    rect: Rect,
-    /// Read by the learned digits rather than Tesseract.
-    learned: bool,
-}
-
-/// Reads the number in each area; `padded` areas have room around the number, so anything
-/// touching their edge is something else. Every candidate image goes to `dir`; the chosen one
-/// is named in the result, the caller removes the rest.
-fn read_areas(img: &RgbImage, areas: &[Rect], padded: bool, dir: &Path, font: Option<&Font>) -> Result<Vec<Option<Read>>, String> {
-    let per_area: Vec<Vec<Candidate>> = thread::scope(|s| {
-        let jobs: Vec<_> = areas.iter().map(|a| s.spawn(move || candidates(img, *a, padded))).collect();
-        jobs.into_iter().map(|j| j.join().unwrap()).collect()
-    });
-    let mut known: Vec<Option<Read>> = Vec::new();
-    let mut files: Vec<(usize, usize, u32, Rect, PathBuf)> = Vec::new(); // area, candidate, glyph height, glyphs, image
-    for (a, cands) in per_area.iter().enumerate() {
-        let mut paths = Vec::new();
-        for (c, cand) in cands.iter().enumerate() {
-            let file = dir.join(format!("ocr-{a}-{c}.png"));
-            cand.img.save(&file).map_err(|e| e.to_string())?;
-            paths.push(file);
-        }
-        // With the game's digits learned, a crop they read completely needs no Tesseract.
-        let by_font = font.and_then(|f| font_read(f, cands));
-        known.push(by_font.map(|(c, n)| Read { n, conf: 95.0, file: paths[c].clone(), rect: cands[c].rect, learned: true }));
-        if known[a].is_none() {
-            files.extend(cands.iter().zip(paths).enumerate().map(|(c, (cand, file))| (a, c, cand.glyph_h, cand.rect, file)));
-        }
-    }
-    // A few Tesseract runs over lists of images: starting it costs more than reading a crop.
-    let runs = thread::available_parallelism().map_or(4, |n| n.get()).min(files.len().div_ceil(4)).max(1);
-    let chunk = files.len().div_ceil(runs).max(1);
-    let texts: Vec<(Vec<(usize, Word)>, Vec<(usize, Word)>)> = thread::scope(|s| {
-        let jobs: Vec<_> = files
-            .chunks(chunk)
-            .enumerate()
-            .map(|(r, part)| {
-                s.spawn(move || {
-                    let list = dir.join(format!("ocr-list-{r}.txt"));
-                    let names: String = part.iter().map(|f| format!("{}\n", f.4.display())).collect();
-                    std::fs::write(&list, names).map_err(|e| e.to_string())?;
-                    // Digits only reads stylised digits best, but also turns letters into digits;
-                    // the free read tells which words are letters.
-                    let (digits, free) = thread::scope(|s| {
-                        let free = s.spawn(|| tesseract(&list, 7, &[]));
-                        (tesseract(&list, 7, &["tessedit_char_whitelist=0123456789"]), free.join().unwrap())
-                    });
-                    std::fs::remove_file(&list).ok();
-                    Ok((digits?, free?))
-                })
-            })
-            .collect();
-        jobs.into_iter().map(|j| j.join().unwrap()).collect::<Result<_, String>>()
-    })?;
-    let mut reads: Vec<(Vec<Word>, Vec<Word>)> = vec![(Vec::new(), Vec::new()); files.len()];
-    for (r, (digits, free)) in texts.into_iter().enumerate() {
-        for (page, w) in digits {
-            reads[r * chunk + page - 1].0.push(w);
-        }
-        for (page, w) in free {
-            reads[r * chunk + page - 1].1.push(w);
-        }
-    }
-    let mut found: Vec<Vec<(u32, Read)>> = (0..areas.len()).map(|_| Vec::new()).collect();
-    for ((a, c, glyph_h, rect, file), (digit_words, free)) in files.into_iter().zip(reads) {
-        let Some((n, conf)) = number_in(&digit_words, &free) else { continue };
-        // Tesseract drops digits it can't read (a blocky "2" in "26" gives 6). When the crop has
-        // more glyphs the size of the learned digits than the read has digits, and no letters,
-        // it is missing some: better no number than a wrong one.
-        let cand = &per_area[a][c];
-        let glyphs = number_glyphs(&cand.glyphs);
-        let digits = n.digits();
-        // "13/40" read as 1340 or 13140: Tesseract took the slash for digits.
-        let slash = cand.glyphs.iter().any(|g| !g.cut && is_slash(g));
-        if slash && glyphs.iter().filter(|g| !g.cut).count() != digits.len() {
-            continue;
-        }
-        // "1.2" read as 12: the crop has the dot, the read doesn't.
-        let whole: Vec<Glyph> = glyphs.iter().filter(|g| !g.cut).cloned().collect();
-        if whole.len() == digits.len() && cand.shown(&whole, &digits).is_some_and(|s| s != n) {
-            continue;
-        }
-        let sized = font.map_or(0, |f| f.digit_sized(&glyphs, SCALE));
-        let letters = free.iter().any(|w| w.text.chars().any(char::is_alphabetic));
-        if sized > digits.len() && !letters {
-            continue;
-        }
-        // Another colour group shows more glyphs of this size here: the read is part of the
-        // number ("1" of "1.8", the 8 in a colour this crop doesn't have).
-        let similar = |o: &Candidate| o.glyph_h * 4 >= glyph_h * 3 && o.glyph_h * 3 <= glyph_h * 4;
-        let most = per_area[a].iter().filter(|o| similar(o)).map(|o| number_glyphs(&o.glyphs).iter().filter(|g| !g.cut).count()).max();
-        // Only for a watched box: the padded boxes of full-frame finding take in neighbours.
-        if !padded && most.is_some_and(|m| m > digits.len()) && !letters {
-            continue;
-        }
-        // A digit the learned ones read differently: Tesseract misread it.
-        if font.is_some_and(|f| !f.agrees(&glyphs, SCALE, &digits)) {
-            continue;
-        }
-        found[a].push((glyph_h, Read { n, conf, file, rect, learned: false }));
-    }
-    // The number is normally the biggest text in the box; among reads of about that size (edge
-    // pixels change the height a little), the most confident one.
-    Ok(found
-        .into_iter()
-        .zip(known)
-        .map(|(reads, known)| {
-            if known.is_some() {
-                return known;
-            }
-            let tallest = reads.iter().map(|r| r.0).max()?;
-            reads.into_iter().filter(|r| r.0 * 4 >= tallest * 3).map(|r| r.1).max_by(|a, b| a.conf.total_cmp(&b.conf))
-        })
-        .collect())
+/// Whether the rectangle's edge cuts a glyph right next to the number: it may be one of its
+/// digits ("13" of "138"). One further away is something else.
+fn cut_beside(c: &Candidate) -> bool {
+    let glyphs = number_glyphs(&c.glyphs);
+    let whole: Vec<&Glyph> = glyphs.iter().filter(|g| !g.cut).collect();
+    let (Some(x0), Some(x1), Some(h)) =
+        (whole.iter().map(|g| g.x).min(), whole.iter().map(|g| g.x + g.w).max(), whole.iter().map(|g| g.h).max())
+    else {
+        return false;
+    };
+    glyphs.iter().any(|g| g.cut && g.x + g.w + h / 2 >= x0 && g.x <= x1 + h / 2)
 }
 
 /// The candidate the learned digits read completely, and its number: among the tallest text,
@@ -959,14 +706,17 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, Shown)> {
         .filter_map(|(i, c)| Some((i, font.read(&number_glyphs(&c.glyphs), SCALE)?)))
         .filter(|(_, r)| !bars(r))
         .collect();
-    let tallest = reads.iter().map(|(i, _)| cands[*i].glyph_h).max()?;
+    // Heights without glyphs the crop's edge cuts: a bar cut off at the edge (Creeper World's
+    // energy bar) is taller than the number.
+    let text_h = |c: &Candidate| c.glyphs.iter().filter(|g| !g.cut).map(|g| g.h).max().unwrap_or(0);
+    let tallest = reads.iter().map(|(i, _)| text_h(&cands[*i])).max()?;
     // A candidate showing more glyphs of that size than a read has (one the digits couldn't
     // read): the read is part of the number ("1" of "1.8").
     let whole = |c: &Candidate| number_glyphs(&c.glyphs).iter().filter(|g| !g.cut).count();
-    let most = cands.iter().filter(|c| c.glyph_h * 4 >= tallest * 3 && c.glyph_h * 3 <= tallest * 4).map(whole).max()?;
+    let most = cands.iter().filter(|c| text_h(c) * 4 >= tallest * 3 && text_h(c) * 3 <= tallest * 4).map(whole).max()?;
     reads
         .into_iter()
-        .filter(|(i, _)| cands[*i].glyph_h * 4 >= tallest * 3)
+        .filter(|(i, _)| text_h(&cands[*i]) * 4 >= tallest * 3)
         .filter(|(_, r)| r.glyphs >= most)
         .min_by_key(|(_, r)| (std::cmp::Reverse(r.glyphs), r.worst))
         .and_then(|(i, r)| {
@@ -975,143 +725,35 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, Shown)> {
         })
 }
 
-/// The number in a crop and its confidence. When the free read is clear (confident numbers and
-/// words of letters like "HP" or "BP"), its numbers; the digits-only read turns letters into
-/// digits. Otherwise the digits-only read, leaving out the words the free read saw as letters.
-/// If that leaves nothing, a confident free read means it really is just letters; if not, the
-/// free read may have misread odd digits.
-fn number_in(digit_words: &[Word], free: &[Word]) -> Option<(Shown, f32)> {
-    // "13/40" (current/most), "1.2", "3:17": as shown. The digits-only read would make them
-    // 1340, 12 and 317.
-    let marked = |w: &Word| w.conf >= 60.0 && w.text.contains(['/', '.', ':']);
-    if let Some((n, w)) = free.iter().filter(|w| marked(w)).find_map(|w| Some((Shown::parse(&w.text)?, w))) {
-        return Some((n, w.conf));
-    }
-    let is_letters = |f: &Word| f.text.chars().any(char::is_alphabetic) && !has_digit(f);
-    let is_number = |f: &Word| f.conf >= 80.0 && f.text.chars().all(|c| c.is_ascii_digit() || ",.".contains(c));
-    if free.iter().any(is_number) && free.iter().all(|f| is_letters(f) || is_number(f)) {
-        let numbers: Vec<&Word> = free.iter().filter(|f| is_number(f)).collect();
-        let text: String = numbers.iter().map(|w| w.text.as_str()).collect();
-        return Some((Shown::whole(digits(&text)?), numbers.iter().map(|w| w.conf).fold(f32::MAX, f32::min)));
-    }
-    let letters = |w: &&Word| {
-        let seen = || free.iter().filter(|f| overlaps(f.rect, w.rect));
-        seen().any(is_letters) && !seen().any(has_digit)
-    };
-    let mut kept: Vec<&Word> = digit_words.iter().filter(|w| !letters(w)).collect();
-    if kept.is_empty() {
-        if free.iter().all(|f| f.conf >= 80.0) {
-            return None;
-        }
-        kept = digit_words.iter().collect();
-    }
-    let text: String = kept.iter().map(|w| w.text.as_str()).collect();
-    // The digits-only read sometimes reports 0 for a word it got right; both reads agreeing is
-    // as good as confidence.
-    let conf = |w: &&Word| {
-        let same = free.iter().filter(|f| f.text == w.text && overlaps(f.rect, w.rect));
-        same.map(|f| f.conf).fold(w.conf, f32::max)
-    };
-    Some((Shown::whole(digits(&text)?), kept.iter().map(conf).fold(f32::MAX, f32::min)))
-}
-
-fn remove_candidates(dir: &Path) {
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        if e.file_name().to_string_lossy().starts_with("ocr-") {
-            std::fs::remove_file(e.path()).ok();
-        }
-    }
-}
-
 /// Numbers the learned digits find on the whole frame (for examples/ocr.rs).
 #[allow(dead_code)]
 pub fn learned_numbers(frame: &Path, font: &Font) -> Result<Vec<Word>, String> {
     Ok(font_numbers(&image::open(frame).map_err(|e| e.to_string())?.to_rgb8(), font))
 }
 
-/// How far the numbers around `area` moved since the previous frame (`before`), when they moved
-/// together: Forager's item info panel shifts the whole inventory sideways. Each of the numbers
-/// nearest the area votes for where the same digits at the same height are now; the shift needs
-/// two votes and more than "stayed put" gets (a menu over the number moves nothing).
-fn layout_shift(before: &[Word], now: &[Word], area: Rect) -> Option<(i32, i32)> {
-    let centre = |r: Rect| (2 * r.x as i64 + r.w as i64, 2 * r.y as i64 + r.h as i64);
-    let (ax, ay) = centre(area);
-    let mut near: Vec<&Word> = before.iter().collect();
-    near.sort_by_key(|w| {
-        let (x, y) = centre(w.rect);
-        (x - ax).pow(2) + (y - ay).pow(2)
-    });
-    near.truncate(8);
-    let mut votes: Vec<((i32, i32), usize)> = Vec::new();
-    for b in near {
-        for n in now.iter().filter(|n| n.text == b.text && n.rect.h.abs_diff(b.rect.h) <= 1) {
-            let s = (n.rect.x as i32 - b.rect.x as i32, n.rect.y as i32 - b.rect.y as i32);
-            match votes.iter_mut().find(|(v, _)| v.0.abs_diff(s.0) <= 2 && v.1.abs_diff(s.1) <= 2) {
-                Some((_, count)) => *count += 1,
-                None => votes.push((s, 1)),
-            }
-        }
-    }
-    let still = |s: (i32, i32)| s.0.abs() <= 2 && s.1.abs() <= 2;
-    let stayed = votes.iter().filter(|(s, _)| still(*s)).map(|(_, n)| *n).sum::<usize>();
-    let (shift, n) = votes.into_iter().filter(|(s, _)| !still(*s)).max_by_key(|(_, n)| *n)?;
-    (n >= 2 && n > stayed).then_some(shift)
-}
-
-fn moved(r: Rect, (dx, dy): (i32, i32)) -> Rect {
-    Rect { x: (r.x as i32 + dx).max(0) as u32, y: (r.y as i32 + dy).max(0) as u32, ..r }
-}
-
-/// Reads the number inside `area` of the frame, and whether the learned digits read it (rather
-/// than Tesseract); `debug` receives the cleaned-up crop that was read. Also returns where to
-/// watch from now on, when that changed. With learned digits the area is only a hint: of the
-/// numbers they find on the whole frame (where other numbers vouch for a lone 1), the one
-/// overlapping it most, whole even when the area cuts it; the area moves onto it. `before` has
-/// the numbers they found in the previous frame: when the numbers around the area all moved
-/// (see `layout_shift`), the area moves with them first. It gets this frame's numbers.
-pub fn read_number_at(
-    frame: &Path,
-    mut area: Rect,
-    debug: &Path,
-    font: Option<&Font>,
-    before: &mut Vec<Word>,
-) -> Result<(Option<(Shown, bool)>, Option<Rect>), String> {
+/// Reads the number inside `area` of the frame, strictly inside it: what is around the
+/// rectangle (an icon, a label, a slot border) is where misreads come from. PaddleOCR reads it;
+/// the read is sure (true) when the learned digits read the same there. When they read another
+/// number, or PaddleOCR none, theirs wins: they are the game's own font, confirmed by the
+/// player. `debug` receives the crop.
+pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font>) -> Result<Option<(Shown, bool)>, String> {
     let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
-    let mut moved_to = None;
-    if let Some(f) = font.filter(|f| !f.is_empty()) {
-        let now = font_numbers(&img, f);
-        if let Some(shift) = layout_shift(before, &now, area) {
-            area = moved(area, shift);
-            moved_to = Some(area);
-        }
-        *before = now.clone();
-        let inside = |r: Rect| {
-            let w = (r.x + r.w).min(area.x + area.w).saturating_sub(r.x.max(area.x));
-            let h = (r.y + r.h).min(area.y + area.h).saturating_sub(r.y.max(area.y));
-            w * h
-        };
-        // Most of the number inside the area, then the leftmost ("13/40" in the box: 13).
-        let best = now
-            .into_iter()
-            .filter(|w| inside(w.rect) > 0)
-            .max_by_key(|w| (inside(w.rect) * 100 / (w.rect.w * w.rect.h).max(1), std::cmp::Reverse(w.rect.x)));
-        if let Some((w, n)) = best.and_then(|w| Shown::parse(&w.text).map(|n| (w, n))) {
-            let r = w.rect;
-            let (x, y) = (r.x.saturating_sub(2), r.y.saturating_sub(2));
-            let crop = imageops::crop_imm(&img, x, y, (r.w + 4).min(img.width() - x), (r.h + 4).min(img.height() - y)).to_image();
-            imageops::resize(&crop, crop.width() * 4, crop.height() * 4, imageops::FilterType::Nearest).save(debug).ok();
-            return Ok((Some((n, true)), Some(watch_area(r))));
-        }
+    let x = area.x.min(img.width().saturating_sub(1));
+    let y = area.y.min(img.height().saturating_sub(1));
+    let crop = imageops::crop_imm(&img, x, y, area.w.min(img.width() - x).max(1), area.h.min(img.height() - y).max(1)).to_image();
+    imageops::resize(&crop, crop.width() * SCALE, crop.height() * SCALE, imageops::FilterType::Nearest).save(debug).ok();
+    let read = crate::reader::read_box(&img, area)?;
+    let Some(font) = font.filter(|f| !f.is_empty()) else { return Ok(read.map(|n| (n, false))) };
+    // Not where the rectangle's edge cuts a glyph beside the number.
+    let cands: Vec<Candidate> = candidates(&img, area, false).into_iter().filter(|c| !cut_beside(c)).collect();
+    let reads_as = |c: &Candidate, n: &Shown| {
+        let glyphs = number_glyphs(&c.glyphs);
+        font.read(&glyphs, SCALE).and_then(|r| c.shown(&glyphs, &format!("{:0w$}", r.n, w = r.glyphs))).as_ref() == Some(n)
+    };
+    if let Some(n) = read.as_ref().filter(|n| cands.iter().any(|c| reads_as(c, n))) {
+        return Ok(Some((n.clone(), true)));
     }
-    let dir = debug.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let read = read_areas(&img, &[area], false, dir, font)?.pop().flatten();
-    // With nothing read, show the first candidate instead.
-    let shown = read.as_ref().map_or_else(|| dir.join("ocr-0-0.png"), |r| r.file.clone());
-    if std::fs::rename(&shown, debug).is_err() {
-        std::fs::remove_file(debug).ok();
-    }
-    remove_candidates(dir);
-    Ok((read.map(|r| (r.n, r.learned)), moved_to))
+    Ok(font_read(font, &cands).map(|(_, n)| (n, true)).or(read.map(|n| (n, false))))
 }
 
 /// Learns the game's digits from `area` showing `n`. The glyphs must split into the number's
@@ -1141,7 +783,22 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
     };
     let fit = |c: &Candidate| parts(c).into_iter().find_map(|p| Some((fits_part(&p)?, p)));
     let fits = |c: &Candidate| fit(c).map(|(extra, _)| extra);
-    let cands = candidates(&img, area, false);
+    // Labels near the number ("AMMO") can be as big as it, or bigger: leave out glyphs PaddleOCR
+    // reads as a word before picking the biggest text.
+    let is_word = |t: &str| t.chars().filter(|c| c.is_alphabetic()).count() >= 2 && !t.chars().any(|c| c.is_ascii_digit());
+    // The columns the glyphs that would be learned take up (glyph x is in crop pixels).
+    let columns = |c: &Candidate| {
+        let (_, p) = fit(c)?;
+        let x0 = p.iter().map(|g| g.x).min()? / SCALE;
+        let x1 = p.iter().map(|g| g.x + g.w).max()?.div_ceil(SCALE);
+        Some(Rect { x: area.x + x0, y: c.rect.y, w: x1 - x0, h: c.rect.h })
+    };
+    // Not where the rectangle's edge cuts a glyph beside the number (the reads skip those too).
+    let cands: Vec<Candidate> = candidates(&img, area, false)
+        .into_iter()
+        .filter(|c| !cut_beside(c))
+        .filter(|c| columns(c).is_none_or(|r| !crate::reader::text(&img, r).is_ok_and(|t| is_word(&t))))
+        .collect();
     // Only the biggest text that could be the number: other colour groups can hold a piece of
     // it (the slash of a 0), or something taller that isn't (Forager's item slot border).
     // Of that, the solid glyphs: anti-aliased edges make a group of thin outlines.
@@ -1149,24 +806,12 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
     // energy bar) can be taller than the number.
     let height = |c: &Candidate| fit(c).and_then(|(_, p)| p.iter().map(|g| g.h).max());
     let tallest = cands.iter().filter_map(height).max().unwrap_or(0);
-    let ink = |c: &Candidate| c.glyphs.iter().map(|g| g.ink.iter().filter(|p| **p).count()).sum::<usize>();
-    let mut fitting: Vec<(&Candidate, usize)> =
-        cands.iter().filter(|c| height(c).is_some_and(|h| h * 4 >= tallest * 3)).filter_map(|c| Some((c, fits(c)?))).collect();
-    fitting.sort_by_key(|(c, extra)| (*extra, std::cmp::Reverse(ink(c))));
-    // Labels near the number ("AMMO") can be as big as it: skip glyphs Tesseract reads as words.
-    let dir = frame.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let file = dir.join("ocr-learn.png");
-    let mut chosen = None;
-    for (c, extra) in fitting {
-        c.img.save(&file).map_err(|e| e.to_string())?;
-        let words = tesseract(&file, 7, &[]);
-        let is_word = |w: &Word| w.conf >= 60.0 && w.text.chars().filter(|c| c.is_alphabetic()).count() >= 2 && !has_digit(w);
-        if words.is_ok_and(|w| !w.iter().any(|(_, w)| is_word(w))) {
-            chosen = Some((c, extra));
-            break;
-        }
-    }
-    std::fs::remove_file(&file).ok();
+    let ink = |c: &Candidate| fit(c).map_or(0, |(_, p)| p.iter().map(|g| g.ink.iter().filter(|p| **p).count()).sum::<usize>());
+    let chosen = cands
+        .iter()
+        .filter(|c| height(c).is_some_and(|h| h * 4 >= tallest * 3))
+        .filter_map(|c| Some((c, fits(c)?)))
+        .min_by_key(|(c, extra)| (*extra, std::cmp::Reverse(ink(c))));
     let (cand, extra) = chosen.ok_or(format!("could not split the number into the {} digits of {n}", text.len()))?;
     let glyphs = fit(cand).map(|(_, p)| p).unwrap_or_default();
     if !trusted {
