@@ -34,6 +34,7 @@ pub struct FindView {
     start: gtk::Button,
     stop: gtk::Button,
     start_over: gtk::Button,
+    undo: gtk::Button,
     /// The value types new searches look for (`TYPE_CHOICES`).
     types: gtk::DropDown,
     spinner: gtk::Spinner,
@@ -129,7 +130,7 @@ fn ask_drop(worker: &Worker, loc: core::Loc, value: &str, parent: &impl IsA<gtk:
     let dialog = adw::AlertDialog::new(
         Some("Rule Out This Place?"),
         Some(&format!(
-            "0x{:x} ({}, now {value}) is dropped from the matches. Only Start Over brings it back.",
+            "0x{:x} ({}, now {value}) is dropped from the matches. Undo brings it back.",
             loc.addr,
             loc.kind.describe()
         )),
@@ -192,6 +193,10 @@ impl FindView {
             .label("Start Over")
             .tooltip_text("Forget the matches so far and search from scratch")
             .build();
+        let undo = gtk::Button::builder()
+            .icon_name("edit-undo-symbolic")
+            .tooltip_text("Undo the last step of the search: a number, a ruled-out place or Start Over")
+            .build();
         let types = gtk::DropDown::builder()
             .model(&gtk::StringList::new(&TYPE_CHOICES.iter().map(|(label, _)| *label).collect::<Vec<_>>()))
             .tooltip_text("What new searches look for. Fewer types leave fewer places to narrow down.")
@@ -199,7 +204,7 @@ impl FindView {
             .build();
         let top = frame_box();
         top.set_margin_top(12);
-        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
+        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), undo.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
             top.append(w);
         }
 
@@ -321,6 +326,7 @@ impl FindView {
             start,
             stop,
             start_over,
+            undo,
             types: types.clone(),
             spinner,
             log,
@@ -384,6 +390,8 @@ impl FindView {
             view.stop.connect_clicked(move |_| view_.stop());
             let view_ = view.clone();
             view.start_over.connect_clicked(move |_| view_.start_over());
+            let view_ = view.clone();
+            view.undo.connect_clicked(move |_| view_.undo());
         }
         {
             let view_ = view.clone();
@@ -661,6 +669,7 @@ impl FindView {
         self.typed_row.set_sensitive(false);
         self.start.set_visible(false);
         self.start_over.set_visible(false);
+        self.undo.set_visible(false);
         self.stop.set_visible(true);
         self.busy(true);
         self.status.set_label("Watching the number. Play normally; every change narrows it down.");
@@ -679,6 +688,7 @@ impl FindView {
         self.stop.set_visible(false);
         self.start.set_visible(true);
         self.start_over.set_visible(true);
+        self.undo.set_visible(true);
         self.typed_row.set_sensitive(true);
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
@@ -815,6 +825,34 @@ impl FindView {
             core.reset();
             Event::Reset
         });
+    }
+
+    /// Takes back the last step of the search (not while Start runs: the button is hidden).
+    pub fn undo(&self) {
+        if self.stop.is_visible() {
+            return;
+        }
+        self.worker.run(|core| Event::Undone(core.undo()));
+    }
+
+    pub fn undone(&self, r: Result<(usize, String), String>) {
+        match r {
+            Ok((n, what)) => {
+                self.result.set_visible(false);
+                self.last_count.set((n > 0).then_some(n));
+                let left = match n {
+                    0 => "no matches yet".to_owned(),
+                    1 => "1 place matches".to_owned(),
+                    n => format!("{} places match", grouped(n)),
+                };
+                self.announce(&format!("Undid {what}: {left}. Press Start, or type the number the game shows."), false);
+                self.list_matches(n);
+            }
+            Err(e) => {
+                let mut c = e.chars();
+                self.status.set_label(&c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect()));
+            }
+        }
     }
 
     /// Attached to another game: nothing picked or found in the last one applies.

@@ -672,6 +672,11 @@ struct Session {
     /// The game stores numbers only as doubles: scans look for nothing else.
     doubles_only: bool,
     candidates: Vec<Candidate>,
+    /// The matches before each step of the search (newest last) and the command that took it,
+    /// for `undo`.
+    history: Vec<(String, Vec<Candidate>)>,
+    /// Older steps were let go (too many, or too many matches to keep).
+    history_cut: bool,
     /// Every pointer in the game's memory, from a `names` that found nothing, for the pointer
     /// scan that comes next (collecting them takes seconds in big games).
     pointer_map: Option<(Instant, (Pointers, u64))>,
@@ -682,7 +687,31 @@ struct Session {
     shapes: Vec<Shape>,
 }
 
+/// How far back `undo` goes, and how many matches it keeps in all (16 bytes each).
+const UNDO_STEPS: usize = 32;
+const UNDO_KEEP: usize = 16 << 20;
+
 impl Session {
+    /// A search step's new matches; the ones before stay for `undo` unless they're the same
+    /// places (only their values moved on).
+    fn replace(&mut self, step: &str, new: Vec<Candidate>) {
+        let same = new.len() == self.candidates.len() && new.iter().zip(&self.candidates).all(|(a, b)| a.tagged == b.tagged);
+        let old = std::mem::replace(&mut self.candidates, new);
+        if same {
+            return;
+        }
+        if old.len() > UNDO_KEEP {
+            self.history.clear();
+            self.history_cut = true;
+            return;
+        }
+        self.history.push((step.to_owned(), old));
+        while self.history.len() > UNDO_STEPS || self.history.iter().map(|(_, c)| c.len()).sum::<usize>() > UNDO_KEEP {
+            self.history.remove(0);
+            self.history_cut = true;
+        }
+    }
+
     fn read(&self, addr: u64, kind: Kind) -> Option<f64> {
         read_value(self.mem.as_ref()?, addr, kind)
     }
@@ -891,11 +920,12 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     }
     let r = scan.unwrap_or_else(|| into.run(&kinds));
     let all = r.found.len();
+    let step = format!("scan {arg}");
     let within = if r.shaped.is_empty() {
-        s.candidates = r.found;
+        s.replace(&step, r.found);
         String::new()
     } else {
-        s.candidates = r.shaped;
+        s.replace(&step, r.shaped);
         format!(" in places shaped like earlier finds (of {all})")
     };
     writeln!(
@@ -1017,8 +1047,24 @@ fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     if next.is_empty() {
         return writeln!(out, "{before} -> 0 matches (kept the {before} from before)");
     }
-    s.candidates = next;
+    s.replace(&format!("next {arg}"), next);
     writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))
+}
+
+/// undo: the matches as they were before the last step that changed them ("<before> -> <n>
+/// matches", then "undid <command>"), with their values as they are now.
+fn cmd_undo(out: &mut impl Write, s: &mut Session) -> io::Result<()> {
+    let Some((step, old)) = s.history.pop() else {
+        return match s.history_cut {
+            true => writeln!(out, "error: can't go back further (the earlier matches were too many to keep)"),
+            false => writeln!(out, "error: nothing to undo"),
+        };
+    };
+    let before = s.candidates.len();
+    s.candidates = old;
+    s.candidates = s.candidates.iter().zip(s.read_all()).map(|(c, v)| Candidate { value: v.unwrap_or(c.value), ..*c }).collect();
+    writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))?;
+    writeln!(out, "undid {step}")
 }
 
 /// Remembers every candidate's current value, right before the screen is read: `next` then
@@ -1076,12 +1122,13 @@ fn cmd_peek(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 }
 
 fn cmd_track(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
-    s.candidates = arg
+    let mut tracked: Vec<Candidate> = arg
         .split_whitespace()
         .filter_map(parse_loc)
         .filter_map(|(addr, kind)| Some(Candidate::new(addr, kind, s.read(addr, kind)?)))
         .collect();
-    s.candidates.sort_by_key(|c| c.addr());
+    tracked.sort_by_key(|c| c.addr());
+    s.replace(format!("track {arg}").trim_end(), tracked);
     writeln!(out, "tracking {} matches", s.candidates.len())
 }
 
@@ -1092,7 +1139,8 @@ fn cmd_keep(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     // With a type, only that one: an int and an XOR value can start at the same address.
     let typed = arg.contains(':');
     let before = s.candidates.len();
-    s.candidates.retain(|c| c.addr() == addr && (!typed || c.kind() == kind));
+    let kept = s.candidates.iter().copied().filter(|c| c.addr() == addr && (!typed || c.kind() == kind)).collect();
+    s.replace(&format!("keep {arg}"), kept);
     writeln!(out, "{before} -> {} matches", s.candidates.len())
 }
 
@@ -1255,7 +1303,8 @@ fn cmd_drop(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     };
     let typed = arg.contains(':');
     let before = s.candidates.len();
-    s.candidates.retain(|c| !(c.addr() == addr && (!typed || c.kind() == kind)));
+    let left = s.candidates.iter().copied().filter(|c| !(c.addr() == addr && (!typed || c.kind() == kind))).collect();
+    s.replace(&format!("drop {arg}"), left);
     writeln!(out, "{before} -> {} matches", s.candidates.len())
 }
 
@@ -1703,6 +1752,7 @@ pub fn run() {
             "scan" => cmd_scan(&mut out, &mut session, arg),
             "next" => cmd_next(&mut out, &mut session, arg),
             "mark" => cmd_mark(&mut out, &mut session),
+            "undo" => cmd_undo(&mut out, &mut session),
             "list" => cmd_list(&mut out, &session),
             "write" => cmd_write(&mut out, &session, arg),
             "set" => cmd_set(&mut out, &session, arg),
@@ -1725,7 +1775,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

@@ -1411,6 +1411,25 @@ impl Core {
         self.say("search cleared");
     }
 
+    /// Takes back the last step of the search (a number, ruling a place out, Start Over, a
+    /// pick): how many places match again, and what was undone.
+    pub fn undo(&mut self) -> Result<(usize, String), String> {
+        let reply = self.helper.call("undo");
+        let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("undo failed".into()))?;
+        let step = reply.get(1).and_then(|l| l.strip_prefix("undid ")).unwrap_or_default();
+        let place = |a: &str| parse_loc(a).map_or(a.to_owned(), |l| format!("0x{:x}", l.addr));
+        let mut words = step.split_whitespace();
+        let what = match (words.next(), words.next()) {
+            (Some("scan" | "next"), Some(n)) => format!("the search for {n}"),
+            (Some("drop"), Some(at)) => format!("ruling out {}", place(at)),
+            (Some("keep"), Some(at)) => format!("picking {}", place(at)),
+            _ => "starting over".to_owned(),
+        };
+        self.search = (count > 0).then_some((count, 0));
+        self.say(&format!("undid {what}: {count} matches"));
+        Ok((count, what))
+    }
+
     /// Reads the number inside the watched area of a fresh frame.
     pub fn read(&mut self) -> Result<Option<Shown>, String> {
         Ok(self.read_learned()?.map(|(n, _)| n))

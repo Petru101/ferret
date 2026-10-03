@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::core::{self, AutoResult, Core};
 use crate::ocr::Rect;
 
-const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, reset, probe, learn-shape <addr>
+const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, reset, undo, probe, learn-shape <addr>
 restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, remove <name>";
 
 fn bound(v: &str) -> Result<Option<f64>, String> {
@@ -72,6 +72,10 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             AutoResult::Several(n) => println!("{n} candidates left"),
         },
         "reset" => core.reset(),
+        "undo" => {
+            let (n, what) = core.undo()?;
+            println!("undid {what}: {n} candidates");
+        }
         "learn-shape" => core.learn_shape(core::parse_loc(arg).ok_or("usage: learn-shape <hex addr[:type]>")?),
         "probe" => {
             core.probe()?;

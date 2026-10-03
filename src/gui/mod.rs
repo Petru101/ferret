@@ -40,6 +40,8 @@ pub enum Event {
     Saved(Result<(String, bool), String>),
     /// The search was cleared (the Find tab already shows it).
     Reset,
+    /// The last step of the search was taken back: the places matching now, and what it was.
+    Undone(Result<(usize, String), String>),
     /// A job with nothing to show.
     Idle,
     /// The attached game's learned digits, 0 to 9.
@@ -294,6 +296,7 @@ impl Ui {
             Event::Matches(Err(e)) | Event::Chosen(Err(e)) => self.toast(&e),
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
+            Event::Undone(r) => self.find.undone(r),
             Event::Saved(Ok((name, confirmed))) => {
                 self.toast(&if confirmed {
                     format!("Saved {name}. Ferret finds it again every time you attach.")
@@ -428,6 +431,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("types", Box::new(|ui, i| ui.find.pick_types(i.trim().parse().unwrap_or(0))));
     action("stop", Box::new(|ui, _| ui.find.stop()));
     action("reset", Box::new(|ui, _| ui.find.start_over()));
+    action("undo", Box::new(|ui, _| ui.find.undo()));
     action(
         "type",
         Box::new(|ui, n| {
