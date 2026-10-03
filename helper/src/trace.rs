@@ -191,7 +191,7 @@ pub struct Access {
 fn one_byte_opcode(op: u8) -> Option<usize> {
     match op {
         0x01 | 0x03 | 0x09 | 0x0B | 0x11 | 0x13 | 0x19 | 0x1B | 0x21 | 0x23 | 0x29 | 0x2B | 0x31 | 0x33 | 0x39
-        | 0x3B | 0x85 | 0x87 | 0x89 | 0x8B | 0x8D | 0xFF => Some(0),
+        | 0x3B | 0x63 | 0x85 | 0x87 | 0x89 | 0x8B | 0x8D | 0xFF => Some(0),
         // x87: fld/fst/fadd/fcomp ... on floats (D8, D9) and doubles (DC, DD), integers (DA, DB, DE, DF).
         0xD8..=0xDF => Some(0),
         0x83 | 0x6B | 0xC1 => Some(1),
@@ -241,11 +241,14 @@ pub fn decode_access(code: &[u8], code_addr: u64, after: u64, target: u64, regs:
                 };
                 let Some(mut op_start) = modrm_at.checked_sub(1) else { continue };
                 let op = code[op_start];
-                let imm_ok = if op_start >= 1 && code[op_start - 1] == 0x0F {
+                let two_byte = op_start >= 1 && code[op_start - 1] == 0x0F;
+                let imm_ok = if two_byte {
                     op_start -= 1;
                     imm == 0
                 } else {
-                    one_byte_opcode(op) == Some(imm)
+                    // 0x63 is movsxd (a 32-bit value into a 64-bit register, Mono's JIT) only in
+                    // 64-bit code.
+                    one_byte_opcode(op) == Some(imm) && (op != 0x63 || is64)
                 };
                 if !imm_ok {
                     continue;
@@ -275,8 +278,8 @@ pub fn decode_access(code: &[u8], code_addr: u64, after: u64, target: u64, regs:
                     let access = Access { start: code_addr + start as u64, len: end - start, base, disp };
                     if reg(regs, base).wrapping_add(disp as u64) & 0xFFFF_FFFF == target & 0xFFFF_FFFF {
                         matched.push(access);
-                    } else if op == 0x8B && dest == base {
-                        // `mov reg, [reg+disp]` overwrites its own base register.
+                    } else if !two_byte && matches!(op, 0x8B | 0x63) && dest == base {
+                        // `mov reg, [reg+disp]` (or movsxd) overwrites its own base register.
                         clobbered.push(access);
                     }
                 }
@@ -318,5 +321,27 @@ mod tests {
         regs.cs = 0x23;
         let found = decode_access(&code, 0x1000, 0x1007, 0x5000_000c, &regs);
         assert_eq!(found, vec![Access { start: 0x1004, len: 3, base: 0, disp: 12 }]);
+    }
+
+    #[test]
+    fn movsxd() {
+        // Valheim (64-bit Mono): mov rax,[rbp-0x238]; movsxd rax,[rax+0x38] -- loads over its base.
+        let code = [0x48, 0x8b, 0x85, 0xc8, 0xfd, 0xff, 0xff, 0x48, 0x63, 0x40, 0x38];
+        let mut regs: Regs = unsafe { std::mem::zeroed() };
+        regs.cs = 0x33;
+        regs.rax = 21;
+        let found = decode_access(&code, 0x1000, 0x100b, 0x7f00_0000_0038, &regs);
+        let starts: Vec<u64> = found.iter().map(|a| a.start).collect();
+        assert_eq!(starts, vec![0x1007, 0x1008]);
+
+        // movsxd rax,[rbx+0x38]
+        let code = [0x3b, 0xc1, 0x7c, 0x07, 0x48, 0x63, 0x43, 0x38];
+        regs.rbx = 0x7f00_0000_0000;
+        let found = decode_access(&code, 0x1000, 0x1008, 0x7f00_0000_0038, &regs);
+        assert_eq!(found[0], Access { start: 0x1004, len: 4, base: 3, disp: 0x38 });
+
+        // 0x63 is arpl in 32-bit code.
+        regs.cs = 0x23;
+        assert!(decode_access(&code, 0x1000, 0x1008, 0x7f00_0000_0038, &regs).is_empty());
     }
 }
