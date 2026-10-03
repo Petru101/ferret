@@ -498,6 +498,8 @@ impl FindView {
     }
 
     pub fn capture(&self) {
+        // The intro page has no status line: errors and the spinner would go unseen there.
+        self.root.set_visible_child_name("pick");
         self.busy(true);
         self.status.set_label("Capturing the game window…");
         self.worker.run(|core| Event::Numbers(core.numbers()));

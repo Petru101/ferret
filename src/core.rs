@@ -681,6 +681,11 @@ impl Core {
             return Err(e.strip_prefix("blocked by ptrace_scope ").map_or_else(|| e.clone(), ptrace_help));
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
+        // Another game (or the same one restarted) has another window: the old capture shows
+        // nothing anymore.
+        if self.game.as_ref().map(|g| g.pid) != Some(pid) {
+            self.capture = None;
+        }
         self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new() });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
@@ -1144,7 +1149,11 @@ impl Core {
     pub fn frame(&mut self) -> Result<PathBuf, String> {
         self.start_capture()?;
         let out = cache_dir().join("frame.png");
-        self.capture.as_ref().unwrap().grab(&out)?;
+        // The window may be gone (the game closed): the next try asks the desktop again.
+        if let Err(e) = self.capture.as_ref().unwrap().grab(&out) {
+            self.capture = None;
+            return Err(e);
+        }
         Ok(out)
     }
 
