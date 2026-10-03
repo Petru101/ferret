@@ -583,7 +583,6 @@ impl FindView {
     }
 
     pub fn select(&self, area: Rect) {
-        self.matches.set_visible(false);
         *self.selection.borrow_mut() = Some(area);
         self.area.queue_draw();
         self.busy(true);
@@ -663,8 +662,13 @@ impl FindView {
         self.announce(msg, false);
     }
 
+    /// The places listed stay while a search runs (it updates them), but can't be tried then.
+    fn searching(&self, searching: bool) {
+        self.matches_list.set_sensitive(!searching);
+    }
+
     pub fn start(&self) {
-        self.matches.set_visible(false);
+        self.searching(true);
         self.result.set_visible(false);
         self.typed_row.set_sensitive(false);
         self.start.set_visible(false);
@@ -690,6 +694,7 @@ impl FindView {
         self.start_over.set_visible(true);
         self.undo.set_visible(true);
         self.typed_row.set_sensitive(true);
+        self.searching(false);
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => {
@@ -699,7 +704,10 @@ impl FindView {
                 );
                 self.list_matches(n);
             }
-            Err(e) => self.status.set_label(&e),
+            Err(e) => {
+                self.status.set_label(&e);
+                self.refresh_matches();
+            }
         }
     }
 
@@ -721,13 +729,13 @@ impl FindView {
         if self.typed.text() != text {
             self.typed.set_text(text);
         }
-        self.matches.set_visible(false);
         let Some(n) = Shown::parse(text) else {
             self.status.set_label("Type the number as the game shows it, for example 1250, 1.5 or 3:17.");
             return;
         };
         self.result.set_visible(false);
         self.typed_searching(true);
+        self.searching(true);
         self.unconfirmed.replace(None);
         self.start.set_label("Start");
         self.busy(true);
@@ -738,6 +746,7 @@ impl FindView {
     pub fn typed_done(&self, r: Result<AutoResult, String>) {
         self.busy(false);
         self.typed_searching(false);
+        self.searching(false);
         self.typed.set_text("");
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
@@ -746,7 +755,10 @@ impl FindView {
                 self.list_matches(n);
                 self.typed.grab_focus();
             }
-            Err(e) => self.status.set_label(&e),
+            Err(e) => {
+                self.status.set_label(&e);
+                self.refresh_matches();
+            }
         }
     }
 
@@ -944,6 +956,13 @@ impl FindView {
             self.worker.run(|core| Event::Matches(Ok(core.matches())));
         } else {
             self.matches.set_visible(false);
+        }
+    }
+
+    /// After a search that failed: the places listed may be gone (it started over) or not.
+    fn refresh_matches(&self) {
+        if self.matches.is_visible() {
+            self.worker.run(|core| Event::Matches(Ok(core.matches())));
         }
     }
 

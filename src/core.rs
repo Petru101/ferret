@@ -654,6 +654,8 @@ pub struct Core {
     pub on_frame: Option<Box<dyn FnMut(&Path, Option<Rect>) + Send>>,
     /// Told when the player has to do something for the search to go on.
     pub on_status: Option<Box<dyn FnMut(&str) + Send>>,
+    /// Told about the places still matching while a search narrows them down (20 or fewer).
+    pub on_matches: Option<Box<dyn FnMut(Vec<Match>) + Send>>,
     /// The value types new scans look for (empty: all of them).
     pub scan_kinds: Vec<Kind>,
     /// The memory around the game's values found so far: new scans try places shaped like them
@@ -683,6 +685,7 @@ impl Core {
             seen: Vec::new(),
             on_frame: None,
             on_status: None,
+            on_matches: None,
             scan_kinds: Vec::new(),
             shapes: Vec::new(),
             shaped: false,
@@ -1522,11 +1525,14 @@ impl Core {
         }
     }
 
-    /// The places still matching (at most 20), with their values as the game holds them.
+    /// The places still matching when there are 20 or fewer (none otherwise), with their values
+    /// as the game holds them.
     pub fn matches(&mut self) -> Vec<Match> {
-        let mut list: Vec<Match> = self
-            .helper
-            .call("list")
+        let reply = self.helper.call("list");
+        if reply.iter().any(|l| l.starts_with("... ")) {
+            return Vec::new();
+        }
+        let mut list: Vec<Match> = reply
             .iter()
             .filter_map(|l| {
                 let (a, v) = l.split_once(" = ")?;
@@ -1542,6 +1548,17 @@ impl Core {
             }
         }
         list
+    }
+
+    /// Shows the places still matching while a search runs, once they're few enough to list
+    /// (more again after a rescan: none).
+    fn tell_matches(&mut self, count: usize) {
+        if self.on_matches.is_some() {
+            let list = if count <= 20 { self.matches() } else { Vec::new() };
+            if let Some(f) = self.on_matches.as_mut() {
+                f(list);
+            }
+        }
     }
 
     /// Writes `value` to one of the places still matching, so the player can see whether the
@@ -1876,6 +1893,7 @@ impl Core {
             }
         }
         self.search = Some((count, 0));
+        self.tell_matches(count);
         let mut last = first.clone();
         let mut unchanged_rounds = 0;
         // A number nothing fits: a misread or something covering the number, unless it's read
@@ -1906,6 +1924,9 @@ impl Core {
                 unchanged_rounds = 0;
             } else {
                 unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
+                if new_count != count {
+                    self.tell_matches(new_count);
+                }
                 count = new_count;
                 confirm = false;
             }
@@ -1999,6 +2020,7 @@ impl Core {
             }
         };
         self.search = Some((count, unchanged));
+        self.tell_matches(count);
         let found = match count {
             0 => {
                 self.search = None;

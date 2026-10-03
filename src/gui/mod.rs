@@ -99,6 +99,10 @@ fn start_worker(cancel: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Eve
         core.on_status = Some(Box::new(move |msg: &str| {
             status.send_blocking(Event::Status(msg.to_owned())).ok();
         }));
+        let matches = events_tx.clone();
+        core.on_matches = Some(Box::new(move |list| {
+            matches.send_blocking(Event::Matches(Ok(list))).ok();
+        }));
         let frames = events_tx.clone();
         let mut shown = std::time::Instant::now() - std::time::Duration::from_secs(1);
         // Decoded here, so the window doesn't stall on big frames.
