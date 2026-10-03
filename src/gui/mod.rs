@@ -87,7 +87,7 @@ fn start_worker(cancel: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Eve
         let log = Box::new(move |msg: &str| {
             log.send_blocking(Event::Log(msg.to_owned())).ok();
         });
-        let mut core = match Core::new(log) {
+        let mut core = match Core::new(log, "ferret.log") {
             Ok(core) => core,
             Err(e) => {
                 events_tx.send_blocking(Event::Failed(e)).ok();

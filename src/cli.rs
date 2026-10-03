@@ -130,7 +130,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
 }
 
 pub fn run() {
-    let mut core = match Core::new(Box::new(|msg| println!("{msg}"))) {
+    let mut core = match Core::new(Box::new(|msg| println!("{msg}")), "ferret-cli.log") {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");

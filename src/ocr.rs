@@ -680,15 +680,25 @@ fn glyphs(mask: &[bool], w: u32, h: u32, cut_off: bool) -> Option<Candidate> {
             }
         }
     }
-    let keep: Vec<bool> = blobs
+    let whole: Vec<bool> = blobs
         .iter()
         .map(|b| {
             let (left, right) = (b.0 == 0, b.2 == w - 1);
             !(left && right) && !(cut_off && (left || right))
         })
         .collect();
+    let tallest = blobs.iter().zip(&whole).filter(|(_, k)| **k).map(|(b, _)| b.3 - b.1 + 1).max()?;
+    let mut keep: Vec<bool> = blobs.iter().zip(&whole).map(|(b, k)| *k && (b.3 - b.1 + 1) * 2 >= tallest).collect();
+    // A thin bar taller than the glyphs beside it is a border (Graveyard Keeper's item slots), not
+    // a 1: a 1 is as tall as the other digits.
+    let bar = |b: &(u32, u32, u32, u32)| !crate::font::could_be(0, b.2 - b.0 + 1, b.3 - b.1 + 1);
+    let text_h = blobs.iter().zip(&keep).filter(|(b, k)| **k && !bar(b)).map(|(b, _)| b.3 - b.1 + 1).max();
+    if let Some(t) = text_h {
+        for (b, k) in blobs.iter().zip(keep.iter_mut()) {
+            *k = *k && !(bar(b) && (b.3 - b.1 + 1) * 3 > t * 4);
+        }
+    }
     let tallest = blobs.iter().zip(&keep).filter(|(_, k)| **k).map(|(b, _)| b.3 - b.1 + 1).max()?;
-    let keep: Vec<bool> = blobs.iter().zip(keep).map(|(b, k)| k && (b.3 - b.1 + 1) * 2 >= tallest).collect();
     for (i, b) in blobs.iter().enumerate().filter(|(i, _)| keep[*i]) {
         unslash(&mut label, w, i as u32 + 1, *b);
     }
@@ -1125,7 +1135,9 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
     let fits_part = |glyphs: &[Glyph]| {
         let (lo, hi) = (glyphs.iter().map(|g| g.h).min()?, glyphs.iter().map(|g| g.h).max()?);
         let extra = glyphs.len().checked_sub(text.len())?;
-        (lo * 4 >= hi * 3 && extra <= 2).then_some(extra)
+        let digits = std::iter::repeat_n(b'0', extra).chain(text.bytes());
+        let shaped = glyphs.iter().zip(digits).all(|(g, c)| crate::font::could_be(c - b'0', g.w, g.h));
+        (lo * 4 >= hi * 3 && extra <= 2 && shaped).then_some(extra)
     };
     let fit = |c: &Candidate| parts(c).into_iter().find_map(|p| Some((fits_part(&p)?, p)));
     let fits = |c: &Candidate| fit(c).map(|(extra, _)| extra);

@@ -14,6 +14,14 @@ const GH: usize = 20;
 const SAME: usize = 4;
 /// Samples kept per digit, newest last.
 const PER_DIGIT: usize = 8;
+/// Narrowest a digit other than 1 is (width / height); fonts' are 0.6-1.0. Anything thinner is
+/// a slot border or an edge (Graveyard Keeper's 4 got learned from the 2-px slot border next to it).
+const MIN_ASPECT: f32 = 0.3;
+
+/// Whether a glyph `w` by `h` is shaped like the digit `d` could be.
+pub fn could_be(d: u8, w: u32, h: u32) -> bool {
+    d == 1 || w as f32 >= h as f32 * MIN_ASPECT
+}
 
 /// One glyph cut out of a mask: its box in the mask, which pixels of the box are ink, and
 /// whether the crop's left or right edge cuts it (then it may be part of something else).
@@ -106,6 +114,10 @@ impl Shape {
         self.cells.iter().filter(|c| **c).count() < GW * GH / 10
     }
 
+    fn could_be(&self, d: u8) -> bool {
+        d == 1 || self.aspect >= MIN_ASPECT
+    }
+
     /// How many cells differ, or `None` when size or proportions rule it out.
     fn distance(&self, other: &Shape) -> Option<usize> {
         let size = (self.height / other.height).ln().abs();
@@ -188,6 +200,12 @@ impl Grid {
         self.cells.iter().all(|c| *c)
     }
 
+    /// Other digits are at least 3 font pixels wide, and a quarter of any digit is ink (an
+    /// outline's ink is all at cell edges, so its grid comes out empty).
+    fn could_be(&self, d: u8) -> bool {
+        self.cells.iter().filter(|c| **c).count() * 4 >= self.cells.len() && (d == 1 || (!self.is_bar() && self.w >= 3))
+    }
+
     fn to_text(&self) -> String {
         let bits: String = self.cells.iter().map(|c| if *c { '1' } else { '0' }).collect();
         format!("{}x{} {bits}", self.w, self.h)
@@ -235,7 +253,7 @@ impl Font {
             let f: Vec<&str> = l.split_whitespace().collect();
             let known = match f[..] {
                 [d, "grid", a, hex] => d.parse::<u8>().ok().filter(|d| *d <= 9).zip(Grid::from_text(a, hex)).map(|(d, g)| {
-                    if d == 1 || !g.is_bar() {
+                    if g.could_be(d) {
                         font.grids.push((d, g));
                     }
                 }),
@@ -243,7 +261,7 @@ impl Font {
                     let d = d.parse::<u8>().ok().filter(|d| *d <= 9);
                     let shape = h.parse().ok().zip(a.parse().ok()).and_then(|(h, a)| Shape::from_hex(h, a, hex));
                     d.zip(shape).map(|(d, s)| {
-                        if !s.is_faint() {
+                        if !s.is_faint() && s.could_be(d) {
                             font.samples.push((d, s));
                         }
                     })
@@ -430,7 +448,7 @@ impl Font {
         let rows = if grids { (3..=16).find(|&r| fits(r)).or(self.grid_rows().first().copied()) } else { None };
         for (g, c) in glyphs.iter().zip(label.bytes()) {
             let d = c - b'0';
-            if let Some(grid) = rows.and_then(|r| Grid::of(g, r, scale)).filter(|grid| d == 1 || !grid.is_bar()) {
+            if let Some(grid) = rows.and_then(|r| Grid::of(g, r, scale)).filter(|grid| grid.could_be(d)) {
                 if trusted {
                     self.grids.retain(|(od, t)| *od == d || grid.distance(t).is_none_or(|x| x > grid.tolerance()));
                 }
@@ -444,7 +462,7 @@ impl Font {
                 }
             }
             let s = Shape::of(g, scale);
-            if s.is_faint() {
+            if s.is_faint() || !s.could_be(d) {
                 continue;
             }
             if trusted {
@@ -528,5 +546,15 @@ mod grid_tests {
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();
         assert!(text.contains("2 vector") && !text.contains("5 vector") && !text.contains("5 grid"));
+    }
+
+    #[test]
+    fn slivers_are_only_ones() {
+        // A slot border 2 px wide and 29 tall, at 4 mask pixels per frame pixel.
+        let bar = Glyph { x: 0, w: 8, h: 116, ink: vec![true; 8 * 116], cut: false };
+        let mut font = Font::default();
+        assert_eq!(font.learn(std::slice::from_ref(&bar), 4, "4", true), 0);
+        assert!(font.learn(std::slice::from_ref(&bar), 4, "1", true) > 0);
+        assert!(font.learn(&[draw(ZERO, 3.0)], 4, "0", false) > 0);
     }
 }

@@ -665,12 +665,23 @@ pub struct Core {
     shaped: bool,
     /// The value wasn't in such a place: scans look everywhere until the next search.
     unshaped: bool,
+    log_name: &'static str,
 }
 
+/// Logs of earlier runs kept next to the current one.
+const OLD_LOGS: usize = 5;
+
 impl Core {
-    pub fn new(log: Box<dyn FnMut(&str) + Send>) -> Result<Self, String> {
-        fs::write(cache_dir().join("ferret.log"), "").ok();
+    /// `log_name`: the file in the cache folder the log is also kept in. The last few runs'
+    /// logs are kept as `<name>.1` and on (a test run after the player's would lose theirs).
+    pub fn new(log: Box<dyn FnMut(&str) + Send>, log_name: &'static str) -> Result<Self, String> {
+        let file = |i: usize| cache_dir().join(if i == 0 { log_name.to_owned() } else { format!("{log_name}.{i}") });
+        for i in (0..OLD_LOGS).rev() {
+            fs::rename(file(i), file(i + 1)).ok();
+        }
+        fs::write(file(0), "").ok();
         Ok(Self {
+            log_name,
             helper: Helper::start()?,
             capture: None,
             words: Vec::new(),
@@ -703,7 +714,7 @@ impl Core {
     fn say(&mut self, msg: &str) {
         (self.log)(msg);
         // Also kept on disk, for looking into problems after the fact.
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(cache_dir().join("ferret.log")) {
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(cache_dir().join(self.log_name)) {
             let _ = writeln!(f, "{msg}");
         }
     }
