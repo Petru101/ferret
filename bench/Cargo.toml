@@ -1,0 +1,19 @@
+# OCR engine comparison on saved game frames (not part of the app). Its own workspace, so the
+# app's Cargo.lock and vendor/ don't take its dependencies. Build with bench/run.sh.
+[workspace]
+
+[package]
+name = "ocr-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+ocrs = "0.13.1"
+rten = "0.26"
+rten-imageproc = "0.26"
+rten-tensor = "0.26"
+
+[profile.release]
+opt-level = 3
