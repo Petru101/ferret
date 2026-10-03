@@ -18,6 +18,10 @@ const PER_DIGIT: usize = 8;
 /// Narrowest a digit other than 1 is (width / height); fonts' are 0.6-1.0. Anything thinner is
 /// a slot border or an edge (Graveyard Keeper's 4 got learned from the 2-px slot border next to it).
 const MIN_ASPECT: f32 = 0.3;
+/// Most of a digit other than 1 that is ink: every one has a hole or a notch (fonts' are at most
+/// 0.91). Solid blocks learned as digits (a dark panel or grass behind Forager's numbers,
+/// learned as 0, 2, 5 and 6) read every block as a number.
+const MAX_FILL: f32 = 0.94;
 
 /// Whether a glyph `w` by `h` is shaped like the digit `d` could be.
 pub fn could_be(d: u8, w: u32, h: u32) -> bool {
@@ -116,7 +120,7 @@ impl Shape {
     }
 
     fn could_be(&self, d: u8) -> bool {
-        d == 1 || self.aspect >= MIN_ASPECT
+        d == 1 || (self.aspect >= MIN_ASPECT && self.cells.iter().filter(|c| **c).count() as f32 <= MAX_FILL * (GW * GH) as f32)
     }
 
     /// How many cells differ, or `None` when size or proportions rule it out.
@@ -240,7 +244,10 @@ pub struct DigitShape {
 pub struct FontRead {
     pub n: i64,
     pub worst: usize,
+    /// How many digits (more than glyphs when digits touch, fewer when cut glyphs are left out).
     pub glyphs: usize,
+    /// For each digit, the index of the glyph it was read from.
+    pub from: Vec<usize>,
 }
 
 impl Font {
@@ -388,8 +395,8 @@ impl Font {
             .fold(0.0, f32::max);
         let mut text = String::new();
         let mut worst = 0;
-        let mut count = 0;
-        for g in glyphs {
+        let mut from = Vec::new();
+        for (i, g) in glyphs.iter().enumerate() {
             let read = self.digit(g, scale).map(|r| vec![r]).or_else(|| {
                 let parts = (g.w as f32 / g.h as f32 / widest).round() as u32;
                 (2..=4).contains(&parts).then(|| g.split(parts).iter().map(|p| self.digit(p, scale)).collect::<Option<Vec<_>>>()).flatten()
@@ -403,10 +410,10 @@ impl Font {
             for (d, dist) in read {
                 text.push(char::from(b'0' + d));
                 worst = worst.max(dist);
-                count += 1;
+                from.push(i);
             }
         }
-        Some(FontRead { n: text.parse().ok()?, worst, glyphs: count })
+        Some(FontRead { n: text.parse().ok()?, worst, glyphs: from.len(), from })
     }
 
     /// Learns glyphs as the digits of `label` (same count, left to right). `trusted` labels come
@@ -541,5 +548,8 @@ mod grid_tests {
         assert_eq!(font.learn(std::slice::from_ref(&bar), 4, "4", true), 0);
         assert!(font.learn(std::slice::from_ref(&bar), 4, "1", true) > 0);
         assert!(font.learn(&[draw(ZERO, 3.0)], 4, "0", false) > 0);
+        // A solid block (a panel behind the number) is no digit but a 1.
+        let block = Glyph { x: 0, w: 80, h: 92, ink: vec![true; 80 * 92], cut: false };
+        assert_eq!(font.learn(std::slice::from_ref(&block), 4, "2", true), 0);
     }
 }

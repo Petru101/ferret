@@ -122,9 +122,13 @@ const MAX_ELEMENTS: u64 = 1 << 16;
 const MAX_FRONTIER: usize = 1 << 16;
 const CHUNK: usize = 4 << 20;
 
+/// Text that reads as a name: two letters or more of plain ASCII, and nothing but printable
+/// ASCII and letters. Two random UTF-16 units often decode to letters of some script ("즨̚" in
+/// Forager, which has no named objects at all).
 fn good_name(units: &[u16]) -> Option<String> {
     let t = String::from_utf16(units).ok()?;
-    (t.chars().count() >= 2 && t.chars().any(char::is_alphabetic) && !t.chars().any(char::is_control)).then_some(t)
+    let ascii_letters = t.chars().filter(char::is_ascii_alphabetic).count();
+    (ascii_letters >= 2 && t.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c.is_alphabetic())).then_some(t)
 }
 
 /// The game's writable memory, read as objects.

@@ -343,6 +343,28 @@ impl Named {
     }
 }
 
+/// Places one value is kept in at most when found by name (stacks of one item).
+const MAX_NAMED_PLACES: usize = 32;
+
+/// Why the places a named path leads to aren't one value kept in several places, if they
+/// aren't: a path through bytes that only look like a name leads all over memory (Forager has
+/// no named objects; a path through two random characters led to 95 places, and a write went
+/// to all of them). Places of one value are the same field of objects of one kind: few, lined
+/// up alike, holding plausible numbers.
+fn named_doubt(mem: &File, leads: &[u64], kind: Kind) -> Option<String> {
+    if leads.len() > MAX_NAMED_PLACES {
+        return Some(format!("it leads to {} places, more than one value is kept in", leads.len()));
+    }
+    if leads.iter().any(|a| a % 8 != leads[0] % 8) {
+        return Some("its places don't line up like the same field of objects".into());
+    }
+    let plausible = |v: f64| v.is_finite() && v.abs() < 1e9 && (v == 0.0 || v.abs() >= 1e-6);
+    if !leads.iter().all(|&a| read_value(mem, a, kind).is_some_and(plausible)) {
+        return Some("some of its places don't hold a number".into());
+    }
+    None
+}
+
 struct NamedLimit {
     path: Named,
     roots: Vec<u64>,
@@ -414,6 +436,8 @@ fn limiter_loop(shared: SharedLimiter) {
                 let leads = n.path.walk(heap, &n.roots);
                 if leads.is_empty() {
                     l.paused = Some("it isn't anywhere right now (none in the game?), waiting");
+                } else if named_doubt(mem, &leads, l.kind).is_some() {
+                    l.paused = Some("its name leads to places that aren't one value, not written");
                 } else {
                     if leads != n.addrs || l.paused.is_some() {
                         l.restores += 1;
@@ -1688,8 +1712,8 @@ fn named_walk(heap: &Heap, path: &Named, roots: &mut Vec<u64>, found_at: &mut Op
     path.walk(heap, roots)
 }
 
-/// named <type> <named path>: every place it leads now ("0x<addr>:<type> = <value>"), then
-/// "named <count>".
+/// named <type> <named path>: "doubtful <why>" when the places aren't one value (never written
+/// then), every place it leads now ("0x<addr>:<type> = <value>"), then "named <count>".
 fn cmd_named(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
     let kind = it.next().and_then(Kind::parse);
@@ -1701,6 +1725,9 @@ fn cmd_named(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     let (mut roots, mut found_at) = s.named_roots.remove(text).unwrap_or_default();
     let leads = named_walk(&heap, &path, &mut roots, &mut found_at);
     s.named_roots.insert(text.to_owned(), (roots, found_at));
+    if let Some(why) = named_doubt(mem, &leads, kind) {
+        writeln!(out, "doubtful {why}")?;
+    }
     for a in &leads {
         writeln!(out, "{}", s.describe(*a, kind))?;
     }

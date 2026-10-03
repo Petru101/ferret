@@ -711,6 +711,12 @@ impl FindView {
         }
     }
 
+    /// A job panicked: whatever was running ends, so the page doesn't wait for it forever.
+    pub fn bug(&self, msg: &str) {
+        self.typed_searching(false);
+        self.auto_done(Err(msg.to_owned()));
+    }
+
     fn found(&self, loc: core::Loc) {
         self.matches.set_visible(false);
         let at = format!("0x{:x} ({})", loc.addr, loc.kind.describe());

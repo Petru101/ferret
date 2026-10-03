@@ -583,6 +583,9 @@ struct Game {
     via: Vec<(String, String)>,
     /// Values found through a named path: every place it leads to now (all of them are set).
     named: Vec<(String, String, Vec<Loc>)>,
+    /// Named values whose places aren't one value now (the helper's "doubtful" line): never
+    /// written.
+    named_doubt: Vec<(String, String)>,
 }
 
 /// How a value's pointer paths agreed when last followed (the helper's "votes" line).
@@ -631,6 +634,10 @@ pub struct Core {
     capture: Option<WindowCapture>,
     words: Vec<Word>,
     area: Option<Rect>,
+    /// How the watched area looked when it was picked: reads and learning only happen while it
+    /// still looks like that. `hidden` = it doesn't now (told to the player once).
+    picked_look: Option<ocr::Look>,
+    hidden: bool,
     game: Option<Game>,
     /// The attached game's digits, as learned so far.
     font: Font,
@@ -681,6 +688,8 @@ impl Core {
             capture: None,
             words: Vec::new(),
             area: None,
+            picked_look: None,
+            hidden: false,
             game: None,
             font: Font::default(),
             search: None,
@@ -704,7 +713,7 @@ impl Core {
         }
     }
 
-    fn say(&mut self, msg: &str) {
+    pub fn say(&mut self, msg: &str) {
         (self.log)(msg);
         // Also kept on disk, for looking into problems after the fact.
         if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(cache_dir().join(self.log_name)) {
@@ -771,7 +780,7 @@ impl Core {
         if self.game.as_ref().map(|g| g.pid) != Some(pid) {
             self.capture = None;
         }
-        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new() });
+        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new() });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -951,7 +960,11 @@ impl Core {
         for line in reply.iter().filter_map(|l| l.strip_prefix("named ")) {
             let mut f = line.splitn(3, ' ');
             let (Some(text), Some(_)) = (f.next(), f.next()) else { continue };
-            let places = self.follow_named(loc.kind, text);
+            let (places, doubt) = self.follow_named(loc.kind, text);
+            if let Some(why) = doubt {
+                self.say(&format!("named path {text} left out: {why}"));
+                continue;
+            }
             if places.iter().any(|(p, _)| p.addr == loc.addr) {
                 return Some((text.to_owned(), places.len(), f.next().unwrap_or_default().to_owned()));
             }
@@ -959,9 +972,20 @@ impl Core {
         None
     }
 
-    /// Every place a named path leads to now, with its value.
-    fn follow_named(&mut self, kind: Kind, text: &str) -> Vec<(Loc, Option<f64>)> {
-        parse_exact_values(&self.helper.call(&format!("named {} {text}", kind.name())))
+    /// Every place a named path leads to now, with its value, and why they aren't one value
+    /// if they aren't.
+    fn follow_named(&mut self, kind: Kind, text: &str) -> (Vec<(Loc, Option<f64>)>, Option<String>) {
+        let reply = self.helper.call(&format!("named {} {text}", kind.name()));
+        let doubt = reply.iter().find_map(|l| l.strip_prefix("doubtful ")).map(str::to_owned);
+        (parse_exact_values(&reply), doubt)
+    }
+
+    /// Remembers why a named value's places aren't one value now (None: they are).
+    fn set_named_doubt(&mut self, name: &str, doubt: Option<String>) {
+        if let Some(game) = self.game.as_mut() {
+            game.named_doubt.retain(|(n, _)| n != name);
+            game.named_doubt.extend(doubt.map(|d| (name.to_owned(), d)));
+        }
     }
 
     /// Follows the named paths of values found through them again: the game adds and removes
@@ -974,7 +998,9 @@ impl Core {
             .filter_map(|(n, t, _)| Some((n.clone(), t.clone(), game.entries.iter().find(|(e, _)| e == n)?.1.kind)))
             .collect();
         for (name, text, kind) in followed {
-            let places: Vec<Loc> = self.follow_named(kind, &text).into_iter().map(|(l, _)| l).collect();
+            let (places, doubt) = self.follow_named(kind, &text);
+            self.set_named_doubt(&name, doubt);
+            let places: Vec<Loc> = places.into_iter().map(|(l, _)| l).collect();
             if let Some(game) = self.game.as_mut() {
                 if let Some(e) = game.entries.iter_mut().find(|(n, _)| *n == name) {
                     e.1.addr = places.first().map_or(0, |l| l.addr);
@@ -1031,6 +1057,9 @@ impl Core {
     /// guesses, or they didn't agree clearly when last followed.
     fn doubtful(&self, name: &str, saved: &[Entry]) -> Option<String> {
         let game = self.game.as_ref()?;
+        if let Some((_, why)) = game.named_doubt.iter().find(|(n, _)| n == name) {
+            return Some(format!("its name doesn't lead to one value ({why})"));
+        }
         game.paths.iter().any(|(n, _)| n == name).then_some(())?;
         if saved.iter().any(|e| e.name == name && e.guessed(saved, game.pid)) {
             return Some("its pointer paths are guesses until a later run of the game confirms them".into());
@@ -1182,7 +1211,11 @@ impl Core {
                 continue;
             }
             if let Some(text) = entry.named.first() {
-                let places = self.follow_named(entry.kind, text);
+                let (places, doubt) = self.follow_named(entry.kind, text);
+                if let Some(why) = &doubt {
+                    self.say(&format!("{name}: its name doesn't lead to one value ({why}): never written; find it again and save it as {name}"));
+                }
+                self.set_named_doubt(name, doubt);
                 let locs: Vec<Loc> = places.iter().map(|(l, _)| *l).collect();
                 let game = self.game()?;
                 game.named.retain(|(n, _, _)| n != name);
@@ -1335,6 +1368,9 @@ impl Core {
             if places.is_empty() {
                 return Err(format!("{name} isn't in the game right now (is a save loaded?)"));
             }
+            if let Some((_, why)) = self.game()?.named_doubt.iter().find(|(n, _)| n == name) {
+                return Err(format!("{name} not written: its name doesn't lead to one value ({why}). Find it again and save it as {name}."));
+            }
             for p in &places {
                 let reply = self.helper.call(&format!("write {p} {value}"));
                 if let Some(e) = first_error(&reply) {
@@ -1406,6 +1442,8 @@ impl Core {
             self.say(&format!("another number picked: keeping the {n} matches (Start Over clears them)"));
         }
         self.area = Some(area);
+        self.picked_look = None;
+        self.hidden = false;
         kept
     }
 
@@ -1447,14 +1485,37 @@ impl Core {
         self.read_frame(&frame)
     }
 
-    /// Reads the watched number in `frame`, strictly inside the watched area.
+    /// Reads the watched number in `frame`, strictly inside the watched area. Nothing while the
+    /// area doesn't look like it did when picked (the inventory closed): what's there instead
+    /// isn't the number, and the readers would make one up.
     fn read_frame(&mut self, frame: &Path) -> Result<Option<(Shown, bool)>, String> {
         let area = self.area.ok_or("no area picked yet")?;
-        let read = ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font))?;
         if let Some(f) = self.on_frame.as_mut() {
             f(frame, self.area);
         }
-        Ok(read)
+        if !self.shows_picked(frame) {
+            return Ok(None);
+        }
+        ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font))
+    }
+
+    /// Whether the watched area of `frame` still looks like when it was picked. Tells the
+    /// player when that changes.
+    fn shows_picked(&mut self, frame: &Path) -> bool {
+        let (Some(area), Some(picked)) = (self.area, self.picked_look.as_ref()) else { return true };
+        let shows = ocr::Look::of(frame, area).is_ok_and(|now| now.like(picked));
+        if shows == self.hidden {
+            self.hidden = !shows;
+            let msg = if shows {
+                "The number is back in the box."
+            } else {
+                "The box doesn't show the number now (it looks different from when you picked it: \
+                 a menu or the inventory closed?). Ferret waits until it's back."
+            };
+            self.say(msg);
+            self.status(msg);
+        }
+        shows
     }
 
     /// The area being watched.
@@ -1465,8 +1526,10 @@ impl Core {
     /// Reads the number just picked, and whether the game's learned digits read it. A read
     /// they didn't make is a guess to confirm; its frame is kept for `confirm`.
     pub fn read_picked(&mut self) -> Result<Option<(Shown, bool)>, String> {
-        self.area.ok_or("no area picked yet")?;
+        let area = self.area.ok_or("no area picked yet")?;
         let frame = self.frame()?;
+        self.picked_look = ocr::Look::of(&frame, area).ok();
+        self.hidden = false;
         let read = self.read_frame(&frame)?;
         fs::rename(&frame, cache_dir().join("picked.png")).map_err(|e| e.to_string())?;
         Ok(read)
@@ -1482,6 +1545,11 @@ impl Core {
     fn learn(&mut self, frame: &Path, n: &Shown, trusted: bool) {
         let (Some(area), Some(game)) = (self.area, self.game.as_ref()) else { return };
         let path = digits_path(&game.exe);
+        // Scenery learned as digits gets read as numbers everywhere.
+        if self.picked_look.as_ref().is_some_and(|picked| !ocr::Look::of(frame, area).is_ok_and(|now| now.like(picked))) {
+            self.say(&format!("digits not learned: the box doesn't show {n} now (it looks different from when you picked it)"));
+            return;
+        }
         let msg = match ocr::learn(frame, area, n, &mut self.font, trusted) {
             Ok(msg) => self.font.save(&path).map(|_| msg).unwrap_or_else(|e| format!("could not save the digits: {e}")),
             Err(e) => format!("digits not learned: {e}"),

@@ -57,6 +57,8 @@ pub enum Event {
     /// A frame the watched number was just read from, and the watched area: shown while
     /// searching (at most one a second).
     Frame(gtk::gdk::Texture, Option<crate::ocr::Rect>),
+    /// A job panicked (a bug): what it said. The core lives on for the next job.
+    Bug(String),
 }
 
 type Job = Box<dyn FnOnce(&mut Core) -> Event + Send>;
@@ -115,7 +117,19 @@ fn start_worker(cancel: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Eve
             }
         }));
         for job in jobs_rx {
-            if events_tx.send_blocking(job(&mut core)).is_err() {
+            // A bug in one job mustn't take the core and the helper with it: the window would
+            // wait for its answer forever.
+            let event = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut core))).unwrap_or_else(|panic| {
+                let what = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                let msg = format!("Ferret hit a bug and stopped: {what}");
+                core.say(&msg);
+                Event::Bug(msg)
+            });
+            if events_tx.send_blocking(event).is_err() {
                 break;
             }
         }
@@ -321,6 +335,7 @@ impl Ui {
             }
             Event::Attached(Err(e)) if e.contains('\n') => self.explain("Ferret Can't Open This Game", &e),
             Event::Attached(Err(e)) | Event::Done(Err(e)) => self.toast(&e),
+            Event::Bug(msg) => self.find.bug(&msg),
         }
     }
 }

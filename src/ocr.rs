@@ -489,25 +489,20 @@ struct Candidate {
 }
 
 impl Candidate {
-    /// The separators between `glyphs` (some of this candidate's, in order): "." or ":" after
-    /// the glyph at each index.
-    fn separators(&self, glyphs: &[Glyph]) -> Vec<Option<char>> {
-        glyphs
-            .windows(2)
-            .map(|p| {
-                let (from, to) = (p[0].x + p[0].w, p[1].x);
-                let marks: Vec<(u32, u32, u32, u32)> = self.marks.iter().filter(|m| m.0 >= from && m.2 < to).copied().collect();
-                separator(&marks, self.band.0, self.band.1)
-            })
-            .collect()
+    /// The separator between two of this candidate's glyphs: "." or ":".
+    fn separator(&self, a: &Glyph, b: &Glyph) -> Option<char> {
+        let (from, to) = (a.x + a.w, b.x);
+        let marks: Vec<(u32, u32, u32, u32)> = self.marks.iter().filter(|m| m.0 >= from && m.2 < to).copied().collect();
+        separator(&marks, self.band.0, self.band.1)
     }
 
-    /// `digits` (one per glyph) as the number shown, with the separators between the glyphs.
-    fn shown(&self, glyphs: &[Glyph], digits: &str) -> Option<Shown> {
+    /// A read of `glyphs` as the number shown, with the separators between the glyphs its
+    /// digits come from (touching digits come from one glyph and have none).
+    fn shown(&self, glyphs: &[Glyph], r: &FontRead) -> Option<Shown> {
         let mut text = String::new();
-        for (i, c) in digits.chars().enumerate() {
-            if i > 0 {
-                text.extend(self.separators(&glyphs[i - 1..=i]).into_iter().flatten());
+        for (i, c) in format!("{:0w$}", r.n, w = r.glyphs).chars().enumerate() {
+            if i > 0 && r.from[i - 1] != r.from[i] {
+                text.extend(self.separator(&glyphs[r.from[i - 1]], &glyphs[r.from[i]]));
             }
             text.push(c);
         }
@@ -721,7 +716,7 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, Shown)> {
         .min_by_key(|(_, r)| (std::cmp::Reverse(r.glyphs), r.worst))
         .and_then(|(i, r)| {
             let glyphs = number_glyphs(&cands[i].glyphs);
-            Some((i, cands[i].shown(&glyphs, &format!("{:0w$}", r.n, w = r.glyphs))?))
+            Some((i, cands[i].shown(&glyphs, &r)?))
         })
 }
 
@@ -729,6 +724,34 @@ fn font_read(font: &Font, cands: &[Candidate]) -> Option<(usize, Shown)> {
 #[allow(dead_code)]
 pub fn learned_numbers(frame: &Path, font: &Font) -> Result<Vec<Word>, String> {
     Ok(font_numbers(&image::open(frame).map_err(|e| e.to_string())?.to_rgb8(), font))
+}
+
+/// The colours inside a rectangle of a frame (512 bins, 3 bits a channel), to tell whether it
+/// still shows what the player picked: a menu or inventory closed over the game leaves the box
+/// on scenery, which the readers turn into numbers. A number changing or the text shifting a
+/// little keeps most colours (Forager's inventory: 0.47-1.00 alike), scenery doesn't (0.00-0.02).
+pub struct Look(Vec<f32>);
+
+impl Look {
+    pub fn of(frame: &Path, area: Rect) -> Result<Look, String> {
+        let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
+        let mut bins = vec![0f32; 512];
+        let (x1, y1) = ((area.x + area.w).min(img.width()), (area.y + area.h).min(img.height()));
+        for y in area.y.min(y1)..y1 {
+            for x in area.x.min(x1)..x1 {
+                let p = img.get_pixel(x, y);
+                bins[((p[0] as usize >> 5) << 6) | ((p[1] as usize >> 5) << 3) | (p[2] as usize >> 5)] += 1.0;
+            }
+        }
+        let n = bins.iter().sum::<f32>().max(1.0);
+        bins.iter_mut().for_each(|b| *b /= n);
+        Ok(Look(bins))
+    }
+
+    /// Whether `other` looks like the same thing: at least a quarter of the colours shared.
+    pub fn like(&self, other: &Look) -> bool {
+        self.0.iter().zip(&other.0).map(|(a, b)| a.min(*b)).sum::<f32>() >= 0.25
+    }
 }
 
 /// Reads the number inside `area` of the frame, strictly inside it: what is around the
@@ -748,7 +771,7 @@ pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font
     let cands: Vec<Candidate> = candidates(&img, area, false).into_iter().filter(|c| !cut_beside(c)).collect();
     let reads_as = |c: &Candidate, n: &Shown| {
         let glyphs = number_glyphs(&c.glyphs);
-        font.read(&glyphs, SCALE).and_then(|r| c.shown(&glyphs, &format!("{:0w$}", r.n, w = r.glyphs))).as_ref() == Some(n)
+        font.read(&glyphs, SCALE).and_then(|r| c.shown(&glyphs, &r)).as_ref() == Some(n)
     };
     if let Some(n) = read.as_ref().filter(|n| cands.iter().any(|c| reads_as(c, n))) {
         return Ok(Some((n.clone(), true)));
@@ -895,5 +918,48 @@ mod shown_tests {
             assert_eq!(p(bad), None, "{bad}");
         }
         assert_eq!(Shown::parse("1.25").map(|s| (s.decimals(), s.scaled())), Some((2, 125)));
+    }
+}
+
+#[cfg(test)]
+mod font_read_tests {
+    use super::{Candidate, Rect};
+    use crate::font::{FontRead, Glyph};
+
+    #[test]
+    fn touching_digits_come_from_one_glyph() {
+        let glyph = |x| Glyph { x, w: 8, h: 10, ink: vec![true; 80], cut: false };
+        let c = Candidate { glyph_h: 10, rect: Rect { x: 0, y: 0, w: 40, h: 10 }, glyphs: vec![], marks: vec![(10, 8, 11, 9)], band: (0, 9) };
+        // "22" drawn as one wide glyph, split in two.
+        let r = FontRead { n: 22, worst: 0, glyphs: 2, from: vec![0, 0] };
+        assert_eq!(c.shown(&[glyph(0)], &r).map(|s| s.to_string()), Some("22".into()));
+        // A dot between two glyphs, the second holding two touching digits: "1.25".
+        let r = FontRead { n: 125, worst: 0, glyphs: 3, from: vec![0, 1, 1] };
+        assert_eq!(c.shown(&[glyph(0), glyph(14)], &r).map(|s| s.to_string()), Some("1.25".into()));
+    }
+}
+
+#[cfg(test)]
+mod look_tests {
+    use super::{Look, Rect};
+    use image::{Rgb, RgbImage};
+
+    #[test]
+    fn tells_the_picked_box_from_scenery() {
+        let dir = std::env::temp_dir().join(format!("ferret-look-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A white "22" on a dark slot, then the same with another number, then grass.
+        let frame = |f: &dyn Fn(u32, u32) -> Rgb<u8>, name: &str| {
+            let path = dir.join(name);
+            RgbImage::from_fn(64, 20, |x, y| f(x, y)).save(&path).unwrap();
+            path
+        };
+        let slot = |n: u32| move |x: u32, y: u32| if (x / 4 + y / 4 + n) % 5 == 0 { Rgb([250, 250, 250]) } else { Rgb([30, 34, 40]) };
+        let area = Rect { x: 0, y: 0, w: 64, h: 20 };
+        let picked = Look::of(&frame(&slot(0), "a.png"), area).unwrap();
+        assert!(Look::of(&frame(&slot(2), "b.png"), area).unwrap().like(&picked));
+        let grass = |x: u32, y: u32| if x > y * 2 { Rgb([90, 160, 60]) } else { Rgb([150, 170, 70]) };
+        assert!(!Look::of(&frame(&grass, "c.png"), area).unwrap().like(&picked));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
