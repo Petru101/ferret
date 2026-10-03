@@ -3,7 +3,7 @@
 // narrows the scan down every time the number changes on screen. When it can't
 // read the number, the player types it instead.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::gdk;
+use gtk::{gdk, glib};
 
 use super::{Event, Worker};
 use crate::core::{self, AutoResult};
@@ -46,6 +46,9 @@ pub struct FindView {
     listed: RefCell<Vec<core::Loc>>,
     typed_row: gtk::Box,
     typed: gtk::Entry,
+    typed_go: gtk::Button,
+    /// How many places matched after the last search, to show how far a search narrowed it.
+    last_count: Cell<Option<usize>>,
     digits: gtk::Box,
     digits_hint: gtk::Label,
     worker: Worker,
@@ -129,8 +132,12 @@ impl FindView {
             .hexpand(true)
             .wrap(true)
             .build();
-        // Green only while it says a value was found: any new message clears it.
-        status.connect_label_notify(|l| l.remove_css_class("success"));
+        // Highlighted only while it says how a search ended: any new message clears it.
+        status.connect_label_notify(|l| {
+            for c in ["success", "news", "flash"] {
+                l.remove_css_class(c);
+            }
+        });
         let crop = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::ScaleDown)
             .height_request(40)
@@ -285,6 +292,8 @@ impl FindView {
             listed: RefCell::default(),
             typed_row,
             typed,
+            typed_go: typed_go.clone(),
+            last_count: Cell::default(),
             digits,
             digits_hint,
             worker,
@@ -454,6 +463,40 @@ impl FindView {
         self.spinner.set_spinning(busy);
     }
 
+    /// How a search ended, highlighted (green for a find) and flashed brightly at first, so the
+    /// player sees it changed even when watching the game.
+    fn announce(&self, msg: &str, found: bool) {
+        self.status.set_label(msg);
+        self.status.add_css_class("news");
+        if found {
+            self.status.add_css_class("success");
+        }
+        self.status.add_css_class("flash");
+        let status = self.status.clone();
+        glib::timeout_add_local_once(Duration::from_millis(700), move || status.remove_css_class("flash"));
+    }
+
+    /// "1,200 places match", or "1,200 -> 35 places match" when an earlier search had more.
+    fn count_text(&self, n: usize) -> String {
+        let text = match self.last_count.replace(Some(n)) {
+            Some(before) if before != n => format!("{} \u{2192} {}", grouped(before), grouped(n)),
+            Some(_) => format!("Still {}", grouped(n)),
+            None => grouped(n),
+        };
+        format!("{text} {}", if n == 1 { "place matches" } else { "places match" })
+    }
+
+    /// The typed number stays readable while it's searched for, in the accent colour.
+    fn typed_searching(&self, searching: bool) {
+        self.typed.set_editable(!searching);
+        self.typed_go.set_sensitive(!searching);
+        if searching {
+            self.typed.add_css_class("searching");
+        } else {
+            self.typed.remove_css_class("searching");
+        }
+    }
+
     pub fn capture(&self) {
         self.busy(true);
         self.status.set_label("Capturing the game window…");
@@ -560,10 +603,10 @@ impl FindView {
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => {
-                self.status.set_label(&format!(
-                    "{} places still match. Press Start to continue and let the number change a few more times.",
-                    grouped(n)
-                ));
+                self.announce(
+                    &format!("{}. Press Start to continue and let the number change a few more times.", self.count_text(n)),
+                    false,
+                );
                 self.list_matches(n);
             }
             Err(e) => self.status.set_label(&e),
@@ -573,21 +616,28 @@ impl FindView {
     fn found(&self, loc: core::Loc) {
         self.matches.set_visible(false);
         let at = format!("0x{:x} ({})", loc.addr, loc.kind.describe());
-        self.status.set_label(&format!("Found it! It's at {at}. Give it a name below to keep it."));
-        self.status.add_css_class("success");
+        self.last_count.set(None);
+        self.announce(&format!("Found it! It's at {at}. Give it a name below to keep it."), true);
         self.log_found(&format!("Found it: {at}"));
         self.result.set_visible(true);
         self.name.grab_focus();
     }
 
     pub fn type_number(&self, text: &str) {
+        if !self.typed.is_editable() {
+            return;
+        }
+        // The D-Bus `type` action doesn't go through the entry.
+        if self.typed.text() != text {
+            self.typed.set_text(text);
+        }
         self.matches.set_visible(false);
         let Some(n) = Shown::parse(text) else {
             self.status.set_label("Type the number as the game shows it, for example 1250, 1.5 or 3:17.");
             return;
         };
         self.result.set_visible(false);
-        self.typed_row.set_sensitive(false);
+        self.typed_searching(true);
         self.unconfirmed.replace(None);
         self.start.set_label("Start");
         self.busy(true);
@@ -597,15 +647,12 @@ impl FindView {
 
     pub fn typed_done(&self, r: Result<AutoResult, String>) {
         self.busy(false);
-        self.typed_row.set_sensitive(true);
+        self.typed_searching(false);
         self.typed.set_text("");
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => {
-                self.status.set_label(&format!(
-                    "{} places match. Change the number in the game, then type the new one.",
-                    grouped(n)
-                ));
+                self.announce(&format!("{}. Change the number in the game, then type the new one.", self.count_text(n)), false);
                 self.list_matches(n);
                 self.typed.grab_focus();
             }
@@ -675,6 +722,7 @@ impl FindView {
 
     /// Forgets the matches so far; the picked number and the captured frame stay.
     pub fn start_over(&self) {
+        self.last_count.set(None);
         self.matches.set_visible(false);
         self.result.set_visible(false);
         self.typed.set_text("");
@@ -691,6 +739,7 @@ impl FindView {
 
     /// Attached to another game: nothing picked or found in the last one applies.
     pub fn new_game(&self) {
+        self.last_count.set(None);
         self.matches.set_visible(false);
         self.picture.set_paintable(None::<&gdk::Paintable>);
         self.crop.set_paintable(None::<&gdk::Paintable>);

@@ -362,7 +362,14 @@ fn load_css() {
     let css = gtk::CssProvider::new();
     css.load_from_string(
         ".found-row { background-color: alpha(@success_color, 0.15); border: 1px solid alpha(@success_color, 0.6); \
-         border-radius: 12px; padding: 8px 12px; }",
+         border-radius: 12px; padding: 8px 12px; } \
+         entry.searching { background-color: alpha(@accent_bg_color, 0.3); outline: 2px solid @accent_bg_color; \
+         outline-offset: -2px; } \
+         label.news { background-color: alpha(@accent_bg_color, 0.18); border-radius: 8px; padding: 4px 8px; \
+         transition: background-color 1200ms ease-out; } \
+         label.news.flash { background-color: alpha(@accent_bg_color, 0.65); transition: none; } \
+         label.news.success { background-color: alpha(@success_color, 0.15); } \
+         label.news.success.flash { background-color: alpha(@success_color, 0.5); transition: none; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
