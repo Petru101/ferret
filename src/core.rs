@@ -253,6 +253,11 @@ struct Entry {
     other: Vec<String>,
 }
 
+/// Names are one word everywhere (helper commands, CLI): "max hp" is saved as "max_hp".
+pub fn one_word(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join("_")
+}
+
 /// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
 /// missing), its "site ...", "path ..." and "candidate ..." lines, "run <pid>" (where the
 /// candidates came from) and an optional "limit <min|-> <max|->" line. Other lines are kept
@@ -585,8 +590,10 @@ impl Core {
     /// value and saves it under `name`, so the value can be found again next time.
     /// Returns false when that still needs confirming in a later run (unconfirmed pointer paths).
     pub fn save(&mut self, name: &str) -> Result<bool, String> {
-        if name.is_empty() || name.contains(char::is_whitespace) {
-            return Err("the name must be one word".into());
+        let name = one_word(name);
+        let name = name.as_str();
+        if name.is_empty() {
+            return Err("the value needs a name".into());
         }
         self.game()?;
         let listed = self.helper.call("list");
@@ -798,6 +805,27 @@ impl Core {
                 }
             }
         }
+    }
+
+    /// Forgets a saved value: out of the profile, no longer followed or kept in range. The
+    /// game's number stays as it is.
+    pub fn remove(&mut self, name: &str) -> Result<(), String> {
+        let exe = self.game()?.exe.clone();
+        let mut entries = read_profile(&exe);
+        let before = entries.len();
+        entries.retain(|e| e.name != name);
+        if entries.len() == before {
+            return Err(format!("no saved value called {name}"));
+        }
+        write_profile(&exe, &entries)?;
+        self.helper.call(&format!("unlimit {name}"));
+        if let Some(game) = self.game.as_mut() {
+            game.entries.retain(|(n, _)| n != name);
+            game.paths.retain(|(n, _)| n != name);
+            game.votes.retain(|(n, _)| n != name);
+            game.via.retain(|(n, _)| n != name);
+        }
+        Ok(())
     }
 
     /// Keeps a saved value within a range; `None` on both sides turns the limit off.

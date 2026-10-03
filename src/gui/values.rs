@@ -1,5 +1,5 @@
 // The Values tab: every saved value with its live number, a field to change
-// it, and a "Keep in range" switch.
+// it, a "Keep in range" switch, and a button to remove it.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -40,6 +40,25 @@ fn limit_subtitle(v: &ValueRow) -> String {
         Some(state) => format!("Kept {} · {}", core::limit_text(v.min, v.max), state_text(state)),
         None => "Off".into(),
     }
+}
+
+/// Asks before forgetting a saved value; `parent` is any widget in the window.
+pub fn ask_remove(worker: &Worker, name: &str, parent: &impl IsA<gtk::Widget>) {
+    let dialog = adw::AlertDialog::new(
+        Some(&format!("Remove {name}?")),
+        Some("Ferret stops finding it and keeping it in range. The number in the game stays as it is."),
+    );
+    dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
+    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let (worker, name) = (worker.clone(), name.to_owned());
+    dialog.connect_response(Some("remove"), move |_, _| {
+        let name = name.clone();
+        worker.run(move |core| Event::Done(core.remove(&name).map(|_| format!("Removed {name}"))));
+        worker.run(|core| Event::Values(core.values()));
+    });
+    dialog.present(Some(parent));
 }
 
 impl ValuesView {
@@ -108,6 +127,17 @@ impl ValuesView {
     fn create(&self, v: &ValueRow) -> ValueWidgets {
         let name = v.name.clone();
         let group = adw::PreferencesGroup::builder().title(&v.name).build();
+        let remove = gtk::Button::builder()
+            .icon_name("user-trash-symbolic")
+            .tooltip_text("Remove")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        {
+            let (worker, name) = (self.worker.clone(), name.clone());
+            remove.connect_clicked(move |button| ask_remove(&worker, &name, button));
+        }
+        group.set_header_suffix(Some(&remove));
 
         let value = gtk::Label::builder().css_classes(["title-3", "numeric"]).build();
         let entry = gtk::Entry::builder()

@@ -7,7 +7,7 @@ use crate::core::{self, AutoResult, Core};
 use crate::ocr::Rect;
 
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, reset, probe
-restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off";
+restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, remove <name>";
 
 fn bound(v: &str) -> Result<Option<i64>, String> {
     match v {
@@ -73,6 +73,10 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             core.save(arg)?;
         }
         "restore" => core.restore()?,
+        "remove" => {
+            core.remove(arg)?;
+            println!("removed {arg}");
+        }
         "values" => {
             for v in core.values()? {
                 let limit = v

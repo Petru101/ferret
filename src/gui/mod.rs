@@ -343,6 +343,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
+    action("remove", Box::new(|ui, name| values::ask_remove(&ui.worker, name.trim(), &ui.stack)));
     action(
         "forget",
         Box::new(|ui, d| {

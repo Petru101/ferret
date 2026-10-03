@@ -780,7 +780,7 @@ impl FindView {
     }
 
     pub fn save_as(&self, name: &str) {
-        let name = name.trim().to_owned();
+        let name = crate::core::one_word(name);
         // One save at a time: a second Enter or click while it runs would save it all over again.
         if name.is_empty() || !self.result.is_sensitive() {
             return;
