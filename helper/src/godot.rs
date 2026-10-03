@@ -5,7 +5,8 @@
 // keys do.
 // Memory (64-bit Linux builds): a Dictionary keeps its entries in a list whose elements are
 // { const Variant *key; Variant value; Element *next, *prev; void *list }, a Variant is
-// { u32 type; u32 pad; 16 bytes of data }, type 2 = int (an int64), 3 = real (a double),
+// { u32 type; 4 bytes of padding (not always zero); 16 bytes of data }, type 2 = int (an int64),
+// 3 = real (a double),
 // 4 = String (data = pointer to its characters, UTF-32: wchar_t is 4 bytes on Linux).
 // Text form: {amount|id=0,index} = the "amount" entry of every dictionary that also has an
 // "id" entry holding 0 and an "index" entry.
@@ -115,9 +116,8 @@ impl<'a> Dicts<'a> {
     }
 
     /// Looks like a list element with a number for its value (checked on the words already read).
-    fn shaped(&self, key: u64, value_type: u32, pad: u32, next: u64, prev: u64) -> bool {
+    fn shaped(&self, key: u64, value_type: u32, next: u64, prev: u64) -> bool {
         (value_type == INT || value_type == REAL)
-            && pad == 0
             && self.heap.is_pointer(key)
             && (next != 0 || prev != 0)
             && self.link(next)
@@ -125,12 +125,12 @@ impl<'a> Dicts<'a> {
     }
 
     fn element(&self, e: u64) -> bool {
-        let (Some(key), Some(t), Some(pad), Some(next), Some(prev)) =
-            (self.u64_at(e), self.u32_at(e + VALUE_TYPE), self.u32_at(e + VALUE_TYPE + 4), self.u64_at(e + NEXT), self.u64_at(e + PREV))
+        let (Some(key), Some(t), Some(next), Some(prev)) =
+            (self.u64_at(e), self.u32_at(e + VALUE_TYPE), self.u64_at(e + NEXT), self.u64_at(e + PREV))
         else {
             return false;
         };
-        self.shaped(key, t, pad, next, prev)
+        self.shaped(key, t, next, prev)
     }
 
     /// The text of the String key of the element at `e`.
@@ -197,12 +197,12 @@ impl<'a> Dicts<'a> {
         let half = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         self.heap.each_chunk(48, |addr, b, fresh| {
             for o in (0..fresh).step_by(8).take_while(|o| o + 48 <= b.len()) {
-                let (t, pad) = (half(b, o + 8), half(b, o + 12));
-                if (t != INT && t != REAL) || pad != 0 {
+                let t = half(b, o + 8);
+                if t != INT && t != REAL {
                     continue;
                 }
                 let e = addr + o as u64;
-                if self.shaped(word(b, o), t, pad, word(b, o + 32), word(b, o + 40)) && self.key(e).as_deref() == Some(key) {
+                if self.shaped(word(b, o), t, word(b, o + 32), word(b, o + 40)) && self.key(e).as_deref() == Some(key) {
                     found.push(e);
                 }
             }
