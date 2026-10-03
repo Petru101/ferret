@@ -41,15 +41,20 @@ until [ -s "$d/log" ]; do sleep 0.2; done
 sleep 2
 "$live" attach "$pid" >/dev/null
 echo "--- food: only its display copy can be found"
-"$live" type 500
-game "eat 7"
-"$live" type 507
-keep_heap
-game "eat 3"
-type_n 510 | tee "$d/out"
+# Wait for each outcome: food changed during a test write looks like the player eating.
+food=500
+type_n 500 | tee "$d/out"
+if ! grep -q "^error: only found a copy" "$d/out"; then
+    game "eat 7"
+    type_n 507
+    keep_heap
+    game "eat 3"
+    food=510
+    type_n 510 | tee "$d/out"
+fi
 grep -q "^error: only found a copy" "$d/out" || fail "the copy was accepted"
 game "show"
-tail -n1 "$d/log" | grep -q "food=510" || fail "food changed"
+tail -n1 "$d/log" | grep -q "food=$food " || fail "food changed"
 echo "--- gold: a real value is still found"
 "$live" type 1000 >/dev/null
 game "earn 5"

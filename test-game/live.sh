@@ -10,6 +10,8 @@ session=${FERRET_SESSION:-live}
 dir="$(cd "$(dirname "$0")/.." && pwd)/run/$session"
 case ${1:-} in
 start)
+    # Shapes learned from the stand-in by one test would steer the next test's scans.
+    rm -f "$HOME"/.var/app/io.github.Petru101.Ferret/data/profiles/target*.shapes
     rm -rf "$dir" && mkdir -p "$dir" && mkfifo "$dir/in"
     systemctl --user stop "ferret-$session" 2>/dev/null || true
     systemd-run --user --quiet --collect --unit="ferret-$session" sh -c \

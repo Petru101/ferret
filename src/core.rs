@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::capture::WindowCapture;
 use crate::font::{self, Font};
 use crate::ocr::{self, Rect, Shown, Word};
+use crate::shapes::{self, Learned, Shape};
 
 fn flatpak_info(key: &str) -> Option<String> {
     let info = fs::read_to_string("/.flatpak-info").ok()?;
@@ -205,7 +206,7 @@ impl std::fmt::Display for Loc {
     }
 }
 
-fn parse_loc(a: &str) -> Option<Loc> {
+pub fn parse_loc(a: &str) -> Option<Loc> {
     let (addr, kind) = a.split_once(':').map_or((a, Some(Kind::I32)), |(a, k)| (a, Kind::parse(k)));
     Some(Loc { addr: u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok()?, kind: kind? })
 }
@@ -292,6 +293,11 @@ fn profile_path(exe: &str) -> PathBuf {
 /// The game's learned digit shapes, next to its profile.
 fn digits_path(exe: &str) -> PathBuf {
     profile_path(exe).with_extension("digits")
+}
+
+/// The memory around the game's values found so far, next to its profile.
+fn shapes_path(exe: &str) -> PathBuf {
+    profile_path(exe).with_extension("shapes")
 }
 
 struct Entry {
@@ -641,6 +647,13 @@ pub struct Core {
     pub on_status: Option<Box<dyn FnMut(&str) + Send>>,
     /// The value types new scans look for (empty: all of them).
     pub scan_kinds: Vec<Kind>,
+    /// The memory around the game's values found so far: new scans try places shaped like them
+    /// first.
+    shapes: Vec<Shape>,
+    /// The search in progress kept only places shaped like an earlier find.
+    shaped: bool,
+    /// The value wasn't in such a place: scans look everywhere until the next search.
+    unshaped: bool,
 }
 
 impl Core {
@@ -662,6 +675,9 @@ impl Core {
             on_frame: None,
             on_status: None,
             scan_kinds: Vec::new(),
+            shapes: Vec::new(),
+            shaped: false,
+            unshaped: false,
         })
     }
 
@@ -731,6 +747,16 @@ impl Core {
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
             self.say(&format!("knows how {exe} draws the digits {}", self.font.known()));
+        }
+        self.shapes = shapes::load(&shapes_path(&exe));
+        self.unshaped = false;
+        self.send_shapes();
+        if !self.shapes.is_empty() {
+            let kinds = match self.shapes.len() {
+                1 => "one kind of value".to_owned(),
+                n => format!("{n} kinds of values"),
+            };
+            self.say(&format!("knows how {exe} keeps {kinds}: searches look there first"));
         }
         if !read_profile(&exe).is_empty() {
             self.say(&format!("found saved values for {exe}, restoring:"));
@@ -1349,6 +1375,7 @@ impl Core {
     /// Forgets the search in progress, so the next number starts from scratch.
     pub fn reset(&mut self) {
         self.search = None;
+        self.unshaped = false;
         self.helper.call("track");
         self.say("search cleared");
     }
@@ -1471,10 +1498,58 @@ impl Core {
         Ok(self.matches())
     }
 
-    /// A new scan for `n`, of the value types the player picked.
-    fn scan_command(&self, n: &Shown) -> String {
+    /// A new scan for `n`, of the value types the player picked, in places shaped like earlier
+    /// finds when there are any (unless the value turned out not to be in one).
+    fn scan(&mut self, n: &Shown) -> Vec<String> {
         let kinds: Vec<&str> = self.scan_kinds.iter().map(|k| k.name()).collect();
-        format!("scan {} {}", n.search(), kinds.join(",")).trim_end().to_owned()
+        let mut cmd = format!("scan {}", n.search());
+        if !kinds.is_empty() {
+            cmd += &format!(" {}", kinds.join(","));
+        }
+        if self.unshaped {
+            cmd += " all";
+        }
+        let reply = self.helper.call(&cmd);
+        self.shaped = reply.first().is_some_and(|l| l.contains("shaped like"));
+        reply
+    }
+
+    /// The value wasn't where earlier finds were: the next scans look everywhere.
+    fn lost_shape(&mut self) {
+        if self.shaped {
+            self.say("not in the places shaped like earlier finds after all: searching everywhere");
+            self.shaped = false;
+            self.unshaped = true;
+        }
+    }
+
+    fn send_shapes(&mut self) {
+        let shapes: Vec<String> = self.shapes.iter().filter(|s| s.distinct()).map(Shape::text).collect();
+        self.helper.call(&format!("shapes {}", shapes.join("; ")));
+    }
+
+    /// Learns the memory around a value just found, for finding the game's next values faster.
+    pub fn learn_shape(&mut self, loc: Loc) {
+        let Some(exe) = self.game.as_ref().map(|g| g.exe.clone()) else { return };
+        self.unshaped = false;
+        let reply = self.helper.call(&format!("shape {loc}"));
+        let Some(found) = reply.first().and_then(|l| l.strip_prefix("shape ")).and_then(Shape::parse) else {
+            return;
+        };
+        let what = match shapes::learn(&mut self.shapes, found) {
+            Learned::Known => return,
+            Learned::Plain => {
+                self.say("nothing distinctive around it to look for the next value by");
+                return;
+            }
+            Learned::Narrowed => "narrowed the shape it shares with earlier finds",
+            Learned::New => "learned how the game keeps values like this one",
+        };
+        match shapes::save(&shapes_path(&exe), &self.shapes) {
+            Ok(()) => self.say(&format!("{what}: new searches look in places shaped like it first")),
+            Err(e) => self.say(&format!("could not save the shapes: {e}")),
+        }
+        self.send_shapes();
     }
 
     /// The player ruled out one of the places still matching; the places left.
@@ -1494,6 +1569,7 @@ impl Core {
         }
         self.search = None;
         self.say(&format!("picked 0x{:x} ({}) as the value", loc.addr, loc.kind.describe()));
+        self.learn_shape(loc);
         Ok(loc)
     }
 
@@ -1715,6 +1791,7 @@ impl Core {
                 return Err("could not read the number".into());
             }
         };
+        let continuing = self.search.is_some();
         let mut count = match self.search {
             Some((before, _)) => {
                 let reply = self.helper.call(&format!("next {}", first.search()));
@@ -1723,10 +1800,20 @@ impl Core {
             }
             None => 0,
         };
+        // One place shaped like an earlier find may be another item that happens to hold the
+        // same number: it has to follow the number once before it counts as found.
+        let mut confirm = false;
         if count == 0 {
-            let reply = self.helper.call(&self.scan_command(&first));
+            if continuing {
+                self.lost_shape();
+            }
+            let reply = self.scan(&first);
             self.say(&format!("screen shows {first}: {}", reply.join(" ")));
             count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
+            confirm = self.shaped && count == 1;
+            if confirm {
+                self.say("one place shaped like earlier finds holds it: waiting for the number to change once to be sure");
+            }
         }
         self.search = Some((count, 0));
         let mut last = first.clone();
@@ -1734,7 +1821,7 @@ impl Core {
         // A number nothing fits: a misread or something covering the number, unless it's read
         // again right after.
         let mut unfit = None;
-        while count > 1 && start.elapsed() < limit && !cancelled(&self.cancel) {
+        while (count > 1 || confirm) && start.elapsed() < limit && !cancelled(&self.cancel) {
             std::thread::sleep(Duration::from_millis(300));
             // Values that change while the screen is read may show either end of that change.
             self.helper.call("mark");
@@ -1751,13 +1838,16 @@ impl Core {
                     unfit = Some(now);
                     continue;
                 }
-                let reply = self.helper.call(&self.scan_command(&now));
+                self.lost_shape();
+                let reply = self.scan(&now);
                 self.say(&format!("{now} again: lost it, rescanning: {}", reply.join(" ")));
                 count = match_count(&reply).unwrap_or(0);
+                confirm = false;
                 unchanged_rounds = 0;
             } else {
                 unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
                 count = new_count;
+                confirm = false;
             }
             unfit = None;
             self.search = Some((count, 0));
@@ -1783,15 +1873,18 @@ impl Core {
             self.search = None;
             let loc = self.candidates()[0].0;
             if !self.holds(loc, &last) {
+                self.lost_shape();
                 self.helper.call("track");
                 return Err("the only match left doesn't hold the number on screen (misreads?); press Start to search again".into());
             }
             if !self.sticks(loc) {
+                self.lost_shape();
                 self.helper.call("track");
                 return Err(COPY_ONLY.into());
             }
             self.say(&format!("stored as {}", loc.kind.with_article()));
             self.learn_from_memory(loc, &last);
+            self.learn_shape(loc);
             return Ok(AutoResult::Found(loc));
         }
         if (2..=20).contains(&count) && !cancelled(&self.cancel) {
@@ -1800,6 +1893,7 @@ impl Core {
                 self.search = None;
                 self.say(&format!("stored as {}", loc.kind.with_article()));
                 self.learn_from_memory(loc, &last);
+                self.learn_shape(loc);
                 return Ok(AutoResult::Found(loc));
             }
         }
@@ -1824,6 +1918,7 @@ impl Core {
 
     fn typed_search(&mut self, n: Shown) -> Result<AutoResult, String> {
         self.searched_decimals = n.decimals();
+        let fresh = self.search.is_none();
         let (count, unchanged) = match self.search {
             Some((before, unchanged)) => {
                 let reply = self.helper.call(&format!("next {}", n.search()));
@@ -1831,13 +1926,14 @@ impl Core {
                 let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
                 if count == 0 {
                     self.say("nothing went from the last number to this one, starting over");
+                    self.lost_shape();
                     self.search = None;
                     return self.typed_search(n);
                 }
                 (count, if count == before { unchanged + 1 } else { 0 })
             }
             None => {
-                let reply = self.helper.call(&self.scan_command(&n));
+                let reply = self.scan(&n);
                 self.say(&format!("typed {n}: {}", reply.join(" ")));
                 (match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?, 0)
             }
@@ -1848,14 +1944,21 @@ impl Core {
                 self.search = None;
                 return Err(format!("{n} is nowhere in the game's memory"));
             }
+            // It may be another item holding the same number: it has to follow the next one.
+            1 if fresh && self.shaped => {
+                self.say("one place shaped like earlier finds holds it: change the number once to be sure");
+                None
+            }
             1 => {
                 let loc = self.candidates()[0].0;
                 if !self.holds(loc, &n) {
+                    self.lost_shape();
                     self.search = None;
                     self.helper.call("track");
                     return Err(format!("the only match left doesn't hold {n}; type the number again to start over"));
                 }
                 if !self.sticks(loc) {
+                    self.lost_shape();
                     self.search = None;
                     self.helper.call("track");
                     return Err(COPY_ONLY.into());
@@ -1874,6 +1977,7 @@ impl Core {
                 self.search = None;
                 self.say(&format!("stored as {}", loc.kind.with_article()));
                 self.learn_from_memory(loc, &n);
+                self.learn_shape(loc);
                 Ok(AutoResult::Found(loc))
             }
             None => Ok(AutoResult::Several(count)),

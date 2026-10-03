@@ -639,6 +639,9 @@ struct Session {
     pointer_map: Option<(Instant, (Pointers, u64))>,
     /// Objects found by name for each named path, and when they were looked for.
     named_roots: HashMap<String, (Vec<u64>, Option<Instant>)>,
+    /// The memory around values found earlier in this game: scans keep the matches in places
+    /// shaped like one of them, when there are any.
+    shapes: Vec<Shape>,
 }
 
 impl Session {
@@ -816,9 +819,16 @@ fn ptrace_scope() -> Option<u8> {
 fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let mut words = arg.split_whitespace();
     let n = words.next().and_then(Shown::parse);
-    let picked: Option<Vec<Kind>> = words.next().map(|t| t.split(',').map(Kind::parse).collect()).unwrap_or(Some(Vec::new()));
+    let mut picked = Some(Vec::new());
+    let mut use_shapes = !s.shapes.is_empty();
+    for w in words {
+        match w {
+            "all" => use_shapes = false,
+            w => picked = w.split(',').map(Kind::parse).collect(),
+        }
+    }
     let (Some(n), Some(picked)) = (n, picked) else {
-        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5> [i32,f32,f64,xor]");
+        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5> [i32,f32,f64,xor] [all]");
     };
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -829,60 +839,112 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     } else {
         picked
     };
-    let mut found = Vec::new();
-    let (mut bytes, mut unreadable) = (0u64, 0u64);
-    let mut buf = vec![0u8; 4 << 20];
-    for r in maps(s.pid)?.iter().filter(|r| scannable(r)) {
-        let mut addr = r.start;
-        while addr < r.end {
-            let len = ((r.end - addr) as usize).min(buf.len());
-            match mem.read_at(&mut buf[..len], addr) {
-                Ok(len) if len > 0 => {
-                    bytes += len as u64;
-                    for off in (0..len.saturating_sub(3)).step_by(4) {
-                        // Doubles are 8-aligned. Integers and pointers read as floats come out
-                        // as zero or next to nothing (1e-40, 1e-300), never a number on screen.
-                        for &kind in &kinds {
-                            let b = &buf[off..(off + kind.size()).min(len)];
-                            if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
-                                continue;
-                            }
-                            // A real key is never 0; skipping those also leaves plain integers
-                            // next to a zero to the i32 check.
-                            if kind == Kind::Xor && (b[..4] == [0; 4] || b[4..] == [0; 4]) {
-                                continue;
-                            }
-                            let value = kind.decode(b);
-                            if matches!(kind, Kind::F32 | Kind::F64) && !(value.abs() >= 1e-3) {
-                                continue;
-                            }
-                            // The scan runs after the screen was read: allow for a fraction
-                            // that has moved on by up to 1 since.
-                            let hit = match kind {
-                                Kind::I32 | Kind::Xor => value == n.scaled,
-                                Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
-                            };
-                            if hit {
-                                found.push(Candidate::new(addr + off as u64, kind, value));
+    let regions = maps(s.pid)?;
+    let mapped = Mapped::new(&regions);
+    let shapes: &[Shape] = if use_shapes { &s.shapes } else { &[] };
+    let into = MemScan { mem, regions: &regions, mapped: &mapped, width: s.width, n, shapes };
+    // Places shaped like an earlier find, looking only at the types those had (with one type, a
+    // third of the work of all four); everything when none of them holds the number. The
+    // caller searches everywhere ("all") when the value isn't among them after all.
+    let shape_kinds: Vec<Kind> = kinds.iter().copied().filter(|k| shapes.iter().any(|sh| sh.kind == *k)).collect();
+    let mut scan = None;
+    if !shape_kinds.is_empty() && shape_kinds.len() < kinds.len() {
+        scan = Some(into.run(&shape_kinds)).filter(|r| !r.shaped.is_empty());
+    }
+    let r = scan.unwrap_or_else(|| into.run(&kinds));
+    let all = r.found.len();
+    let within = if r.shaped.is_empty() {
+        s.candidates = r.found;
+        String::new()
+    } else {
+        s.candidates = r.shaped;
+        format!(" in places shaped like earlier finds (of {all})")
+    };
+    writeln!(
+        out,
+        "{} matches ({}){within} in {} MiB ({} MiB unreadable) in {} ms",
+        s.candidates.len(),
+        kinds_text(&s.candidates),
+        r.bytes >> 20,
+        r.unreadable >> 20,
+        t.elapsed().as_millis()
+    )
+}
+
+/// One pass of `scan` over the game's memory.
+struct MemScan<'a> {
+    mem: &'a File,
+    regions: &'a [Region],
+    mapped: &'a Mapped,
+    width: usize,
+    n: Shown,
+    shapes: &'a [Shape],
+}
+
+struct MemScanned {
+    found: Vec<Candidate>,
+    /// The ones in places shaped like an earlier find.
+    shaped: Vec<Candidate>,
+    bytes: u64,
+    unreadable: u64,
+}
+
+impl MemScan<'_> {
+    fn run(&self, kinds: &[Kind]) -> MemScanned {
+        let (mem, n) = (self.mem, self.n);
+        let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0 };
+        let mut buf = vec![0u8; 4 << 20];
+        for reg in self.regions.iter().filter(|r| scannable(r)) {
+            let mut addr = reg.start;
+            while addr < reg.end {
+                let len = ((reg.end - addr) as usize).min(buf.len());
+                match mem.read_at(&mut buf[..len], addr) {
+                    Ok(len) if len > 0 => {
+                        r.bytes += len as u64;
+                        for off in (0..len.saturating_sub(3)).step_by(4) {
+                            // Doubles are 8-aligned. Integers and pointers read as floats come out
+                            // as zero or next to nothing (1e-40, 1e-300), never a number on screen.
+                            for &kind in kinds {
+                                let b = &buf[off..(off + kind.size()).min(len)];
+                                if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
+                                    continue;
+                                }
+                                // A real key is never 0; skipping those also leaves plain integers
+                                // next to a zero to the i32 check.
+                                if kind == Kind::Xor && (b[..4] == [0; 4] || b[4..] == [0; 4]) {
+                                    continue;
+                                }
+                                let value = kind.decode(b);
+                                if matches!(kind, Kind::F32 | Kind::F64) && !(value.abs() >= 1e-3) {
+                                    continue;
+                                }
+                                // The scan runs after the screen was read: allow for a fraction
+                                // that has moved on by up to 1 since.
+                                let hit = match kind {
+                                    Kind::I32 | Kind::Xor => value == n.scaled,
+                                    Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
+                                };
+                                if hit {
+                                    let at = addr + off as u64;
+                                    let c = Candidate::new(at, kind, value);
+                                    let around = |o: i64, n: usize| {
+                                        le_at(&buf[..len], off as i64 + o, n).or_else(|| read_le(mem, at.wrapping_add_signed(o), n))
+                                    };
+                                    if self.shapes.iter().any(|sh| sh.kind == kind && sh.fits(around, self.mapped, self.width)) {
+                                        r.shaped.push(c);
+                                    }
+                                    r.found.push(c);
+                                }
                             }
                         }
                     }
+                    _ => r.unreadable += len as u64,
                 }
-                _ => unreadable += len as u64,
+                addr += len as u64;
             }
-            addr += len as u64;
         }
+        r
     }
-    s.candidates = found;
-    writeln!(
-        out,
-        "{} matches ({}) in {} MiB ({} MiB unreadable) in {} ms",
-        s.candidates.len(),
-        kinds_text(&s.candidates),
-        bytes >> 20,
-        unreadable >> 20,
-        t.elapsed().as_millis()
-    )
 }
 
 /// "12 i32, 3 f32, 0 f64"
@@ -994,6 +1056,127 @@ fn cmd_keep(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     let before = s.candidates.len();
     s.candidates.retain(|c| c.addr() == addr && (!typed || c.kind() == kind));
     writeln!(out, "{before} -> {} matches", s.candidates.len())
+}
+
+// --- Shapes: the memory around a found value. A game keeps its values of one kind the same way
+// (every inventory item is a record like the next), so the next one is likely in a place shaped
+// like the last.
+
+/// How far around a value a shape looks, before it and after it.
+const SHAPE_SPAN: i64 = 32;
+
+#[derive(Clone, Copy, PartialEq)]
+enum ShapeWord {
+    Exact(u32),
+    /// A pointer-sized word pointing into mapped memory (its value changes between runs).
+    Pointer,
+}
+
+struct Shape {
+    kind: Kind,
+    /// Offsets from the value, exact words first (they rule places out cheaply).
+    words: Vec<(i64, ShapeWord)>,
+}
+
+impl Shape {
+    /// "<type> <offset>=<hex word>|p ...", e.g. "i32 -8=2 -16=p 4=0".
+    fn parse(text: &str) -> Option<Shape> {
+        let mut it = text.split_whitespace();
+        let kind = Kind::parse(it.next()?)?;
+        let mut words = Vec::new();
+        for w in it {
+            let (off, v) = w.split_once('=')?;
+            let word = if v == "p" { ShapeWord::Pointer } else { ShapeWord::Exact(u32::from_str_radix(v, 16).ok()?) };
+            words.push((off.parse().ok()?, word));
+        }
+        words.sort_by_key(|&(_, w)| w == ShapeWord::Pointer);
+        Some(Shape { kind, words })
+    }
+
+    /// Whether the place has this shape; `at(offset, bytes)` reads around it.
+    fn fits(&self, at: impl Fn(i64, usize) -> Option<u64>, mapped: &Mapped, width: usize) -> bool {
+        self.words.iter().all(|&(off, w)| match w {
+            ShapeWord::Exact(v) => at(off, 4) == Some(v as u64),
+            ShapeWord::Pointer => at(off, width).is_some_and(|p| mapped.contains(p)),
+        })
+    }
+}
+
+/// Mapped address ranges, sorted: tells pointers from other numbers quickly.
+struct Mapped(Vec<(u64, u64)>);
+
+impl Mapped {
+    fn new(regions: &[Region]) -> Self {
+        let mut ranges: Vec<(u64, u64)> = regions.iter().map(|r| (r.start, r.end)).collect();
+        ranges.sort_unstable();
+        Mapped(ranges)
+    }
+
+    fn contains(&self, p: u64) -> bool {
+        let i = self.0.partition_point(|r| r.1 <= p);
+        p >= 0x10000 && self.0.get(i).is_some_and(|r| r.0 <= p)
+    }
+}
+
+/// `n` little-endian bytes at `i` in `buf`, when they're all in it.
+fn le_at(buf: &[u8], i: i64, n: usize) -> Option<u64> {
+    let i = usize::try_from(i).ok()?;
+    let b = buf.get(i..i + n)?;
+    let mut w = [0u8; 8];
+    w[..n].copy_from_slice(b);
+    Some(u64::from_le_bytes(w))
+}
+
+fn read_le(mem: &File, addr: u64, n: usize) -> Option<u64> {
+    let mut w = [0u8; 8];
+    mem.read_exact_at(&mut w[..n], addr).ok()?;
+    Some(u64::from_le_bytes(w))
+}
+
+/// shape <hex addr[:type]>: the memory around the value as a shape, every word in it (the
+/// caller keeps what other finds agree on).
+fn cmd_shape(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let (Some((addr, kind)), Some(mem)) = (parse_loc(arg), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: shape <hex addr[:type]> (after attach)");
+    };
+    let mapped = Mapped::new(&maps(s.pid)?);
+    let size = kind.size() as i64;
+    let mut words = Vec::new();
+    let mut off = -SHAPE_SPAN;
+    while off < size + SHAPE_SPAN {
+        if (0..size).contains(&off) {
+            off = size;
+            continue;
+        }
+        let at = addr.wrapping_add_signed(off);
+        let width = s.width as i64;
+        // A pointer: aligned, clear of the value, into mapped memory.
+        let pointer = at % s.width as u64 == 0
+            && (off + width <= 0 || off >= size)
+            && read_le(mem, at, s.width).is_some_and(|p| mapped.contains(p));
+        if pointer {
+            words.push(format!("{off}=p"));
+            off += width;
+            continue;
+        }
+        let Some(w) = read_le(mem, at, 4) else {
+            off += 4;
+            continue;
+        };
+        words.push(format!("{off}={w:x}"));
+        off += 4;
+    }
+    writeln!(out, "shape {} {}", kind.name(), words.join(" "))
+}
+
+/// shapes <shape>; <shape>...: the shapes scans prefer (none: every place).
+fn cmd_shapes(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let shapes: Option<Vec<Shape>> = arg.split(';').map(str::trim).filter(|t| !t.is_empty()).map(Shape::parse).collect();
+    let Some(shapes) = shapes else {
+        return writeln!(out, "error: usage: shapes <type> <offset>=<hex>|p ...; ...");
+    };
+    s.shapes = shapes;
+    writeln!(out, "{} shapes", s.shapes.len())
 }
 
 /// drop <hex addr[:type]>: the player ruled this one out.
@@ -1451,6 +1634,8 @@ pub fn run() {
             "peek" => cmd_peek(&mut out, &session, arg),
             "keep" => cmd_keep(&mut out, &mut session, arg),
             "drop" => cmd_drop(&mut out, &mut session, arg),
+            "shape" => cmd_shape(&mut out, &session, arg),
+            "shapes" => cmd_shapes(&mut out, &mut session, arg),
             "track" => cmd_track(&mut out, &mut session, arg),
             "sites" => cmd_sites(&mut out, &session, arg),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
@@ -1463,7 +1648,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor], mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, drop <addr>, track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, drop <addr>, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing
