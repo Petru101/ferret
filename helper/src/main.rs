@@ -9,6 +9,7 @@ mod names;
 mod pointers;
 mod steam;
 mod trace;
+mod ue;
 
 fn main() {
     helper::run();

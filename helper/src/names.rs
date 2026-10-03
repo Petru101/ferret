@@ -133,6 +133,7 @@ fn good_name(units: &[u16]) -> Option<String> {
 
 /// The game's writable memory, read as objects.
 pub struct Heap<'a> {
+    pub pid: u32,
     mem: &'a File,
     width: usize,
     rw: Vec<(u64, u64)>,
@@ -145,7 +146,7 @@ impl<'a> Heap<'a> {
             .filter(|r| scannable(r) && (width == 8 || r.end <= 1 << 32))
             .map(|r| (r.start, r.end))
             .collect();
-        Ok(Heap { mem, width, rw })
+        Ok(Heap { pid, mem, width, rw })
     }
 
     fn w(&self) -> u64 {

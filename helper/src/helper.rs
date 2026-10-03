@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::anticheat;
+use crate::ue::{self, UePath};
 use crate::godot::{self, DictPath};
 use crate::names::{self, Heap, NamedPath};
 use crate::pointers::{self, Module, Pointers, PtrPath};
@@ -68,7 +69,7 @@ fn cmdline(pid: u32) -> String {
 }
 
 /// File name of the program, also for Windows programs under Wine.
-fn exe_name(pid: u32) -> String {
+pub fn exe_name(pid: u32) -> String {
     let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
     let first = raw.split(|b| *b == 0).next().unwrap_or_default();
     let first = String::from_utf8_lossy(first);
@@ -325,10 +326,14 @@ struct Limit {
 enum Named {
     Objects(NamedPath),
     Dict(DictPath),
+    Unreal(UePath),
 }
 
 impl Named {
     fn parse(text: &str) -> Option<Named> {
+        if text.starts_with("ue:") {
+            return UePath::parse(text).map(Named::Unreal);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -336,7 +341,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{')
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:")
     }
 
     /// Where it leads from the roots found before (no search).
@@ -344,16 +349,24 @@ impl Named {
         match self {
             Named::Objects(p) => heap.walk(roots, p),
             Named::Dict(p) => godot::walk(heap, roots, p),
+            Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
 
-    /// Searches the game's memory for its roots (seconds).
+    /// Searches the game's memory for its roots (seconds; Unreal's object list: a fraction of one).
     fn find_roots(&self, heap: &Heap) -> Vec<u64> {
         match self {
             Named::Objects(p) => heap.find_roots(p),
             Named::Dict(p) => godot::find_roots(heap, p),
+            Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
+}
+
+/// The game's Unreal objects, when it's an Unreal game.
+fn unreal(pid: u32, mem: &File) -> Result<std::sync::Arc<ue::Ue>, String> {
+    let exe = exe_name(pid);
+    ue::shared(pid, mem, &exe, || pointers::modules(pid, mem))
 }
 
 /// Places one value is kept in at most when found by name (stacks of one item).
@@ -364,11 +377,13 @@ const MAX_NAMED_PLACES: usize = 32;
 /// no named objects; a path through two random characters led to 95 places, and a write went
 /// to all of them). Places of one value are the same field of objects of one kind: few, lined
 /// up alike, holding plausible numbers.
-fn named_doubt(mem: &File, leads: &[u64], kind: Kind) -> Option<String> {
+fn named_doubt(mem: &File, leads: &[u64], kind: Kind, path: &Named) -> Option<String> {
     if leads.len() > MAX_NAMED_PLACES {
         return Some(format!("it leads to {} places, more than one value is kept in", leads.len()));
     }
-    if leads.iter().any(|a| a % 8 != leads[0] % 8) {
+    // An Unreal path's places are the properties the game itself describes (a stack and a
+    // tally of it may sit at different alignments).
+    if !matches!(path, Named::Unreal(_)) && leads.iter().any(|a| a % 8 != leads[0] % 8) {
         return Some("its places don't line up like the same field of objects".into());
     }
     let plausible = |v: f64| v.is_finite() && v.abs() < 1e9 && (v == 0.0 || v.abs() >= 1e-6);
@@ -449,7 +464,7 @@ fn limiter_loop(shared: SharedLimiter) {
                 let leads = n.path.walk(heap, &n.roots);
                 if leads.is_empty() {
                     l.paused = Some("it isn't anywhere right now (none in the game?), waiting");
-                } else if named_doubt(mem, &leads, l.kind).is_some() {
+                } else if named_doubt(mem, &leads, l.kind, &n.path).is_some() {
                     l.paused = Some("its name leads to places that aren't one value, not written");
                 } else {
                     if leads != n.addrs || l.paused.is_some() {
@@ -719,6 +734,8 @@ struct Session {
     pointer_map: Option<(Instant, (Pointers, u64))>,
     /// Objects found by name for each named path, and when they were looked for.
     named_roots: HashMap<String, (Vec<u64>, Option<Instant>)>,
+    /// What `about` said about places (an Unreal place takes a pass over every object).
+    abouts: HashMap<u64, Option<String>>,
     /// The memory around values found earlier in this game: scans keep the matches in places
     /// shaped like one of them, when there are any.
     shapes: Vec<Shape>,
@@ -1325,14 +1342,28 @@ fn cmd_shapes(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()
 
 /// about <hex addr>...: "0x<addr> <what it is>" for each address Ferret can tell something
 /// about (an entry of a Godot dictionary: its key and ids).
-fn cmd_about(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+fn cmd_about(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
     let heap = Heap::new(s.pid, mem, s.width)?;
-    for (addr, _) in arg.split_whitespace().filter_map(parse_loc) {
-        if let Some(text) = godot::about(&heap, addr) {
-            writeln!(out, "0x{addr:x} {text}")?;
+    let addrs: Vec<u64> = arg.split_whitespace().filter_map(parse_loc).map(|(a, _)| a).collect();
+    let new: Vec<u64> = addrs.iter().copied().filter(|a| !s.abouts.contains_key(a)).collect();
+    let mut texts: Vec<Option<String>> = new.iter().map(|&a| godot::about(&heap, a)).collect();
+    // Unreal places in one pass over the objects (a fraction of a second).
+    let unnamed: Vec<u64> = new.iter().zip(&texts).filter(|(_, t)| t.is_none()).map(|(a, _)| *a).collect();
+    if let (Ok(ue), false) = (unreal(s.pid, mem), unnamed.is_empty()) {
+        let found = ue.discover_all(mem, &unnamed);
+        for (a, f) in unnamed.iter().zip(found) {
+            if let Some(i) = new.iter().position(|n| n == a) {
+                texts[i] = f.first().map(|(p, _)| p.describe());
+            }
+        }
+    }
+    s.abouts.extend(new.into_iter().zip(texts));
+    for a in addrs {
+        if let Some(Some(text)) = s.abouts.get(&a) {
+            writeln!(out, "0x{a:x} {text}")?;
         }
     }
     Ok(())
@@ -1680,14 +1711,31 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     }
 }
 
-/// names <hex addr[:type]>: named paths that lead to the value now, best first: "named <path>
+/// names <hex addr[:type]> [unreal]: named paths that lead to the value now, best first: "named <path>
 /// <places it leads to> <what it means>" (see names.rs), then a summary line.
 fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
-    let (Some((target, _)), Some(mem)) = (parse_loc(arg.trim()), s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: names <hex addr[:type]> (after attach)");
+    let (addr, only_unreal) = match arg.trim().strip_suffix(" unreal") {
+        Some(a) => (a, true),
+        None => (arg.trim(), false),
+    };
+    let (Some((target, _)), Some(mem)) = (parse_loc(addr), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: names <hex addr[:type]> [unreal] (after attach)");
     };
     let t = Instant::now();
     let heap = Heap::new(s.pid, mem, s.width)?;
+    // A property of an Unreal object is named by the objects and properties leading to it.
+    if let Ok(ue) = unreal(s.pid, mem) {
+        let found = ue.discover(mem, target);
+        for (p, leads) in found.iter().take(5) {
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+        }
+        if !found.is_empty() {
+            return writeln!(out, "{} named paths in {} ms", found.len().min(5), t.elapsed().as_millis());
+        }
+    }
+    if only_unreal {
+        return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
+    }
     // An entry of a Godot dictionary is named by its key and its dictionary's other entries
     // (no pointer map needed).
     if let Some((p, leads)) = godot::discover(&heap, target) {
@@ -1749,13 +1797,26 @@ fn cmd_named(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     let (mut roots, mut found_at) = s.named_roots.remove(text).unwrap_or_default();
     let leads = named_walk(&heap, &path, &mut roots, &mut found_at);
     s.named_roots.insert(text.to_owned(), (roots, found_at));
-    if let Some(why) = named_doubt(mem, &leads, kind) {
+    if let Some(why) = named_doubt(mem, &leads, kind, &path) {
         writeln!(out, "doubtful {why}")?;
     }
     for a in &leads {
         writeln!(out, "{}", s.describe(*a, kind))?;
     }
     writeln!(out, "named {}", leads.len())
+}
+
+/// ue [objects <text> | class <name> | dump <addr> [struct]]: the game's Unreal objects.
+fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let t = Instant::now();
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    match unreal(s.pid, mem) {
+        Ok(ue) => ue.command(out, mem, arg)?,
+        Err(e) => return writeln!(out, "error: {e}"),
+    }
+    writeln!(out, "in {} ms", t.elapsed().as_millis())
 }
 
 /// resolve <site> [type] [seconds]: "0x<addr>:<type> = <value>", then "via +<static>,<disp>"
@@ -1811,7 +1872,7 @@ pub fn run() {
             "keep" => cmd_keep(&mut out, &mut session, arg),
             "drop" => cmd_drop(&mut out, &mut session, arg),
             "alive" => cmd_alive(&mut out, &session),
-            "about" => cmd_about(&mut out, &session, arg),
+            "about" => cmd_about(&mut out, &mut session, arg),
             "shape" => cmd_shape(&mut out, &session, arg),
             "shapes" => cmd_shapes(&mut out, &mut session, arg),
             "track" => cmd_track(&mut out, &mut session, arg),
@@ -1820,13 +1881,14 @@ pub fn run() {
             "ptrscan" => cmd_ptrscan(&mut out, &mut session, arg),
             "names" => cmd_names(&mut out, &mut session, arg),
             "named" => cmd_named(&mut out, &mut session, arg),
+            "ue" => cmd_ue(&mut out, &session, arg),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

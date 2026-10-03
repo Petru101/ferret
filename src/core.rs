@@ -836,14 +836,20 @@ impl Core {
         let [(loc, _)] = parse_values(&listed)[..] else {
             return Err("narrow down to exactly one address first".into());
         };
-        let reply = self.helper.call(&format!("sites {loc}"));
+        // An Unreal game names its objects and their properties: a name holds up across restarts
+        // and updates (code patterns break when the game replaces objects), and needs no tracing.
+        let mut named = self.named_path(loc, true);
+        let reply = match named {
+            Some(_) => Vec::new(),
+            None => self.helper.call(&format!("sites {loc}")),
+        };
         for l in reply.iter().filter(|l| !l.starts_with("site ")) {
             self.say(l);
         }
         let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
-        let (mut paths, mut candidates, mut named) = (Vec::new(), Vec::new(), None);
+        let (mut paths, mut candidates) = (Vec::new(), Vec::new());
         let pid = self.game()?.pid;
-        if sites.is_empty() {
+        if sites.is_empty() && named.is_none() {
             let accessed = reply.iter().find_map(|l| l.strip_suffix(" instructions accessed it")).and_then(|n| n.parse::<usize>().ok());
             let shared = reply.iter().any(|l| l.contains(": shared code,"));
             let why = match accessed {
@@ -852,7 +858,7 @@ impl Core {
                 _ => "the game uses the value in a way Ferret can't save by code",
             };
             self.say(&format!("{why}; looking for objects the game names that lead to it"));
-            named = self.named_path(loc);
+            named = self.named_path(loc, false);
         }
         if sites.is_empty() && named.is_none() {
             self.say("no names lead to it; looking for pointers that lead to it instead");
@@ -955,10 +961,11 @@ impl Core {
     }
 
     /// The best named path to the value (see helper/src/names.rs): its text, how many places it
-    /// leads to now and what it means. Checked the way a restart finds it: by name.
-    fn named_path(&mut self, loc: Loc) -> Option<(String, usize, String)> {
-        let reply = self.helper.call(&format!("names {loc}"));
-        for l in reply.iter().filter(|l| !l.starts_with("named ")) {
+    /// leads to now and what it means. Checked the way a restart finds it: by name. `unreal`:
+    /// only through an Unreal game's objects (fast; nothing for other games).
+    fn named_path(&mut self, loc: Loc, unreal: bool) -> Option<(String, usize, String)> {
+        let reply = self.helper.call(&format!("names {loc}{}", if unreal { " unreal" } else { "" }));
+        for l in reply.iter().filter(|l| !l.starts_with("named ") && !(unreal && l.starts_with("0 named paths"))) {
             self.say(l);
         }
         for line in reply.iter().filter_map(|l| l.strip_prefix("named ")) {
