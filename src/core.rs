@@ -651,6 +651,9 @@ pub struct Core {
     log: Box<dyn FnMut(&str) + Send>,
     /// Set to stop a running `auto`.
     pub cancel: Arc<AtomicBool>,
+    /// Set to have a running `auto` narrow down by the number on screen now, even when it
+    /// didn't change (places that changed meanwhile are other things).
+    pub scan_now: Arc<AtomicBool>,
     /// Told about every frame the watched number is read from, and where the watched area is
     /// after it (the interface shows the game as the search sees it).
     pub on_frame: Option<Box<dyn FnMut(&Path, Option<Rect>) + Send>>,
@@ -696,6 +699,7 @@ impl Core {
             searched_decimals: 0,
             log,
             cancel: Arc::new(AtomicBool::new(false)),
+            scan_now: Arc::new(AtomicBool::new(false)),
             on_frame: None,
             on_status: None,
             on_matches: None,
@@ -1911,6 +1915,7 @@ impl Core {
     /// `cancel` is set. Continues a search that was stopped or typed into.
     pub fn auto(&mut self, limit: Duration) -> Result<AutoResult, String> {
         self.cancel.store(false, Ordering::Relaxed);
+        self.scan_now.store(false, Ordering::Relaxed);
         let cancelled = |c: &Arc<AtomicBool>| c.load(Ordering::Relaxed);
         let start = Instant::now();
         let first = loop {
@@ -1957,12 +1962,13 @@ impl Core {
             // Values that change while the screen is read may show either end of that change.
             self.helper.call("mark");
             let Some(now) = self.read_stable()? else { continue };
-            if now == last {
+            let still = now == last;
+            if still && !self.scan_now.swap(false, Ordering::Relaxed) {
                 continue;
             }
             let reply = self.helper.call(&format!("next {}", now.search()));
             let new_count = match_count(&reply).unwrap_or(0);
-            self.say(&format!("screen shows {now}: {}", reply.join(" ")));
+            self.say(&format!("screen {} {now}: {}", if still { "still shows" } else { "shows" }, reply.join(" ")));
             if new_count == 0 {
                 if unfit.as_ref() != Some(&now) {
                     self.say(&format!("nothing fits {now} (a misread?), keeping the {count} matches"));
@@ -2049,6 +2055,25 @@ impl Core {
             }
         }
         self.typed_search(n)
+    }
+
+    /// Narrows the search down by the number the game shows now, changed or not: the places
+    /// that changed meanwhile are other things.
+    pub fn scan_again(&mut self) -> Result<AutoResult, String> {
+        self.game()?;
+        if self.search.is_none() {
+            return Err("Nothing to narrow down yet: press Start or type the number the game shows.".into());
+        }
+        if self.area.is_none() {
+            return Err("No number picked: type the number the game shows instead.".into());
+        }
+        match self.read_stable()? {
+            Some(n) => {
+                self.say(&format!("scanning again for {n}"));
+                self.typed_search(n)
+            }
+            None => Err("Can't read the number now (is it on screen?). Type it below instead.".into()),
+        }
     }
 
     fn typed_search(&mut self, n: Shown) -> Result<AutoResult, String> {

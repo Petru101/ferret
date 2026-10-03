@@ -58,6 +58,8 @@ pub struct FindView {
     digits_hint: gtk::Label,
     worker: Worker,
     cancel: Arc<AtomicBool>,
+    scan_now: Arc<AtomicBool>,
+    again: gtk::Button,
 }
 
 /// 5040383 -> "5,040,383".
@@ -144,7 +146,7 @@ fn ask_drop(worker: &Worker, loc: core::Loc, value: &str, parent: &impl IsA<gtk:
 }
 
 impl FindView {
-    pub fn new(worker: Worker, cancel: Arc<AtomicBool>) -> Rc<Self> {
+    pub fn new(worker: Worker, cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> Rc<Self> {
         let picture = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::ScaleDown)
             .can_shrink(true)
@@ -192,6 +194,11 @@ impl FindView {
             .label("Start Over")
             .tooltip_text("Forget the matches so far and search from scratch")
             .build();
+        let again = gtk::Button::builder()
+            .label("Scan Again")
+            .tooltip_text("Keep only the places that hold the number the game shows now, even if it didn't change")
+            .visible(false)
+            .build();
         let undo = gtk::Button::builder()
             .icon_name("edit-undo-symbolic")
             .tooltip_text("Undo the last step of the search: a number, a ruled-out place or Start Over")
@@ -203,7 +210,7 @@ impl FindView {
             .build();
         let top = frame_box();
         top.set_margin_top(12);
-        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), undo.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
+        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), undo.upcast_ref(), again.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
             top.append(w);
         }
 
@@ -342,6 +349,8 @@ impl FindView {
             digits_hint,
             worker,
             cancel,
+            scan_now,
+            again,
         });
 
         for b in [&begin, &capture] {
@@ -390,6 +399,8 @@ impl FindView {
             view.start_over.connect_clicked(move |_| view_.start_over());
             let view_ = view.clone();
             view.undo.connect_clicked(move |_| view_.undo());
+            let view_ = view.clone();
+            view.again.connect_clicked(move |_| view_.scan_again());
         }
         {
             let view_ = view.clone();
@@ -672,6 +683,7 @@ impl FindView {
         self.start_over.set_visible(false);
         self.undo.set_visible(false);
         self.stop.set_visible(true);
+        self.again.set_visible(true);
         self.busy(true);
         self.status.set_label("Watching the number. Play normally; every change narrows it down.");
         self.start.set_label("Start");
@@ -693,6 +705,7 @@ impl FindView {
         if !self.typed.is_editable() {
             return;
         }
+        self.again.set_sensitive(true);
         self.busy(false);
         self.searching(false);
         match r {
@@ -721,6 +734,7 @@ impl FindView {
 
     fn found(&self, loc: core::Loc) {
         self.matches.set_visible(false);
+        self.again.set_visible(false);
         let at = format!("0x{:x} ({})", loc.addr, loc.kind.describe());
         self.last_count.set(None);
         self.announce(&format!("Found it! It's at {at}. Give it a name below to keep it."), true);
@@ -753,16 +767,47 @@ impl FindView {
     }
 
     pub fn typed_done(&self, r: Result<AutoResult, String>) {
+        self.typed.set_text("");
+        self.narrowed(r, "Change the number in the game, then type the new one.");
+        self.typed.grab_focus();
+    }
+
+    /// Keeps only the places holding the number on screen now: at once while Start runs (it
+    /// goes on), else with one read of the box.
+    pub fn scan_again(&self) {
+        if !self.again.is_visible() || !self.again.is_sensitive() {
+            return;
+        }
+        if self.stop.is_visible() {
+            self.scan_now.store(true, Ordering::Relaxed);
+            self.status.set_label("Scanning again with the number on screen…");
+            return;
+        }
+        self.result.set_visible(false);
+        self.again.set_sensitive(false);
+        self.typed_searching(true);
+        self.searching(true);
+        self.busy(true);
+        self.status.set_label("Reading the number and scanning again…");
+        self.worker.run(|core| Event::ScannedAgain(core.scan_again()));
+    }
+
+    pub fn scanned_again(&self, r: Result<AutoResult, String>) {
+        self.narrowed(r, "Press Scan Again whenever the number stays the same, or Start to follow its changes.");
+    }
+
+    /// The end of a step taken with a number (typed, or read by Scan Again).
+    fn narrowed(&self, r: Result<AutoResult, String>, next: &str) {
         self.busy(false);
         self.typed_searching(false);
         self.searching(false);
-        self.typed.set_text("");
+        self.again.set_sensitive(true);
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => {
-                self.announce(&format!("{}. Change the number in the game, then type the new one.", self.count_text(n)), false);
+                self.announce(&format!("{}. {next}", self.count_text(n)), false);
                 self.list_matches(n);
-                self.typed.grab_focus();
+                self.again.set_visible(true);
             }
             Err(e) => {
                 self.status.set_label(&e);
@@ -834,6 +879,7 @@ impl FindView {
     /// Forgets the matches so far; the picked number and the captured frame stay.
     pub fn start_over(&self) {
         self.last_count.set(None);
+        self.again.set_visible(false);
         self.matches.set_visible(false);
         self.result.set_visible(false);
         self.typed.set_text("");
@@ -861,6 +907,7 @@ impl FindView {
             Ok((n, what)) => {
                 self.result.set_visible(false);
                 self.last_count.set((n > 0).then_some(n));
+                self.again.set_visible(n > 0);
                 let left = match n {
                     0 => "no matches yet".to_owned(),
                     1 => "1 place matches".to_owned(),
@@ -879,6 +926,7 @@ impl FindView {
     /// Attached to another game: nothing picked or found in the last one applies.
     pub fn new_game(&self) {
         self.last_count.set(None);
+        self.again.set_visible(false);
         self.matches.set_visible(false);
         self.picture.set_paintable(None::<&gdk::Paintable>);
         self.crop.set_paintable(None::<&gdk::Paintable>);

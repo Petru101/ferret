@@ -36,6 +36,8 @@ pub enum Event {
     Read(Result<Option<(crate::ocr::Shown, bool)>, String>, Option<crate::ocr::Rect>, Option<usize>),
     Auto(Result<AutoResult, String>),
     Typed(Result<AutoResult, String>),
+    /// Scan Again (the number on screen now, changed or not) while Start wasn't running.
+    ScannedAgain(Result<AutoResult, String>),
     /// The name, and whether Ferret is sure to find it again after a restart.
     Saved(Result<(String, bool), String>),
     /// The search was cleared (the Find tab already shows it).
@@ -81,7 +83,7 @@ impl Worker {
     }
 }
 
-fn start_worker(cancel: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Event>) {
+fn start_worker(cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Event>) {
     let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
     let (events_tx, events_rx) = async_channel::unbounded();
     std::thread::spawn(move || {
@@ -97,6 +99,7 @@ fn start_worker(cancel: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Eve
             }
         };
         core.cancel = cancel;
+        core.scan_now = scan_now;
         let status = events_tx.clone();
         core.on_status = Some(Box::new(move |msg: &str| {
             status.send_blocking(Event::Status(msg.to_owned())).ok();
@@ -272,7 +275,7 @@ impl Ui {
             self.worker.pending.set(self.worker.pending.get().saturating_sub(1));
         }
         // These can teach Ferret digits.
-        if matches!(event, Event::Attached(Ok(_)) | Event::Auto(_) | Event::Typed(_)) {
+        if matches!(event, Event::Attached(Ok(_)) | Event::Auto(_) | Event::Typed(_) | Event::ScannedAgain(_)) {
             self.worker.run(|core| Event::Digits(core.digits()));
         }
         match event {
@@ -314,6 +317,7 @@ impl Ui {
             Event::Matches(Err(e)) | Event::Chosen(Err(e)) => self.toast(&e),
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
+            Event::ScannedAgain(r) => self.find.scanned_again(r),
             Event::Undone(r) => self.find.undone(r),
             Event::Saved(Ok((name, confirmed))) => {
                 self.toast(&if confirmed {
@@ -451,6 +455,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("stop", Box::new(|ui, _| ui.find.stop()));
     action("reset", Box::new(|ui, _| ui.find.start_over()));
     action("undo", Box::new(|ui, _| ui.find.undo()));
+    action("again", Box::new(|ui, _| ui.find.scan_again()));
     action(
         "type",
         Box::new(|ui, n| {
@@ -498,14 +503,15 @@ fn load_css() {
 fn build(app: &adw::Application) {
     load_css();
     let cancel = Arc::new(AtomicBool::new(false));
-    let (worker, events) = start_worker(cancel.clone());
+    let scan_now = Arc::new(AtomicBool::new(false));
+    let (worker, events) = start_worker(cancel.clone(), scan_now.clone());
 
     let stack = adw::ViewStack::new();
     let values = {
         let stack = stack.clone();
         values::ValuesView::new(worker.clone(), move || stack.set_visible_child_name("find"))
     };
-    let find = find::FindView::new(worker.clone(), cancel);
+    let find = find::FindView::new(worker.clone(), cancel, scan_now);
     stack.add_titled_with_icon(&values.root, Some("values"), "Values", "view-list-symbolic");
     stack.add_titled_with_icon(&find.root, Some("find"), "Find Value", "edit-find-symbolic");
 
