@@ -723,8 +723,18 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             }
             Ok(())
         }
-        Err(e) => writeln!(out, "error: cannot open /proc/{pid}/mem: {e}"),
+        Err(e) => match ptrace_scope() {
+            // Yama, not file permissions: the game is the user's own.
+            Some(scope @ 1..) if e.kind() == io::ErrorKind::PermissionDenied && owner_uid(pid) == Some(my_uid()) => {
+                writeln!(out, "error: blocked by ptrace_scope {scope}")
+            }
+            _ => writeln!(out, "error: cannot open /proc/{pid}/mem: {e}"),
+        },
     }
+}
+
+fn ptrace_scope() -> Option<u8> {
+    fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok()?.trim().parse().ok()
 }
 
 /// scan <n>: every value that can be what the screen shows as n, stored as a 4-byte integer

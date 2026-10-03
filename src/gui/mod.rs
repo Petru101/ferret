@@ -129,6 +129,30 @@ impl Ui {
         self.toasts.add_toast(adw::Toast::new(msg));
     }
 
+    /// A longer explanation than a toast holds. Lines starting with two spaces are commands,
+    /// shown selectable so they can be copied.
+    fn explain(&self, heading: &str, text: &str) {
+        let lines = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        for line in text.lines() {
+            let command = line.strip_prefix("  ");
+            let label = gtk::Label::builder()
+                .label(command.unwrap_or(line))
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .xalign(0.0)
+                .selectable(command.is_some())
+                .build();
+            if command.is_some() {
+                label.add_css_class("monospace");
+            }
+            lines.append(&label);
+        }
+        let dialog = adw::AlertDialog::new(Some(heading), None);
+        dialog.set_extra_child(Some(&lines));
+        dialog.add_response("close", "Close");
+        dialog.present(Some(&self.nav));
+    }
+
     fn on_game_page(&self) -> bool {
         self.nav.visible_page().as_ref() == Some(&self.game_page)
     }
@@ -241,6 +265,7 @@ impl Ui {
                 self.find.save_failed(&e);
                 self.toast(&e);
             }
+            Event::Attached(Err(e)) if e.contains('\n') => self.explain("Ferret Can't Open This Game", &e),
             Event::Attached(Err(e)) | Event::Done(Err(e)) => self.toast(&e),
         }
     }

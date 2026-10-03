@@ -251,6 +251,29 @@ pub fn number_text(v: f64, decimals: Option<u32>) -> String {
     }
 }
 
+/// Why attaching was blocked by kernel.yama.ptrace_scope and how to allow it. Lines starting
+/// with two spaces are commands (the GUI shows them selectable).
+fn ptrace_help(scope: &str) -> String {
+    let now = "To allow it until the next restart, run this in a terminal:\n  sudo sysctl kernel.yama.ptrace_scope=0\n";
+    let keep = "  echo kernel.yama.ptrace_scope=0 | sudo tee /etc/sysctl.d/60-ptrace.conf";
+    let risk = "This lets any program you run read and change your other programs' memory.";
+    match scope {
+        "1" => format!(
+            "Your system only lets programs change the memory of programs they started themselves \
+             (kernel.yama.ptrace_scope is 1). Windows games running through Proton or Wine still work.\n\
+             {now}To keep it that way:\n{keep}\n{risk}"
+        ),
+        "2" => format!(
+            "Your system only lets administrators change other programs' memory \
+             (kernel.yama.ptrace_scope is 2).\n{now}To keep it that way:\n{keep}\n{risk}"
+        ),
+        _ => format!(
+            "Your system has turned off changing other programs' memory until it restarts \
+             (kernel.yama.ptrace_scope is {scope}).\nTo allow it, run this in a terminal and restart:\n{keep}\n{risk}"
+        ),
+    }
+}
+
 fn first_error(reply: &[String]) -> Option<String> {
     reply.iter().find_map(|l| l.strip_prefix("error: ")).map(str::to_owned)
 }
@@ -655,7 +678,7 @@ impl Core {
             self.say(l);
         }
         if let Some(e) = first_error(&reply) {
-            return Err(e);
+            return Err(e.strip_prefix("blocked by ptrace_scope ").map_or_else(|| e.clone(), ptrace_help));
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
         self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new() });
