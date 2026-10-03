@@ -46,6 +46,9 @@ pub struct FindView {
     matches_list: gtk::ListBox,
     /// The places listed there, in order (for the D-Bus debug actions).
     listed: RefCell<Vec<core::Loc>>,
+    /// Their rows, updated in place while the same places are listed (a value being typed into
+    /// one stays).
+    match_rows: RefCell<Vec<adw::ActionRow>>,
     typed_row: gtk::Box,
     typed: gtk::Entry,
     typed_go: gtk::Button,
@@ -326,6 +329,7 @@ impl FindView {
             matches,
             matches_list,
             listed: RefCell::default(),
+            match_rows: RefCell::default(),
             typed_row,
             typed,
             typed_go: typed_go.clone(),
@@ -832,19 +836,35 @@ impl FindView {
     }
 
     /// Lists the places still matching, each with Try (write a value) and Use This One.
+    /// Whether the places still matching are listed (their values are refreshed every second).
+    pub fn matches_shown(&self) -> bool {
+        self.matches.is_visible()
+    }
+
     pub fn show_matches(&self, list: Vec<core::Match>) {
+        // What a place is, when Ferret can tell: an inventory stack stands out from a statistic.
+        let subtitle = |m: &core::Match| {
+            let at = format!("0x{:x}, {}", m.loc.addr, m.loc.kind.describe());
+            m.about.as_ref().map_or(at.clone(), |about| format!("{about} · {at}"))
+        };
+        let locs: Vec<core::Loc> = list.iter().map(|m| m.loc).collect();
+        if !list.is_empty() && *self.listed.borrow() == locs {
+            for (row, m) in self.match_rows.borrow().iter().zip(&list) {
+                row.set_title(&m.value);
+                row.set_subtitle(&subtitle(m));
+            }
+            return;
+        }
         while let Some(row) = self.matches_list.first_child() {
             self.matches_list.remove(&row);
         }
+        self.match_rows.borrow_mut().clear();
         self.matches.set_visible(!list.is_empty());
-        *self.listed.borrow_mut() = list.iter().map(|m| m.loc).collect();
-        for core::Match { loc, value, about } in list {
-            // What a place is, when Ferret can tell: an inventory stack stands out from a statistic.
-            let mut subtitle = format!("0x{:x}, {}", loc.addr, loc.kind.describe());
-            if let Some(about) = about {
-                subtitle = format!("{about} · {subtitle}");
-            }
-            let row = adw::ActionRow::builder().title(&value).subtitle(subtitle).build();
+        *self.listed.borrow_mut() = locs;
+        for m in list {
+            let loc = m.loc;
+            let row = adw::ActionRow::builder().title(&m.value).subtitle(subtitle(&m)).build();
+            self.match_rows.borrow_mut().push(row.clone());
             let entry = gtk::Entry::builder().placeholder_text("New value").width_chars(8).valign(gtk::Align::Center).build();
             let try_it = gtk::Button::builder().label("Try").valign(gtk::Align::Center).build();
             let pick = gtk::Button::builder().label("Use This One").valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
@@ -874,8 +894,8 @@ impl FindView {
             row.add_suffix(&drop);
             let worker = self.worker.clone();
             pick.connect_clicked(move |_| worker.run(move |core| Event::Chosen(core.choose(loc))));
-            let (worker, root) = (self.worker.clone(), self.root.clone());
-            drop.connect_clicked(move |_| ask_drop(&worker, loc, &value, &root));
+            let (worker, root, shown) = (self.worker.clone(), self.root.clone(), row.clone());
+            drop.connect_clicked(move |_| ask_drop(&worker, loc, &shown.title(), &root));
             self.matches_list.append(&row);
         }
     }

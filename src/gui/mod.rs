@@ -563,14 +563,17 @@ fn build(app: &adw::Application) {
         let worker = ui.worker.clone();
         refresh.connect_clicked(move |_| worker.run(|core| Event::Games(core.games())));
     }
-    // Keep the games list and the values fresh while nothing else is running.
+    // Keep the games list, the values and the matches list fresh while nothing else is running.
     {
         let ui = ui.clone();
         glib::timeout_add_seconds_local(1, move || {
             if ui.worker.idle() {
                 let values = ui.on_game_page() && ui.attached.get().is_some();
+                // The places still matching a search, with their values as they are now.
+                let matches = values && ui.stack.visible_child_name().as_deref() == Some("find") && ui.find.matches_shown();
                 ui.worker.run(move |core| match core.check_game() {
                     Some(exe) => Event::Quit(exe),
+                    None if matches => Event::Matches(Ok(core.matches())),
                     None if values => Event::Values(core.values()),
                     None => Event::Games(core.games()),
                 });
