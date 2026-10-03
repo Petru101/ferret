@@ -157,7 +157,9 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn name(self) -> &'static str {
+    pub const ALL: [Kind; 4] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor];
+
+    pub fn name(self) -> &'static str {
         match self {
             Kind::I32 => "i32",
             Kind::F32 => "f32",
@@ -167,7 +169,7 @@ impl Kind {
     }
 
     fn parse(s: &str) -> Option<Kind> {
-        [Kind::I32, Kind::F32, Kind::F64, Kind::Xor].into_iter().find(|k| k.name() == s)
+        Kind::ALL.into_iter().find(|k| k.name() == s)
     }
 
     fn with_article(self) -> String {
@@ -635,6 +637,10 @@ pub struct Core {
     /// Told about every frame the watched number is read from, and where the watched area is
     /// after it (the interface shows the game as the search sees it).
     pub on_frame: Option<Box<dyn FnMut(&Path, Option<Rect>) + Send>>,
+    /// Told when the player has to do something for the search to go on.
+    pub on_status: Option<Box<dyn FnMut(&str) + Send>>,
+    /// The value types new scans look for (empty: all of them).
+    pub scan_kinds: Vec<Kind>,
 }
 
 impl Core {
@@ -654,7 +660,16 @@ impl Core {
             ignored: None,
             seen: Vec::new(),
             on_frame: None,
+            on_status: None,
+            scan_kinds: Vec::new(),
         })
+    }
+
+    /// Something the player has to do now (shown in the interface, not only logged).
+    fn status(&mut self, msg: &str) {
+        if let Some(f) = self.on_status.as_mut() {
+            f(msg);
+        }
     }
 
     fn say(&mut self, msg: &str) {
@@ -1319,14 +1334,16 @@ impl Core {
     }
 
     /// Picks the number to watch. A different number (not just a tighter box around the same
-    /// one) starts the next search over.
-    pub fn set_area(&mut self, area: Rect) {
-        if self.search.is_some() && self.area.is_some_and(|a| !ocr::overlaps(a, area)) {
-            self.say("another number picked: the next search starts over");
-            self.search = None;
+    /// one) while a search runs keeps the search: it may show the same value elsewhere (a
+    /// total and a stack). Returns the matches kept then, for the player to decide.
+    pub fn set_area(&mut self, area: Rect) -> Option<usize> {
+        let kept = self.search.filter(|_| self.area.is_some_and(|a| !ocr::overlaps(a, area))).map(|(n, _)| n);
+        if let Some(n) = kept {
+            self.say(&format!("another number picked: keeping the {n} matches (Start Over clears them)"));
         }
         self.area = Some(area);
         self.seen.clear();
+        kept
     }
 
     /// Forgets the search in progress, so the next number starts from scratch.
@@ -1454,6 +1471,21 @@ impl Core {
         Ok(self.matches())
     }
 
+    /// A new scan for `n`, of the value types the player picked.
+    fn scan_command(&self, n: &Shown) -> String {
+        let kinds: Vec<&str> = self.scan_kinds.iter().map(|k| k.name()).collect();
+        format!("scan {} {}", n.search(), kinds.join(",")).trim_end().to_owned()
+    }
+
+    /// The player ruled out one of the places still matching; the places left.
+    pub fn drop_match(&mut self, loc: Loc) -> Result<Vec<(Loc, String)>, String> {
+        let reply = self.helper.call(&format!("drop {loc}"));
+        let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("drop failed".into()))?;
+        self.say(&format!("ruled out 0x{:x} ({}): {count} left", loc.addr, loc.kind.describe()));
+        self.search = self.search.map(|(_, unchanged)| (count, unchanged)).filter(|_| count > 0);
+        Ok(self.matches())
+    }
+
     /// The player picked the value among the places still matching.
     pub fn choose(&mut self, loc: Loc) -> Result<Loc, String> {
         let reply = self.helper.call(&format!("keep {loc}"));
@@ -1482,6 +1514,8 @@ impl Core {
         if addrs.is_empty() {
             return Err("no candidates to probe".into());
         }
+        // The ones the game left the test value in, with their exact originals.
+        let mut kept = Vec::new();
         for (i, &loc) in addrs.iter().enumerate() {
             let addr = loc.addr;
             // The exact original, fraction included, to put back afterwards.
@@ -1506,6 +1540,7 @@ impl Core {
             ));
             if stuck {
                 self.helper.call(&format!("write {loc} {orig}"));
+                kept.push((loc, orig));
             }
             if stuck && (followers > 0 || shown) {
                 self.helper.call(&format!("keep {addr:x}"));
@@ -1513,8 +1548,91 @@ impl Core {
                 return Ok(Some(loc));
             }
         }
+        if !kept.is_empty() {
+            if let Some(loc) = self.probe_in_game(&kept) {
+                self.helper.call(&format!("keep {:x}", loc.addr));
+                return Ok(Some(loc));
+            }
+        }
         self.say("no candidate behaved like the real value (is the game paused?)");
         Ok(None)
+    }
+
+    /// Some games only redraw a number when they change it themselves (Lumencraft: neither a
+    /// write nor switching to the game updates its counters), so a test write unseen on screen
+    /// proves nothing. Each candidate that kept its test value gets one of its own at once
+    /// (+100, +200, ...) and the player changes the number in the game: the game's own value
+    /// carries on from its test value (in memory, and on screen once redrawn), copies don't.
+    /// All undone after, keeping what the player gathered meanwhile.
+    fn probe_in_game(&mut self, kept: &[(Loc, String)]) -> Option<Loc> {
+        const WAIT: Duration = Duration::from_secs(45);
+        // Steps 100 apart: a change of up to 49 from one test value is still that one.
+        const NEAR: i64 = 49;
+        let addrs: Vec<Loc> = kept.iter().map(|(l, _)| *l).collect();
+        let before = self.peek(&addrs);
+        // (place, test value, step)
+        let mut tests = Vec::new();
+        for (k, (&loc, b)) in addrs.iter().zip(before).enumerate() {
+            let Some(b) = b else { continue };
+            let step = 100 * (k as i64 + 1);
+            self.helper.call(&format!("write {loc} {}", b + step));
+            tests.push((loc, b + step, step));
+        }
+        let locs: Vec<Loc> = tests.iter().map(|t| t.0).collect();
+        self.say(&format!(
+            "the screen showed none of them (some games only redraw a number when they change it): each holds \
+             its own test value now, waiting up to {} s for the game to change it",
+            WAIT.as_secs()
+        ));
+        self.status(&format!(
+            "Change the number in the game once (pick some up or use some): Ferret is watching which of the {} \
+             places the game carries on from.",
+            tests.len()
+        ));
+        let start = Instant::now();
+        let mut last = None;
+        let mut real = None;
+        while real.is_none() && start.elapsed() < WAIT && !self.cancel.load(Ordering::Relaxed) {
+            // Memory: the one the game changed, starting from its test value.
+            let now = self.peek(&locs);
+            real = tests
+                .iter()
+                .zip(&now)
+                .find(|((_, t, _), v)| v.is_some_and(|v| v != *t && (v - t).abs() <= NEAR))
+                .map(|(&(loc, t, _), v)| (loc, format!("went from {t} to {}", v.unwrap())));
+            if real.is_some() || self.area.is_none() {
+                std::thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+            // Screen: a game that does redraw shows the test value (or what followed it).
+            let Ok(Some(s)) = self.read() else { continue };
+            real = tests
+                .iter()
+                .find(|(_, t, _)| [s.value() as i64, s.scaled()].iter().any(|v| (v - t).abs() <= NEAR))
+                .map(|&(loc, t, _)| (loc, format!("held {t} and the screen showed {s}")));
+            if last.as_ref() != Some(&s) {
+                self.say(&format!("screen shows {s}"));
+                last = Some(s);
+            }
+        }
+        // Undo: the exact original where the test value is still there, only the step where the
+        // game changed it since; a copy the game rewrote is left alone.
+        let now = self.peek(&locs);
+        for (&(loc, t, step), v) in tests.iter().zip(now) {
+            match v {
+                Some(v) if v == t => {
+                    let orig = &kept.iter().find(|(l, _)| *l == loc).unwrap().1;
+                    self.helper.call(&format!("write {loc} {orig}"));
+                }
+                Some(v) if (v - t).abs() <= NEAR => {
+                    self.helper.call(&format!("write {loc} {}", (v - step).max((t - step).min(0))));
+                }
+                _ => {}
+            }
+        }
+        let (loc, how) = real?;
+        self.say(&format!("0x{:012x} {how}: the real value (test writes undone)", loc.addr));
+        Some(loc)
     }
 
     /// Two reads in a row that agree. Once the learned digits know every digit, a number only
@@ -1606,7 +1724,7 @@ impl Core {
             None => 0,
         };
         if count == 0 {
-            let reply = self.helper.call(&format!("scan {}", first.search()));
+            let reply = self.helper.call(&self.scan_command(&first));
             self.say(&format!("screen shows {first}: {}", reply.join(" ")));
             count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
         }
@@ -1633,7 +1751,7 @@ impl Core {
                     unfit = Some(now);
                     continue;
                 }
-                let reply = self.helper.call(&format!("scan {}", now.search()));
+                let reply = self.helper.call(&self.scan_command(&now));
                 self.say(&format!("{now} again: lost it, rescanning: {}", reply.join(" ")));
                 count = match_count(&reply).unwrap_or(0);
                 unchanged_rounds = 0;
@@ -1719,7 +1837,7 @@ impl Core {
                 (count, if count == before { unchanged + 1 } else { 0 })
             }
             None => {
-                let reply = self.helper.call(&format!("scan {}", n.search()));
+                let reply = self.helper.call(&self.scan_command(&n));
                 self.say(&format!("typed {n}: {}", reply.join(" ")));
                 (match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?, 0)
             }

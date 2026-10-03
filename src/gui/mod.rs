@@ -22,6 +22,8 @@ pub const APP_ID: &str = "io.github.Petru101.Ferret";
 
 pub enum Event {
     Log(String),
+    /// Something the player has to do now for the search to go on.
+    Status(String),
     /// The core could not start (for example the host helper is missing).
     Failed(String),
     Games(Vec<GameProcess>),
@@ -29,14 +31,17 @@ pub enum Event {
     Attached(Result<(u32, String), String>),
     Values(Result<Vec<ValueRow>, String>),
     Numbers(Result<(PathBuf, Vec<Word>), String>),
-    /// The read, and the watched area afterwards (it snaps to the number found).
-    Read(Result<Option<(crate::ocr::Shown, bool)>, String>, Option<crate::ocr::Rect>),
+    /// The read, the watched area afterwards (it snaps to the number found), and the matches
+    /// kept when a different number was picked during a search.
+    Read(Result<Option<(crate::ocr::Shown, bool)>, String>, Option<crate::ocr::Rect>, Option<usize>),
     Auto(Result<AutoResult, String>),
     Typed(Result<AutoResult, String>),
     /// The name, and whether Ferret is sure to find it again after a restart.
     Saved(Result<(String, bool), String>),
     /// The search was cleared (the Find tab already shows it).
     Reset,
+    /// A job with nothing to show.
+    Idle,
     /// The attached game's learned digits, 0 to 9.
     Digits(Vec<Vec<crate::font::DigitShape>>),
     /// Anything else: a message to show, or an error.
@@ -86,6 +91,10 @@ fn start_worker(cancel: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Eve
             }
         };
         core.cancel = cancel;
+        let status = events_tx.clone();
+        core.on_status = Some(Box::new(move |msg: &str| {
+            status.send_blocking(Event::Status(msg.to_owned())).ok();
+        }));
         let frames = events_tx.clone();
         let mut shown = std::time::Instant::now() - std::time::Duration::from_secs(1);
         // Decoded here, so the window doesn't stall on big frames.
@@ -213,7 +222,7 @@ impl Ui {
     }
 
     fn handle(self: &Rc<Self>, event: Event) {
-        if !matches!(event, Event::Log(_) | Event::Failed(_) | Event::Frame(..)) {
+        if !matches!(event, Event::Log(_) | Event::Status(_) | Event::Failed(_) | Event::Frame(..)) {
             self.worker.pending.set(self.worker.pending.get().saturating_sub(1));
         }
         // These can teach Ferret digits.
@@ -222,6 +231,7 @@ impl Ui {
         }
         match event {
             Event::Log(msg) => self.find.log(&msg),
+            Event::Status(msg) => self.find.ask(&msg),
             Event::Failed(e) => {
                 self.games_error.set_description(Some(&e));
                 self.games_stack.set_visible_child_name("error");
@@ -240,7 +250,7 @@ impl Ui {
             Event::Values(Ok(values)) => self.values.update(values),
             Event::Values(Err(_)) => {}
             Event::Numbers(r) => self.find.numbers(r),
-            Event::Read(r, area) => self.find.read(r, area),
+            Event::Read(r, area, kept) => self.find.read(r, area, kept),
             Event::Frame(t, area) => self.find.show_frame(t, area),
             Event::Matches(Ok(list)) => self.find.show_matches(list),
             Event::Chosen(Ok(loc)) => self.find.chosen(loc),
@@ -258,7 +268,7 @@ impl Ui {
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));
             }
-            Event::Reset => {}
+            Event::Reset | Event::Idle => {}
             Event::Digits(shapes) => self.find.show_digits(shapes),
             Event::Done(Ok(msg)) => self.toast(&msg),
             Event::Saved(Err(e)) => {
@@ -376,6 +386,9 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("use", Box::new(|ui, i| ui.find.use_listed(i.trim().parse().unwrap_or(usize::MAX))));
+    // Without the confirmation the button asks for.
+    action("drop", Box::new(|ui, i| ui.find.drop_listed(i.trim().parse().unwrap_or(usize::MAX))));
+    action("types", Box::new(|ui, i| ui.find.pick_types(i.trim().parse().unwrap_or(0))));
     action("stop", Box::new(|ui, _| ui.find.stop()));
     action("reset", Box::new(|ui, _| ui.find.start_over()));
     action(

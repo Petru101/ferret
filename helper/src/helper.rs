@@ -810,17 +810,25 @@ fn ptrace_scope() -> Option<u8> {
     fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok()?.trim().parse().ok()
 }
 
-/// scan <n>: every value that can be what the screen shows as n, stored as a 4-byte integer
-/// (plain or XOR-encoded) or as a float/double (fractions are cut off or rounded on screen).
+/// scan <n> [types]: every value that can be what the screen shows as n, stored as a 4-byte
+/// integer (plain or XOR-encoded) or as a float/double (fractions are cut off or rounded on
+/// screen). `types` (comma-separated, e.g. `i32,xor`) narrows it to the ones the player picked.
 fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
-    let Some(n) = Shown::parse(arg.trim()) else {
-        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5>");
+    let mut words = arg.split_whitespace();
+    let n = words.next().and_then(Shown::parse);
+    let picked: Option<Vec<Kind>> = words.next().map(|t| t.split(',').map(Kind::parse).collect()).unwrap_or(Some(Vec::new()));
+    let (Some(n), Some(picked)) = (n, picked) else {
+        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5> [i32,f32,f64,xor]");
     };
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
     let t = Instant::now();
-    let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|k| !s.doubles_only || *k == Kind::F64).collect();
+    let kinds: Vec<Kind> = if picked.is_empty() {
+        Kind::ALL.into_iter().filter(|k| !s.doubles_only || *k == Kind::F64).collect()
+    } else {
+        picked
+    };
     let mut found = Vec::new();
     let (mut bytes, mut unreadable) = (0u64, 0u64);
     let mut buf = vec![0u8; 4 << 20];
@@ -985,6 +993,17 @@ fn cmd_keep(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     let typed = arg.contains(':');
     let before = s.candidates.len();
     s.candidates.retain(|c| c.addr() == addr && (!typed || c.kind() == kind));
+    writeln!(out, "{before} -> {} matches", s.candidates.len())
+}
+
+/// drop <hex addr[:type]>: the player ruled this one out.
+fn cmd_drop(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let Some((addr, kind)) = parse_loc(arg) else {
+        return writeln!(out, "error: usage: drop <hex addr[:type]>");
+    };
+    let typed = arg.contains(':');
+    let before = s.candidates.len();
+    s.candidates.retain(|c| !(c.addr() == addr && (!typed || c.kind() == kind)));
     writeln!(out, "{before} -> {} matches", s.candidates.len())
 }
 
@@ -1431,6 +1450,7 @@ pub fn run() {
             "set" => cmd_set(&mut out, &session, arg),
             "peek" => cmd_peek(&mut out, &session, arg),
             "keep" => cmd_keep(&mut out, &mut session, arg),
+            "drop" => cmd_drop(&mut out, &mut session, arg),
             "track" => cmd_track(&mut out, &mut session, arg),
             "sites" => cmd_sites(&mut out, &session, arg),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
@@ -1443,7 +1463,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor], mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, drop <addr>, track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

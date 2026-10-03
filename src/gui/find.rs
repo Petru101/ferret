@@ -14,7 +14,7 @@ use adw::prelude::*;
 use gtk::{gdk, glib};
 
 use super::{Event, Worker};
-use crate::core::{self, AutoResult};
+use crate::core::{self, AutoResult, Kind};
 use crate::font::DigitShape;
 use crate::ocr::{self, Rect, Shown, Word};
 
@@ -34,6 +34,8 @@ pub struct FindView {
     start: gtk::Button,
     stop: gtk::Button,
     start_over: gtk::Button,
+    /// The value types new searches look for (`TYPE_CHOICES`).
+    types: gtk::DropDown,
     spinner: gtk::Spinner,
     log: gtk::TextView,
     result: gtk::Box,
@@ -106,8 +108,36 @@ fn draw_shape(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: i32, h: i32,
     cr.fill().ok();
 }
 
+/// The value types a search can be narrowed to, as Cheat Engine offers them (none: all).
+const TYPE_CHOICES: [(&str, &[Kind]); 5] = [
+    ("All Types", &[]),
+    ("4 Bytes", &[Kind::I32]),
+    ("Float", &[Kind::F32]),
+    ("Double", &[Kind::F64]),
+    ("Encoded 4 Bytes", &[Kind::Xor]),
+];
+
 fn frame_box() -> gtk::Box {
     gtk::Box::builder().spacing(12).margin_start(12).margin_end(12).build()
+}
+
+/// Asks before ruling out one of the places still matching (only Start Over brings it back).
+fn ask_drop(worker: &Worker, loc: core::Loc, value: &str, parent: &impl IsA<gtk::Widget>) {
+    let dialog = adw::AlertDialog::new(
+        Some("Rule Out This Place?"),
+        Some(&format!(
+            "0x{:x} ({}, now {value}) is dropped from the matches. Only Start Over brings it back.",
+            loc.addr,
+            loc.kind.describe()
+        )),
+    );
+    dialog.add_responses(&[("cancel", "Cancel"), ("drop", "Rule Out")]);
+    dialog.set_response_appearance("drop", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let worker = worker.clone();
+    dialog.connect_response(Some("drop"), move |_, _| worker.run(move |core| Event::Matches(core.drop_match(loc))));
+    dialog.present(Some(parent));
 }
 
 impl FindView {
@@ -159,9 +189,14 @@ impl FindView {
             .label("Start Over")
             .tooltip_text("Forget the matches so far and search from scratch")
             .build();
+        let types = gtk::DropDown::builder()
+            .model(&gtk::StringList::new(&TYPE_CHOICES.iter().map(|(label, _)| *label).collect::<Vec<_>>()))
+            .tooltip_text("What new searches look for. Fewer types leave fewer places to narrow down.")
+            .valign(gtk::Align::Center)
+            .build();
         let top = frame_box();
         top.set_margin_top(12);
-        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
+        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
             top.append(w);
         }
 
@@ -283,6 +318,7 @@ impl FindView {
             start,
             stop,
             start_over,
+            types: types.clone(),
             spinner,
             log,
             result,
@@ -330,6 +366,14 @@ impl FindView {
         {
             let view_ = view.clone();
             view.start.connect_clicked(move |_| view_.start());
+            let worker = view.worker.clone();
+            types.connect_selected_notify(move |d| {
+                let kinds = TYPE_CHOICES.get(d.selected() as usize).map_or(Vec::new(), |(_, k)| k.to_vec());
+                worker.run(move |core| {
+                    core.scan_kinds = kinds;
+                    Event::Idle
+                });
+            });
         }
         {
             let view_ = view.clone();
@@ -533,13 +577,13 @@ impl FindView {
         self.busy(true);
         self.status.set_label("Reading…");
         self.worker.run(move |core| {
-            core.set_area(area);
+            let kept = core.set_area(area);
             let read = core.read_picked();
-            Event::Read(read, core.watched())
+            Event::Read(read, core.watched(), kept)
         });
     }
 
-    pub fn read(&self, r: Result<Option<(Shown, bool)>, String>, area: Option<Rect>) {
+    pub fn read(self: &Rc<Self>, r: Result<Option<(Shown, bool)>, String>, area: Option<Rect>, kept: Option<usize>) {
         self.busy(false);
         // Show where Ferret now watches: the box snaps to the number it found.
         if area.is_some() {
@@ -575,6 +619,36 @@ impl FindView {
             }
             Err(e) => self.status.set_label(&e),
         }
+        if let Some(n) = kept {
+            self.ask_keep(n);
+        }
+    }
+
+    /// A different number was picked during a search: it may show the same value (a total and
+    /// a stack) or another one, which only the player knows.
+    fn ask_keep(self: &Rc<Self>, n: usize) {
+        let dialog = adw::AlertDialog::new(
+            Some("Keep the Matches?"),
+            Some(&format!(
+                "You picked a different number while {} {} still {} the last one. Keep them if this \
+                 number shows the same value (a total and a stack of it, say); start over if it's another value.",
+                grouped(n),
+                if n == 1 { "place" } else { "places" },
+                if n == 1 { "matches" } else { "match" }
+            )),
+        );
+        dialog.add_responses(&[("start-over", "Start Over"), ("keep", "Keep Them")]);
+        dialog.set_response_appearance("keep", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("keep"));
+        dialog.set_close_response("keep");
+        let view = self.clone();
+        dialog.connect_response(Some("start-over"), move |_, _| view.start_over());
+        dialog.present(Some(&self.root));
+    }
+
+    /// Something the player has to do now (the search waits for it).
+    pub fn ask(&self, msg: &str) {
+        self.announce(msg, false);
     }
 
     pub fn start(&self) {
@@ -786,8 +860,17 @@ impl FindView {
                 try_it.connect_clicked(move |_| apply());
             }
             entry.connect_activate(move |_| apply());
+            let drop = gtk::Button::builder()
+                .icon_name("user-trash-symbolic")
+                .tooltip_text("Not this one")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            row.add_suffix(&drop);
             let worker = self.worker.clone();
             pick.connect_clicked(move |_| worker.run(move |core| Event::Chosen(core.choose(loc))));
+            let (worker, root) = (self.worker.clone(), self.root.clone());
+            drop.connect_clicked(move |_| ask_drop(&worker, loc, &value, &root));
             self.matches_list.append(&row);
         }
     }
@@ -806,6 +889,17 @@ impl FindView {
         if let Some(&loc) = self.listed.borrow().get(i) {
             self.worker.run(move |core| Event::Matches(core.try_match(loc, &value)));
         }
+    }
+
+    pub fn drop_listed(&self, i: usize) {
+        if let Some(&loc) = self.listed.borrow().get(i) {
+            self.worker.run(move |core| Event::Matches(core.drop_match(loc)));
+        }
+    }
+
+    /// Debug action: picks `TYPE_CHOICES[i]`.
+    pub fn pick_types(&self, i: u32) {
+        self.types.set_selected(i);
     }
 
     pub fn use_listed(&self, i: usize) {
