@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::anticheat;
 use crate::pointers::{self, Module, PtrPath};
-use crate::steam;
+use crate::launchers;
 use crate::trace;
 
 pub struct Region {
@@ -83,16 +83,16 @@ fn is_gamemaker(pid: u32, exe: &str) -> bool {
     })
 }
 
-/// Anti-cheat loaded in the game, shipped in its folder, or (VAC, which runs in the Steam
-/// client) listed by Steam.
-fn anti_cheat(pid: u32) -> Option<&'static str> {
+/// Anti-cheat loaded in the game, shipped in its folder, or known to its launcher or to
+/// AreWeAntiCheatYet (VAC runs in the Steam client, others may load only when going online).
+fn anti_cheat(pid: u32) -> Option<String> {
     let maps = maps(pid).ok()?;
     if let Some(ac) = maps.iter().find_map(|r| anticheat::in_path(&r.path)) {
-        return Some(ac);
+        return Some(ac.to_owned());
     }
     let env = environ(pid);
-    if steam_app(&env).is_some_and(|a| a.vac) {
-        return Some("Valve Anti-Cheat");
+    if let Some(ac) = about(&env).anti_cheat {
+        return Some(ac);
     }
     // Seen from inside the game's sandbox (pressure-vessel, flatpak).
     let root = Path::new("/proc").join(pid.to_string()).join("root");
@@ -110,12 +110,12 @@ fn anti_cheat(pid: u32) -> Option<&'static str> {
             anticheat::game_folder(&program)
         }
     };
-    anticheat::in_folder(&inside(&folder))
+    anticheat::in_folder(&inside(&folder)).map(str::to_owned)
 }
 
-/// A Steam game played only with other people.
+/// A game its store lists as played only with other people.
 fn online_only(pid: u32) -> bool {
-    steam_app(&environ(pid)).is_some_and(|a| a.online_only())
+    about(&environ(pid)).online_only
 }
 
 /// The Steam app ID a game was started with (umu sets 0 or "default" for games not on Steam).
@@ -126,9 +126,8 @@ fn steam_id(env: &HashMap<String, String>) -> Option<&String> {
         .find(|id| *id != "0" && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn steam_app(env: &HashMap<String, String>) -> Option<steam::App> {
-    let id = steam_id(env)?.parse().ok()?;
-    steam::app(env.get("STEAM_COMPAT_CLIENT_INSTALL_PATH").map(String::as_str), id)
+fn about(env: &HashMap<String, String>) -> launchers::About {
+    launchers::about(env, steam_id(env).and_then(|id| id.parse().ok()))
 }
 
 fn my_uid() -> u32 {
@@ -654,9 +653,9 @@ fn draws_like_a_game(pid: u32) -> bool {
     driver
 }
 
-/// Running games, one per line: pid, program name, Steam app ID, anti-cheat, the name Steam
-/// gives it and "online" (online only) or "multiplayer" (tab-separated, "-" when unknown or
-/// not).
+/// Running games, one per line: pid, program name, Steam app ID, anti-cheat, the name its
+/// launcher gives it and "online" (online only) or "multiplayer" (tab-separated, "-" when
+/// unknown or not).
 fn cmd_games(out: &mut impl Write) -> io::Result<()> {
     let uid = my_uid();
     let mut pids: Vec<u32> = fs::read_dir("/proc")?
@@ -677,17 +676,11 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
             continue;
         }
         let dash = |s: Option<&str>| s.filter(|s| !s.is_empty()).unwrap_or("-").to_owned();
-        let steam = steam_app(&env);
-        let name = steam.as_ref().map(|a| a.name.replace('\t', " "));
-        let play = steam.as_ref().and_then(|a| {
-            if a.online_only() {
-                Some("online")
-            } else {
-                a.multiplayer.then_some("multiplayer")
-            }
-        });
+        let about = about(&env);
+        let name = about.name.as_ref().map(|n| n.replace('\t', " "));
+        let play = if about.online_only { Some("online") } else { about.multiplayer.then_some("multiplayer") };
         let id = dash(app_id.map(String::as_str));
-        let ac = dash(anti_cheat(pid));
+        let ac = dash(anti_cheat(pid).as_deref());
         writeln!(out, "{pid}\t{exe}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(play))?;
     }
     Ok(())

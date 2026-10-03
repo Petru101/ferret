@@ -2,6 +2,8 @@
 // flatpak runtime. Uses only std and libc.
 mod anticheat;
 mod helper;
+mod json;
+mod launchers;
 mod pointers;
 mod steam;
 mod trace;
