@@ -421,6 +421,9 @@ struct Game {
     paths: Vec<(String, Vec<String>)>,
     /// How those paths agreed when last followed.
     votes: Vec<(String, Votes)>,
+    /// Values found through code patterns whose object the game reads from a static pointer:
+    /// that pointer as a path (good for this run only), for the helper to follow.
+    via: Vec<(String, String)>,
 }
 
 /// How a value's pointer paths agreed when last followed (the helper's "votes" line).
@@ -554,7 +557,7 @@ impl Core {
             return Err(e);
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
-        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new() });
+        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new() });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -643,8 +646,14 @@ impl Core {
         game.entries.push((name.to_owned(), loc));
         game.paths.retain(|(n, _)| n != name);
         game.votes.retain(|(n, _)| n != name);
+        game.via.retain(|(n, _)| n != name);
         if !followed.is_empty() {
             game.paths.push((name.to_owned(), followed));
+        }
+        if let Some(entry) = entries.last().filter(|e| !e.sites.is_empty()) {
+            if let Err(e) = self.apply_limit(entry) {
+                self.say(&format!("{name}: Ferret can't keep track of it if the game moves it: {e}"));
+            }
         }
         if !confirmed && likely < entries.last().map_or(0, |e| e.candidates.len()) {
             self.say(&format!("{likely} of them start like other saved values' confirmed paths: Ferret follows those"));
@@ -743,20 +752,22 @@ impl Core {
         }
     }
 
-    /// Hands a saved limit to the helper, which enforces it in the background
-    /// and finds the value again through its code patterns if the game moves it.
+    /// Hands a saved value to the helper, which keeps it in its limit (if it has one) in the
+    /// background and finds it again through its code patterns if the game moves it.
     fn apply_limit(&mut self, entry: &Entry) -> Result<(), String> {
-        let limit = entry.limit.as_deref().ok_or("no limit set")?;
+        let limit = entry.limit.as_deref().unwrap_or("- -");
         let game = self.game()?;
         let (_, loc) = *game.entries.iter().find(|(n, _)| *n == entry.name).ok_or("value not found in this run")?;
         let followed = entry.followed(&read_profile(&game.exe));
         if entry.sites.is_empty() && followed.is_empty() {
             return Err("no saved code pattern or pointer path".into());
         }
+        let via = game.via.iter().filter(|(n, _)| *n == entry.name).map(|(_, p)| p.clone());
         let sites: Vec<String> = entry
             .sites
             .iter()
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(":"))
+            .chain(via)
             .chain(followed)
             .collect();
         let reply = self.helper.call(&format!("limit {} {loc} {limit} {}", entry.name, sites.join(" ")));
@@ -798,6 +809,9 @@ impl Core {
         if entries[i].limit.is_some() {
             self.apply_limit(&entries[i])?;
             self.say(&format!("{name} is kept {} (written only when the game goes past it)", limit_text(min, max)));
+        } else if !entries[i].sites.is_empty() && self.apply_limit(&entries[i]).is_ok() {
+            // Still found again when the game moves it.
+            self.say(&format!("{name} is no longer limited"));
         } else {
             self.helper.call(&format!("unlimit {name}"));
             self.say(&format!("{name} is no longer limited"));
@@ -821,10 +835,14 @@ impl Core {
                 continue;
             }
             let mut resolved = None;
+            self.game()?.via.retain(|(n, _)| n != name);
             for site in &entry.sites {
                 let reply = self.helper.call(&format!("resolve {site} {}", entry.kind.name()));
                 if let Some((loc, Some(v))) = parse_values(&reply).first() {
                     resolved = Some((*loc, *v));
+                    if let Some(via) = reply.iter().find_map(|l| l.strip_prefix("via ")) {
+                        self.game()?.via.push((name.clone(), via.to_owned()));
+                    }
                     break;
                 }
                 self.say(&format!("{name}: {}", reply.join(" ")));
@@ -878,6 +896,12 @@ impl Core {
                             Ok(()) => self.say(&format!("{name} is kept {}", limit_text(min, max))),
                             Err(e) => self.say(&format!("{name}: limit not applied: {e}")),
                         }
+                    } else if !entry.sites.is_empty() {
+                        // The game may replace the object holding it (Particle Fleet does on a
+                        // new map): the helper finds it again.
+                        if let Err(e) = self.apply_limit(entry) {
+                            self.say(&format!("{name}: Ferret can't keep track of it if the game moves it: {e}"));
+                        }
                     }
                 }
                 None => self.say(&format!("{name}: not found yet, try restore again once the game has used it")),
@@ -907,6 +931,7 @@ impl Core {
                     .map_or((None, None), parse_range);
                 let limit_state = limits
                     .iter()
+                    .filter(|_| min.is_some() || max.is_some())
                     .find(|(n, _, _)| *n == name)
                     .and_then(|(_, _, rest)| rest.split_once(" fixed ").map(|(_, s)| format!("fixed {s}")));
                 let unconfirmed = saved.iter().any(|e| e.name == name && e.unconfirmed());

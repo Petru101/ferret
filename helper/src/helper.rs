@@ -249,6 +249,11 @@ struct Limit {
     restores: u64,
     paused: Option<&'static str>,
     retry_at: Instant,
+    /// When its code patterns last found it (the object may be replaced while the old one stays
+    /// readable, which the guard can't see).
+    checked_at: Instant,
+    /// Whether all its code patterns were searched for a static pointer to the object.
+    searched_code: bool,
 }
 
 #[derive(Default)]
@@ -263,6 +268,7 @@ struct Limiter {
 type SharedLimiter = Arc<Mutex<Limiter>>;
 
 const RETRY_EVERY: Duration = Duration::from_secs(5);
+const RECHECK_EVERY: Duration = Duration::from_secs(10);
 const RESOLVE_WAIT: Duration = Duration::from_secs(2);
 
 fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
@@ -271,12 +277,14 @@ fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
 }
 
 /// Keeps limited values in range; paused limits are found again through their
-/// saved code patterns and then resume.
+/// saved code patterns and then resume. Values found through code patterns are also found
+/// again every 10 s, and through the static pointer their object comes from (when there is
+/// one) on every check. A limit with no bounds only keeps the address current.
 fn limiter_loop(shared: SharedLimiter) {
     loop {
         std::thread::sleep(Duration::from_millis(250));
-        let due: Vec<(String, Vec<Site>)>;
-        let (pid, mem) = {
+        let due: Vec<(String, Vec<Site>, bool)>;
+        let (pid, mem, width) = {
             let mut guard = shared.lock().unwrap();
             let Limiter { pid, mem, width, modules, limits } = &mut *guard;
             let Some(mem) = mem.as_ref() else { continue };
@@ -327,35 +335,49 @@ fn limiter_loop(shared: SharedLimiter) {
             let now = Instant::now();
             due = limits
                 .iter()
-                .filter(|l| l.paths.is_empty() && l.paused.is_some() && l.retry_at <= now)
-                .map(|l| (l.name.clone(), l.sites.clone()))
+                .filter(|l| l.paths.is_empty())
+                .filter(|l| if l.paused.is_some() { l.retry_at <= now } else { l.checked_at + RECHECK_EVERY <= now })
+                .map(|l| (l.name.clone(), l.sites.clone(), !l.searched_code))
                 .collect();
             let Ok(mem) = mem.try_clone() else { continue };
-            (*pid, mem)
+            (*pid, mem, *width)
         };
         // Resolving traces the game for a moment, so it runs without holding the lock.
-        for (name, sites) in due {
-            let found = sites
+        for (name, sites, search_code) in due {
+            let mut found = sites
                 .iter()
-                .find_map(|site| Some((resolve_site(pid, &mem, site, RESOLVE_WAIT).ok()?, site.disp)));
+                .find_map(|site| Some((resolve_site(pid, &mem, site, width, RESOLVE_WAIT).ok()?, site.disp)));
+            // The code that ran may not show where the object comes from; another site's may
+            // (searching the code for every site is slow: once per value).
+            if let Some((r, _)) = found.as_mut().filter(|(r, _)| r.holder.is_none() && search_code) {
+                r.holder = holder_in_code(pid, &mem, &sites, r.is_64bit, width, r.addr);
+            }
             let mut guard = shared.lock().unwrap();
             if guard.pid != pid {
                 break;
             }
             let Some(l) = guard.limits.iter_mut().find(|l| l.name == name) else { continue };
-            let object = found.and_then(|(addr, disp)| {
-                let object = addr.wrapping_sub(disp as u64);
-                Some((addr, object, read_guard(&mem, object)?))
+            l.checked_at = Instant::now();
+            l.searched_code |= search_code && found.is_some();
+            let object = found.and_then(|(r, disp)| {
+                let object = r.addr.wrapping_sub(disp as u64);
+                Some((r, object, read_guard(&mem, object)?))
             });
             match object {
-                Some((addr, object, g)) => {
-                    l.addr = addr;
+                Some((r, object, g)) => {
+                    if r.addr != l.addr || l.paused.is_some() {
+                        l.restores += 1;
+                    }
+                    l.addr = r.addr;
                     l.guard_addr = object;
                     l.guard = g;
-                    l.restores += 1;
                     l.paused = None;
+                    // Through the static pointer it is found on every check, without tracing.
+                    l.paths.extend(r.holder);
                 }
-                None => l.retry_at = Instant::now() + RETRY_EVERY,
+                None if l.paused.is_some() => l.retry_at = Instant::now() + RETRY_EVERY,
+                // The code didn't run meanwhile (a menu?): nothing says the value moved.
+                None => {}
             }
         }
     }
@@ -371,7 +393,8 @@ fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
 
 /// limit <name> <hex addr[:type]> <min|-> <max|-> <site or path>... where a site is
 /// "pattern:offset:register:displacement" as saved in the profile, and a path
-/// "module+offset,offset,...".
+/// "module+offset,offset,..." ("+static,disp" from resolve). No bounds: only keeps the address
+/// current (see `limiter_loop`).
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
     let rest = f.get(4..).unwrap_or_default();
@@ -413,6 +436,8 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         restores: 0,
         paused: None,
         retry_at: Instant::now(),
+        checked_at: Instant::now(),
+        searched_code: false,
     });
     writeln!(out, "limiting {name} at 0x{addr:x}")
 }
@@ -988,23 +1013,79 @@ impl Site {
     }
 }
 
+/// Where a code pattern led: the value's address, and when the code loaded the object from a
+/// static pointer, that pointer as a path (good for this run only).
+struct Resolved {
+    addr: u64,
+    is_64bit: bool,
+    holder: Option<PtrPath>,
+}
+
+/// How far before the instruction its base register may have been loaded.
+const HOLDER_REACH: usize = 32;
+
+/// The static pointer the site's instruction (at `instr`) got its object from, when a
+/// `mov <base>,[address]` shortly before it (how Mono and C++ code read a static object) loads
+/// from a pointer that holds that object now. Following it finds the object the game uses,
+/// also after the game replaces it (Particle Fleet does when the map changes).
+fn holder(mem: &File, instr: u64, site: &Site, is_64bit: bool, width: usize, addr: u64) -> Option<PtrPath> {
+    let object = addr.wrapping_sub(site.disp as u64);
+    if site.disp < 0 || object < 0x10000 {
+        return None;
+    }
+    let from = instr.checked_sub(HOLDER_REACH as u64)?;
+    let mut code = [0u8; HOLDER_REACH];
+    mem.read_exact_at(&mut code, from).ok()?;
+    let modrm = (site.base & 7) << 3 | 5;
+    let rex = 0x48 | (site.base >> 3) << 2;
+    // `i` = where the load's 32-bit address or displacement starts; the nearest load first.
+    (1..=HOLDER_REACH - 4).rev().find_map(|i| {
+        let disp = u32::from_le_bytes([code[i], code[i + 1], code[i + 2], code[i + 3]]);
+        let (at, size) = if is_64bit {
+            // 48 8b 05 <disp32>: mov r64,[rip+disp32]
+            let load = i >= 3 && code[i - 3] == rex && code[i - 2] == 0x8b && code[i - 1] == modrm;
+            load.then_some(((from + i as u64 + 4).wrapping_add(disp as i32 as u64), 8))?
+        } else if (i >= 2 && code[i - 2] == 0x8b && code[i - 1] == modrm) || (site.base == 0 && code[i - 1] == 0xa1) {
+            // 8b 05 <addr32> or a1 <addr32>: mov r32,[addr32]
+            (disp as u64, 4)
+        } else {
+            return None;
+        };
+        let mut held = [0u8; 8];
+        mem.read_exact_at(&mut held[..size], at).ok()?;
+        (size == width && u64::from_le_bytes(held) == object)
+            .then(|| PtrPath { module: String::new(), base: at, offsets: vec![site.disp as u64] })
+    })
+}
+
+/// The first of `sites` whose code loads the object holding `addr` from a static pointer.
+fn holder_in_code(pid: u32, mem: &File, sites: &[Site], is_64bit: bool, width: usize, addr: u64) -> Option<PtrPath> {
+    sites.iter().find_map(|site| {
+        let [code] = find_pattern(pid, mem, &site.pat, 2).ok()?[..] else { return None };
+        holder(mem, code + site.off, site, is_64bit, width, addr)
+    })
+}
+
 /// Finds a saved pattern in the game's code, waits for that instruction to
 /// run and reads its base register: the value's address in this run.
-fn resolve_site(pid: u32, mem: &File, site: &Site, timeout: Duration) -> Result<u64, String> {
+fn resolve_site(pid: u32, mem: &File, site: &Site, width: usize, timeout: Duration) -> Result<Resolved, String> {
     let found = find_pattern(pid, mem, &site.pat, 2).map_err(|e| e.to_string())?;
     let [code] = found.as_slice() else {
         return Err(format!("pattern found {} times (the game may not have run that code yet)", found.len()));
     };
     let instr = code + site.off;
     let _tracing = TRACING.lock().unwrap();
-    let mut value_addr = None;
+    let mut resolved = None;
     let mut tracer = trace::Tracer::attach(pid).map_err(|e| format!("cannot trace the game: {e}"))?;
     tracer.arm(instr, trace::DR7_EXECUTE);
     tracer.watch(timeout, |hit| {
-        value_addr = Some(trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64));
+        // The thread is stopped here, so the static pointer still holds what it loaded.
+        let addr = trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64);
+        let is_64bit = trace::is_64bit(&hit.regs);
+        resolved = Some(Resolved { addr, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
         false
     });
-    value_addr.ok_or(format!("the code at 0x{instr:x} did not run within {} s", timeout.as_secs()))
+    resolved.ok_or(format!("the code at 0x{instr:x} did not run within {} s", timeout.as_secs()))
 }
 
 /// ptrscan <hex addr[:type]> [depth] [max offset, hex] [max paths]: pointer paths to the address, best
@@ -1065,6 +1146,8 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     }
 }
 
+/// resolve <site> [type] [seconds]: "0x<addr>:<type> = <value>", then "via +<static>,<disp>"
+/// when the object comes from a static pointer (a path to follow for the rest of this run).
 fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
     let (Some(site), Some(mem)) = (Site::parse(&f), s.mem.as_ref()) else {
@@ -1072,9 +1155,15 @@ fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<(
     };
     let kind = f.get(4..).unwrap_or_default().iter().find_map(|v| Kind::parse(v)).unwrap_or(Kind::I32);
     let secs = f.get(4..).unwrap_or_default().iter().find_map(|v| v.parse().ok()).unwrap_or(10);
-    match resolve_site(s.pid, mem, &site, Duration::from_secs(secs)) {
-        Ok(addr) => match s.read(addr, kind) {
-            Some(_) => writeln!(out, "{}", s.describe(addr, kind)),
+    match resolve_site(s.pid, mem, &site, s.width, Duration::from_secs(secs)) {
+        Ok(Resolved { addr, holder, .. }) => match s.read(addr, kind) {
+            Some(_) => {
+                writeln!(out, "{}", s.describe(addr, kind))?;
+                match holder {
+                    Some(h) => writeln!(out, "via {}", h.text()),
+                    None => Ok(()),
+                }
+            }
             None => writeln!(out, "error: resolved to unreadable 0x{addr:x}"),
         },
         Err(e) => writeln!(out, "error: {e}"),

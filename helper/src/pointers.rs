@@ -107,6 +107,7 @@ pub struct PtrPath {
 
 impl PtrPath {
     /// "Forager.exe+177a64c,44,2c,10,3a8,0" (a space in the module name is written as %20).
+    /// No module ("+3a1b2c,66c") = an absolute address, only good for this run of the game.
     pub fn parse(text: &str) -> Option<Self> {
         let mut parts = text.split(',');
         let (module, base) = parts.next()?.rsplit_once('+')?;
@@ -131,8 +132,11 @@ impl PtrPath {
 
     /// The pointers read along the path right now, one per offset.
     fn pointers(&self, mem: &File, mods: &[Module], width: usize) -> Option<Vec<u64>> {
-        let m = mods.iter().find(|m| !m.ambiguous && m.name.eq_ignore_ascii_case(&self.module))?;
-        let mut read = vec![read_ptr(mem, m.start + self.base, width)?];
+        let start = match self.module.as_str() {
+            "" => 0,
+            name => mods.iter().find(|m| !m.ambiguous && m.name.eq_ignore_ascii_case(name))?.start,
+        };
+        let mut read = vec![read_ptr(mem, start + self.base, width)?];
         for off in &self.offsets[..self.offsets.len() - 1] {
             if *read.last()? < 0x10000 {
                 return None;

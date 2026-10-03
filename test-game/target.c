@@ -7,10 +7,14 @@
  * and changes them on commands (earn N, spend N, hit N, gain X, shield X, scrap N,
  * plus food (a 16-bit short, which Ferret doesn't search for) with a float copy of it for the HUD,
  * refreshed every tick (a search can only end on that copy, which Ferret must reject),
- * coins N, wood N, gems N, ore N, eat N, show, respawn, newroom) dropped into a command file, so it
- * can be driven the same way natively, under Proton and inside the Steam
+ * plus crystals (an int in the base object, which the code reads from a static pointer, like
+ * Particle Fleet's gems),
+ * coins N, wood N, gems N, ore N, eat N, crystals N, show, respawn, newroom, newmap) dropped into a
+ * command file, so it can be driven the same way natively, under Proton and inside the Steam
  * runtime. "respawn" moves the player to a new object and frees the old one,
- * like a new mission; "newroom" does the same with the room and its stats.
+ * like a new mission; "newroom" does the same with the room and its stats. "newmap" moves the
+ * player and the base to new objects and keeps the old ones (garbage a collector hasn't freed
+ * yet: they stay readable and look alive).
  * Usage: target <command file> <log file>. Built for Linux and Windows. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +60,26 @@ struct world {
 };
 
 static struct world *world;
+
+static const char base_type[] = "base";
+
+struct base {
+    const char *type;
+    int level;
+    int crystals;
+};
+
+static struct base *base;
+
+static struct base *new_base(int crystals)
+{
+    struct base *b = malloc(sizeof *b);
+
+    b->type = base_type;
+    b->level = 1;
+    b->crystals = crystals;
+    return b;
+}
 
 static int scrap(const struct player *p)
 {
@@ -116,9 +140,9 @@ static void report(const char *log, const struct player *p, const double *coins,
     FILE *f = fopen(log, "a");
 
     if (f) {
-        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f food=%d\n",
+        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f food=%d crystals=%d\n",
                 p->gold, p->hp, p->energy, p->shield, scrap(p), *coins, *wood, read_real(&world->room->stats->gems),
-                read_real(&world->room->stats->ore), needs.food);
+                read_real(&world->room->stats->ore), needs.food, base->crystals);
         fclose(f);
     }
 }
@@ -135,6 +159,7 @@ int main(int argc, char **argv)
     volatile float most_energy = 0;
     volatile double most_shield = 0;
     volatile int most_scrap = 0;
+    volatile int most_crystals = 0;
     volatile double most_coins = 0, total = 0;
     float x;
     char line[64];
@@ -150,6 +175,7 @@ int main(int argc, char **argv)
     world = malloc(sizeof *world);
     world->type = "world";
     world->room = new_room(77, 40);
+    base = new_base(300);
     report(argv[2], p, coins, wood);
     for (;;) {
         sleep_ms(100);
@@ -160,6 +186,8 @@ int main(int argc, char **argv)
             most_energy = p->energy;
         if (p->shield > most_shield)
             most_shield = p->shield;
+        if (base->crystals > most_crystals)
+            most_crystals = base->crystals;
         if (scrap(p) > most_scrap)
             most_scrap = scrap(p);
         total = read_real(coins) + read_real(wood) + read_real(&world->room->stats->gems);
@@ -195,7 +223,15 @@ int main(int argc, char **argv)
             write_real(&world->room->stats->gems, read_real(&world->room->stats->gems) + n);
         else if (sscanf(line, "ore %d", &n) == 1)
             write_real(&world->room->stats->ore, read_real(&world->room->stats->ore) + n);
-        else if (strncmp(line, "newroom", 7) == 0) {
+        else if (sscanf(line, "crystals %d", &n) == 1)
+            base->crystals += n;
+        else if (strncmp(line, "newmap", 6) == 0) {
+            struct player *q = spawn();
+
+            q->gold = p->gold;
+            p = q;
+            base = new_base(base->crystals);
+        } else if (strncmp(line, "newroom", 7) == 0) {
             struct room *r = world->room;
 
             padding = malloc(4096);
