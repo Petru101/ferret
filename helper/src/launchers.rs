@@ -1,11 +1,11 @@
 // What the launcher that started a game knows about it: Steam's app info, Heroic's copy of
 // GOG's game database (game modes of Epic, GOG and Amazon games) and Lutris's game name; plus
-// the anti-cheat AreWeAntiCheatYet lists for it (Heroic keeps a copy of that list).
+// the anti-cheat AreWeAntiCheatYet lists for it (bundled, and Heroic's newer copy if there is one).
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::json::{self, Value};
 use crate::steam;
@@ -20,6 +20,9 @@ pub struct About {
 
 /// GOG's game modes that mean playing with other people.
 const SHARED_MODES: &[&str] = &["multiplayer", "co-operative", "massively-multiplayer", "battle-royale"];
+
+/// AreWeAntiCheatYet's games.json (MIT), trimmed by data/areweanticheatyet/update.sh.
+const BUNDLED: &str = include_str!("../../data/areweanticheatyet/games.json");
 
 /// The games list asks every second; a game's launcher info doesn't change while it runs.
 static CACHE: Mutex<Option<HashMap<String, About>>> = Mutex::new(None);
@@ -126,11 +129,13 @@ fn heroic_game(dirs: &[PathBuf], runner: &str, app: &str, a: &mut About, ids: &m
 
 /// AreWeAntiCheatYet's entry by Steam app ID, Epic namespace or name (letters and digits only).
 fn listed_anti_cheat(dirs: &[PathBuf], ids: &Ids, name: Option<&str>) -> Option<String> {
+    static LIST: OnceLock<Option<Value>> = OnceLock::new();
     let simple = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
     let name = name.map(simple).filter(|n| !n.is_empty());
-    let list = dirs.iter().find_map(|d| load(d.join("areweanticheatyet.json")))?;
+    let heroic = dirs.iter().find_map(|d| load(d.join("areweanticheatyet.json")));
+    let bundled = LIST.get_or_init(|| json::parse(BUNDLED));
     let steam = ids.steam.map(|id| id.to_string());
-    list.arr().iter().find_map(|g| {
+    heroic.iter().chain(bundled).flat_map(Value::arr).find_map(|g| {
         let store = g.get("storeIds");
         let by_steam = steam.is_some() && store.and_then(|s| s.get("steam")?.str()) == steam.as_deref();
         let namespace = store.and_then(|s| s.get("epic")?.get("namespace")?.str());

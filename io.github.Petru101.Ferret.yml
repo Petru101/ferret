@@ -79,6 +79,8 @@ modules:
       - install -Dm755 target/x86_64-unknown-linux-gnu/release/ferret-helper /app/bin/ferret-helper
       - install -Dm644 data/io.github.Petru101.Ferret.desktop /app/share/applications/io.github.Petru101.Ferret.desktop
       - install -Dm644 data/io.github.Petru101.Ferret.svg /app/share/icons/hicolor/scalable/apps/io.github.Petru101.Ferret.svg
+      # The helper carries AreWeAntiCheatYet's list (MIT).
+      - install -Dm644 data/areweanticheatyet/LICENSE /app/share/licenses/io.github.Petru101.Ferret/AreWeAntiCheatYet-LICENSE
     sources:
       - type: dir
         path: .
