@@ -1093,11 +1093,21 @@ impl Shape {
         Some(Shape { kind, words })
     }
 
-    /// Whether the place has this shape; `at(offset, bytes)` reads around it.
+    /// Whether the place has this shape, but for one word in five (two finds don't show every
+    /// field that differs between items: Lumencraft's lumen and iron had a pointer where another
+    /// item has two small numbers); `at(offset, bytes)` reads around it.
     fn fits(&self, at: impl Fn(i64, usize) -> Option<u64>, mapped: &Mapped, width: usize) -> bool {
-        self.words.iter().all(|&(off, w)| match w {
-            ShapeWord::Exact(v) => at(off, 4) == Some(v as u64),
-            ShapeWord::Pointer => at(off, width).is_some_and(|p| mapped.contains(p)),
+        let mut misses = self.words.len() / 5;
+        self.words.iter().all(|&(off, w)| {
+            let ok = match w {
+                ShapeWord::Exact(v) => at(off, 4) == Some(v as u64),
+                ShapeWord::Pointer => at(off, width).is_some_and(|p| mapped.contains(p)),
+            };
+            if !ok && misses > 0 {
+                misses -= 1;
+                return true;
+            }
+            ok
         })
     }
 }
