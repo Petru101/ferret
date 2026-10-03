@@ -3,6 +3,7 @@
 // interface sends it jobs and gets events back.
 
 mod find;
+mod tips;
 mod values;
 
 use std::cell::{Cell, RefCell};
@@ -117,6 +118,7 @@ struct Ui {
     stack: adw::ViewStack,
     values: Rc<values::ValuesView>,
     find: Rc<find::FindView>,
+    tips: Rc<tips::Tips>,
     worker: Worker,
     /// The game Ferret is attached to.
     attached: Rc<Cell<Option<u32>>>,
@@ -228,6 +230,7 @@ impl Ui {
                     format!("Saved {name}. If it's wrong after restarting the game, find it again and save it as {name}.")
                 });
                 self.find.saved();
+                self.tips.show(tips::Tip::Slots);
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));
             }
@@ -359,6 +362,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
+    action("tip", Box::new(|ui, how| ui.tips.close(how == "never")));
     action("remove", Box::new(|ui, name| values::ask_remove(&ui.worker, name.trim(), &ui.stack)));
     action(
         "forget",
@@ -385,7 +389,8 @@ fn load_css() {
          transition: background-color 1200ms ease-out; } \
          label.news.flash { background-color: alpha(@accent_bg_color, 0.65); transition: none; } \
          label.news.success { background-color: alpha(@success_color, 0.15); } \
-         label.news.success.flash { background-color: alpha(@success_color, 0.5); transition: none; }",
+         label.news.success.flash { background-color: alpha(@success_color, 0.5); transition: none; } \
+         .tip { background-color: alpha(@accent_bg_color, 0.15); padding: 6px 6px 6px 12px; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -424,6 +429,8 @@ fn build(app: &adw::Application) {
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&banners[0]);
+    let tips = tips::Tips::new();
+    toolbar.add_top_bar(&tips.root);
     toolbar.set_content(Some(&stack));
     let game_page = adw::NavigationPage::builder().title("Game").tag("game").child(&toolbar).build();
 
@@ -462,6 +469,7 @@ fn build(app: &adw::Application) {
         stack,
         values,
         find,
+        tips,
         worker,
         attached: Rc::default(),
     });
