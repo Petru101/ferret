@@ -117,6 +117,9 @@ impl ValuesView {
                 Some(d) if d > 1 => about.push_str(&format!(", shown with {d} decimals")),
                 _ => {}
             }
+            if v.places > 1 {
+                about.push_str(&format!(". Kept in {} places (every stack): setting it sets each", v.places));
+            }
             if v.unconfirmed {
                 about.push_str(". Not confirmed yet: if this number is wrong after restarting the game, find it again and save it under the same name");
             }

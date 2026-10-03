@@ -4,6 +4,7 @@ mod anticheat;
 mod helper;
 mod json;
 mod launchers;
+mod names;
 mod pointers;
 mod steam;
 mod trace;

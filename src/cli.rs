@@ -91,7 +91,8 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                     .unwrap_or_default();
                 let value = v.value.map_or("??".into(), |n| core::number_text(n, v.decimals));
                 let doubt = v.doubtful.map(|d| format!("  not written: {d}")).unwrap_or_default();
-                println!("{:<12} {value} (at 0x{:x}, {}){limit}{doubt}", v.name, v.addr, v.kind.describe());
+                let places = if v.places > 1 { format!("  in {} places", v.places) } else { String::new() };
+                println!("{:<12} {value} (at 0x{:x}, {}){places}{limit}{doubt}", v.name, v.addr, v.kind.describe());
             }
         }
         "limit" => {

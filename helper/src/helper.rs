@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::anticheat;
-use crate::pointers::{self, Module, PtrPath};
+use crate::names::{self, Heap, NamedPath};
+use crate::pointers::{self, Module, Pointers, PtrPath};
 use crate::launchers;
 use crate::trace;
 
@@ -286,6 +287,9 @@ struct Limit {
     /// Pointer paths to the value; when there are any, the value is found through them on
     /// every check instead of through `sites` and the guard.
     paths: Vec<PtrPath>,
+    /// A named path to every place the value is kept (all of an item's stacks): when there is
+    /// one, all of them are found through it on every check and kept in range.
+    named: Option<NamedLimit>,
     // First bytes of the object holding the value (its type pointer). If they
     // change, the object is gone and writing would corrupt unrelated memory.
     guard_addr: u64,
@@ -299,6 +303,13 @@ struct Limit {
     checked_at: Instant,
     /// Whether all its code patterns were searched for a static pointer to the object.
     searched_code: bool,
+}
+
+struct NamedLimit {
+    path: NamedPath,
+    roots: Vec<u64>,
+    found_at: Option<Instant>,
+    addrs: Vec<u64>,
 }
 
 #[derive(Default)]
@@ -329,6 +340,7 @@ fn limiter_loop(shared: SharedLimiter) {
     loop {
         std::thread::sleep(Duration::from_millis(250));
         let due: Vec<(String, Vec<Site>, bool)>;
+        let named_due: Vec<(String, NamedPath)>;
         let (pid, mem, width) = {
             let mut guard = shared.lock().unwrap();
             let Limiter { pid, mem, width, modules, limits } = &mut *guard;
@@ -357,7 +369,44 @@ fn limiter_loop(shared: SharedLimiter) {
                     }
                 }
             }
+            let heap = limits.iter().any(|l| l.named.is_some()).then(|| Heap::new(*pid, mem, *width).ok()).flatten();
+            for l in limits.iter_mut() {
+                let (Some(n), Some(heap)) = (l.named.as_mut(), heap.as_ref()) else { continue };
+                // Searching memory for its objects again takes seconds: done without the lock.
+                let leads = heap.walk(&n.roots, &n.path);
+                if leads.is_empty() {
+                    l.paused = Some("it isn't anywhere right now (none in the game?), waiting");
+                } else {
+                    if leads != n.addrs || l.paused.is_some() {
+                        l.restores += 1;
+                    }
+                    l.addr = leads[0];
+                    l.paused = None;
+                }
+                n.addrs = leads;
+            }
+            named_due = limits
+                .iter()
+                .filter_map(|l| {
+                    let n = l.named.as_ref()?;
+                    (n.addrs.is_empty() && n.found_at.is_none_or(|t| t.elapsed() >= NAMED_REFIND)).then(|| (l.name.clone(), n.path.clone()))
+                })
+                .collect();
             for l in limits.iter_mut().filter(|l| l.paused.is_none()) {
+                if let Some(n) = &l.named {
+                    for &addr in &n.addrs {
+                        let Some(v) = read_value(mem, addr, l.kind) else { continue };
+                        let target = match (l.min, l.max) {
+                            (_, Some(max)) if v > max => max,
+                            (Some(min), _) if v < min => min,
+                            _ => continue,
+                        };
+                        if write_value(mem, addr, l.kind, target).is_ok() {
+                            l.fixes += 1;
+                        }
+                    }
+                    continue;
+                }
                 if l.paths.is_empty() && read_guard(mem, l.guard_addr) != Some(l.guard) {
                     l.paused = Some("the object holding it changed, finding it again");
                     l.retry_at = Instant::now();
@@ -380,13 +429,24 @@ fn limiter_loop(shared: SharedLimiter) {
             let now = Instant::now();
             due = limits
                 .iter()
-                .filter(|l| l.paths.is_empty())
+                .filter(|l| l.paths.is_empty() && l.named.is_none())
                 .filter(|l| if l.paused.is_some() { l.retry_at <= now } else { l.checked_at + RECHECK_EVERY <= now })
                 .map(|l| (l.name.clone(), l.sites.clone(), !l.searched_code))
                 .collect();
             let Ok(mem) = mem.try_clone() else { continue };
             (*pid, mem, *width)
         };
+        for (name, path) in named_due {
+            let roots = Heap::new(pid, &mem, width).map(|h| h.find_roots(&path)).unwrap_or_default();
+            let mut guard = shared.lock().unwrap();
+            if guard.pid != pid {
+                break;
+            }
+            if let Some(n) = guard.limits.iter_mut().find(|l| l.name == name).and_then(|l| l.named.as_mut()) {
+                n.found_at = Some(named_found_at(&n.roots, &roots));
+                n.roots = roots;
+            }
+        }
         // Resolving traces the game for a moment, so it runs without holding the lock.
         for (name, sites, search_code) in due {
             let mut found = sites
@@ -437,22 +497,29 @@ fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
 }
 
 /// limit <name> <hex addr[:type]> <min|-> <max|-> <site or path>... where a site is
-/// "pattern:offset:register:displacement" as saved in the profile, and a path
-/// "module+offset,offset,..." ("+static,disp" from resolve). No bounds: only keeps the address
+/// "pattern:offset:register:displacement" as saved in the profile, a path
+/// "module+offset,offset,..." ("+static,disp" from resolve), and a named path starts with a
+/// quote (see names.rs; it keeps every place it leads to in range). No bounds: only keeps the address
 /// current (see `limiter_loop`).
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
     let rest = f.get(4..).unwrap_or_default();
+    let is_named = |s: &&&str| s.starts_with('"');
+    let named: Option<Vec<NamedPath>> = rest.iter().filter(is_named).map(|s| NamedPath::parse(s)).collect();
+    let rest: Vec<&str> = rest.iter().filter(|s| !is_named(s)).copied().collect();
     let paths: Option<Vec<PtrPath>> = rest.iter().filter(|s| s.contains(',')).map(|s| PtrPath::parse(s)).collect();
     let sites: Option<Vec<Site>> =
         rest.iter().filter(|s| !s.contains(',')).map(|s| Site::parse(&s.split(':').collect::<Vec<_>>())).collect();
+    let Some(mut named) = named else {
+        return writeln!(out, "error: not a named path");
+    };
     let (Some(name), Some(addr), Ok(min), Ok(max), Some(sites), Some(paths)) =
         (f.first(), f.get(1).and_then(|a| parse_loc(a)), bound(f.get(2)), bound(f.get(3)), sites, paths)
     else {
         return writeln!(out, "error: usage: limit <name> <hex addr[:type]> <min|-> <max|-> <pattern:offset:register:displacement | module+offset,offset,...>...");
     };
-    if sites.is_empty() && paths.is_empty() {
-        return writeln!(out, "error: a limit needs at least one saved code pattern or pointer path");
+    if sites.is_empty() && paths.is_empty() && named.is_empty() {
+        return writeln!(out, "error: a limit needs at least one saved code pattern, pointer path or named path");
     }
     let mut l = limiter.lock().unwrap();
     let Some(mem) = l.mem.as_ref() else {
@@ -463,7 +530,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
     // Paths are followed on every check, so they need no guard (and the value may not exist yet).
     let guard = match read_guard(mem, guard_addr) {
         Some(g) => g,
-        None if !paths.is_empty() => [0; 4],
+        None if !paths.is_empty() || !named.is_empty() => [0; 4],
         None => return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}"),
     };
     l.limits.retain(|l| l.name != *name);
@@ -475,6 +542,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         max,
         sites,
         paths,
+        named: named.pop().map(|path| NamedLimit { path, roots: Vec::new(), found_at: None, addrs: Vec::new() }),
         guard_addr,
         guard,
         fixes: 0,
@@ -566,6 +634,11 @@ struct Session {
     /// The game stores numbers only as doubles: scans look for nothing else.
     doubles_only: bool,
     candidates: Vec<Candidate>,
+    /// Every pointer in the game's memory, from a `names` that found nothing, for the pointer
+    /// scan that comes next (collecting them takes seconds in big games).
+    pointer_map: Option<(Instant, (Pointers, u64))>,
+    /// Objects found by name for each named path, and when they were looked for.
+    named_roots: HashMap<String, (Vec<u64>, Option<Instant>)>,
 }
 
 impl Session {
@@ -712,7 +785,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             let width = pointers::pointer_width(pid, &f, &modules, &exe);
             *limiter.lock().unwrap() = Limiter { pid, mem: f.try_clone().ok(), width, modules, limits: Vec::new() };
             let doubles_only = is_gamemaker(pid, &exe);
-            *s = Session { pid, mem: Some(f), exe: exe.clone(), width, doubles_only, candidates: Vec::new() };
+            *s = Session { pid, mem: Some(f), exe: exe.clone(), width, doubles_only, ..Session::default() };
             let regions = maps(pid)?;
             let rw: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
             writeln!(out, "attached to {pid}: {}", cmdline(pid))?;
@@ -1182,7 +1255,7 @@ fn resolve_site(pid: u32, mem: &File, site: &Site, width: usize, timeout: Durati
 
 /// ptrscan <hex addr[:type]> [depth] [max offset, hex] [max paths]: pointer paths to the address, best
 /// first, as lines "path <module>+<offset>,<offset>,...".
-fn cmd_ptrscan(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+fn cmd_ptrscan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
     let (Some((target, _)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
         return writeln!(out, "error: usage: ptrscan <hex addr[:type]> [depth] [max offset] [max paths] (after attach)");
@@ -1191,7 +1264,8 @@ fn cmd_ptrscan(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let max_off = it.next().and_then(parse_addr).unwrap_or(0x1000);
     let max_paths = it.next().and_then(|v| v.parse().ok()).unwrap_or(200);
     let t = Instant::now();
-    let r = pointers::scan(s.pid, mem, s.width, &s.exe, target, depth, max_off, max_paths)?;
+    let collected = s.pointer_map.take().filter(|(at, _)| at.elapsed() < Duration::from_secs(60)).map(|(_, c)| c);
+    let r = pointers::scan(s.pid, mem, s.width, &s.exe, target, depth, max_off, max_paths, collected)?;
     for p in &r.paths {
         writeln!(out, "path {}", p.text())?;
     }
@@ -1236,6 +1310,75 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         }
         None => writeln!(out, "none of the paths lead anywhere now"),
     }
+}
+
+/// names <hex addr[:type]>: named paths that lead to the value now, best first: "named <path>
+/// <places it leads to> <what it means>" (see names.rs), then a summary line.
+fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let (Some((target, _)), Some(mem)) = (parse_loc(arg.trim()), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: names <hex addr[:type]> (after attach)");
+    };
+    let t = Instant::now();
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    let collected = pointers::collect_pointers(s.pid, mem, s.width)?;
+    let found = names::discover(&heap, &collected.0, target);
+    for (p, leads) in &found {
+        writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+    }
+    writeln!(out, "{} named paths in {} ms", found.len(), t.elapsed().as_millis())?;
+    if found.is_empty() {
+        s.pointer_map = Some((Instant::now(), collected));
+    }
+    Ok(())
+}
+
+/// Time between searches for a named path's objects when it leads nowhere (each reads all of
+/// the game's memory twice), and longer once a search found the same objects again (the game
+/// has none of the item right now).
+const NAMED_REFIND: Duration = Duration::from_secs(10);
+const NAMED_UNCHANGED: Duration = Duration::from_secs(60);
+
+/// When to count a search for a named path's objects as done, so that the next one waits:
+/// in the future when it found the same objects as the last one (none at all: soon, a save
+/// may be loading).
+fn named_found_at(old: &[u64], new: &[u64]) -> Instant {
+    if !new.is_empty() && old == new {
+        Instant::now() + (NAMED_UNCHANGED - NAMED_REFIND)
+    } else {
+        Instant::now()
+    }
+}
+
+/// Where a named path leads, from the objects found for it before when it still leads anywhere
+/// from them, else from a new search (at most every `NAMED_REFIND`).
+fn named_walk(heap: &Heap, path: &NamedPath, roots: &mut Vec<u64>, found_at: &mut Option<Instant>) -> Vec<u64> {
+    let leads = heap.walk(roots, path);
+    if !leads.is_empty() || found_at.is_some_and(|t| t.elapsed() < NAMED_REFIND) {
+        return leads;
+    }
+    let new = heap.find_roots(path);
+    *found_at = Some(named_found_at(roots, &new));
+    *roots = new;
+    heap.walk(roots, path)
+}
+
+/// named <type> <named path>: every place it leads now ("0x<addr>:<type> = <value>"), then
+/// "named <count>".
+fn cmd_named(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let mut it = arg.split_whitespace();
+    let kind = it.next().and_then(Kind::parse);
+    let text = it.next().unwrap_or_default();
+    let (Some(kind), Some(path), Some(mem)) = (kind, NamedPath::parse(text), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: named <type> <named path> (after attach)");
+    };
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    let (mut roots, mut found_at) = s.named_roots.remove(text).unwrap_or_default();
+    let leads = named_walk(&heap, &path, &mut roots, &mut found_at);
+    s.named_roots.insert(text.to_owned(), (roots, found_at));
+    for a in &leads {
+        writeln!(out, "{}", s.describe(*a, kind))?;
+    }
+    writeln!(out, "named {}", leads.len())
 }
 
 /// resolve <site> [type] [seconds]: "0x<addr>:<type> = <value>", then "via +<static>,<disp>"
@@ -1291,14 +1434,16 @@ pub fn run() {
             "track" => cmd_track(&mut out, &mut session, arg),
             "sites" => cmd_sites(&mut out, &session, arg),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
-            "ptrscan" => cmd_ptrscan(&mut out, &session, arg),
+            "ptrscan" => cmd_ptrscan(&mut out, &mut session, arg),
+            "names" => cmd_names(&mut out, &mut session, arg),
+            "named" => cmd_named(&mut out, &mut session, arg),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         if res.and_then(|_| writeln!(out, "end")).and_then(|_| out.flush()).is_err() {

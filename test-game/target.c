@@ -15,7 +15,16 @@
  * like a new mission; "newroom" does the same with the room and its stats. "newmap" moves the
  * player and the base to new objects and keeps the old ones (garbage a collector hasn't freed
  * yet: they stay readable and look alive).
+ * Plus a Unity (Mono) style inventory, laid out like Valheim's: managed objects (a two-pointer
+ * header), UTF-16 strings and arrays, reached only from objects allocated at run time:
+ * "Inventory" -> list -> array of items -> item -> its info -> "$item_logs", the stack count an
+ * int in each item. "logs N" adds to the first logs stack, "stack N" adds a logs stack, "stone N"
+ * a stone stack, "chest N" logs in a chest (an inventory named "$piece_chest"), "die" moves the
+ * stacks into a new "Inventory" (the player object points at it) and keeps the old, emptied one
+ * (garbage). A label object also
+ * holds a string "Inventory" (a root that leads nowhere).
  * Usage: target <command file> <log file>. Built for Linux and Windows. */
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,20 +138,176 @@ static struct room *new_room(double gems, double ore)
     return r;
 }
 
+/* Managed objects: a type pointer and a lock word first. */
+struct header {
+    void *vtable;
+    void *sync;
+};
+
+struct string {
+    struct header h;
+    int32_t length;
+    uint16_t chars[];
+};
+
+struct array {
+    struct header h;
+    void *bounds;
+    uintptr_t length;
+    void *items[];
+};
+
+struct item_info {
+    struct header h;
+    struct string *name;
+    struct string *description;
+    int max_stack;
+};
+
+struct item {
+    struct header h;
+    struct item_info *info;
+    void *drop_prefab;
+    struct string *crafter;
+    void *custom;
+    int stack;
+    float durability;
+};
+
+struct item_list {
+    struct header h;
+    struct array *items;
+    int size;
+    int version;
+};
+
+struct inventory {
+    struct header h;
+    struct string *name;
+    void *background;
+    struct item_list *list;
+    int width, height;
+};
+
+struct humanoid {
+    struct header h;
+    struct string *name;
+    struct inventory *inventory;
+    float health;
+};
+
+struct label {
+    struct header h;
+    struct string *text;
+    int font_size;
+};
+
+/* Type objects live in the managed heap too. */
+static void *new_type(void)
+{
+    return calloc(1, 64);
+}
+
+static void *string_type, *array_type, *info_type, *item_type, *list_type, *inventory_type, *label_type, *humanoid_type;
+
+static struct string *new_string(const char *text)
+{
+    size_t n = strlen(text), i;
+    struct string *s = calloc(1, sizeof *s + 2 * n + 2);
+
+    s->h.vtable = string_type;
+    s->length = (int32_t)n;
+    for (i = 0; i < n; i++)
+        s->chars[i] = (uint16_t)text[i];
+    return s;
+}
+
+static struct item_info *logs_info, *stone_info;
+
+static struct item_info *new_info(const char *name, const char *description)
+{
+    struct item_info *t = calloc(1, sizeof *t);
+
+    t->h.vtable = info_type;
+    t->name = new_string(name);
+    t->description = new_string(description);
+    t->max_stack = 50;
+    return t;
+}
+
+static struct inventory *new_inventory(const char *name)
+{
+    struct inventory *inv = calloc(1, sizeof *inv);
+
+    inv->h.vtable = inventory_type;
+    inv->name = new_string(name);
+    inv->list = calloc(1, sizeof *inv->list);
+    inv->list->h.vtable = list_type;
+    inv->list->items = calloc(1, sizeof *inv->list->items + 32 * sizeof(void *));
+    inv->list->items->h.vtable = array_type;
+    inv->list->items->length = 32;
+    inv->width = 8;
+    inv->height = 4;
+    return inv;
+}
+
+static void add_stack(struct inventory *inv, struct item_info *info, int n)
+{
+    struct item *it = calloc(1, sizeof *it);
+
+    it->h.vtable = item_type;
+    it->info = info;
+    it->crafter = new_string("");
+    it->stack = n;
+    it->durability = 100;
+    inv->list->items->items[inv->list->size++] = it;
+}
+
+static struct item *first_stack(const struct inventory *inv, const struct item_info *info)
+{
+    int i;
+
+    for (i = 0; i < inv->list->size; i++) {
+        struct item *it = inv->list->items->items[i];
+        if (it->info == info)
+            return it;
+    }
+    return NULL;
+}
+
+static void print_stacks(FILE *f, const char *what, const struct inventory *inv, const struct item_info *info)
+{
+    int i, any = 0;
+
+    fprintf(f, " %s=", what);
+    for (i = 0; i < inv->list->size; i++) {
+        const struct item *it = inv->list->items->items[i];
+        if (it->info == info)
+            fprintf(f, "%s%d", any++ ? "," : "", it->stack);
+    }
+    if (!any)
+        fprintf(f, "-");
+}
+
 /* Food and a neighbour, so the pair doesn't read as an int holding food. */
 static struct {
     short food;
     short thirst;
 } needs = { 500, 999 };
 
-static void report(const char *log, const struct player *p, const double *coins, const double *wood)
+static void report(const char *log, const struct player *p, const double *coins, const double *wood, const struct inventory *inv,
+                   const struct inventory *chest)
 {
     FILE *f = fopen(log, "a");
 
     if (f) {
-        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f food=%d crystals=%d\n",
+        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f food=%d crystals=%d",
                 p->gold, p->hp, p->energy, p->shield, scrap(p), *coins, *wood, read_real(&world->room->stats->gems),
                 read_real(&world->room->stats->ore), needs.food, base->crystals);
+        print_stacks(f, "logs", inv, logs_info);
+        print_stacks(f, "stone", inv, stone_info);
+        print_stacks(f, "chestlogs", chest, logs_info);
+        fprintf(f, "\n");
         fclose(f);
     }
 }
@@ -155,6 +320,10 @@ int main(int argc, char **argv)
     double *wood = malloc(sizeof *wood);
     volatile float *hud_food = malloc(sizeof *hud_food);
     struct player *old;
+    struct inventory *inv, *chest;
+    struct label *label;
+    struct humanoid *hero;
+    struct item *it;
     volatile int richest = 0;
     volatile float most_energy = 0;
     volatile double most_shield = 0;
@@ -176,7 +345,33 @@ int main(int argc, char **argv)
     world->type = "world";
     world->room = new_room(77, 40);
     base = new_base(300);
-    report(argv[2], p, coins, wood);
+    string_type = new_type();
+    array_type = new_type();
+    info_type = new_type();
+    item_type = new_type();
+    list_type = new_type();
+    inventory_type = new_type();
+    label_type = new_type();
+    humanoid_type = new_type();
+    logs_info = new_info("$item_logs", "$item_logs_description");
+    stone_info = new_info("$item_stone", "$item_stone_description");
+    label = calloc(1, sizeof *label);
+    label->h.vtable = label_type;
+    label->text = new_string("Inventory");
+    label->font_size = 14;
+    inv = new_inventory("Inventory");
+    add_stack(inv, stone_info, 9);
+    add_stack(inv, logs_info, 33);
+    hero = calloc(1, sizeof *hero);
+    hero->h.vtable = humanoid_type;
+    hero->name = new_string("Player");
+    hero->inventory = inv;
+    hero->health = 25;
+    chest = new_inventory("$piece_chest");
+    chest->width = 5;
+    chest->height = 2;
+    add_stack(chest, logs_info, 50);
+    report(argv[2], p, coins, wood, inv, chest);
     for (;;) {
         sleep_ms(100);
         *hud_food = needs.food;
@@ -225,6 +420,29 @@ int main(int argc, char **argv)
             write_real(&world->room->stats->ore, read_real(&world->room->stats->ore) + n);
         else if (sscanf(line, "crystals %d", &n) == 1)
             base->crystals += n;
+        else if (sscanf(line, "logs %d", &n) == 1) {
+            if ((it = first_stack(inv, logs_info)))
+                it->stack += n;
+        } else if (sscanf(line, "stack %d", &n) == 1)
+            add_stack(inv, logs_info, n);
+        else if (sscanf(line, "stone %d", &n) == 1)
+            add_stack(inv, stone_info, n);
+        else if (sscanf(line, "chest %d", &n) == 1) {
+            if ((it = first_stack(chest, logs_info)))
+                it->stack += n;
+        } else if (strncmp(line, "die", 3) == 0) {
+            struct inventory *next = new_inventory("Inventory");
+            int i;
+
+            for (i = 0; i < inv->list->size; i++) {
+                next->list->items->items[i] = inv->list->items->items[i];
+                inv->list->items->items[i] = NULL;
+            }
+            next->list->size = inv->list->size;
+            inv->list->size = 0;
+            inv = next;
+            hero->inventory = inv;
+        }
         else if (strncmp(line, "newmap", 6) == 0) {
             struct player *q = spawn();
 
@@ -246,7 +464,7 @@ int main(int argc, char **argv)
             p = spawn();
             free(old);
         }
-        report(argv[2], p, coins, wood);
+        report(argv[2], p, coins, wood, inv, chest);
     }
     return 0;
 }

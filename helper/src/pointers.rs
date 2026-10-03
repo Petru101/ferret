@@ -192,20 +192,20 @@ pub fn vote(mem: &File, mods: &[Module], width: usize, paths: &[PtrPath]) -> Opt
 
 /// Every aligned pointer-sized word in writable memory that points (aligned) into writable memory, as
 /// (pointer, where it is), sorted by pointer. 32-bit games pack both into one word.
-enum Pointers {
+pub enum Pointers {
     Narrow(Vec<u64>),
     Wide(Vec<(u64, u64)>),
 }
 
 impl Pointers {
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Pointers::Narrow(v) => v.len(),
             Pointers::Wide(v) => v.len(),
         }
     }
 
-    fn get(&self, i: usize) -> (u64, u64) {
+    pub fn get(&self, i: usize) -> (u64, u64) {
         match self {
             Pointers::Narrow(v) => (v[i] >> 32, v[i] & 0xFFFF_FFFF),
             Pointers::Wide(v) => v[i],
@@ -213,7 +213,7 @@ impl Pointers {
     }
 }
 
-fn collect_pointers(pid: u32, mem: &File, width: usize) -> io::Result<(Pointers, u64)> {
+pub fn collect_pointers(pid: u32, mem: &File, width: usize) -> io::Result<(Pointers, u64)> {
     // A 32-bit game's own memory is all below 4 GiB (Wine's 64-bit parts may not be).
     let rw: Vec<(u64, u64)> = maps(pid)?
         .iter()
@@ -306,14 +306,29 @@ impl Bits {
 /// kept, and so on. A pointer can be on several steps (objects next to each other make short
 /// paths across them, and the real, longer one must not be lost to those). Pointers kept
 /// inside a module are where paths start: they are there in every run.
-pub fn scan(pid: u32, mem: &File, width: usize, exe: &str, target: u64, depth: usize, max_off: u64, max_paths: usize) -> io::Result<ScanResult> {
+/// `collected`: the pointers from `collect_pointers`, when there are recent ones.
+#[allow(clippy::too_many_arguments)]
+pub fn scan(
+    pid: u32,
+    mem: &File,
+    width: usize,
+    exe: &str,
+    target: u64,
+    depth: usize,
+    max_off: u64,
+    max_paths: usize,
+    collected: Option<(Pointers, u64)>,
+) -> io::Result<ScanResult> {
     let mods = modules(pid, mem);
     let roots: Vec<&Module> = mods.iter().filter(|m| !m.ambiguous).collect();
     let module_of = |a: u64| {
         let i = roots.partition_point(|m| m.start <= a);
         (i > 0 && a < roots[i - 1].end).then(|| roots[i - 1])
     };
-    let (pointers, bytes) = collect_pointers(pid, mem, width)?;
+    let (pointers, bytes) = match collected {
+        Some(c) => c,
+        None => collect_pointers(pid, mem, width)?,
+    };
     let n = pointers.len();
     let addr = |i: usize| pointers.get(i).1;
     let mut by_addr: Vec<u32> = (0..n as u32).collect();
