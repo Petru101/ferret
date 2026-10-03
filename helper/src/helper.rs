@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::anticheat;
+use crate::godot::{self, DictPath};
 use crate::names::{self, Heap, NamedPath};
 use crate::pointers::{self, Module, Pointers, PtrPath};
 use crate::launchers;
@@ -305,8 +306,45 @@ struct Limit {
     searched_code: bool,
 }
 
+/// A named path of either kind: through objects the game names (Unity, names.rs) or to an entry
+/// of the game's dictionaries (Godot, godot.rs).
+#[derive(Clone)]
+enum Named {
+    Objects(NamedPath),
+    Dict(DictPath),
+}
+
+impl Named {
+    fn parse(text: &str) -> Option<Named> {
+        match text.starts_with('{') {
+            true => DictPath::parse(text).map(Named::Dict),
+            false => NamedPath::parse(text).map(Named::Objects),
+        }
+    }
+
+    fn is_named(text: &str) -> bool {
+        text.starts_with('"') || text.starts_with('{')
+    }
+
+    /// Where it leads from the roots found before (no search).
+    fn walk(&self, heap: &Heap, roots: &[u64]) -> Vec<u64> {
+        match self {
+            Named::Objects(p) => heap.walk(roots, p),
+            Named::Dict(p) => godot::walk(heap, roots, p),
+        }
+    }
+
+    /// Searches the game's memory for its roots (seconds).
+    fn find_roots(&self, heap: &Heap) -> Vec<u64> {
+        match self {
+            Named::Objects(p) => heap.find_roots(p),
+            Named::Dict(p) => godot::find_roots(heap, p),
+        }
+    }
+}
+
 struct NamedLimit {
-    path: NamedPath,
+    path: Named,
     roots: Vec<u64>,
     found_at: Option<Instant>,
     addrs: Vec<u64>,
@@ -340,7 +378,7 @@ fn limiter_loop(shared: SharedLimiter) {
     loop {
         std::thread::sleep(Duration::from_millis(250));
         let due: Vec<(String, Vec<Site>, bool)>;
-        let named_due: Vec<(String, NamedPath)>;
+        let named_due: Vec<(String, Named)>;
         let (pid, mem, width) = {
             let mut guard = shared.lock().unwrap();
             let Limiter { pid, mem, width, modules, limits } = &mut *guard;
@@ -373,7 +411,7 @@ fn limiter_loop(shared: SharedLimiter) {
             for l in limits.iter_mut() {
                 let (Some(n), Some(heap)) = (l.named.as_mut(), heap.as_ref()) else { continue };
                 // Searching memory for its objects again takes seconds: done without the lock.
-                let leads = heap.walk(&n.roots, &n.path);
+                let leads = n.path.walk(heap, &n.roots);
                 if leads.is_empty() {
                     l.paused = Some("it isn't anywhere right now (none in the game?), waiting");
                 } else {
@@ -437,7 +475,7 @@ fn limiter_loop(shared: SharedLimiter) {
             (*pid, mem, *width)
         };
         for (name, path) in named_due {
-            let roots = Heap::new(pid, &mem, width).map(|h| h.find_roots(&path)).unwrap_or_default();
+            let roots = Heap::new(pid, &mem, width).map(|h| path.find_roots(&h)).unwrap_or_default();
             let mut guard = shared.lock().unwrap();
             if guard.pid != pid {
                 break;
@@ -504,8 +542,8 @@ fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
     let rest = f.get(4..).unwrap_or_default();
-    let is_named = |s: &&&str| s.starts_with('"');
-    let named: Option<Vec<NamedPath>> = rest.iter().filter(is_named).map(|s| NamedPath::parse(s)).collect();
+    let is_named = |s: &&&str| Named::is_named(s);
+    let named: Option<Vec<Named>> = rest.iter().filter(is_named).map(|s| Named::parse(s)).collect();
     let rest: Vec<&str> = rest.iter().filter(|s| !is_named(s)).copied().collect();
     let paths: Option<Vec<PtrPath>> = rest.iter().filter(|s| s.contains(',')).map(|s| PtrPath::parse(s)).collect();
     let sites: Option<Vec<Site>> =
@@ -1532,6 +1570,12 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     };
     let t = Instant::now();
     let heap = Heap::new(s.pid, mem, s.width)?;
+    // An entry of a Godot dictionary is named by its key and its dictionary's other entries
+    // (no pointer map needed).
+    if let Some((p, leads)) = godot::discover(&heap, target) {
+        writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+        return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+    }
     let collected = pointers::collect_pointers(s.pid, mem, s.width)?;
     let found = names::discover(&heap, &collected.0, target);
     for (p, leads) in &found {
@@ -1563,15 +1607,15 @@ fn named_found_at(old: &[u64], new: &[u64]) -> Instant {
 
 /// Where a named path leads, from the objects found for it before when it still leads anywhere
 /// from them, else from a new search (at most every `NAMED_REFIND`).
-fn named_walk(heap: &Heap, path: &NamedPath, roots: &mut Vec<u64>, found_at: &mut Option<Instant>) -> Vec<u64> {
-    let leads = heap.walk(roots, path);
+fn named_walk(heap: &Heap, path: &Named, roots: &mut Vec<u64>, found_at: &mut Option<Instant>) -> Vec<u64> {
+    let leads = path.walk(heap, roots);
     if !leads.is_empty() || found_at.is_some_and(|t| t.elapsed() < NAMED_REFIND) {
         return leads;
     }
-    let new = heap.find_roots(path);
+    let new = path.find_roots(heap);
     *found_at = Some(named_found_at(roots, &new));
     *roots = new;
-    heap.walk(roots, path)
+    path.walk(heap, roots)
 }
 
 /// named <type> <named path>: every place it leads now ("0x<addr>:<type> = <value>"), then
@@ -1580,7 +1624,7 @@ fn cmd_named(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     let mut it = arg.split_whitespace();
     let kind = it.next().and_then(Kind::parse);
     let text = it.next().unwrap_or_default();
-    let (Some(kind), Some(path), Some(mem)) = (kind, NamedPath::parse(text), s.mem.as_ref()) else {
+    let (Some(kind), Some(path), Some(mem)) = (kind, Named::parse(text), s.mem.as_ref()) else {
         return writeln!(out, "error: usage: named <type> <named path> (after attach)");
     };
     let heap = Heap::new(s.pid, mem, s.width)?;

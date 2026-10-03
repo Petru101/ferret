@@ -148,6 +148,15 @@ impl<'a> Heap<'a> {
         self.width as u64
     }
 
+    pub fn file(&self) -> &File {
+        self.mem
+    }
+
+    /// Whether `v` is an aligned address in writable memory.
+    pub fn is_pointer(&self, v: u64) -> bool {
+        self.inside(v)
+    }
+
     fn inside(&self, v: u64) -> bool {
         if v % self.w() != 0 {
             return false;
@@ -275,7 +284,7 @@ impl<'a> Heap<'a> {
 
     /// Reads all writable memory in chunks that overlap by `overlap` bytes; `f` gets the
     /// chunk's address, its bytes and how many of them start something new.
-    fn each_chunk(&self, overlap: usize, mut f: impl FnMut(u64, &[u8], usize)) {
+    pub fn each_chunk(&self, overlap: usize, mut f: impl FnMut(u64, &[u8], usize)) {
         let mut buf = vec![0u8; CHUNK + overlap];
         for &(start, end) in &self.rw {
             let mut addr = start;
