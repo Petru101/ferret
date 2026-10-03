@@ -203,10 +203,13 @@ fn one_byte_opcode(op: u8) -> Option<usize> {
 /// Works out the instruction that ends at `after` (a data breakpoint stops
 /// right after the accessing instruction) and accessed `target`.
 /// `code` holds the bytes from `code_addr`.
-pub fn decode_access(code: &[u8], code_addr: u64, after: u64, target: u64, regs: &Regs) -> Option<Access> {
+/// In 64-bit code a 0x4x byte before the opcode may be a REX prefix or the end of the previous
+/// instruction, so this returns every reading that fits, the REX one first; only the real start
+/// runs (an execute breakpoint tells them apart).
+pub fn decode_access(code: &[u8], code_addr: u64, after: u64, target: u64, regs: &Regs) -> Vec<Access> {
     let end = (after - code_addr) as usize;
     let is64 = is_64bit(regs);
-    let mut found = None;
+    let mut found = Vec::new();
     // (displacement size, ModRM mode): [reg+disp32], [reg+disp8], [reg]
     for (disp_size, want_mode) in [(4usize, 2u8), (1, 1), (0, 0)] {
         for sib in [false, true] {
@@ -236,10 +239,10 @@ pub fn decode_access(code: &[u8], code_addr: u64, after: u64, target: u64, regs:
                     1 => d[0] as i8 as i64,
                     _ => 0,
                 };
-                let Some(mut start) = modrm_at.checked_sub(1) else { continue };
-                let op = code[start];
-                let imm_ok = if start >= 1 && code[start - 1] == 0x0F {
-                    start -= 1;
+                let Some(mut op_start) = modrm_at.checked_sub(1) else { continue };
+                let op = code[op_start];
+                let imm_ok = if op_start >= 1 && code[op_start - 1] == 0x0F {
+                    op_start -= 1;
                     imm == 0
                 } else {
                     one_byte_opcode(op) == Some(imm)
@@ -249,37 +252,71 @@ pub fn decode_access(code: &[u8], code_addr: u64, after: u64, target: u64, regs:
                 }
                 // A REX prefix sits right before the opcode: B extends the base register, X the
                 // SIB index, R the ModRM reg field.
-                let rex = if is64 && start >= 1 && (0x40..=0x4F).contains(&code[start - 1]) { code[start - 1] } else { 0 };
-                if let Some(s) = sib_byte {
-                    if (s >> 3) & 7 != 4 || rex & 0x02 != 0 {
-                        continue; // indexed addressing is out of scope here
+                let maybe_rex = is64 && op_start >= 1 && (0x40..=0x4F).contains(&code[op_start - 1]);
+                let rexes: &[u8] = if maybe_rex { &[code[op_start - 1], 0] } else { &[0] };
+                let mut matched = Vec::new();
+                let mut clobbered = Vec::new();
+                for &rex in rexes {
+                    if let Some(s) = sib_byte {
+                        if (s >> 3) & 7 != 4 || rex & 0x02 != 0 {
+                            continue; // indexed addressing is out of scope here
+                        }
+                    }
+                    let base = low_base | (rex & 1) << 3;
+                    // A REX prefix must come last, so only operand-size/SSE prefixes can precede it.
+                    // (A 0x4x byte before those is the end of the previous instruction.)
+                    let mut start = op_start - (rex != 0) as usize;
+                    let mut legacy = 0;
+                    while start > 0 && legacy < 2 && matches!(code[start - 1], 0x66 | 0xF2 | 0xF3) {
+                        start -= 1;
+                        legacy += 1;
+                    }
+                    let dest = (modrm >> 3) & 7 | (rex & 4) << 1;
+                    let access = Access { start: code_addr + start as u64, len: end - start, base, disp };
+                    if reg(regs, base).wrapping_add(disp as u64) & 0xFFFF_FFFF == target & 0xFFFF_FFFF {
+                        matched.push(access);
+                    } else if op == 0x8B && dest == base {
+                        // `mov reg, [reg+disp]` overwrites its own base register.
+                        clobbered.push(access);
                     }
                 }
-                let base = low_base | (rex & 1) << 3;
-                // A REX prefix must come last, so only operand-size/SSE prefixes can precede it.
-                // (A 0x4x byte before those is the end of the previous instruction.)
-                if rex != 0 {
-                    start -= 1;
+                if !matched.is_empty() {
+                    return matched;
                 }
-                let mut legacy = 0;
-                while start > 0 && legacy < 2 && matches!(code[start - 1], 0x66 | 0xF2 | 0xF3) {
-                    start -= 1;
-                    legacy += 1;
-                }
-                let base_value = reg(regs, base);
-                let dest = (modrm >> 3) & 7 | (rex & 4) << 1;
-                let matches = base_value.wrapping_add(disp as u64) & 0xFFFF_FFFF == target & 0xFFFF_FFFF;
-                // `mov reg, [reg+disp]` overwrites its own base register.
-                let clobbered = op == 0x8B && dest == base;
-                let access = Access { start: code_addr + start as u64, len: end - start, base, disp };
-                if matches {
-                    return Some(access);
-                }
-                if clobbered && found.is_none() {
-                    found = Some(access);
+                if found.is_empty() {
+                    found = clobbered;
                 }
             }
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_before_opcode_is_not_always_rex() {
+        // mov edx,[rsp+0x4c]; mov eax,[rax+0xc] -- the 0x4c is not a REX prefix of the second.
+        let code = [0x48, 0x8b, 0x05, 0xbd, 0x64, 0x00, 0x00, 0x8b, 0x54, 0x24, 0x4c, 0x8b, 0x40, 0x0c];
+        let mut regs: Regs = unsafe { std::mem::zeroed() };
+        regs.cs = 0x33;
+        regs.rax = 1234; // the loaded value: the base is gone
+        let after = 0x1000 + code.len() as u64;
+        let found = decode_access(&code, 0x1000, after, 0x5000_000c, &regs);
+        assert_eq!(found, vec![Access { start: 0x100b, len: 3, base: 0, disp: 12 }]);
+
+        // mov ecx,[rax+0xc] after the same bytes: both readings hit the target.
+        let code = [0x8b, 0x54, 0x24, 0x4c, 0x8b, 0x48, 0x0c];
+        regs.rax = 0x5000_0000;
+        let found = decode_access(&code, 0x1000, 0x1007, 0x5000_000c, &regs);
+        let starts: Vec<u64> = found.iter().map(|a| a.start).collect();
+        assert_eq!(starts, vec![0x1003, 0x1004]);
+
+        // 32-bit code has no REX prefixes.
+        regs.cs = 0x23;
+        let found = decode_access(&code, 0x1000, 0x1007, 0x5000_000c, &regs);
+        assert_eq!(found, vec![Access { start: 0x1004, len: 3, base: 0, disp: 12 }]);
+    }
 }

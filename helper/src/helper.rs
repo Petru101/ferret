@@ -925,14 +925,20 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         if mem.read_exact_at(&mut code, after - before).is_err() {
             continue;
         }
-        let Some(acc) = trace::decode_access(&code, after - before, *after, target, regs) else {
+        let readings = trace::decode_access(&code, after - before, *after, target, regs);
+        if readings.is_empty() {
             let tail: Vec<String> = code[before as usize - 16..before as usize].iter().map(|b| format!("{b:02x}")).collect();
             writeln!(out, "instruction before 0x{after:x}: not a [register+offset] access, skipped (bytes before it: {})", tail.join(" "))?;
             continue;
-        };
+        }
         // Shared code (a runtime function every variable goes through, as in GameMaker games)
         // reads other addresses too: a pattern for it would find some other value next time.
-        let read = site_targets(s.pid, acc.start, acc.base, acc.disp, Duration::from_secs(1));
+        // An execute breakpoint only fires at the real start, which picks between the readings.
+        let (acc, read) = readings
+            .iter()
+            .map(|acc| (*acc, site_targets(s.pid, acc.start, acc.base, acc.disp, Duration::from_secs(1))))
+            .find(|(_, read)| !read.is_empty())
+            .unwrap_or((readings[0], Vec::new()));
         let others = read.iter().filter(|a| *a & 0xFFFF_FFFF != target & 0xFFFF_FFFF).count();
         if others > 0 {
             writeln!(
