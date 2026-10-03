@@ -1977,16 +1977,17 @@ impl Core {
                 unchanged_rounds = 0;
             } else {
                 unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
-                if new_count != count {
-                    self.tell_matches(new_count);
-                }
+                // Every change: the listed values follow the game.
+                self.tell_matches(new_count);
                 count = new_count;
                 confirm = false;
             }
             unfit = None;
             self.search = Some((count, 0));
             last = now;
-            if unchanged_rounds >= 3 {
+            // Few enough to test one by one: once they stop shrinking, more changes rarely
+            // tell them apart (Astro Colony: 5 places followed 19, 20 and 21).
+            if unchanged_rounds >= 3 || (count <= 20 && unchanged_rounds >= 1) {
                 self.say(&format!("{count} addresses keep following the value (likely the value plus copies of it)"));
                 break;
             }
@@ -2101,7 +2102,7 @@ impl Core {
                 Some(loc)
             }
             // The same few keep following the value: copies of it. Find the real one.
-            2..=20 if unchanged >= 2 => {
+            2..=20 if unchanged >= 1 => {
                 self.say("checking which one is the real value:");
                 self.probe()?
             }

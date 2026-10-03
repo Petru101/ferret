@@ -50,7 +50,6 @@ pub struct FindView {
     /// Their rows, updated in place while the same places are listed (a value being typed into
     /// one stays).
     match_rows: RefCell<Vec<adw::ActionRow>>,
-    typed_row: gtk::Box,
     typed: gtk::Entry,
     typed_go: gtk::Button,
     /// How many places matched after the last search, to show how far a search narrowed it.
@@ -336,7 +335,6 @@ impl FindView {
             matches_list,
             listed: RefCell::default(),
             match_rows: RefCell::default(),
-            typed_row,
             typed,
             typed_go: typed_go.clone(),
             last_count: Cell::default(),
@@ -662,15 +660,14 @@ impl FindView {
         self.announce(msg, false);
     }
 
-    /// The places listed stay while a search runs (it updates them), but can't be tried then.
+    /// The places listed stay while a typed number is searched for (it updates them), but can't
+    /// be tried then. While Start runs they can: trying one stops it first.
     fn searching(&self, searching: bool) {
         self.matches_list.set_sensitive(!searching);
     }
 
     pub fn start(&self) {
-        self.searching(true);
         self.result.set_visible(false);
-        self.typed_row.set_sensitive(false);
         self.start.set_visible(false);
         self.start_over.set_visible(false);
         self.undo.set_visible(false);
@@ -688,20 +685,25 @@ impl FindView {
     }
 
     pub fn auto_done(&self, r: Result<AutoResult, String>) {
-        self.busy(false);
         self.stop.set_visible(false);
         self.start.set_visible(true);
         self.start_over.set_visible(true);
         self.undo.set_visible(true);
-        self.typed_row.set_sensitive(true);
+        // A typed number stopped it: its search runs next and tells how it went.
+        if !self.typed.is_editable() {
+            return;
+        }
+        self.busy(false);
         self.searching(false);
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => {
-                self.announce(
-                    &format!("{}. Press Start to continue and let the number change a few more times.", self.count_text(n)),
-                    false,
-                );
+                let next = if n <= 20 {
+                    "Try them below, or press Start and let the number change again."
+                } else {
+                    "Press Start to continue and let the number change a few more times."
+                };
+                self.announce(&format!("{}. {next}", self.count_text(n)), false);
                 self.list_matches(n);
             }
             Err(e) => {
@@ -739,6 +741,7 @@ impl FindView {
             self.status.set_label("Type the number as the game shows it, for example 1250, 1.5 or 3:17.");
             return;
         };
+        interrupt(&self.cancel, &self.stop);
         self.result.set_visible(false);
         self.typed_searching(true);
         self.searching(true);
@@ -928,10 +931,11 @@ impl FindView {
             row.add_suffix(&try_it);
             row.add_suffix(&pick);
             let apply = {
-                let (worker, entry) = (self.worker.clone(), entry.clone());
+                let (worker, entry, cancel, stop) = (self.worker.clone(), entry.clone(), self.cancel.clone(), self.stop.clone());
                 move || {
                     let v = entry.text().to_string();
                     if !v.trim().is_empty() {
+                        interrupt(&cancel, &stop);
                         worker.run(move |core| Event::Matches(core.try_match(loc, &v)));
                     }
                 }
@@ -948,10 +952,17 @@ impl FindView {
                 .css_classes(["flat"])
                 .build();
             row.add_suffix(&drop);
-            let worker = self.worker.clone();
-            pick.connect_clicked(move |_| worker.run(move |core| Event::Chosen(core.choose(loc))));
-            let (worker, root, shown) = (self.worker.clone(), self.root.clone(), row.clone());
-            drop.connect_clicked(move |_| ask_drop(&worker, loc, &shown.title(), &root));
+            let (worker, cancel, stop) = (self.worker.clone(), self.cancel.clone(), self.stop.clone());
+            pick.connect_clicked(move |_| {
+                interrupt(&cancel, &stop);
+                worker.run(move |core| Event::Chosen(core.choose(loc)));
+            });
+            let (worker, root, shown, cancel, stop) =
+                (self.worker.clone(), self.root.clone(), row.clone(), self.cancel.clone(), self.stop.clone());
+            drop.connect_clicked(move |_| {
+                interrupt(&cancel, &stop);
+                ask_drop(&worker, loc, &shown.title(), &root);
+            });
             self.matches_list.append(&row);
         }
     }
@@ -1036,6 +1047,14 @@ impl FindView {
         self.busy(false);
         self.result.set_sensitive(true);
         self.status.set_label(&format!("Not saved: {e}"));
+    }
+}
+
+/// Stops a running Start so that what the player asked for runs next (the worker does one
+/// thing at a time).
+fn interrupt(cancel: &AtomicBool, stop: &gtk::Button) {
+    if stop.is_visible() {
+        cancel.store(true, Ordering::Relaxed);
     }
 }
 
