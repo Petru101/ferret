@@ -1132,6 +1132,15 @@ impl Core {
     pub fn limit(&mut self, name: &str, min: Option<f64>, max: Option<f64>) -> Result<(), String> {
         let name = one_word(name);
         let name = name.as_str();
+        if let (Some(lo), Some(hi)) = (min, max) {
+            if hi < lo {
+                return Err(format!(
+                    "At most ({}) is lower than at least ({}): nothing changed",
+                    number_text(hi, None),
+                    number_text(lo, None)
+                ));
+            }
+        }
         let exe = self.game()?.exe.clone();
         let mut entries = read_profile(&exe);
         let i = entries.iter().position(|e| e.name == name).ok_or(format!("no saved value called {name}"))?;

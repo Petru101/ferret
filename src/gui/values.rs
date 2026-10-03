@@ -213,6 +213,14 @@ impl ValuesView {
                 } else {
                     (None, None)
                 };
+                // The saved range stays until the two numbers make sense again.
+                let backwards = matches!((min_v, max_v), (Some(lo), Some(hi)) if hi < lo);
+                max.set_subtitle(if backwards { "Lower than At Least: the range isn't changed" } else { "" });
+                if backwards {
+                    max.add_css_class("error");
+                    return;
+                }
+                max.remove_css_class("error");
                 let name = name.clone();
                 worker.run(move |core| {
                     Event::Done(core.limit(&name, min_v, max_v).map(|_| match max_v {
