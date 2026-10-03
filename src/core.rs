@@ -253,9 +253,10 @@ struct Entry {
     other: Vec<String>,
 }
 
-/// Names are one word everywhere (helper commands, CLI): "max hp" is saved as "max_hp".
+/// Names are one lowercase word everywhere (helper commands, CLI): "Max HP" is saved as
+/// "max_hp", so saving over a value doesn't depend on remembering how it was capitalised.
 pub fn one_word(name: &str) -> String {
-    name.split_whitespace().collect::<Vec<_>>().join("_")
+    name.split_whitespace().collect::<Vec<_>>().join("_").to_lowercase()
 }
 
 /// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
@@ -266,8 +267,11 @@ fn read_profile(exe: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for line in fs::read_to_string(profile_path(exe)).unwrap_or_default().lines() {
         if let Some(name) = line.strip_prefix("entry ") {
+            // Older builds kept capitals ("Gems" and "gems" both saved): the newer one wins.
+            let name = one_word(name);
+            entries.retain(|e| e.name != name);
             entries.push(Entry {
-                name: name.trim().to_owned(),
+                name,
                 kind: Kind::I32,
                 sites: Vec::new(),
                 paths: Vec::new(),
@@ -810,6 +814,8 @@ impl Core {
     /// Forgets a saved value: out of the profile, no longer followed or kept in range. The
     /// game's number stays as it is.
     pub fn remove(&mut self, name: &str) -> Result<(), String> {
+        let name = one_word(name);
+        let name = name.as_str();
         let exe = self.game()?.exe.clone();
         let mut entries = read_profile(&exe);
         let before = entries.len();
@@ -830,6 +836,8 @@ impl Core {
 
     /// Keeps a saved value within a range; `None` on both sides turns the limit off.
     pub fn limit(&mut self, name: &str, min: Option<i64>, max: Option<i64>) -> Result<(), String> {
+        let name = one_word(name);
+        let name = name.as_str();
         let exe = self.game()?.exe.clone();
         let mut entries = read_profile(&exe);
         let i = entries.iter().position(|e| e.name == name).ok_or(format!("no saved value called {name}"))?;
@@ -970,6 +978,8 @@ impl Core {
     }
 
     pub fn set(&mut self, name: &str, value: i64) -> Result<(), String> {
+        let name = one_word(name);
+        let name = name.as_str();
         self.refresh_paths();
         self.sync_addresses();
         let (_, loc) = *self
