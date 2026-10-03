@@ -477,6 +477,8 @@ pub struct GameProcess {
     pub name: Option<String>,
     /// Steam lists it as played online or with others.
     pub multiplayer: bool,
+    /// ... and not as single-player: Ferret refuses it.
+    pub online_only: bool,
 }
 
 pub struct ValueRow {
@@ -639,7 +641,8 @@ impl Core {
                     app_id: opt(f.get(2)?),
                     anti_cheat: opt(f.get(3)?),
                     name: f.get(4).and_then(|s| opt(s)),
-                    multiplayer: f.get(5) == Some(&"multiplayer"),
+                    multiplayer: matches!(f.get(5), Some(&"multiplayer" | &"online")),
+                    online_only: f.get(5) == Some(&"online"),
                 })
             })
             .collect()

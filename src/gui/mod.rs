@@ -158,8 +158,13 @@ impl Ui {
             }
             let row = adw::ActionRow::builder().title(title).subtitle(&subtitle).build();
             row.set_subtitle_lines(2);
-            if let Some(ac) = &g.anti_cheat {
-                row.set_subtitle(&format!("{ac} detected. Ferret won't attach to games with anti-cheat."));
+            let refused = match (&g.anti_cheat, g.online_only) {
+                (Some(ac), _) => Some(format!("{ac} found. Ferret won't attach to games with anti-cheat.")),
+                (None, true) => Some("Online-only game. Ferret won't attach to online games.".to_owned()),
+                _ => None,
+            };
+            if let Some(why) = refused {
+                row.set_subtitle(&why);
                 row.add_suffix(&gtk::Image::from_icon_name("action-unavailable-symbolic"));
             } else {
                 row.set_activatable(true);

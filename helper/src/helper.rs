@@ -6,9 +6,11 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::anticheat;
 use crate::pointers::{self, Module, PtrPath};
 use crate::steam;
 use crate::trace;
@@ -81,25 +83,39 @@ fn is_gamemaker(pid: u32, exe: &str) -> bool {
     })
 }
 
+/// Anti-cheat loaded in the game, shipped in its folder, or (VAC, which runs in the Steam
+/// client) listed by Steam.
 fn anti_cheat(pid: u32) -> Option<&'static str> {
     let maps = maps(pid).ok()?;
-    let loaded = maps.iter().find_map(|r| {
-        let p = r.path.to_ascii_lowercase();
-        if p.contains("easyanticheat") {
-            Some("Easy Anti-Cheat")
-        } else if p.contains("beclient") || p.contains("battleye") {
-            Some("BattlEye")
-        } else {
-            None
+    if let Some(ac) = maps.iter().find_map(|r| anticheat::in_path(&r.path)) {
+        return Some(ac);
+    }
+    let env = environ(pid);
+    if steam_app(&env).is_some_and(|a| a.vac) {
+        return Some("Valve Anti-Cheat");
+    }
+    // Seen from inside the game's sandbox (pressure-vessel, flatpak).
+    let root = Path::new("/proc").join(pid.to_string()).join("root");
+    let inside = |p: &Path| root.join(p.strip_prefix("/").unwrap_or(p));
+    let folder = match env.get("STEAM_COMPAT_INSTALL_PATH") {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            // Wine maps the .exe by its Linux path; native programs are /proc/<pid>/exe.
+            let exe = exe_name(pid);
+            let mapped = maps.iter().map(|r| Path::new(&r.path)).find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(&*exe)));
+            let program = match mapped {
+                Some(p) => p.to_path_buf(),
+                None => fs::read_link(format!("/proc/{pid}/exe")).ok()?,
+            };
+            anticheat::game_folder(&program)
         }
-    });
-    // VAC runs in the Steam client, so only Steam can tell. Source games started with
-    // -insecure run without it.
-    let vac = || {
-        let insecure = cmdline(pid).split(' ').any(|a| a == "-insecure");
-        (!insecure && steam_app(&environ(pid)).is_some_and(|a| a.vac)).then_some("Valve Anti-Cheat")
     };
-    loaded.or_else(vac)
+    anticheat::in_folder(&inside(&folder))
+}
+
+/// A Steam game played only with other people.
+fn online_only(pid: u32) -> bool {
+    steam_app(&environ(pid)).is_some_and(|a| a.online_only())
 }
 
 /// The Steam app ID a game was started with (umu sets 0 or "default" for games not on Steam).
@@ -639,7 +655,8 @@ fn draws_like_a_game(pid: u32) -> bool {
 }
 
 /// Running games, one per line: pid, program name, Steam app ID, anti-cheat, the name Steam
-/// gives it and "multiplayer" (tab-separated, "-" when unknown or not).
+/// gives it and "online" (online only) or "multiplayer" (tab-separated, "-" when unknown or
+/// not).
 fn cmd_games(out: &mut impl Write) -> io::Result<()> {
     let uid = my_uid();
     let mut pids: Vec<u32> = fs::read_dir("/proc")?
@@ -662,10 +679,16 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let dash = |s: Option<&str>| s.filter(|s| !s.is_empty()).unwrap_or("-").to_owned();
         let steam = steam_app(&env);
         let name = steam.as_ref().map(|a| a.name.replace('\t', " "));
-        let multiplayer = steam.as_ref().is_some_and(|a| a.multiplayer).then_some("multiplayer");
+        let play = steam.as_ref().and_then(|a| {
+            if a.online_only() {
+                Some("online")
+            } else {
+                a.multiplayer.then_some("multiplayer")
+            }
+        });
         let id = dash(app_id.map(String::as_str));
         let ac = dash(anti_cheat(pid));
-        writeln!(out, "{pid}\t{exe}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(multiplayer))?;
+        writeln!(out, "{pid}\t{exe}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(play))?;
     }
     Ok(())
 }
@@ -675,7 +698,10 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
         return writeln!(out, "error: usage: attach <pid>");
     };
     if let Some(ac) = anti_cheat(pid) {
-        return writeln!(out, "error: refusing to attach, the game runs with {ac}");
+        return writeln!(out, "error: refusing to attach, the game comes with {ac}");
+    }
+    if online_only(pid) {
+        return writeln!(out, "error: refusing to attach, the game is played online only");
     }
     match OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem")) {
         Ok(f) => {

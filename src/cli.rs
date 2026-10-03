@@ -26,7 +26,11 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                 let id = g.app_id.map(|id| format!("  [SteamAppId={id}]")).unwrap_or_default();
                 let ac = g.anti_cheat.map(|ac| format!("  [{ac}]")).unwrap_or_default();
                 let name = g.name.map(|n| format!("  ({n})")).unwrap_or_default();
-                let mp = if g.multiplayer { "  [multiplayer]" } else { "" };
+                let mp = match (g.online_only, g.multiplayer) {
+                    (true, _) => "  [online only]",
+                    (_, true) => "  [multiplayer]",
+                    _ => "",
+                };
                 println!("{:>7}  {}{name}{id}{ac}{mp}", g.pid, g.exe);
             }
         }

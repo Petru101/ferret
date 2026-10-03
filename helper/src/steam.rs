@@ -13,10 +13,19 @@ pub struct App {
     pub name: String,
     pub vac: bool,
     pub multiplayer: bool,
+    pub single_player: bool,
 }
 
-/// Store categories: 8 = Valve Anti-Cheat enabled; 1 = Multi-player, 20 = MMO, 36 = Online
-/// PvP, 38 = Online Co-op.
+impl App {
+    /// Played only with other people (Steam doesn't list it as single-player).
+    pub fn online_only(&self) -> bool {
+        self.multiplayer && !self.single_player
+    }
+}
+
+/// Store categories: 2 = Single-player, 8 = Valve Anti-Cheat enabled; 1 = Multi-player,
+/// 20 = MMO, 36 = Online PvP, 38 = Online Co-op.
+const SINGLE_PLAYER: &str = "category_2";
 const VAC: &str = "category_8";
 const MULTIPLAYER: &[&str] = &["category_1", "category_20", "category_36", "category_38"];
 
@@ -117,6 +126,7 @@ fn parse(d: &[u8], table: Option<&[String]>) -> Option<App> {
         let at = |want: &[&str]| path.iter().map(String::as_str).eq(want.iter().copied());
         if at(&["appinfo", "common", "category"]) {
             app.vac |= key == VAC;
+            app.single_player |= key == SINGLE_PLAYER;
             app.multiplayer |= MULTIPLAYER.contains(&key.as_str());
         }
         match t {
