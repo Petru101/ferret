@@ -3,7 +3,7 @@
 # (world -> room -> stats) and is only touched through shared functions, like GameMaker games,
 # so save must fall back to a pointer scan. Then the paths must follow gems when the game moves
 # its room to new memory, keep a limit on it across that move, and find it again after the game
-# restarts. Then ore, saved once, must come back after a restart through the paths that start
+# restarts (not written, the limit waits, until saving it again confirms the path). Then ore, saved once, must come back after a restart through the paths that start
 # like gems' confirmed ones. Runs in its own Ferret session. Run on the host.
 #   paths-test.sh [target|proton|proton32]
 # proton runs target.exe (64-bit), proton32 target32.exe (32-bit, like Forager) under Proton.
@@ -111,7 +111,7 @@ game "newroom"
 game "gems 30"
 game "show"
 "$live" values
-echo "--- restart the game: the saved paths find gems again (fresh game: 77)"
+echo "--- restart the game: the saved paths find gems again (fresh game: 77), unconfirmed: no limit"
 stop_game
 start_game
 "$live" attach "$pid"
@@ -123,10 +123,10 @@ game "show"
 echo "--- find gems again and save it again: the saved paths that lead to it are kept"
 "$live" limit gems off
 game "gems 7"
-"$live" scan 102
+"$live" scan 135
 game "gems 1"
-"$live" next 103
-keep_real_match gems 103
+"$live" next 136
+keep_real_match gems 136
 save_value gems
 grep -A3 "^entry gems" "$profile" || true
 echo "--- save ore (next to gems): its unconfirmed paths that start like gems' confirmed ones are followed"

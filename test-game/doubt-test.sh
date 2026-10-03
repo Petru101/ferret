@@ -3,7 +3,8 @@
 # pointer paths, then its profile is changed to one real path plus two copies of a wrong one
 # (gems' path with the last offset +8 = ore). The vote then points at ore, 2 to 1: not clear.
 # Set must refuse, and a limit must pause instead of writing ore (or gems). Then with the real
-# path given three times the vote is clear again and both work. Run on the host.
+# path given three times the vote is clear again and both work. The same three as unconfirmed
+# candidates of an earlier run are guesses: set must refuse. Run on the host.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 export FERRET_SESSION=doubt-test
@@ -54,11 +55,13 @@ last=${real##* }
 wrong="${real% *} $(printf '%x' $((0x$last + 8)))"
 echo "real path: $real   wrong path: $wrong"
 write_profile() {
-    { echo "entry gems"; echo "type f64"; echo "run 1"; for p in "$@"; do echo "candidate $p"; done; } > "$profile"
+    kind=$1
+    shift
+    { echo "entry gems"; echo "type f64"; echo "run 1"; for p in "$@"; do echo "$kind $p"; done; } > "$profile"
 }
 
 echo "--- paths disagree (1 real, 2 wrong)"
-write_profile "$real" "$wrong" "$wrong"
+write_profile path "$real" "$wrong" "$wrong"
 "$live" restore
 "$live" values | tee "$game_dir/values"
 grep -q "not written" "$game_dir/values" || fail "values doesn't say it won't write"
@@ -74,7 +77,7 @@ tail -n1 "$log" | grep -q "ore=95\b" && fail "the limit wrote ore"
 "$live" limit gems off >/dev/null
 
 echo "--- paths agree (3 real)"
-write_profile "$real" "$real" "$real"
+write_profile path "$real" "$real" "$real"
 "$live" restore
 "$live" set gems 90 | tee "$game_dir/set"
 grep -q "^error" "$game_dir/set" && fail "set refused"
@@ -84,4 +87,13 @@ tail -n1 "$log" | grep -q "gems=90" || fail "gems not 90"
 game "gems 20"
 game "show"
 tail -n1 "$log" | grep -q "gems=95" || fail "limit didn't hold gems at 95"
+"$live" limit gems off >/dev/null
+
+echo "--- unconfirmed candidates of an earlier run (3 real): guesses, not written"
+write_profile candidate "$real" "$real" "$real"
+"$live" restore
+"$live" set gems 90 | tee "$game_dir/set"
+grep -q "^error: not written: its pointer paths are guesses" "$game_dir/set" || fail "set wrote through guesses"
+"$live" limit gems 50 | tee "$game_dir/limit" || true
+grep -q "aren't confirmed yet" "$game_dir/limit" || fail "limit set on guesses"
 echo "PASS"

@@ -416,16 +416,28 @@ impl Entry {
         all.iter().filter(|e| e.name != self.name).flat_map(|e| &e.paths).collect()
     }
 
+    /// Candidates that start like other values' confirmed paths.
+    fn likely<'a>(&'a self, all: &[Entry]) -> Vec<&'a String> {
+        let known = self.known(all);
+        self.candidates.iter().filter(|p| shared_start(p, &known) >= SHARED_START).collect()
+    }
+
     /// The pointer paths to follow, as the helper takes them: the confirmed ones, else the
     /// candidates that start like other values' confirmed paths, else all candidates.
     fn followed(&self, all: &[Entry]) -> Vec<String> {
         if !self.paths.is_empty() {
             return self.paths.iter().map(|p| path_arg(p)).collect();
         }
-        let known = self.known(all);
-        let likely: Vec<&String> = self.candidates.iter().filter(|p| shared_start(p, &known) >= SHARED_START).collect();
+        let likely = self.likely(all);
         let paths = if likely.is_empty() { self.candidates.iter().collect() } else { likely };
         paths.into_iter().map(|p| path_arg(p)).collect()
+    }
+
+    /// Followed through any of its thousands of unconfirmed paths in a later run than the one
+    /// it was saved in: several of them agreeing proves nothing (Valheim: 6 of 2998 led to an
+    /// unrelated 21, and a write went there).
+    fn guessed(&self, all: &[Entry], pid: u32) -> bool {
+        self.unconfirmed() && self.run != Some(pid) && self.likely(all).is_empty()
     }
 
     /// Saved by a newer build with a value type this one doesn't know: reading or writing it
@@ -865,11 +877,15 @@ impl Core {
         }
     }
 
-    /// The latest vote of a value found through pointer paths, when it wasn't clear.
-    fn doubtful(&self, name: &str) -> Option<Votes> {
+    /// Why a value found through pointer paths isn't written now: its paths are unconfirmed
+    /// guesses, or they didn't agree clearly when last followed.
+    fn doubtful(&self, name: &str, saved: &[Entry]) -> Option<String> {
         let game = self.game.as_ref()?;
         game.paths.iter().any(|(n, _)| n == name).then_some(())?;
-        game.votes.iter().find(|(n, _)| n == name).map(|(_, v)| *v).filter(|v| !v.clear)
+        if saved.iter().any(|e| e.name == name && e.guessed(saved, game.pid)) {
+            return Some("its pointer paths are guesses until a later run of the game confirms them".into());
+        }
+        game.votes.iter().find(|(n, _)| n == name).map(|(_, v)| *v).filter(|v| !v.clear).map(|v| v.doubt())
     }
 
     /// Follows the pointer paths of values found through them again: the game may have moved them.
@@ -894,9 +910,16 @@ impl Core {
         let limit = entry.limit.as_deref().unwrap_or("- -");
         let game = self.game()?;
         let (_, loc) = *game.entries.iter().find(|(n, _)| *n == entry.name).ok_or("value not found in this run")?;
-        let followed = entry.followed(&read_profile(&game.exe));
+        let saved = read_profile(&game.exe);
+        let followed = entry.followed(&saved);
         if entry.sites.is_empty() && followed.is_empty() {
             return Err("no saved code pattern or pointer path".into());
+        }
+        if entry.limit.is_some() && entry.sites.is_empty() && entry.guessed(&saved, game.pid) {
+            return Err(format!(
+                "its pointer paths aren't confirmed yet: find it again and save it as {}, that confirms the right path",
+                entry.name
+            ));
         }
         let via = game.via.iter().filter(|(n, _)| *n == entry.name).map(|(_, p)| p.clone());
         let sites: Vec<String> = entry
@@ -985,7 +1008,7 @@ impl Core {
 
     /// Finds every saved value of this game again, and re-applies saved limits.
     pub fn restore(&mut self) -> Result<(), String> {
-        let exe = self.game()?.exe.clone();
+        let (exe, pid) = (self.game()?.exe.clone(), self.game()?.pid);
         let entries = read_profile(&exe);
         if entries.is_empty() {
             return Err(format!("nothing saved for {exe}"));
@@ -1030,6 +1053,9 @@ impl Core {
                                 self.say(&format!("{name}: following the {} unconfirmed paths that start like other values' confirmed ones", paths.len()));
                             }
                             self.say(&format!("{name}: its pointer paths aren't confirmed yet; if the number is wrong, find it again and save it as {name}"));
+                            if entry.guessed(&entries, pid) {
+                                self.say(&format!("{name}: Ferret won't write it until a path is confirmed"));
+                            }
                         }
                         resolved = Some((loc, v));
                     }
@@ -1097,7 +1123,7 @@ impl Core {
                     .find(|(n, _, _)| *n == name)
                     .and_then(|(_, _, rest)| rest.split_once(" fixed ").map(|(_, s)| format!("fixed {s}")));
                 let unconfirmed = saved.iter().any(|e| e.name == name && e.unconfirmed());
-                let doubtful = self.doubtful(&name).map(|v| v.doubt());
+                let doubtful = self.doubtful(&name, &saved);
                 ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, decimals, limit_state, unconfirmed, doubtful }
             })
             .collect())
@@ -1108,7 +1134,8 @@ impl Core {
         let name = one_word(name);
         let name = name.as_str();
         let exe = self.game()?.exe.clone();
-        let value = match read_profile(&exe).iter().find(|e| e.name == name) {
+        let saved = read_profile(&exe);
+        let value = match saved.iter().find(|e| e.name == name) {
             Some(entry) => entry.to_memory(value)?,
             None => value,
         };
@@ -1123,10 +1150,9 @@ impl Core {
         if loc.addr == 0 {
             return Err(format!("{name} can't be found right now (is a save loaded?)"));
         }
-        if let Some(v) = self.doubtful(name) {
+        if let Some(why) = self.doubtful(name, &saved) {
             return Err(format!(
-                "not written: {}, so it could land in the wrong place. If the number shown is wrong, find it again and save it as {name}",
-                v.doubt()
+                "not written: {why}, so it could land in the wrong place. Find it again and save it as {name}: that confirms the right path"
             ));
         }
         let reply = self.helper.call(&format!("write {loc} {value}"));
