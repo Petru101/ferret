@@ -112,6 +112,11 @@ impl ValuesView {
             }
             let w = &rows[&v.name];
             let mut about = format!("At 0x{:x}, {}", v.addr, v.kind.describe());
+            match v.decimals {
+                Some(1) => about.push_str(", shown with one decimal"),
+                Some(d) if d > 1 => about.push_str(&format!(", shown with {d} decimals")),
+                _ => {}
+            }
             if v.unconfirmed {
                 about.push_str(". Not confirmed yet: if this number is wrong after restarting the game, find it again and save it under the same name");
             }
@@ -119,7 +124,7 @@ impl ValuesView {
                 about.push_str(&format!(". Not written right now: {d}"));
             }
             w.group.set_description(Some(&about));
-            w.value.set_label(&v.value.map_or("?".into(), |n| n.to_string()));
+            w.value.set_label(&v.value.map_or("?".into(), |n| core::number_text(n, v.decimals)));
             w.limit.set_subtitle(&limit_subtitle(v));
         }
     }
@@ -143,7 +148,7 @@ impl ValuesView {
         let entry = gtk::Entry::builder()
             .placeholder_text("New value")
             .width_chars(10)
-            .input_purpose(gtk::InputPurpose::Digits)
+            .input_purpose(if v.decimals == Some(0) { gtk::InputPurpose::Digits } else { gtk::InputPurpose::Number })
             .valign(gtk::Align::Center)
             .build();
         let set = gtk::Button::builder().label("Set").valign(gtk::Align::Center).build();
@@ -155,7 +160,7 @@ impl ValuesView {
         let apply_set = {
             let (worker, entry, name) = (self.worker.clone(), entry.clone(), name.clone());
             move || {
-                let Ok(n) = entry.text().trim().parse::<i64>() else { return };
+                let Some(n) = core::parse_number(&entry.text()) else { return };
                 entry.set_text("");
                 let name = name.clone();
                 worker.run(move |core| Event::Done(core.set(&name, n).map(|_| format!("{name} set to {n}"))));
@@ -173,13 +178,19 @@ impl ValuesView {
             .enable_expansion(v.min.is_some() || v.max.is_some())
             .expanded(false)
             .build();
-        let max = adw::SpinRow::with_range(0.0, i32::MAX as f64, 1.0);
+        // Floats get 2 decimals; whole numbers shown with decimals step by their last digit.
+        let digits = v.decimals.unwrap_or(2);
+        let step = v.decimals.map_or(1.0, |d| 10f64.powi(-(d as i32)));
+        let top = i32::MAX as f64 * step;
+        let max = adw::SpinRow::with_range(0.0, top, step);
+        max.set_digits(digits);
         max.set_title("At Most");
-        max.set_value(v.max.or(v.value).unwrap_or(0) as f64);
-        let min = adw::SpinRow::with_range(0.0, i32::MAX as f64, 1.0);
+        max.set_value(v.max.or(v.value).unwrap_or(0.0));
+        let min = adw::SpinRow::with_range(0.0, top, step);
+        min.set_digits(digits);
         min.set_title("At Least");
         min.set_subtitle("0 means no minimum");
-        min.set_value(v.min.unwrap_or(0) as f64);
+        min.set_value(v.min.unwrap_or(0.0));
         limit.add_row(&max);
         limit.add_row(&min);
         group.add(&limit);
@@ -188,9 +199,14 @@ impl ValuesView {
         let apply_limit = {
             let (worker, limit, max, min, name) = (self.worker.clone(), limit.clone(), max.clone(), min.clone(), name);
             move || {
+                // What the field shows, without float noise past its digits.
+                let shown = |s: &adw::SpinRow| {
+                    let f = 10f64.powi(s.digits() as i32);
+                    (s.value() * f).round() / f
+                };
                 let (min_v, max_v) = if limit.enables_expansion() {
-                    let m = min.value() as i64;
-                    ((m > 0).then_some(m), Some(max.value() as i64))
+                    let m = shown(&min);
+                    ((m > 0.0).then_some(m), Some(shown(&max)))
                 } else {
                     (None, None)
                 };

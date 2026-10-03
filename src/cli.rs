@@ -9,10 +9,10 @@ use crate::ocr::Rect;
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, reset, probe
 restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, remove <name>";
 
-fn bound(v: &str) -> Result<Option<i64>, String> {
+fn bound(v: &str) -> Result<Option<f64>, String> {
     match v {
         "-" => Ok(None),
-        v => v.parse().map(Some).map_err(|_| format!("not a number: {v}")),
+        v => core::parse_number(v).map(Some).ok_or(format!("not a number: {v}")),
     }
 }
 
@@ -83,7 +83,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                     .limit_state
                     .map(|s| format!("  kept {}, {s}", core::limit_text(v.min, v.max)))
                     .unwrap_or_default();
-                let value = v.value.map_or("??".into(), |v| v.to_string());
+                let value = v.value.map_or("??".into(), |n| core::number_text(n, v.decimals));
                 let doubt = v.doubtful.map(|d| format!("  not written: {d}")).unwrap_or_default();
                 println!("{:<12} {value} (at 0x{:x}, {}){limit}{doubt}", v.name, v.addr, v.kind.describe());
             }
@@ -99,10 +99,10 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             };
             core.limit(f.first().ok_or(usage)?, min, max)?;
         }
-        "set" if arg.split_whitespace().next().is_some_and(|n| n.parse::<i64>().is_err()) => {
+        "set" if arg.split_whitespace().next().is_some_and(|n| n.parse::<f64>().is_err()) => {
             let mut it = arg.split_whitespace();
             let name = it.next().unwrap_or_default();
-            let value = it.next().and_then(|v| v.parse().ok()).ok_or("usage: set <name> <n>")?;
+            let value = it.next().and_then(core::parse_number).ok_or("usage: set <name> <n>")?;
             core.set(name, value)?;
         }
         _ => {

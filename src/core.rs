@@ -175,6 +175,11 @@ impl Kind {
         format!("{} {d}", if d.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" })
     }
 
+    /// Whole numbers in memory (a game may still show them with decimals: 12 as "1.2").
+    pub fn whole(self) -> bool {
+        matches!(self, Kind::I32 | Kind::Xor)
+    }
+
     pub fn describe(self) -> &'static str {
         match self {
             Kind::I32 => "whole number",
@@ -203,17 +208,47 @@ fn parse_loc(a: &str) -> Option<Loc> {
     Some(Loc { addr: u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok()?, kind: kind? })
 }
 
-/// Parses helper lines of the form "0x00003795366c:f32 = 96.5". Values are shown as whole
-/// numbers, cut off the way games usually display them.
-fn parse_values(lines: &[String]) -> Vec<(Loc, Option<i64>)> {
+/// Parses helper lines of the form "0x00003795366c:f32 = 96.5".
+fn parse_exact_values(lines: &[String]) -> Vec<(Loc, Option<f64>)> {
     lines
         .iter()
         .filter_map(|l| {
             let (a, v) = l.split_once(" = ")?;
-            let v = v.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (v + 1e-6).floor() as i64);
-            Some((parse_loc(a)?, v))
+            Some((parse_loc(a)?, v.trim().parse::<f64>().ok().filter(|v| v.is_finite())))
         })
         .collect()
+}
+
+/// The same, with values as whole numbers, cut off the way games usually display them.
+fn parse_values(lines: &[String]) -> Vec<(Loc, Option<i64>)> {
+    parse_exact_values(lines).into_iter().map(|(loc, v)| (loc, v.map(|v| (v + 1e-6).floor() as i64))).collect()
+}
+
+/// A number the player typed: "1.5", "-3", "1,250" (thousands), "1,5" (a decimal comma).
+pub fn parse_number(text: &str) -> Option<f64> {
+    let t = text.trim().replace([' ', '_'], "");
+    let groups: Vec<&str> = t.split(',').collect();
+    let t = if t.contains('.') || groups[1..].iter().all(|g| g.len() == 3) {
+        t.replace(',', "")
+    } else if groups.len() == 2 {
+        t.replace(',', ".")
+    } else {
+        return None;
+    };
+    t.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// A value as Ferret shows it: `decimals` for whole numbers the game shows with decimals
+/// (none for plain ones), and floats (`None`) with up to 3 decimals ("96.5", "100").
+pub fn number_text(v: f64, decimals: Option<u32>) -> String {
+    match decimals {
+        Some(d) => format!("{v:.*}", d as usize),
+        None => {
+            let s = format!("{v:.3}");
+            let s = s.trim_end_matches('0').trim_end_matches('.');
+            if s == "-0" { "0" } else { s }.to_owned()
+        }
+    }
 }
 
 fn first_error(reply: &[String]) -> Option<String> {
@@ -247,8 +282,11 @@ struct Entry {
     candidates: Vec<String>,
     /// The game process the candidates were found in.
     run: Option<u32>,
-    /// "<min|-> <max|->" when the value is kept within a range.
+    /// "<min|-> <max|->" when the value is kept within a range, as the game keeps it (12 for a
+    /// "1.2" kept in tenths).
     limit: Option<String>,
+    /// How many decimals the game shows a whole number with: 1 = kept in tenths ("1.2" is 12).
+    decimals: u32,
     /// Lines this build doesn't understand (from a newer one), saved back unchanged.
     other: Vec<String>,
 }
@@ -261,7 +299,8 @@ pub fn one_word(name: &str) -> String {
 
 /// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
 /// missing), its "site ...", "path ..." and "candidate ..." lines, "run <pid>" (where the
-/// candidates came from) and an optional "limit <min|-> <max|->" line. Other lines are kept
+/// candidates came from), an optional "limit <min|-> <max|->" line and "decimals <n>" for a
+/// whole number shown with decimals. Other lines are kept
 /// with their entry, so a build older than the profile doesn't drop what it doesn't know.
 fn read_profile(exe: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
@@ -278,6 +317,7 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 candidates: Vec::new(),
                 run: None,
                 limit: None,
+                decimals: 0,
                 other: Vec::new(),
             });
         } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
@@ -292,6 +332,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.run = pid.trim().parse().ok();
         } else if let (Some(limit), Some(e)) = (line.strip_prefix("limit "), entries.last_mut()) {
             e.limit = Some(limit.trim().to_owned());
+        } else if let (Some(d), Some(e)) = (line.strip_prefix("decimals ").and_then(|d| d.trim().parse().ok()), entries.last_mut()) {
+            e.decimals = d;
         } else if let (false, Some(e)) = (line.trim().is_empty(), entries.last_mut()) {
             e.other.push(line.to_owned());
         }
@@ -322,6 +364,9 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         if let Some(l) = &e.limit {
             text.push_str(&format!("limit {l}\n"));
+        }
+        if e.decimals > 0 {
+            text.push_str(&format!("decimals {}\n", e.decimals));
         }
         for l in &e.other {
             text.push_str(&format!("{l}\n"));
@@ -369,19 +414,50 @@ impl Entry {
     fn unconfirmed(&self) -> bool {
         self.paths.is_empty() && !self.candidates.is_empty()
     }
+
+    /// What the game keeps per shown unit: 10 for a value shown as "1.2" and kept as 12.
+    fn scale(&self) -> f64 {
+        if self.kind.whole() { 10f64.powi(self.decimals as i32) } else { 1.0 }
+    }
+
+    /// Decimals the value is shown with; `None` for floats (any).
+    fn shown_decimals(&self) -> Option<u32> {
+        self.kind.whole().then_some(self.decimals)
+    }
+
+    /// A number as the player sees it, in the game's units; refuses decimals it can't keep.
+    fn to_memory(&self, v: f64) -> Result<f64, String> {
+        let m = v * self.scale();
+        if self.kind.whole() && (m - m.round()).abs() > 1e-6 {
+            return Err(match self.decimals {
+                0 => format!("{} only takes whole numbers", self.name),
+                1 => format!("{} takes one decimal at most", self.name),
+                d => format!("{} takes {d} decimals at most", self.name),
+            });
+        }
+        Ok(if self.kind.whole() { m.round() } else { m })
+    }
+
+    /// The saved range as the player sees it.
+    fn shown_range(&self) -> (Option<f64>, Option<f64>) {
+        let (min, max) = self.limit.as_deref().map_or((None, None), parse_range);
+        (min.map(|v| v / self.scale()), max.map(|v| v / self.scale()))
+    }
 }
 
-fn parse_range(limit: &str) -> (Option<i64>, Option<i64>) {
-    let mut f = limit.split_whitespace().map(|v| v.parse().ok());
+fn parse_range(limit: &str) -> (Option<f64>, Option<f64>) {
+    let mut f = limit.split_whitespace().map(|v| v.parse().ok().filter(|v: &f64| v.is_finite()));
     (f.next().flatten(), f.next().flatten())
 }
 
-fn range_text(min: Option<i64>, max: Option<i64>) -> String {
-    let show = |b: Option<i64>| b.map_or("-".to_owned(), |b| b.to_string());
+fn range_text(min: Option<f64>, max: Option<f64>) -> String {
+    // Rounded so float noise (1.2000000000000002) doesn't end up in the profile.
+    let show = |b: Option<f64>| b.map_or("-".to_owned(), |b| ((b * 1e6).round() / 1e6).to_string());
     format!("{} {}", show(min), show(max))
 }
 
-pub fn limit_text(min: Option<i64>, max: Option<i64>) -> String {
+pub fn limit_text(min: Option<f64>, max: Option<f64>) -> String {
+    let (min, max) = (min.map(|v| number_text(v, None)), max.map(|v| number_text(v, None)));
     match (min, max) {
         (None, Some(max)) => format!("at most {max}"),
         (Some(min), None) => format!("at least {min}"),
@@ -403,9 +479,12 @@ pub struct ValueRow {
     pub name: String,
     pub addr: u64,
     pub kind: Kind,
-    pub value: Option<i64>,
-    pub min: Option<i64>,
-    pub max: Option<i64>,
+    /// The value, min and max as the game shows them (1.2 for a value kept as 12).
+    pub value: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    /// Decimals the game shows it with (0 = whole number); `None` for floats.
+    pub decimals: Option<u32>,
     /// "fixed N times, restored M times, active" while a limit is enforced.
     pub limit_state: Option<String>,
     /// Found through pointer paths no other run of the game has confirmed yet.
@@ -488,6 +567,9 @@ pub struct Core {
     /// left, and how many typed numbers in a row left the count unchanged. None = the next
     /// number starts a new scan.
     search: Option<(usize, usize)>,
+    /// Decimals of the number the search last went by: a whole number found from "1.2" is
+    /// kept in tenths, and saved that way.
+    searched_decimals: u32,
     log: Box<dyn FnMut(&str) + Send>,
     /// Set to stop a running `auto`.
     pub cancel: Arc<AtomicBool>,
@@ -512,6 +594,7 @@ impl Core {
             game: None,
             font: Font::default(),
             search: None,
+            searched_decimals: 0,
             log,
             cancel: Arc::new(AtomicBool::new(false)),
             ignored: None,
@@ -582,8 +665,12 @@ impl Core {
     // --- Saved values
 
     fn peek(&mut self, addrs: &[Loc]) -> Vec<Option<i64>> {
+        self.peek_exact(addrs).into_iter().map(|v| v.map(|v| (v + 1e-6).floor() as i64)).collect()
+    }
+
+    fn peek_exact(&mut self, addrs: &[Loc]) -> Vec<Option<f64>> {
         let arg: Vec<String> = addrs.iter().map(|a| a.to_string()).collect();
-        let values = parse_values(&self.helper.call(&format!("peek {}", arg.join(" "))));
+        let values = parse_exact_values(&self.helper.call(&format!("peek {}", arg.join(" "))));
         addrs
             .iter()
             .map(|a| values.iter().find(|(b, _)| b == a).and_then(|(_, v)| *v))
@@ -643,10 +730,11 @@ impl Core {
                 candidates.len()
             )
         };
+        let decimals = if loc.kind.whole() { self.searched_decimals } else { 0 };
         let game = self.game()?;
         let mut entries = read_profile(&game.exe);
         entries.retain(|e| e.name != name);
-        let mut entry = Entry { name: name.to_owned(), kind: loc.kind, sites, paths, candidates, run: Some(pid), limit: None, other: Vec::new() };
+        let mut entry = Entry { name: name.to_owned(), kind: loc.kind, sites, paths, candidates, run: Some(pid), limit: None, decimals, other: Vec::new() };
         let known = entry.known(&entries);
         entry.candidates.sort_by_key(|p| std::cmp::Reverse(shared_start(p, &known)));
         let likely = entry.followed(&entries).len();
@@ -834,14 +922,16 @@ impl Core {
         Ok(())
     }
 
-    /// Keeps a saved value within a range; `None` on both sides turns the limit off.
-    pub fn limit(&mut self, name: &str, min: Option<i64>, max: Option<i64>) -> Result<(), String> {
+    /// Keeps a saved value within a range (as the game shows it); `None` on both sides turns
+    /// the limit off.
+    pub fn limit(&mut self, name: &str, min: Option<f64>, max: Option<f64>) -> Result<(), String> {
         let name = one_word(name);
         let name = name.as_str();
         let exe = self.game()?.exe.clone();
         let mut entries = read_profile(&exe);
         let i = entries.iter().position(|e| e.name == name).ok_or(format!("no saved value called {name}"))?;
-        entries[i].limit = (min.is_some() || max.is_some()).then(|| range_text(min, max));
+        let (lo, hi) = (min.map(|v| entries[i].to_memory(v)).transpose()?, max.map(|v| entries[i].to_memory(v)).transpose()?);
+        entries[i].limit = (lo.is_some() || hi.is_some()).then(|| range_text(lo, hi));
         if entries[i].limit.is_some() {
             self.apply_limit(&entries[i])?;
             self.say(&format!("{name} is kept {} (written only when the game goes past it)", limit_text(min, max)));
@@ -926,8 +1016,8 @@ impl Core {
                     let game = self.game()?;
                     game.entries.retain(|(n, _)| n != name);
                     game.entries.push((name.clone(), loc));
-                    if let Some(l) = &entry.limit {
-                        let (min, max) = parse_range(l);
+                    if entry.limit.is_some() {
+                        let (min, max) = entry.shown_range();
                         match self.apply_limit(entry) {
                             Ok(()) => self.say(&format!("{name} is kept {}", limit_text(min, max))),
                             Err(e) => self.say(&format!("{name}: limit not applied: {e}")),
@@ -953,18 +1043,17 @@ impl Core {
         self.sync_addresses();
         let entries: Vec<(String, Loc)> = self.game()?.entries.clone();
         let addrs: Vec<Loc> = entries.iter().map(|(_, a)| *a).collect();
-        let values = self.peek(&addrs);
+        let values = self.peek_exact(&addrs);
         let limits = self.limits();
         let saved = read_profile(&exe);
         Ok(entries
             .into_iter()
             .zip(values)
             .map(|((name, loc), value)| {
-                let (min, max) = saved
-                    .iter()
-                    .find(|e| e.name == name)
-                    .and_then(|e| e.limit.as_deref())
-                    .map_or((None, None), parse_range);
+                let entry = saved.iter().find(|e| e.name == name);
+                let (min, max) = entry.map_or((None, None), Entry::shown_range);
+                let value = value.map(|v| v / entry.map_or(1.0, Entry::scale));
+                let decimals = entry.map_or(loc.kind.whole().then_some(0), Entry::shown_decimals);
                 let limit_state = limits
                     .iter()
                     .filter(|_| min.is_some() || max.is_some())
@@ -972,14 +1061,20 @@ impl Core {
                     .and_then(|(_, _, rest)| rest.split_once(" fixed ").map(|(_, s)| format!("fixed {s}")));
                 let unconfirmed = saved.iter().any(|e| e.name == name && e.unconfirmed());
                 let doubtful = self.doubtful(&name).map(|v| v.doubt());
-                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, limit_state, unconfirmed, doubtful }
+                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, decimals, limit_state, unconfirmed, doubtful }
             })
             .collect())
     }
 
-    pub fn set(&mut self, name: &str, value: i64) -> Result<(), String> {
+    /// Writes a saved value, as the game shows it ("1.5").
+    pub fn set(&mut self, name: &str, value: f64) -> Result<(), String> {
         let name = one_word(name);
         let name = name.as_str();
+        let exe = self.game()?.exe.clone();
+        let value = match read_profile(&exe).iter().find(|e| e.name == name) {
+            Some(entry) => entry.to_memory(value)?,
+            None => value,
+        };
         self.refresh_paths();
         self.sync_addresses();
         let (_, loc) = *self
@@ -1363,6 +1458,7 @@ impl Core {
                 break;
             }
         }
+        self.searched_decimals = last.decimals();
         if cancelled(&self.cancel) {
             self.say("stopped");
         } else if count > 1 && start.elapsed() >= limit {
@@ -1418,6 +1514,7 @@ impl Core {
     }
 
     fn typed_search(&mut self, n: Shown) -> Result<AutoResult, String> {
+        self.searched_decimals = n.decimals();
         let (count, unchanged) = match self.search {
             Some((before, unchanged)) => {
                 let reply = self.helper.call(&format!("next {}", n.search()));
@@ -1472,5 +1569,58 @@ impl Core {
             }
             None => Ok(AutoResult::Several(count)),
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(kind: Kind, decimals: u32) -> Entry {
+        Entry {
+            name: "gems".into(),
+            kind,
+            sites: Vec::new(),
+            paths: Vec::new(),
+            candidates: Vec::new(),
+            run: None,
+            limit: None,
+            decimals,
+            other: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn typed_numbers() {
+        assert_eq!(parse_number("1.5"), Some(1.5));
+        assert_eq!(parse_number(" -3 "), Some(-3.0));
+        assert_eq!(parse_number("1,250"), Some(1250.0));
+        assert_eq!(parse_number("1,250,000.5"), Some(1250000.5));
+        assert_eq!(parse_number("1,5"), Some(1.5));
+        assert_eq!(parse_number("1,2,3"), None);
+        assert_eq!(parse_number("abc"), None);
+    }
+
+    #[test]
+    fn shown_numbers() {
+        assert_eq!(number_text(96.5, None), "96.5");
+        assert_eq!(number_text(100.0, None), "100");
+        assert_eq!(number_text(0.1f32 as f64, None), "0.1");
+        assert_eq!(number_text(-0.0001, None), "0");
+        assert_eq!(number_text(1.2, Some(1)), "1.2");
+        assert_eq!(number_text(40.0, Some(0)), "40");
+    }
+
+    #[test]
+    fn game_units() {
+        let tenths = entry(Kind::I32, 1);
+        assert_eq!(tenths.to_memory(1.5), Ok(15.0));
+        assert!(tenths.to_memory(1.25).is_err());
+        assert!(entry(Kind::Xor, 0).to_memory(1.5).is_err());
+        assert_eq!(entry(Kind::F32, 0).to_memory(1.25), Ok(1.25));
+        let mut limited = entry(Kind::I32, 1);
+        limited.limit = Some(range_text(Some(15.0), None));
+        assert_eq!(limited.limit.as_deref(), Some("15 -"));
+        assert_eq!(limited.shown_range(), (Some(1.5), None));
+        assert_eq!(range_text(Some(1.2000000000000002), Some(3.0)), "1.2 3");
     }
 }
