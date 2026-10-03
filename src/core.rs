@@ -727,6 +727,19 @@ impl Core {
             .collect()
     }
 
+    /// Lets go of the attached game when it quit; returns the program name it ran under.
+    pub fn check_game(&mut self) -> Option<String> {
+        self.game.as_ref()?;
+        if self.helper.call("alive").first().map(String::as_str) != Some("alive no") {
+            return None;
+        }
+        let exe = self.game.take()?.exe;
+        self.search = None;
+        self.capture = None;
+        self.say(&format!("{exe} quit"));
+        Some(exe)
+    }
+
     /// Attaches and, when the game has a profile, finds its saved values again.
     pub fn attach(&mut self, pid: u32) -> Result<String, String> {
         let reply = self.helper.call(&format!("attach {pid}"));

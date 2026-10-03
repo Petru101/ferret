@@ -50,6 +50,8 @@ pub enum Event {
     Matches(Result<Vec<(crate::core::Loc, String)>, String>),
     /// The player picked one of them as the value.
     Chosen(Result<crate::core::Loc, String>),
+    /// The attached game quit (its program name).
+    Quit(String),
     /// A frame the watched number was just read from, and the watched area: shown while
     /// searching (at most one a second).
     Frame(gtk::gdk::Texture, Option<crate::ocr::Rect>),
@@ -131,6 +133,10 @@ struct Ui {
     worker: Worker,
     /// The game Ferret is attached to.
     attached: Rc<Cell<Option<u32>>>,
+    /// The program of a game that quit: attached to again when it starts.
+    waiting_for: Rc<RefCell<Option<String>>>,
+    /// The names games go by (Steam's), by program, from the games list.
+    game_names: RefCell<std::collections::HashMap<String, String>>,
 }
 
 impl Ui {
@@ -167,6 +173,19 @@ impl Ui {
     }
 
     fn show_games(&self, games: Vec<GameProcess>) {
+        for g in &games {
+            if let Some(name) = &g.name {
+                self.game_names.borrow_mut().insert(g.exe.clone(), name.clone());
+            }
+        }
+        // The game that quit is back: open it again (its saved values come back with it).
+        let waiting = self.waiting_for.borrow().clone();
+        if let Some(g) = waiting.and_then(|exe| games.iter().find(|g| g.exe == exe && g.anti_cheat.is_none() && !g.online_only)) {
+            self.waiting_for.replace(None);
+            self.toast(&format!("{} started again: opening it", g.name.as_deref().unwrap_or(&g.exe)));
+            let pid = g.pid;
+            self.worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
+        }
         let shown: String = games.iter().map(|g| format!("{}:{};", g.pid, g.exe)).collect();
         self.games_stack.set_visible_child_name(if games.is_empty() { "empty" } else { "list" });
         if *self.games_shown.borrow() == shown {
@@ -204,10 +223,17 @@ impl Ui {
             } else {
                 row.set_activatable(true);
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                let (worker, find, nav, page, attached) =
-                    (self.worker.clone(), self.find.clone(), self.nav.clone(), self.game_page.clone(), self.attached.clone());
+                let (worker, find, nav, page, attached, waiting_for) = (
+                    self.worker.clone(),
+                    self.find.clone(),
+                    self.nav.clone(),
+                    self.game_page.clone(),
+                    self.attached.clone(),
+                    self.waiting_for.clone(),
+                );
                 let pid = g.pid;
                 row.connect_activated(move |_| {
+                    waiting_for.replace(None);
                     // Back to the same game: everything (a search in progress too) is still there.
                     if attached.get() == Some(pid) {
                         nav.push(&page);
@@ -238,6 +264,7 @@ impl Ui {
             }
             Event::Games(games) => self.show_games(games),
             Event::Attached(Ok((pid, exe))) => {
+                self.waiting_for.replace(None);
                 if self.attached.replace(Some(pid)) != Some(pid) {
                     self.find.new_game();
                 }
@@ -246,6 +273,16 @@ impl Ui {
                     self.nav.push(&self.game_page);
                 }
                 self.worker.run(|core| Event::Values(core.values()));
+            }
+            Event::Quit(exe) => {
+                self.attached.set(None);
+                self.find.stop();
+                if self.on_game_page() {
+                    self.nav.pop();
+                }
+                let name = self.game_names.borrow().get(&exe).cloned().unwrap_or_else(|| exe.clone());
+                self.toast(&format!("{name} closed. Ferret opens it again when it starts."));
+                self.waiting_for.replace(Some(exe));
             }
             Event::Values(Ok(values)) => self.values.update(values),
             Event::Values(Err(_)) => {}
@@ -510,6 +547,8 @@ fn build(app: &adw::Application) {
         tips,
         worker,
         attached: Rc::default(),
+        waiting_for: Rc::default(),
+        game_names: RefCell::default(),
     });
 
     {
@@ -529,11 +568,12 @@ fn build(app: &adw::Application) {
         let ui = ui.clone();
         glib::timeout_add_seconds_local(1, move || {
             if ui.worker.idle() {
-                if ui.on_game_page() && ui.attached.get().is_some() {
-                    ui.worker.run(|core| Event::Values(core.values()));
-                } else if !ui.on_game_page() {
-                    ui.worker.run(|core| Event::Games(core.games()));
-                }
+                let values = ui.on_game_page() && ui.attached.get().is_some();
+                ui.worker.run(move |core| match core.check_game() {
+                    Some(exe) => Event::Quit(exe),
+                    None if values => Event::Values(core.values()),
+                    None => Event::Games(core.games()),
+                });
             }
             glib::ControlFlow::Continue
         });
