@@ -564,7 +564,7 @@ fn cmd_ps(out: &mut impl Write, filter: &str) -> io::Result<()> {
         let cmd = cmdline(pid);
         let env = environ(pid);
         let app_id = env.get("SteamAppId").or_else(|| env.get("SteamGameId"));
-        let is_game = app_id.is_some() || cmd.to_ascii_lowercase().contains(".exe");
+        let is_game = app_id.is_some() || cmd.to_ascii_lowercase().contains(".exe") || draws_like_a_game(pid);
         let shown = if filter.is_empty() { is_game } else { cmd.to_ascii_lowercase().contains(&filter) };
         if !shown {
             continue;
@@ -592,7 +592,30 @@ const NOT_GAMES: &[&str] = &[
     "steamwebhelper.exe", "mscorsvw.exe", "ngen.exe", "reaper", "pressure-vessel-wrap", "pv-adverb", "python3",
     "srt-bwrap", "bwrap", "steam-runtime-launcher-service", "x86_64-linux-gnu-srt-launch", "wineserver", "sh",
     "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep", "umu.exe", "xalia.exe",
+    "xwayland", "gamescope", "gamescope-wl", "gpu-screen-recorder", "mpv", "ffplay",
 ];
+
+/// Native games outside Steam: a GPU driver is loaded (the program draws with OpenGL or Vulkan;
+/// the plain libGL/libEGL/libvulkan front ends also load in programs that never draw) and it
+/// isn't a desktop app (GTK, Qt, Chromium/Electron).
+fn draws_like_a_game(pid: u32) -> bool {
+    if cmdline(pid).contains(" --type=") {
+        return false;
+    }
+    let Ok(regions) = maps(pid) else { return false };
+    let mut driver = false;
+    for r in &regions {
+        let name = r.path.rsplit('/').next().unwrap_or_default();
+        if ["libgtk-3.", "libgtk-4.", "libQt5Core.", "libQt6Core.", "libcef."].iter().any(|t| name.starts_with(t)) {
+            return false;
+        }
+        driver |= ["libGLX_", "libEGL_", "libvulkan_", "libnvidia-glcore.", "libnvidia-eglcore.", "libgallium", "amdvlk"]
+            .iter()
+            .any(|d| name.starts_with(d))
+            || name.ends_with("_dri.so");
+    }
+    driver
+}
 
 /// Running games, one per line: pid, program name, Steam app ID and anti-cheat
 /// (tab-separated, "-" when unknown).
@@ -613,7 +636,10 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
             .filter_map(|k| env.get(*k))
             .find(|id| *id != "0" && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
         let windows = lower.ends_with(".exe");
-        if !(windows || app_id.is_some()) || NOT_GAMES.contains(&lower.as_str()) || lower.contains("crashhandler") {
+        if NOT_GAMES.contains(&lower.as_str()) || lower.contains("crashhandler") {
+            continue;
+        }
+        if !(windows || app_id.is_some() || draws_like_a_game(pid)) {
             continue;
         }
         let dash = |s: Option<&str>| s.unwrap_or("-").to_owned();
