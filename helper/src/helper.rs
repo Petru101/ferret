@@ -1227,6 +1227,21 @@ fn cmd_shapes(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()
     writeln!(out, "{} shapes", s.shapes.len())
 }
 
+/// about <hex addr>...: "0x<addr> <what it is>" for each address Ferret can tell something
+/// about (an entry of a Godot dictionary: its key and ids).
+fn cmd_about(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    for (addr, _) in arg.split_whitespace().filter_map(parse_loc) {
+        if let Some(text) = godot::about(&heap, addr) {
+            writeln!(out, "0x{addr:x} {text}")?;
+        }
+    }
+    Ok(())
+}
+
 /// alive: whether the attached game still runs (the same program under the same pid).
 fn cmd_alive(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let alive = s.pid != 0 && exe_name(s.pid) == s.exe;
@@ -1695,6 +1710,7 @@ pub fn run() {
             "keep" => cmd_keep(&mut out, &mut session, arg),
             "drop" => cmd_drop(&mut out, &mut session, arg),
             "alive" => cmd_alive(&mut out, &session),
+            "about" => cmd_about(&mut out, &session, arg),
             "shape" => cmd_shape(&mut out, &session, arg),
             "shapes" => cmd_shapes(&mut out, &mut session, arg),
             "track" => cmd_track(&mut out, &mut session, arg),
@@ -1709,7 +1725,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, drop <addr>, alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

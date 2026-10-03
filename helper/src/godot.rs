@@ -253,10 +253,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(DictPath, Vec<u64>)> {
         p.with.iter_mut().filter(|(pk, _)| pk == k).for_each(|w| w.1 = *v);
         options.push(p);
     }
-    let identity = |p: &DictPath| {
-        let named_id = p.with.iter().any(|(k, v)| v.is_some() && ["id", "type", "kind", "name"].iter().any(|n| k.to_lowercase().contains(n)));
-        if named_id { 0 } else { 1 }
-    };
+    let identity = |p: &DictPath| if p.with.iter().any(|(k, v)| v.is_some() && identity_key(k)) { 0 } else { 1 };
     options
         .into_iter()
         .map(|p| {
@@ -266,6 +263,34 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(DictPath, Vec<u64>)> {
         .filter(|(_, leads)| leads.contains(&e) && leads.len() <= MAX_PLACES)
         .min_by_key(|(p, leads)| (leads.len(), identity(p), p.with.iter().filter(|w| w.1.is_some()).count()))
         .map(|(p, leads)| (p, values(&leads)))
+}
+
+/// What the value at `addr` is, when it is an entry of a dictionary: its key, and the ids of
+/// its dictionary (""amount" where "id" is 0"), for telling an inventory stack from a statistic
+/// among a search's matches.
+pub fn about(heap: &Heap, addr: u64) -> Option<String> {
+    let d = Dicts::new(heap);
+    let e = addr.checked_sub(VALUE)?;
+    if !d.element(e) {
+        return None;
+    }
+    let key = d.key(e)?;
+    let ids: Vec<String> = d
+        .siblings(e)
+        .into_iter()
+        .filter(|(k, v)| v.is_some() && identity_key(k))
+        .map(|(k, v)| format!("\"{k}\" is {}", v.unwrap_or_default()))
+        .collect();
+    Some(match ids.is_empty() {
+        true => format!("\"{key}\""),
+        false => format!("\"{key}\" where {}", ids.join(" and ")),
+    })
+}
+
+/// A key that says what an entry is (rather than where or how much).
+fn identity_key(k: &str) -> bool {
+    let k = k.to_lowercase();
+    ["id", "type", "kind", "name"].iter().any(|n| k.contains(n))
 }
 
 #[cfg(test)]

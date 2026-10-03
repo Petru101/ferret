@@ -832,14 +832,19 @@ impl FindView {
     }
 
     /// Lists the places still matching, each with Try (write a value) and Use This One.
-    pub fn show_matches(&self, list: Vec<(core::Loc, String)>) {
+    pub fn show_matches(&self, list: Vec<core::Match>) {
         while let Some(row) = self.matches_list.first_child() {
             self.matches_list.remove(&row);
         }
         self.matches.set_visible(!list.is_empty());
-        *self.listed.borrow_mut() = list.iter().map(|(l, _)| *l).collect();
-        for (loc, value) in list {
-            let row = adw::ActionRow::builder().title(&value).subtitle(format!("0x{:x}, {}", loc.addr, loc.kind.describe())).build();
+        *self.listed.borrow_mut() = list.iter().map(|m| m.loc).collect();
+        for core::Match { loc, value, about } in list {
+            // What a place is, when Ferret can tell: an inventory stack stands out from a statistic.
+            let mut subtitle = format!("0x{:x}, {}", loc.addr, loc.kind.describe());
+            if let Some(about) = about {
+                subtitle = format!("{about} · {subtitle}");
+            }
+            let row = adw::ActionRow::builder().title(&value).subtitle(subtitle).build();
             let entry = gtk::Entry::builder().placeholder_text("New value").width_chars(8).valign(gtk::Align::Center).build();
             let try_it = gtk::Button::builder().label("Try").valign(gtk::Align::Center).build();
             let pick = gtk::Button::builder().label("Use This One").valign(gtk::Align::Center).css_classes(["suggested-action"]).build();

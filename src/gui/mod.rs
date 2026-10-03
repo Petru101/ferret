@@ -47,7 +47,7 @@ pub enum Event {
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
     /// The places still matching, with their values (the player tries them out).
-    Matches(Result<Vec<(crate::core::Loc, String)>, String>),
+    Matches(Result<Vec<crate::core::Match>, String>),
     /// The player picked one of them as the value.
     Chosen(Result<crate::core::Loc, String>),
     /// The attached game quit (its program name).

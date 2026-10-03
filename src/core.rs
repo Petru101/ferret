@@ -147,6 +147,15 @@ fn match_count(reply: &[String]) -> Option<usize> {
     words.get(i.checked_sub(1)?)?.parse().ok()
 }
 
+/// One of the places still matching a search, as the matches list shows it.
+pub struct Match {
+    pub loc: Loc,
+    /// Its value as the game holds it.
+    pub value: String,
+    /// What it is, when Ferret can tell (an entry of a Godot dictionary: its key and ids).
+    pub about: Option<String>,
+}
+
 /// How the game stores a value.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
@@ -1486,21 +1495,31 @@ impl Core {
     }
 
     /// The places still matching (at most 20), with their values as the game holds them.
-    pub fn matches(&mut self) -> Vec<(Loc, String)> {
-        self.helper
+    pub fn matches(&mut self) -> Vec<Match> {
+        let mut list: Vec<Match> = self
+            .helper
             .call("list")
             .iter()
             .filter_map(|l| {
                 let (a, v) = l.split_once(" = ")?;
-                Some((parse_loc(a)?, v.trim().to_owned()))
+                Some(Match { loc: parse_loc(a)?, value: v.trim().to_owned(), about: None })
             })
-            .collect()
+            .collect();
+        let addrs: Vec<String> = list.iter().map(|m| format!("{:x}", m.loc.addr)).collect();
+        for l in self.helper.call(&format!("about {}", addrs.join(" "))) {
+            let Some((a, text)) = l.split_once(' ') else { continue };
+            let addr = a.strip_prefix("0x").and_then(|a| u64::from_str_radix(a, 16).ok());
+            for m in list.iter_mut().filter(|m| Some(m.loc.addr) == addr) {
+                m.about = Some(text.to_owned());
+            }
+        }
+        list
     }
 
     /// Writes `value` to one of the places still matching, so the player can see whether the
     /// game shows it (when Ferret couldn't tell from the screen); the places a second later
     /// (a copy the game keeps rewriting is back to the old value by then).
-    pub fn try_match(&mut self, loc: Loc, value: &str) -> Result<Vec<(Loc, String)>, String> {
+    pub fn try_match(&mut self, loc: Loc, value: &str) -> Result<Vec<Match>, String> {
         let v = Shown::parse(value).map(|s| s.value()).ok_or(format!("not a number: {value}"))?;
         let reply = self.helper.call(&format!("write {loc} {v}"));
         if let Some(e) = first_error(&reply) {
@@ -1566,7 +1585,7 @@ impl Core {
     }
 
     /// The player ruled out one of the places still matching; the places left.
-    pub fn drop_match(&mut self, loc: Loc) -> Result<Vec<(Loc, String)>, String> {
+    pub fn drop_match(&mut self, loc: Loc) -> Result<Vec<Match>, String> {
         let reply = self.helper.call(&format!("drop {loc}"));
         let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("drop failed".into()))?;
         self.say(&format!("ruled out 0x{:x} ({}): {count} left", loc.addr, loc.kind.describe()));
