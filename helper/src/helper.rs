@@ -1446,7 +1446,13 @@ pub fn run() {
                 "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n>, mark, next <n>|+|-|=|!, list, peek <addr>..., keep <addr>, track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr>, named <type> <named path>, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
-        if res.and_then(|_| writeln!(out, "end")).and_then(|_| out.flush()).is_err() {
+        // A command that failed (the game quit: its /proc files are gone) says so; only losing
+        // the frontend ends the helper.
+        let replied = match res {
+            Ok(()) => Ok(()),
+            Err(e) => writeln!(out, "error: {e}"),
+        };
+        if replied.and_then(|_| writeln!(out, "end")).and_then(|_| out.flush()).is_err() {
             break;
         }
     }
