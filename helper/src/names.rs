@@ -157,6 +157,11 @@ impl<'a> Heap<'a> {
         self.mem
     }
 
+    /// Bytes in a pointer.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
     /// Whether `v` is an aligned address in writable memory.
     pub fn is_pointer(&self, v: u64) -> bool {
         self.inside(v)

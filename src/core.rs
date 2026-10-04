@@ -896,8 +896,9 @@ impl Core {
         let [(loc, _)] = parse_values(&listed)[..] else {
             return Err("narrow down to exactly one address first".into());
         };
-        // An Unreal game names its objects and their properties: a name holds up across restarts
-        // and updates (code patterns break when the game replaces objects), and needs no tracing.
+        // Unreal and Unity (Mono) games name their objects' classes and fields: a name holds up
+        // across restarts and updates (code patterns break when the game replaces objects), and
+        // needs no tracing.
         let mut named = self.named_path(loc, true);
         let reply = match named {
             Some(_) => Vec::new(),
@@ -1030,7 +1031,7 @@ impl Core {
 
     /// The best named path to the value (see helper/src/names.rs): its text, how many places it
     /// leads to now and what it means. Checked the way a restart finds it: by name. `unreal`:
-    /// only through an Unreal game's objects (fast; nothing for other games).
+    /// only through an Unreal game's objects or a Mono class's live object (fast; nothing for other games).
     fn named_path(&mut self, loc: Loc, unreal: bool) -> Option<(String, usize, String)> {
         let reply = self.helper.call(&format!("names {loc}{}", if unreal { " unreal" } else { "" }));
         for l in reply.iter().filter(|l| !l.starts_with("named ") && !(unreal && l.starts_with("0 named paths"))) {

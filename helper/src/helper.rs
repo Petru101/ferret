@@ -17,6 +17,7 @@ use crate::godot::{self, DictPath};
 use crate::names::{self, Heap, NamedPath};
 use crate::pointers::{self, Module, Pointers, PtrPath};
 use crate::launchers;
+use crate::mono::{self, MonoPath};
 use crate::trace;
 
 pub struct Region {
@@ -341,13 +342,15 @@ struct Limit {
 
 /// A named path of any kind: through objects the game names (Unity, names.rs), to an entry of
 /// the game's dictionaries (Godot, godot.rs), through its scripts' variables (Godot,
-/// gdscript.rs) or through its Unreal objects (ue.rs).
+/// gdscript.rs), through its Unreal objects (ue.rs) or to a field of a Mono class's live
+/// objects (Unity, mono.rs).
 #[derive(Clone)]
 enum Named {
     Objects(NamedPath),
     Dict(DictPath),
     Script(ScriptPath),
     Unreal(UePath),
+    Mono(MonoPath),
 }
 
 impl Named {
@@ -358,6 +361,9 @@ impl Named {
         if text.starts_with("gd:") {
             return ScriptPath::parse(text).map(Named::Script);
         }
+        if text.starts_with("mono:") {
+            return MonoPath::parse(text).map(Named::Mono);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -365,7 +371,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:")
     }
 
     /// Where it leads from the roots found before (no search).
@@ -374,6 +380,7 @@ impl Named {
             Named::Objects(p) => heap.walk(roots, p),
             Named::Dict(p) => godot::walk(heap, roots, p),
             Named::Script(p) => gdscript::walk(heap, roots, p),
+            Named::Mono(p) => mono::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
@@ -384,6 +391,7 @@ impl Named {
             Named::Objects(p) => heap.find_roots(p),
             Named::Dict(p) => godot::find_roots(heap, p),
             Named::Script(p) => gdscript::find_roots(heap, p),
+            Named::Mono(p) => mono::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
@@ -1391,7 +1399,7 @@ fn cmd_about(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     let heap = Heap::new(s.pid, mem, s.width)?;
     let addrs: Vec<u64> = arg.split_whitespace().filter_map(parse_loc).map(|(a, _)| a).collect();
     let new: Vec<u64> = addrs.iter().copied().filter(|a| !s.abouts.contains_key(a)).collect();
-    let mut texts: Vec<Option<String>> = new.iter().map(|&a| godot::about(&heap, a)).collect();
+    let mut texts: Vec<Option<String>> = new.iter().map(|&a| godot::about(&heap, a).or_else(|| mono::about(&heap, a))).collect();
     // Unreal places in one pass over the objects (a fraction of a second).
     let unnamed: Vec<u64> = new.iter().zip(&texts).filter(|(_, t)| t.is_none()).map(|(a, _)| *a).collect();
     if let (Ok(ue), false) = (unreal(s.pid, mem), unnamed.is_empty()) {
@@ -1753,7 +1761,8 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     }
 }
 
-/// names <hex addr[:type]> [unreal]: named paths that lead to the value now, best first: "named <path>
+/// names <hex addr[:type]> [unreal]: named paths that lead to the value now, best first ("unreal": only
+/// the engine's own: Unreal objects and Mono classes, no tracing or pointer map needed): "named <path>
 /// <places it leads to> <what it means>" (see names.rs), then a summary line.
 fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let (addr, only_unreal) = match arg.trim().strip_suffix(" unreal") {
@@ -1774,6 +1783,12 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         if !found.is_empty() {
             return writeln!(out, "{} named paths in {} ms", found.len().min(5), t.elapsed().as_millis());
         }
+    }
+    // A field of a Unity (Mono) class's only live object: by the class's name, past the
+    // objects the game replaces (a checkpoint's new player).
+    if let Some((p, leads)) = mono::discover(&heap, target) {
+        writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+        return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
     }
     if only_unreal {
         return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());

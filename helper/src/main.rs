@@ -6,6 +6,7 @@ mod godot;
 mod helper;
 mod json;
 mod launchers;
+mod mono;
 mod names;
 mod pointers;
 mod steam;
