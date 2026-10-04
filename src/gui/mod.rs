@@ -341,7 +341,10 @@ impl Ui {
                 self.toast(&format!("{name} closed. Ferret opens it again when it starts."));
                 self.waiting_for.replace(Some(exe));
             }
-            Event::Values(Ok(values)) => self.values.update(values),
+            Event::Values(Ok(values)) => {
+                self.find.saved_values(&values);
+                self.values.update(values);
+            }
             Event::Values(Err(_)) => {}
             Event::Numbers(r) => self.find.numbers(r),
             Event::Read(r, area, kept) => self.find.read(r, area, kept),
@@ -503,6 +506,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("reset", Box::new(|ui, _| ui.find.start_over()));
     action("undo", Box::new(|ui, _| ui.find.undo()));
     action("redo", Box::new(|ui, _| ui.find.redo()));
+    action("name", Box::new(|ui, name| ui.find.type_name(&name)));
     action("again", Box::new(|ui, _| ui.find.scan_again()));
     action(
         "type",

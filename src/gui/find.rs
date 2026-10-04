@@ -54,6 +54,14 @@ pub struct FindView {
     log: gtk::TextView,
     result: gtk::Box,
     name: gtk::Entry,
+    /// Under the save row: what's saved for this game already, so a name isn't reused by
+    /// mistake (Prey: the shotgun's ammo was saved as "ammo", over the pistol's, and took its
+    /// 15-15 limit with it).
+    saved_box: gtk::Box,
+    saved_grid: RefCell<gtk::Grid>,
+    /// The saved values as listed (name, value, limit), to redraw only on a change.
+    saved_rows: RefCell<Vec<(String, String, String)>>,
+    replaces: gtk::Label,
     save: gtk::Button,
     /// The places still matching when Ferret couldn't tell which is the value: the player
     /// changes them and watches the game.
@@ -306,6 +314,19 @@ impl FindView {
         page.append(&typed_row);
         page.append(&digits_row);
         page.append(&result);
+        let saved_grid = gtk::Grid::builder().column_spacing(24).row_spacing(4).build();
+        let replaces = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["warning"]).visible(false).build();
+        let saved_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .margin_start(12)
+            .margin_end(12)
+            .visible(false)
+            .build();
+        saved_box.append(&replaces);
+        saved_box.append(&gtk::Label::builder().label("Already saved for this game:").xalign(0.0).css_classes(["heading"]).build());
+        saved_box.append(&saved_grid);
+        page.append(&saved_box);
         page.append(&log_scroll);
 
         let begin = gtk::Button::builder()
@@ -346,7 +367,7 @@ impl FindView {
         );
         matches.append(&gtk::ScrolledWindow::builder().child(&matches_list).max_content_height(220).propagate_natural_height(true).build());
         page.append(&matches);
-        page.reorder_child_after(&matches, Some(&result));
+        page.reorder_child_after(&matches, Some(&saved_box));
         let root = gtk::Stack::new();
         root.add_named(&intro, Some("intro"));
         root.add_named(&page, Some("pick"));
@@ -377,6 +398,10 @@ impl FindView {
             log,
             result,
             name,
+            saved_box,
+            saved_grid: RefCell::new(saved_grid),
+            saved_rows: RefCell::default(),
+            replaces,
             save: save.clone(),
             matches,
             matches_list,
@@ -450,6 +475,10 @@ impl FindView {
             save.connect_clicked(move |_| view_.save_as(&view_.name.text()));
             let view_ = view.clone();
             view.name.connect_activate(move |e| view_.save_as(&e.text()));
+            let view_ = view.clone();
+            view.name.connect_changed(move |_| view_.show_replaces());
+            let view_ = view.clone();
+            view.result.connect_visible_notify(move |_| view_.show_saved_box());
         }
         {
             let weak = Rc::downgrade(&view);
@@ -1340,6 +1369,68 @@ impl FindView {
         self.name.set_text("");
         self.nudge(None);
         self.status.set_label("Saved. Pick another number to find more.");
+    }
+
+    /// Types into the save row's name field (the D-Bus `name` action, for tests).
+    pub fn type_name(&self, name: &str) {
+        self.name.set_text(name);
+    }
+
+    /// The values saved for this game (from the 1 s refresh), listed under the save row.
+    pub fn saved_values(&self, values: &[core::ValueRow]) {
+        let rows: Vec<(String, String, String)> = values
+            .iter()
+            .map(|v| {
+                let text = |n: f64| core::number_text(n, v.decimals);
+                let value = v.value.map_or("not found now".into(), text);
+                let limit = match (v.min, v.max) {
+                    (Some(a), Some(b)) if a == b => format!("kept at {}", text(a)),
+                    (Some(a), Some(b)) => format!("kept between {} and {}", text(a), text(b)),
+                    (Some(a), None) => format!("kept at least {}", text(a)),
+                    (None, Some(b)) => format!("kept at most {}", text(b)),
+                    (None, None) => String::new(),
+                };
+                (v.name.clone(), value, limit)
+            })
+            .collect();
+        if *self.saved_rows.borrow() == rows {
+            return;
+        }
+        let grid = gtk::Grid::builder().column_spacing(24).row_spacing(4).build();
+        for (i, (name, value, limit)) in rows.iter().enumerate() {
+            for (col, text) in [name, value, limit].into_iter().enumerate() {
+                let label = gtk::Label::builder().label(text.as_str()).xalign(0.0).build();
+                if col == 0 {
+                    label.add_css_class("heading");
+                } else {
+                    label.add_css_class("dim-label");
+                }
+                grid.attach(&label, col as i32, i as i32, 1, 1);
+            }
+        }
+        let old = self.saved_grid.replace(grid.clone());
+        self.saved_box.remove(&old);
+        self.saved_box.append(&grid);
+        self.saved_rows.replace(rows);
+        self.show_saved_box();
+        self.show_replaces();
+    }
+
+    fn show_saved_box(&self) {
+        self.saved_box.set_visible(self.result.is_visible() && !self.saved_rows.borrow().is_empty());
+    }
+
+    /// Says so when the name typed is already saved: saving replaces it and keeps its limit.
+    fn show_replaces(&self) {
+        let name = crate::core::one_word(&self.name.text());
+        let rows = self.saved_rows.borrow();
+        let Some((_, value, limit)) = rows.iter().find(|(n, ..)| *n == name) else {
+            self.replaces.set_visible(false);
+            return;
+        };
+        let keeps = if limit.is_empty() { String::new() } else { format!(" Its limit stays and applies to this one ({limit}).") };
+        self.replaces.set_label(&format!("“{name}” is already saved (now {value}): saving replaces it.{keeps}"));
+        self.replaces.set_visible(true);
     }
 
     pub fn save_failed(&self, e: &str) {
