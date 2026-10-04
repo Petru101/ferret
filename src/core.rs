@@ -1753,9 +1753,18 @@ impl Core {
     /// Takes back the last step of the search (a number, ruling a place out, Start Over, a
     /// pick): how many places match again, and what was undone.
     pub fn undo(&mut self) -> Result<(usize, String), String> {
-        let reply = self.helper.call("undo");
-        let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("undo failed".into()))?;
-        let step = reply.get(1).and_then(|l| l.strip_prefix("undid ")).unwrap_or_default();
+        self.history_step("undo", "undid")
+    }
+
+    /// Takes the last step Undo took back again: the matches count and the step in words.
+    pub fn redo(&mut self) -> Result<(usize, String), String> {
+        self.history_step("redo", "redid")
+    }
+
+    fn history_step(&mut self, command: &str, done: &str) -> Result<(usize, String), String> {
+        let reply = self.helper.call(command);
+        let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or(format!("{command} failed")))?;
+        let step = reply.get(1).and_then(|l| l.strip_prefix(done)).unwrap_or_default();
         let place = |a: &str| parse_loc(a).map_or(a.to_owned(), |l| format!("0x{:x}", l.addr));
         let mut words = step.split_whitespace();
         let what = match (words.next(), words.next()) {
@@ -1765,7 +1774,7 @@ impl Core {
             _ => "starting over".to_owned(),
         };
         self.search = (count > 0).then_some((count, 0));
-        self.say(&format!("undid {what}: {count} matches"));
+        self.say(&format!("{done} {what}: {count} matches"));
         Ok((count, what))
     }
 
@@ -2238,7 +2247,7 @@ impl Core {
         self.phase(Phase::YourTurn(watched.len(), WAIT.as_secs()));
         self.status(&format!(
             "Now change the number in the game once (pick some up or use some): Ferret waits and watches which \
-             of the {} places the game carries on from. Stop gives up.",
+             of the {} places the game carries on from. Stop Waiting lists them to try instead.",
             watched.len()
         ));
         let start = Instant::now();

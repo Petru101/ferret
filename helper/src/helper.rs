@@ -763,6 +763,8 @@ struct Session {
     history: Vec<(String, Vec<Candidate>)>,
     /// Older steps were let go (too many, or too many matches to keep).
     history_cut: bool,
+    /// Steps taken back by `undo` (the last one undone last), for `redo`; a new step forgets them.
+    undone: Vec<(String, Vec<Candidate>)>,
     /// Every pointer in the game's memory, from a `names` that found nothing, for the pointer
     /// scan that comes next (collecting them takes seconds in big games).
     pointer_map: Option<(Instant, (Pointers, u64))>,
@@ -788,6 +790,7 @@ impl Session {
         if same {
             return;
         }
+        self.undone.clear();
         if old.len() > UNDO_KEEP {
             self.history.clear();
             self.history_cut = true;
@@ -1204,10 +1207,30 @@ fn cmd_undo(out: &mut impl Write, s: &mut Session) -> io::Result<()> {
         };
     };
     let before = s.candidates.len();
-    s.candidates = old;
+    let now = std::mem::replace(&mut s.candidates, old);
+    // Too many to keep for `redo` (a fresh scan of a small number): it can't be taken again.
+    if now.len() > UNDO_KEEP {
+        s.undone.clear();
+    } else {
+        s.undone.push((step.clone(), now));
+    }
     s.candidates = s.candidates.iter().zip(s.read_all()).map(|(c, v)| Candidate { value: v.unwrap_or(c.value), ..*c }).collect();
     writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))?;
     writeln!(out, "undid {step}")
+}
+
+/// redo: takes the last step `undo` took back again ("<before> -> <n> matches", then "redid
+/// <command>"), with their values as they are now.
+fn cmd_redo(out: &mut impl Write, s: &mut Session) -> io::Result<()> {
+    let Some((step, again)) = s.undone.pop() else {
+        return writeln!(out, "error: nothing to redo");
+    };
+    let before = s.candidates.len();
+    let old = std::mem::replace(&mut s.candidates, again);
+    s.history.push((step.clone(), old));
+    s.candidates = s.candidates.iter().zip(s.read_all()).map(|(c, v)| Candidate { value: v.unwrap_or(c.value), ..*c }).collect();
+    writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))?;
+    writeln!(out, "redid {step}")
 }
 
 /// Remembers every candidate's current value, right before the screen is read: `next` then
@@ -1961,6 +1984,7 @@ pub fn run() {
             "next" => cmd_next(&mut out, &mut session, arg),
             "mark" => cmd_mark(&mut out, &mut session),
             "undo" => cmd_undo(&mut out, &mut session),
+            "redo" => cmd_redo(&mut out, &mut session),
             "list" => cmd_list(&mut out, &session),
             "write" => cmd_write(&mut out, &session, arg),
             "set" => cmd_set(&mut out, &session, arg),
@@ -1984,7 +2008,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

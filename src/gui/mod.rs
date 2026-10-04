@@ -45,8 +45,9 @@ pub enum Event {
     Saved(Result<(String, bool), String>),
     /// The search was cleared (the Find tab already shows it).
     Reset,
-    /// The last step of the search was taken back: the places matching now, and what it was.
-    Undone(Result<(usize, String), String>),
+    /// A step of the search was taken back (Undo) or again (Redo): the places matching now and
+    /// what it was, and "Undid" or "Redid".
+    Undone(Result<(usize, String), String>, &'static str),
     /// A job with nothing to show.
     Idle,
     /// The attached game's learned digits, 0 to 9.
@@ -352,7 +353,7 @@ impl Ui {
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
             Event::ScannedAgain(r) => self.find.scanned_again(r),
-            Event::Undone(r) => self.find.undone(r),
+            Event::Undone(r, done) => self.find.undone(r, done),
             Event::Saved(Ok((name, confirmed))) => {
                 self.toast(&if confirmed {
                     format!("Saved {name}. Ferret finds it again every time you attach.")
@@ -501,6 +502,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("stop", Box::new(|ui, _| ui.find.stop()));
     action("reset", Box::new(|ui, _| ui.find.start_over()));
     action("undo", Box::new(|ui, _| ui.find.undo()));
+    action("redo", Box::new(|ui, _| ui.find.redo()));
     action("again", Box::new(|ui, _| ui.find.scan_again()));
     action(
         "type",
@@ -592,6 +594,10 @@ fn build(app: &adw::Application) {
     };
     let phase = phase::PhaseCard::new();
     let find = find::FindView::new(worker.clone(), cancel, scan_now, phase.clone());
+    {
+        let find = find.clone();
+        phase.give_up.connect_clicked(move |_| find.stop());
+    }
     stack.add_titled_with_icon(&values.root, Some("values"), "Values", "view-list-symbolic");
     stack.add_titled_with_icon(&find.root, Some("find"), "Find Value", "edit-find-symbolic");
 

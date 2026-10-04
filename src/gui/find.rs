@@ -45,6 +45,7 @@ pub struct FindView {
     stop: gtk::Button,
     start_over: gtk::Button,
     undo: gtk::Button,
+    redo: gtk::Button,
     /// The value types new searches look for (`TYPE_CHOICES`).
     types: gtk::DropDown,
     spinner: gtk::Spinner,
@@ -231,6 +232,10 @@ impl FindView {
             .icon_name("edit-undo-symbolic")
             .tooltip_text("Undo the last step of the search: a number, a ruled-out place or Start Over")
             .build();
+        let redo = gtk::Button::builder()
+            .icon_name("edit-redo-symbolic")
+            .tooltip_text("Redo the last step Undo took back")
+            .build();
         let types = gtk::DropDown::builder()
             .model(&gtk::StringList::new(&TYPE_CHOICES.iter().map(|(label, _)| *label).collect::<Vec<_>>()))
             .tooltip_text("What new searches look for. Fewer types leave fewer places to narrow down.")
@@ -238,7 +243,7 @@ impl FindView {
             .build();
         let top = frame_box();
         top.set_margin_top(12);
-        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), undo.upcast_ref(), again.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
+        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), undo.upcast_ref(), redo.upcast_ref(), again.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
             top.append(w);
         }
 
@@ -365,6 +370,7 @@ impl FindView {
             stop,
             start_over,
             undo,
+            redo,
             types: types.clone(),
             spinner,
             phase,
@@ -434,6 +440,8 @@ impl FindView {
             view.start_over.connect_clicked(move |_| view_.start_over());
             let view_ = view.clone();
             view.undo.connect_clicked(move |_| view_.undo());
+            let view_ = view.clone();
+            view.redo.connect_clicked(move |_| view_.redo());
             let view_ = view.clone();
             view.again.connect_clicked(move |_| view_.scan_again());
         }
@@ -847,6 +855,7 @@ impl FindView {
         self.start.set_visible(false);
         self.start_over.set_visible(false);
         self.undo.set_visible(false);
+        self.redo.set_visible(false);
         self.stop.set_visible(true);
         self.again.set_visible(true);
         self.busy(true);
@@ -860,6 +869,7 @@ impl FindView {
         self.start.set_visible(true);
         self.start_over.set_visible(true);
         self.undo.set_visible(true);
+        self.redo.set_visible(true);
         // A typed number stopped it: its search runs next and tells how it went.
         if !self.typed.is_editable() {
             return;
@@ -1127,10 +1137,19 @@ impl FindView {
         if self.stop.is_visible() {
             return;
         }
-        self.worker.run(|core| Event::Undone(core.undo()));
+        self.worker.run(|core| Event::Undone(core.undo(), "Undid"));
     }
 
-    pub fn undone(&self, r: Result<(usize, String), String>) {
+    /// Takes the last step Undo took back again (not while Start runs either).
+    pub fn redo(&self) {
+        if self.stop.is_visible() {
+            return;
+        }
+        self.worker.run(|core| Event::Undone(core.redo(), "Redid"));
+    }
+
+    /// After Undo or Redo (`done` says which).
+    pub fn undone(&self, r: Result<(usize, String), String>, done: &str) {
         match r {
             Ok((n, what)) => {
                 self.result.set_visible(false);
@@ -1141,7 +1160,7 @@ impl FindView {
                     1 => "1 place matches".to_owned(),
                     n => format!("{} places match", grouped(n)),
                 };
-                self.announce(&format!("Undid {what}: {left}. Press Start, or type the number the game shows."), false);
+                self.announce(&format!("{done} {what}: {left}. Press Start, or type the number the game shows."), false);
                 self.list_matches(n);
             }
             Err(e) => {

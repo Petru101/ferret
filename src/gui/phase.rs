@@ -19,6 +19,10 @@ pub struct PhaseCard {
     title: gtk::Label,
     bar: gtk::ProgressBar,
     hint: gtk::Label,
+    /// On "Your turn" only: the wait can take minutes, and a game that pauses while it isn't
+    /// in front (Prey, during a cutscene) never changes the number. The toolbar's Stop sat
+    /// behind the blinking card and went unseen.
+    pub give_up: gtk::Button,
     /// Counts the card's changes: timers stop, and "Ready!" stays, only while nothing came after.
     shown: Rc<Cell<u32>>,
     /// The places matching, for the strip that follows "Ready!".
@@ -36,6 +40,13 @@ impl PhaseCard {
         let title = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).build();
         let bar = gtk::ProgressBar::builder().show_text(true).width_request(360).build();
         let hint = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).build();
+        let give_up = gtk::Button::builder()
+            .label("Stop Waiting")
+            .tooltip_text("Undo the test values and list the places, to try them one by one")
+            .halign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .visible(false)
+            .build();
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(14)
@@ -50,7 +61,8 @@ impl PhaseCard {
         root.append(&title);
         root.append(&bar);
         root.append(&hint);
-        Rc::new(Self { root, title, bar, hint, shown: Rc::default(), count: Cell::new(0) })
+        root.append(&give_up);
+        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0) })
     }
 
     /// Shows the card in one of `LOOKS`; `bar` = how far, when there's something to measure.
@@ -71,6 +83,9 @@ impl PhaseCard {
         self.bar.set_show_text(look == "busy");
         self.bar.set_fraction(bar.unwrap_or(0.0).clamp(0.0, 1.0));
         self.hint.set_label(hint);
+        // Clicks go through the card to the window, except while it has a button.
+        self.give_up.set_visible(false);
+        self.root.set_can_target(false);
         self.root.set_visible(true);
         shown
     }
@@ -123,6 +138,8 @@ impl PhaseCard {
             )
         };
         let shown = self.show("turn", "Your turn: change the number in the game!", Some(1.0), &hint(secs));
+        self.give_up.set_visible(true);
+        self.root.set_can_target(true);
         let (card, start) = (self.clone(), Instant::now());
         glib::timeout_add_local(Duration::from_millis(600), move || {
             if card.shown.get() != shown {
