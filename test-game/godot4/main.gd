@@ -2,8 +2,8 @@ extends Control
 
 # Commands come from a file (one line, removed once read), as in target.c:
 #   earn/spend N (gold), wood N, hp N, energy X (float), iron N (inventory dictionary,
-#   id 0, also counted in stats), lumen N (id 1), wave (keeps a snapshot of the player),
-#   show, quit N.
+#   id 0, also counted in stats), lumen N (id 1), charges N (tools dictionary with
+#   StringName keys, kind 3), wave (keeps a snapshot of the player), show, quit N.
 # Run: <binary> -- <cmd file> <log file>
 
 var cmd_path := ""
@@ -59,6 +59,8 @@ func run(line: String) -> void:
 				RunData.stats["metal_collected"] += int(arg)
 		"lumen":
 			RunData.stack(1)["amount"] += int(arg)
+		"charges":
+			RunData.tools[0][&"charges"] += int(arg)
 		"wave":
 			RunData.next_wave()
 		"quit":
@@ -76,7 +78,7 @@ func report() -> void:
 	if f == null:
 		f = FileAccess.open(log_path, FileAccess.WRITE)
 	f.seek_end()
-	f.store_line("gold=%d wood=%d hp=%d energy=%.2f iron=%d lumen=%d metal_collected=%d wave=%d snapshots=%d" % [
+	f.store_line("gold=%d wood=%d hp=%d energy=%.2f iron=%d lumen=%d charges=%d metal_collected=%d wave=%d snapshots=%d" % [
 		p.gold, p.wood, p.hp, p.energy, RunData.stack(0)["amount"], RunData.stack(1)["amount"],
-		RunData.stats["metal_collected"], RunData.wave, RunData.snapshots.size()])
+		RunData.tools[0][&"charges"], RunData.stats["metal_collected"], RunData.wave, RunData.snapshots.size()])
 	f.close()

@@ -1,4 +1,4 @@
-// Godot 3 dictionaries: a value kept as an entry of a Dictionary the game's scripts fill
+// Godot dictionaries: a value kept as an entry of a Dictionary the game's scripts fill
 // (Lumencraft's inventory stacks are {"id": 0, "amount": 2, "data": null, "index": 6}). The
 // game re-creates such entries as it runs, in memory allocated at run time, so neither code
 // patterns (the GDScript interpreter is shared code) nor pointer paths find them again; their
@@ -8,6 +8,10 @@
 // { u32 type; 4 bytes of padding (not always zero); 16 bytes of data }, type 2 = int (an int64),
 // 3 = real (a double),
 // 4 = String (data = pointer to its characters, UTF-32: wchar_t is 4 bytes on Linux).
+// Godot 4 keeps the entries in a HashMap whose elements are { Element *next, *prev; Variant key;
+// Variant value }, in insertion order; keys are Strings (4) or StringNames (21: data = pointer
+// to { u32 refcount, u32 static count, then its String at +8 (4.5+), else a C string there and
+// the String at +0x10 }). Strings are UTF-32 on every platform.
 // Text form: {amount|id=0,index} = the "amount" entry of every dictionary that also has an
 // "id" entry holding 0 and an "index" entry.
 
@@ -18,13 +22,12 @@ use std::os::unix::fs::FileExt;
 
 use crate::names::Heap;
 
-const VALUE_TYPE: u64 = 8;
-const VALUE: u64 = 16;
-const NEXT: u64 = 32;
-const PREV: u64 = 40;
 const INT: u32 = 2;
 const REAL: u32 = 3;
 const STRING: u32 = 4;
+const STRING_NAME: u32 = 21;
+/// Bytes of an element read when searching memory.
+const ELEMENT: usize = 0x38;
 const MAX_KEY: usize = 64;
 /// Entries per dictionary followed: a misread link can't make a walk take forever.
 const MAX_ENTRIES: usize = 64;
@@ -83,6 +86,39 @@ impl DictPath {
     }
 }
 
+/// How a dictionary's elements are laid out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Shape {
+    V3,
+    V4,
+}
+
+const SHAPES: [Shape; 2] = [Shape::V3, Shape::V4];
+
+impl Shape {
+    /// Offsets in an element: the value's data, the links.
+    fn value(self) -> u64 {
+        match self {
+            Shape::V3 => 16,
+            Shape::V4 => 0x30,
+        }
+    }
+
+    fn next(self) -> u64 {
+        match self {
+            Shape::V3 => 32,
+            Shape::V4 => 0,
+        }
+    }
+
+    fn prev(self) -> u64 {
+        match self {
+            Shape::V3 => 40,
+            Shape::V4 => 8,
+        }
+    }
+}
+
 /// Reads the game's dictionaries; keys are cached by the address of their characters (a key's
 /// text is shared by every dictionary that has it).
 struct Dicts<'a> {
@@ -115,31 +151,53 @@ impl<'a> Dicts<'a> {
         p == 0 || self.heap.is_pointer(p)
     }
 
-    /// Looks like a list element with a number for its value (checked on the words already read).
-    fn shaped(&self, key: u64, value_type: u32, next: u64, prev: u64) -> bool {
-        (value_type == INT || value_type == REAL)
-            && self.heap.is_pointer(key)
-            && (next != 0 || prev != 0)
-            && self.link(next)
-            && self.link(prev)
+    /// Looks like an element with a number for its value (checked on the words already read):
+    /// `key` is the key's pointer (Godot 3) or its Variant type (Godot 4).
+    fn shaped(&self, shape: Shape, key: u64, value_type: u32, next: u64, prev: u64) -> bool {
+        let key_ok = match shape {
+            Shape::V3 => self.heap.is_pointer(key),
+            Shape::V4 => key == STRING as u64 || key == STRING_NAME as u64,
+        };
+        (value_type == INT || value_type == REAL) && key_ok && (next != 0 || prev != 0) && self.link(next) && self.link(prev)
     }
 
-    fn element(&self, e: u64) -> bool {
+    fn is(&self, e: u64, shape: Shape) -> bool {
+        let key = match shape {
+            Shape::V3 => self.u64_at(e),
+            Shape::V4 => self.u32_at(e + 0x10).map(u64::from),
+        };
         let (Some(key), Some(t), Some(next), Some(prev)) =
-            (self.u64_at(e), self.u32_at(e + VALUE_TYPE), self.u64_at(e + NEXT), self.u64_at(e + PREV))
+            (key, self.u32_at(e + shape.value() - 8), self.u64_at(e + shape.next()), self.u64_at(e + shape.prev()))
         else {
             return false;
         };
-        self.shaped(key, t, next, prev)
+        self.shaped(shape, key, t, next, prev)
     }
 
-    /// The text of the String key of the element at `e`.
-    fn key(&self, e: u64) -> Option<String> {
-        let k = self.u64_at(e)?;
-        if self.u32_at(k)? != STRING {
-            return None;
-        }
-        let chars = self.u64_at(k + 8)?;
+    /// The shape of the element at `e`, when it is one.
+    fn element(&self, e: u64) -> Option<Shape> {
+        SHAPES.into_iter().find(|&shape| self.is(e, shape))
+    }
+
+    /// The text of the String or StringName key of the element at `e`.
+    fn key(&self, e: u64, shape: Shape) -> Option<String> {
+        let k = match shape {
+            Shape::V3 => self.u64_at(e)?,
+            Shape::V4 => e + 0x10,
+        };
+        let chars = match self.u32_at(k)? {
+            STRING => self.u64_at(k + 8)?,
+            STRING_NAME if shape == Shape::V4 => {
+                let sn = self.u64_at(k + 8).filter(|&p| self.heap.is_pointer(p))?;
+                return [8, 0x10].into_iter().find_map(|at| self.u64_at(sn + at).filter(|&p| self.heap.is_pointer(p)).and_then(|c| self.chars(c)));
+            }
+            _ => return None,
+        };
+        self.chars(chars)
+    }
+
+    /// A key's UTF-32 characters at `chars`.
+    fn chars(&self, chars: u64) -> Option<String> {
         if let Some(cached) = self.keys.borrow().get(&chars) {
             return cached.clone();
         }
@@ -153,15 +211,15 @@ impl<'a> Dicts<'a> {
         text
     }
 
-    fn int(&self, e: u64) -> Option<i64> {
-        (self.u32_at(e + VALUE_TYPE)? == INT).then(|| self.u64_at(e + VALUE).map(|v| v as i64)).flatten()
+    fn int(&self, e: u64, shape: Shape) -> Option<i64> {
+        (self.u32_at(e + shape.value() - 8)? == INT).then(|| self.u64_at(e + shape.value()).map(|v| v as i64)).flatten()
     }
 
     /// The other entries of the dictionary the element at `e` is in: their keys and ints.
-    fn siblings(&self, e: u64) -> Vec<(String, Option<i64>)> {
+    fn siblings(&self, e: u64, shape: Shape) -> Vec<(String, Option<i64>)> {
         let mut first = e;
         for _ in 0..MAX_ENTRIES {
-            match self.u64_at(first + PREV) {
+            match self.u64_at(first + shape.prev()) {
                 Some(p) if p != 0 && p != e && self.heap.is_pointer(p) => first = p,
                 _ => break,
             }
@@ -170,11 +228,11 @@ impl<'a> Dicts<'a> {
         let mut at = first;
         for _ in 0..MAX_ENTRIES {
             if at != e {
-                if let Some(k) = self.key(at) {
-                    out.push((k, self.int(at)));
+                if let Some(k) = self.key(at, shape) {
+                    out.push((k, self.int(at, shape)));
                 }
             }
-            match self.u64_at(at + NEXT) {
+            match self.u64_at(at + shape.next()) {
                 Some(n) if n != 0 && n != first && self.heap.is_pointer(n) => at = n,
                 _ => break,
             }
@@ -183,27 +241,36 @@ impl<'a> Dicts<'a> {
     }
 
     fn fits(&self, e: u64, path: &DictPath) -> bool {
-        if !self.element(e) || self.key(e).as_deref() != Some(path.key.as_str()) {
+        let Some(shape) = self.element(e) else { return false };
+        if self.key(e, shape).as_deref() != Some(path.key.as_str()) {
             return false;
         }
-        let siblings = self.siblings(e);
+        let siblings = self.siblings(e, shape);
         path.with.iter().all(|(k, v)| siblings.iter().any(|(sk, sv)| sk == k && (v.is_none() || sv == v)))
     }
 
-    /// Every element in memory whose key is `key` (one pass over the game's memory).
+    /// Every element in memory whose key is `key`, of either shape (one pass over the game's
+    /// memory).
     fn with_key(&self, key: &str) -> Vec<u64> {
         let mut found = Vec::new();
         let word = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
         let half = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
-        self.heap.each_chunk(48, |addr, b, fresh| {
-            for o in (0..fresh).step_by(8).take_while(|o| o + 48 <= b.len()) {
-                let t = half(b, o + 8);
-                if t != INT && t != REAL {
-                    continue;
-                }
+        self.heap.each_chunk(ELEMENT, |addr, b, fresh| {
+            for o in (0..fresh).step_by(8).take_while(|o| o + ELEMENT <= b.len()) {
                 let e = addr + o as u64;
-                if self.shaped(word(b, o), t, word(b, o + 32), word(b, o + 40)) && self.key(e).as_deref() == Some(key) {
-                    found.push(e);
+                for shape in SHAPES {
+                    let t = half(b, o + shape.value() as usize - 8);
+                    if t != INT && t != REAL {
+                        continue;
+                    }
+                    let k = match shape {
+                        Shape::V3 => word(b, o),
+                        Shape::V4 => half(b, o + 0x10) as u64,
+                    };
+                    let (next, prev) = (word(b, o + shape.next() as usize), word(b, o + shape.prev() as usize));
+                    if self.shaped(shape, k, t, next, prev) && self.key(e, shape).as_deref() == Some(key) {
+                        found.push(e);
+                    }
                 }
             }
         });
@@ -212,14 +279,14 @@ impl<'a> Dicts<'a> {
 }
 
 /// The value's address of each element.
-fn values(elements: &[u64]) -> Vec<u64> {
-    elements.iter().map(|e| e + VALUE).collect()
+fn values(d: &Dicts, elements: &[u64]) -> Vec<u64> {
+    elements.iter().filter_map(|&e| Some(e + d.element(e)?.value())).collect()
 }
 
 /// Elements the path leads to, among those found before (cheap: no search).
 pub fn walk(heap: &Heap, roots: &[u64], path: &DictPath) -> Vec<u64> {
     let d = Dicts::new(heap);
-    values(&roots.iter().copied().filter(|&e| d.fits(e, path)).collect::<Vec<_>>())
+    values(&d, &roots.iter().copied().filter(|&e| d.fits(e, path)).collect::<Vec<_>>())
 }
 
 /// Searches the game's memory for the path's elements (the roots `walk` takes).
@@ -236,12 +303,9 @@ pub fn find_roots(heap: &Heap, path: &DictPath) -> Vec<u64> {
 /// leads to now.
 pub fn discover(heap: &Heap, target: u64) -> Option<(DictPath, Vec<u64>)> {
     let d = Dicts::new(heap);
-    let e = target.checked_sub(VALUE)?;
-    if !d.element(e) {
-        return None;
-    }
-    let key = d.key(e)?;
-    let siblings = d.siblings(e);
+    let (e, shape) = at_value(&d, target)?;
+    let key = d.key(e, shape)?;
+    let siblings = d.siblings(e, shape);
     if siblings.is_empty() {
         return None;
     }
@@ -262,7 +326,15 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(DictPath, Vec<u64>)> {
         })
         .filter(|(_, leads)| leads.contains(&e) && leads.len() <= MAX_PLACES)
         .min_by_key(|(p, leads)| (leads.len(), identity(p), p.with.iter().filter(|w| w.1.is_some()).count()))
-        .map(|(p, leads)| (p, values(&leads)))
+        .map(|(p, leads)| (p, values(&d, &leads)))
+}
+
+/// The element whose value is at `addr`, and its shape.
+fn at_value(d: &Dicts, addr: u64) -> Option<(u64, Shape)> {
+    SHAPES.into_iter().find_map(|shape| {
+        let e = addr.checked_sub(shape.value())?;
+        d.is(e, shape).then_some((e, shape))
+    })
 }
 
 /// What the value at `addr` is, when it is an entry of a dictionary: its key, and the ids of
@@ -270,13 +342,10 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(DictPath, Vec<u64>)> {
 /// among a search's matches.
 pub fn about(heap: &Heap, addr: u64) -> Option<String> {
     let d = Dicts::new(heap);
-    let e = addr.checked_sub(VALUE)?;
-    if !d.element(e) {
-        return None;
-    }
-    let key = d.key(e)?;
+    let (e, shape) = at_value(&d, addr)?;
+    let key = d.key(e, shape)?;
     let ids: Vec<String> = d
-        .siblings(e)
+        .siblings(e, shape)
         .into_iter()
         .filter(|(k, v)| v.is_some() && identity_key(k))
         .map(|(k, v)| format!("\"{k}\" is {}", v.unwrap_or_default()))

@@ -8,6 +8,11 @@ var inventory: Array = [
 	{"id": 0, "amount": 33, "data": null, "index": 1},
 ]
 var stats := {"metal_collected": 33, "shots_fired": 0}
+# StringName keys.
+var tools: Array = [
+	{&"kind": 3, &"charges": 5, &"slot": 0},
+	{&"kind": 4, &"charges": 2, &"slot": 1},
+]
 
 
 func player() -> PlayerData:
