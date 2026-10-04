@@ -629,6 +629,19 @@ fn path_arg(p: &str) -> String {
     p.split_whitespace().collect::<Vec<_>>().join(",")
 }
 
+/// Test values a probe gives its candidates are this far apart; the game changing one by up to
+/// `PROBE_NEAR` still counts as carrying on from it.
+const PROBE_STEP: i64 = 100;
+const PROBE_NEAR: i64 = 49;
+
+/// A candidate's test write: its exact original and its test value.
+struct Probe {
+    loc: Loc,
+    orig: String,
+    test: i64,
+    step: i64,
+}
+
 pub struct Core {
     helper: Helper,
     capture: Option<WindowCapture>,
@@ -1729,9 +1742,14 @@ impl Core {
         parse_values(&self.helper.call("list"))
     }
 
-    /// Tells the real value apart from copies of it: writes a test value to one
-    /// candidate at a time and checks whether it sticks, whether the other
-    /// candidates follow it, and whether the screen shows it. Test writes are undone.
+    /// Tells the real value apart from copies of it, all candidates at once: each gets its own
+    /// test value (+100, +200, ...). The screen showing one of them, or other candidates taking
+    /// one on (a copy the game refreshes from the real value), tells which it is. Else one at a
+    /// time, +10 each (a copy that only follows a rise won't leave a higher test value of its
+    /// own). When neither does (some games only redraw a number when they change it
+    /// themselves: Lumencraft), the player changes the number in the game and the real one
+    /// carries on from its test value; copies don't. Test writes are undone, keeping what the
+    /// game changed meanwhile.
     pub fn probe(&mut self) -> Result<Option<Loc>, String> {
         let listed = self.helper.call("list");
         if listed.iter().any(|l| l.starts_with("...")) {
@@ -1741,131 +1759,193 @@ impl Core {
         if addrs.is_empty() {
             return Err("no candidates to probe".into());
         }
-        // The ones the game left the test value in, with their exact originals.
-        let mut kept = Vec::new();
-        for (i, &loc) in addrs.iter().enumerate() {
-            let addr = loc.addr;
+        let mut tests: Vec<Probe> = Vec::new();
+        for &loc in &addrs {
             // The exact original, fraction included, to put back afterwards.
             let listed = self.helper.call(&format!("peek {loc}"));
             let Some(orig) = listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()) else {
                 continue;
             };
             let Some(Some(shown)) = self.peek(&[loc]).first().copied() else { continue };
-            let test = shown + 10;
-            self.helper.call(&format!("write {loc} {test}"));
-            std::thread::sleep(Duration::from_millis(1500));
-            let after = self.peek(&addrs);
-            let stuck = after[i] == Some(test);
-            let followers = (0..addrs.len()).filter(|&j| j != i && after[j] == Some(test)).count();
-            let screen = if self.area.is_some() { self.read().ok().flatten() } else { None };
-            let shown = screen.as_ref().is_some_and(|s| s.value() as i64 == test || s.scaled() == test);
-            self.say(&format!(
-                "0x{addr:012x}: wrote {test}: {}, {followers} of {} others followed, screen shows {}",
-                if stuck { "kept" } else { "game overwrote it" },
-                addrs.len() - 1,
-                screen.as_ref().map_or("?".into(), |n| n.to_string()),
-            ));
-            if stuck {
-                self.helper.call(&format!("write {loc} {orig}"));
-                kept.push((loc, orig));
-            }
-            if stuck && (followers > 0 || shown) {
-                self.helper.call(&format!("keep {addr:x}"));
-                self.say(&format!("real value at 0x{addr:012x} (test write undone)"));
-                return Ok(Some(loc));
-            }
+            let step = PROBE_STEP * (tests.len() as i64 + 1);
+            tests.push(Probe { loc, orig, test: shown + step, step });
         }
-        if !kept.is_empty() {
-            if let Some(loc) = self.probe_in_game(&kept) {
-                self.helper.call(&format!("keep {:x}", loc.addr));
-                return Ok(Some(loc));
-            }
+        for t in &tests {
+            self.helper.call(&format!("write {} {}", t.loc, t.test));
         }
-        let why = match self.cancel.load(Ordering::Relaxed) {
-            true => "stopped before the game changed the number",
-            false => "the number didn't change in the game while Ferret waited (is the game paused?)",
+        std::thread::sleep(Duration::from_millis(1500));
+        let locs: Vec<Loc> = tests.iter().map(|t| t.loc).collect();
+        let after = self.peek(&locs);
+        let screen = if self.area.is_some() { self.read().ok().flatten() } else { None };
+        // Each place kept its test value (or carried on from it), took another's on, or went back.
+        let kept: Vec<bool> = tests.iter().zip(&after).map(|(t, v)| v.is_some_and(|v| (v - t.test).abs() <= PROBE_NEAR)).collect();
+        let source = |v: Option<i64>, k: usize| tests.iter().enumerate().position(|(j, t)| j != k && v == Some(t.test));
+        let followers: Vec<usize> = (0..tests.len()).map(|j| (0..tests.len()).filter(|&k| source(after[k], k) == Some(j)).count()).collect();
+        for (k, (t, v)) in tests.iter().zip(&after).enumerate() {
+            let what = match (kept[k], source(*v, k)) {
+                (true, _) => "kept".to_owned(),
+                (false, Some(j)) => format!("took 0x{:012x}'s test value", tests[j].loc.addr),
+                (false, None) => format!("the game put back {}", v.map_or("something else".into(), |v| v.to_string())),
+            };
+            self.say(&format!("0x{:012x}: wrote {}: {what}", t.loc.addr, t.test));
+        }
+        if let Some(s) = &screen {
+            self.say(&format!("screen shows {s}"));
+        }
+        let on_screen = |s: &Shown, t: &Probe| [s.value() as i64, s.scaled()].iter().any(|v| (v - t.test).abs() <= PROBE_NEAR);
+        let mut real = screen
+            .as_ref()
+            .and_then(|s| (0..tests.len()).find(|&k| kept[k] && on_screen(s, &tests[k])))
+            .map(|k| (k, format!("held {} and the screen showed it", tests[k].test)));
+        if real.is_none() {
+            // The one the others copy: alone in having followers.
+            let most = (0..tests.len()).filter(|&k| kept[k]).max_by_key(|&k| followers[k]).filter(|&k| followers[k] > 0);
+            real = most
+                .filter(|&k| (0..tests.len()).filter(|&j| kept[j] && followers[j] == followers[k]).count() == 1)
+                .map(|k| (k, format!("held {} and {} other places copied it", tests[k].test, followers[k])));
+        }
+        self.undo_probes(&tests);
+        // Copies that only follow some changes (a highest-so-far that only follows a rise) may
+        // have got a test value they won't leave: one place at a time, each only +10.
+        if real.is_none() && kept.iter().any(|&k| k) {
+            real = self.probe_one_by_one(&tests, &kept);
+        }
+        if real.is_none() && kept.iter().any(|&k| k) {
+            let now = self.peek(&locs);
+            for (k, t) in tests.iter_mut().enumerate() {
+                match now[k] {
+                    Some(v) if kept[k] => {
+                        t.test = v + t.step;
+                        self.helper.call(&format!("write {} {}", t.loc, t.test));
+                    }
+                    _ => {}
+                }
+            }
+            real = self.probe_in_game(&tests, &kept);
+            self.undo_probes(&tests);
+        }
+        if let Some((k, how)) = real {
+            let loc = tests[k].loc;
+            self.helper.call(&format!("keep {:x}", loc.addr));
+            self.say(&format!("0x{:012x} {how}: the real value (test writes undone)", loc.addr));
+            return Ok(Some(loc));
+        }
+        let why = match (kept.iter().any(|&k| k), self.cancel.load(Ordering::Relaxed)) {
+            (false, _) => "the game put every test value back",
+            (true, true) => "stopped before the game changed the number",
+            (true, false) => "the number didn't change in the game while Ferret waited (is the game paused?)",
         };
         self.say(&format!("no candidate behaved like the real value: {why}"));
         Ok(None)
     }
 
-    /// Some games only redraw a number when they change it themselves (Lumencraft: neither a
-    /// write nor switching to the game updates its counters), so a test write unseen on screen
-    /// proves nothing. Each candidate that kept its test value gets one of its own at once
-    /// (+100, +200, ...) and the player changes the number in the game: the game's own value
-    /// carries on from its test value (in memory, and on screen once redrawn), copies don't.
-    /// All undone after, keeping what the player gathered meanwhile.
-    fn probe_in_game(&mut self, kept: &[(Loc, String)]) -> Option<Loc> {
+    /// Puts back what the test writes changed: the exact original where the test value is still
+    /// there, only the step where the game changed it since; a copy the game rewrote is left
+    /// alone.
+    fn undo_probes(&mut self, tests: &[Probe]) {
+        let locs: Vec<Loc> = tests.iter().map(|t| t.loc).collect();
+        let now = self.peek(&locs);
+        for (t, v) in tests.iter().zip(now) {
+            match v {
+                Some(v) if v == t.test => {
+                    self.helper.call(&format!("write {} {}", t.loc, t.orig));
+                }
+                Some(v) if (v - t.test).abs() <= PROBE_NEAR => {
+                    self.helper.call(&format!("write {} {}", t.loc, (v - t.step).max((t.test - t.step).min(0))));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// One candidate at a time (of those that kept their test value): +10 for 1.5 s, then
+    /// whether it kept it and other candidates followed it or the screen shows it. Undone
+    /// before the next.
+    fn probe_one_by_one(&mut self, tests: &[Probe], kept: &[bool]) -> Option<(usize, String)> {
+        self.say("checking them one at a time");
+        let locs: Vec<Loc> = tests.iter().map(|t| t.loc).collect();
+        for k in (0..tests.len()).filter(|&k| kept[k]) {
+            let loc = tests[k].loc;
+            let listed = self.helper.call(&format!("peek {loc}"));
+            let Some(orig) = listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()) else { continue };
+            let Some(Some(shown)) = self.peek(&[loc]).first().copied() else { continue };
+            let test = shown + 10;
+            self.helper.call(&format!("write {loc} {test}"));
+            std::thread::sleep(Duration::from_millis(1500));
+            let after = self.peek(&locs);
+            let stuck = after[k] == Some(test);
+            let followers = (0..tests.len()).filter(|&j| j != k && after[j] == Some(test)).count();
+            let screen = if self.area.is_some() { self.read().ok().flatten() } else { None };
+            let on_screen = screen.as_ref().is_some_and(|s| s.value() as i64 == test || s.scaled() == test);
+            self.say(&format!(
+                "0x{:012x}: wrote {test}: {}, {followers} of {} others followed, screen shows {}",
+                loc.addr,
+                if stuck { "kept" } else { "the game changed it" },
+                tests.len() - 1,
+                screen.as_ref().map_or("?".into(), |n| n.to_string()),
+            ));
+            match after[k] {
+                Some(v) if v == test => {
+                    self.helper.call(&format!("write {loc} {orig}"));
+                }
+                // The game changed it meanwhile: only the test's +10 comes off.
+                Some(v) if (v - test).abs() < (v - shown).abs() => {
+                    self.helper.call(&format!("write {loc} {}", v - 10));
+                }
+                _ => {}
+            }
+            if stuck && (followers > 0 || on_screen) {
+                let how = match on_screen {
+                    true => format!("held {test} and the screen showed it"),
+                    false => format!("held {test} and {followers} other places followed it"),
+                };
+                return Some((k, how));
+            }
+        }
+        None
+    }
+
+    /// The player changes the number in the game while every candidate that kept its test
+    /// value still holds it: the game's own value carries on from its test value (in memory,
+    /// and on screen once redrawn), copies don't. The index of the real one, and how it showed.
+    fn probe_in_game(&mut self, tests: &[Probe], kept: &[bool]) -> Option<(usize, String)> {
         // The player has to go to the game and gather or use some (Astro Colony's copper: 45 s
         // ran out first); Stop gives up sooner.
         const WAIT: Duration = Duration::from_secs(180);
-        // Steps 100 apart: a change of up to 49 from one test value is still that one.
-        const NEAR: i64 = 49;
-        let addrs: Vec<Loc> = kept.iter().map(|(l, _)| *l).collect();
-        let before = self.peek(&addrs);
-        // (place, test value, step)
-        let mut tests = Vec::new();
-        for (k, (&loc, b)) in addrs.iter().zip(before).enumerate() {
-            let Some(b) = b else { continue };
-            let step = 100 * (k as i64 + 1);
-            self.helper.call(&format!("write {loc} {}", b + step));
-            tests.push((loc, b + step, step));
-        }
-        let locs: Vec<Loc> = tests.iter().map(|t| t.0).collect();
+        let watched: Vec<usize> = (0..tests.len()).filter(|&k| kept[k]).collect();
+        let locs: Vec<Loc> = watched.iter().map(|&k| tests[k].loc).collect();
         self.say(&format!(
-            "the screen showed none of them (some games only redraw a number when they change it): each holds \
-             its own test value now, waiting up to {} s for the game to change it",
+            "neither the screen nor the other places told which one it is: waiting up to {} s for the game to change it",
             WAIT.as_secs()
         ));
         self.status(&format!(
             "Now change the number in the game once (pick some up or use some): Ferret waits and watches which \
              of the {} places the game carries on from. Stop gives up.",
-            tests.len()
+            watched.len()
         ));
         let start = Instant::now();
         let mut last = None;
-        let mut real = None;
-        while real.is_none() && start.elapsed() < WAIT && !self.cancel.load(Ordering::Relaxed) {
+        while start.elapsed() < WAIT && !self.cancel.load(Ordering::Relaxed) {
             // Memory: the one the game changed, starting from its test value.
             let now = self.peek(&locs);
-            real = tests
-                .iter()
-                .zip(&now)
-                .find(|((_, t, _), v)| v.is_some_and(|v| v != *t && (v - t).abs() <= NEAR))
-                .map(|(&(loc, t, _), v)| (loc, format!("went from {t} to {}", v.unwrap())));
-            if real.is_some() || self.area.is_none() {
+            if let Some((&k, v)) = watched.iter().zip(&now).find(|(&k, v)| v.is_some_and(|v| v != tests[k].test && (v - tests[k].test).abs() <= PROBE_NEAR)) {
+                return Some((k, format!("went from {} to {}", tests[k].test, v.unwrap())));
+            }
+            if self.area.is_none() {
                 std::thread::sleep(Duration::from_millis(250));
                 continue;
             }
             // Screen: a game that does redraw shows the test value (or what followed it).
             let Ok(Some(s)) = self.read() else { continue };
-            real = tests
-                .iter()
-                .find(|(_, t, _)| [s.value() as i64, s.scaled()].iter().any(|v| (v - t).abs() <= NEAR))
-                .map(|&(loc, t, _)| (loc, format!("held {t} and the screen showed {s}")));
+            if let Some(&k) = watched.iter().find(|&&k| [s.value() as i64, s.scaled()].iter().any(|v| (v - tests[k].test).abs() <= PROBE_NEAR)) {
+                return Some((k, format!("held {} and the screen showed {s}", tests[k].test)));
+            }
             if last.as_ref() != Some(&s) {
                 self.say(&format!("screen shows {s}"));
                 last = Some(s);
             }
         }
-        // Undo: the exact original where the test value is still there, only the step where the
-        // game changed it since; a copy the game rewrote is left alone.
-        let now = self.peek(&locs);
-        for (&(loc, t, step), v) in tests.iter().zip(now) {
-            match v {
-                Some(v) if v == t => {
-                    let orig = &kept.iter().find(|(l, _)| *l == loc).unwrap().1;
-                    self.helper.call(&format!("write {loc} {orig}"));
-                }
-                Some(v) if (v - t).abs() <= NEAR => {
-                    self.helper.call(&format!("write {loc} {}", (v - step).max((t - step).min(0))));
-                }
-                _ => {}
-            }
-        }
-        let (loc, how) = real?;
-        self.say(&format!("0x{:012x} {how}: the real value (test writes undone)", loc.addr));
-        Some(loc)
+        None
     }
 
     /// Two reads in a row that agree.
