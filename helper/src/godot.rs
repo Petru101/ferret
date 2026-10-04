@@ -19,6 +19,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::names::Heap;
 
@@ -33,6 +35,23 @@ const MAX_KEY: usize = 64;
 const MAX_ENTRIES: usize = 64;
 /// A path leading to more places than this is too loose to write through.
 const MAX_PLACES: usize = 16;
+/// How long the elements a search found serve other searches.
+const FOUND_FOR: Duration = Duration::from_secs(5);
+/// How long a key that was looked for is looked for by every search.
+const WANTED_FOR: Duration = Duration::from_secs(60);
+
+/// The last search's elements by key. Saved values of a game mostly share their key (every
+/// Lumencraft stack is "amount"), and the limits and the window each look for a missing one:
+/// each search was a pass over the game's memory (~1-2 s on 2.2 GB) of its own.
+struct Found {
+    pid: u32,
+    at: Instant,
+    by_key: HashMap<String, Vec<u64>>,
+}
+
+static FOUND: Mutex<Option<Found>> = Mutex::new(None);
+/// Keys looked for lately (pid, key, when): one search looks for all of them.
+static WANTED: Mutex<Vec<(u32, String, Instant)>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DictPath {
@@ -276,7 +295,12 @@ impl<'a> Dicts<'a> {
     /// Every element in memory whose key is `key`, of either shape (one pass over the game's
     /// memory).
     fn with_key(&self, key: &str) -> Vec<u64> {
-        let mut found = Vec::new();
+        self.with_keys(&[key.to_owned()]).remove(key).unwrap_or_default()
+    }
+
+    /// Every element in memory whose key is one of `keys`, by key: one pass for all of them.
+    fn with_keys(&self, keys: &[String]) -> HashMap<String, Vec<u64>> {
+        let mut found: HashMap<String, Vec<u64>> = HashMap::new();
         let word = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
         let half = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         self.heap.each_chunk(ELEMENT, |addr, b, fresh| {
@@ -292,13 +316,39 @@ impl<'a> Dicts<'a> {
                         Shape::V4 => half(b, o + 0x10) as u64,
                     };
                     let (next, prev) = (word(b, o + shape.next() as usize), word(b, o + shape.prev() as usize));
-                    if self.shaped(shape, k, t, next, prev) && self.key(e, shape).as_deref() == Some(key) {
-                        found.push(e);
+                    if !self.shaped(shape, k, t, next, prev) {
+                        continue;
+                    }
+                    if let Some(key) = self.key(e, shape).filter(|k| keys.contains(k)) {
+                        found.entry(key).or_default().push(e);
                     }
                 }
             }
         });
         found
+    }
+
+    /// Elements with `key`, from a search of the last few seconds when there was one (it looked
+    /// for every key wanted lately), else from a new one. One search at a time: a second one
+    /// waits and takes the first's result.
+    fn recent_with_key(&self, key: &str) -> Vec<u64> {
+        let pid = self.heap.pid;
+        let wanted: Vec<String> = {
+            let mut w = WANTED.lock().unwrap();
+            w.retain(|(p, k, at)| *p == pid && at.elapsed() < WANTED_FOR && k != key);
+            w.push((pid, key.to_owned(), Instant::now()));
+            w.iter().map(|(_, k, _)| k.clone()).collect()
+        };
+        let mut found = FOUND.lock().unwrap();
+        if let Some(f) = found.as_ref().filter(|f| f.pid == pid && f.at.elapsed() < FOUND_FOR) {
+            if let Some(elements) = f.by_key.get(key) {
+                return elements.clone();
+            }
+        }
+        let by_key = self.with_keys(&wanted);
+        let elements = by_key.get(key).cloned().unwrap_or_default();
+        *found = Some(Found { pid, at: Instant::now(), by_key: wanted.iter().map(|k| (k.clone(), by_key.get(k).cloned().unwrap_or_default())).collect() });
+        elements
     }
 }
 
@@ -322,7 +372,7 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &DictPath) -> Vec<u64> {
 pub fn find_roots(heap: &Heap, path: &DictPath) -> Vec<u64> {
     let d = Dicts::new(heap);
     let any = path.any_slot();
-    let all: Vec<u64> = d.with_key(&path.key).into_iter().filter(|&e| d.fits(e, &any)).collect();
+    let all: Vec<u64> = d.recent_with_key(&path.key).into_iter().filter(|&e| d.fits(e, &any)).collect();
     let mut found: Vec<u64> = all.iter().copied().filter(|&e| d.fits(e, path)).collect();
     if found.is_empty() && path.has_slot() {
         let stacks: Vec<(u64, Option<i64>, f64)> = all
