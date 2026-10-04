@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::names::Heap;
 
@@ -139,6 +140,11 @@ struct Layout {
 
 /// The layout found last, by process.
 static LAYOUT: Mutex<Option<(u32, Layout)>> = Mutex::new(None);
+
+/// Script instances found lately, by process and script: values of one script restored
+/// together share one search (Lumencraft's hp and stamina in Player.gd: ~5 s each on 2 GB).
+static FOUND: Mutex<Vec<(u32, String, Instant, Vec<u64>)>> = Mutex::new(Vec::new());
+const FOUND_FOR: Duration = Duration::from_secs(10);
 
 struct Godot<'a> {
     heap: &'a Heap<'a>,
@@ -637,15 +643,30 @@ fn find_bytes(heap: &Heap, bytes: &[u8]) -> Vec<u64> {
     found
 }
 
-/// The script instances the path starts from (searches the game's memory).
+/// The script instances the path starts from (searches the game's memory, unless a search for
+/// the same script just did).
 pub fn find_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
+    let fresh = |(pid, script, at, _): &(u32, String, Instant, Vec<u64>)| *pid == heap.pid && at.elapsed() < FOUND_FOR && *script == path.script;
+    if let Some((_, _, _, roots)) = FOUND.lock().unwrap().iter().find(|f| fresh(f)) {
+        return roots.clone();
+    }
+    let roots = search_roots(heap, path);
+    let mut found = FOUND.lock().unwrap();
+    found.retain(|(pid, script, at, _)| *pid == heap.pid && at.elapsed() < FOUND_FOR && *script != path.script);
+    found.push((heap.pid, path.script.clone(), Instant::now(), roots.clone()));
+    roots
+}
+
+fn search_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
     if let Some(lay) = known_layout(heap.pid) {
         return find_roots_with(&Godot::new(heap, lay), path);
     }
     // A new run of the game: the script's path, then the objects pointing to it, then the
-    // instances pointing to those; the layout comes from the first that fits.
+    // instances pointing to those; the layout comes from the first that fits. Characters are
+    // 4 bytes but in Godot 3 Windows builds: each try reads all of the game's memory.
     let full = format!("res://{}", path.script);
-    for wide in [2u64, 4] {
+    let windows = crate::helper::exe_name(heap.pid).to_lowercase().ends_with(".exe");
+    for wide in if windows { [2u64, 4] } else { [4, 2] } {
         let encoded: Vec<u8> = match wide {
             2 => full.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect(),
             _ => full.chars().map(|c| c as u32).chain([0]).flat_map(u32::to_le_bytes).collect(),
