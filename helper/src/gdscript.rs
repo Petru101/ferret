@@ -1,0 +1,646 @@
+// Godot 3 script variables: a value kept in a variable of a GDScript object (Brotato's
+// materials: the `gold` of the PlayerRunData in the RunData singleton's `players_data`). The
+// game replaces such objects as it runs (Brotato at every wave, keeping the old one around as a
+// snapshot), the interpreter is shared code, and pointer paths go through run-time memory; the
+// scripts' paths and their variables' names stay.
+// Memory (64-bit builds; the offsets are found on the game itself, `Layout`): an Object points
+// to its ScriptInstance; a GDScriptInstance points to its owner Object and its GDScript and
+// keeps the variables as a Vector<Variant> (a pointer to the first one; the count as a u32
+// 4 bytes before it). A Variant is { u32 type; 4 bytes; 16 bytes of data }: 2 = int (int64),
+// 3 = real (double), 17 = Object (data: a pointer, for References the second word),
+// 19 = Array (data: a pointer to { refcount; Vector<Variant> } with the Vector's data pointer
+// at +0x10). The GDScript keeps its path ("res://singletons/run_data.gd", wchar_t: UTF-16 on
+// Windows, UTF-32 on Linux) and member_indices, a Map<StringName, MemberInfo> (red-black tree:
+// { root, nil, size }, elements { color, right, left, parent, next, prev, key, value }, the
+// index first in the value); a StringName points to { refcount, const char *cname, String name }.
+// Text form: gd:singletons/run_data.gd.players_data[0].gold = the variable "gold" of element 0
+// of the variable "players_data" of the (only) object running res://singletons/run_data.gd.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fs::File;
+use std::os::unix::fs::FileExt;
+use std::sync::Mutex;
+
+use crate::names::Heap;
+
+const VARIANT: u64 = 24;
+const INT: u32 = 2;
+const REAL: u32 = 3;
+const OBJECT: u32 = 17;
+const ARRAY: u32 = 19;
+/// Variables per script and elements per array Ferret looks through.
+const MAX_MEMBERS: u64 = 1024;
+const MAX_ELEMENTS: u64 = 1 << 16;
+/// Bytes of a GDScript object searched for its path and its member table.
+const SCRIPT_SIZE: u64 = 0x800;
+/// Objects above the value's own.
+const MAX_UP: usize = 4;
+/// A path leading to more places than this is too loose to write through.
+const MAX_PLACES: usize = 16;
+const MAX_NAME: usize = 128;
+
+#[derive(Clone, Debug, PartialEq, PartialOrd)]
+pub enum Step {
+    Member(String),
+    Index(u64),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptPath {
+    /// The script's path without "res://".
+    script: String,
+    steps: Vec<Step>,
+}
+
+fn good_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= MAX_NAME && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn good_script(s: &str) -> bool {
+    s.ends_with(".gd") && s.len() <= 4 * MAX_NAME && s.chars().all(|c| c.is_ascii_alphanumeric() || "_-/.".contains(c))
+}
+
+impl ScriptPath {
+    pub fn parse(text: &str) -> Option<Self> {
+        let rest = text.strip_prefix("gd:")?;
+        let at = rest.find(".gd.")? + 3;
+        let (script, steps_text) = (&rest[..at], &rest[at + 1..]);
+        let mut steps = Vec::new();
+        for part in steps_text.split('.') {
+            let (name, mut idx) = part.split_once('[').map_or((part, ""), |(n, i)| (n, i));
+            if !good_name(name) {
+                return None;
+            }
+            steps.push(Step::Member(name.to_owned()));
+            while !idx.is_empty() {
+                let (n, tail) = idx.split_once(']')?;
+                steps.push(Step::Index(n.parse().ok()?));
+                idx = tail.strip_prefix('[').unwrap_or(tail);
+                if !tail.is_empty() && !tail.starts_with('[') {
+                    return None;
+                }
+            }
+        }
+        (good_script(script) && matches!(steps.last(), Some(Step::Member(_)))).then(|| ScriptPath { script: script.to_owned(), steps })
+    }
+
+    pub fn text(&self) -> String {
+        format!("gd:{}{}", self.script, self.steps_text())
+    }
+
+    fn steps_text(&self) -> String {
+        self.steps
+            .iter()
+            .map(|s| match s {
+                Step::Member(n) => format!(".{n}"),
+                Step::Index(i) => format!("[{i}]"),
+            })
+            .collect()
+    }
+
+    /// In words: "players_data[0].gold in run_data.gd".
+    pub fn describe(&self) -> String {
+        let file = self.script.rsplit('/').next().unwrap_or(&self.script);
+        format!("{} in {file}", &self.steps_text()[1..])
+    }
+}
+
+/// Where the engine keeps things, as found on the running game.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    /// GDScriptInstance -> its Object, its GDScript, its variables.
+    owner: u64,
+    script: u64,
+    members: u64,
+    /// Object -> its ScriptInstance.
+    instance: u64,
+    /// GDScript -> member_indices, its path's characters.
+    indices: u64,
+    path: u64,
+    /// Bytes per character: 2 (Windows) or 4 (Linux).
+    wide: u64,
+}
+
+/// The layout found last, by process.
+static LAYOUT: Mutex<Option<(u32, Layout)>> = Mutex::new(None);
+
+struct Godot<'a> {
+    heap: &'a Heap<'a>,
+    lay: Layout,
+    /// member_indices by script: name -> index.
+    indices: RefCell<HashMap<u64, Option<HashMap<String, u64>>>>,
+}
+
+fn mem_u32(mem: &File, at: u64) -> Option<u32> {
+    let mut b = [0u8; 4];
+    mem.read_exact_at(&mut b, at).ok()?;
+    Some(u32::from_le_bytes(b))
+}
+
+fn mem_u64(mem: &File, at: u64) -> Option<u64> {
+    let mut b = [0u8; 8];
+    mem.read_exact_at(&mut b, at).ok()?;
+    Some(u64::from_le_bytes(b))
+}
+
+/// A Godot string's characters at `p` (the count, with the terminating 0, is the u32 before).
+fn read_chars(mem: &File, p: u64, wide: u64) -> Option<String> {
+    let n = mem_u32(mem, p.checked_sub(4)?)? as u64;
+    if !(2..=4 * MAX_NAME as u64).contains(&n) {
+        return None;
+    }
+    let mut b = vec![0u8; ((n - 1) * wide) as usize];
+    mem.read_exact_at(&mut b, p).ok()?;
+    match wide {
+        2 => String::from_utf16(&b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()).ok(),
+        _ => b.chunks(4).map(|c| char::from_u32(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect(),
+    }
+}
+
+/// The entries of a Map at `map` ({ root, nil, size }): (key, address of the value), in order.
+fn map_entries(mem: &File, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
+    let (root, nil, size) = (mem_u64(mem, map)?, mem_u64(mem, map + 8)?, mem_u32(mem, map + 16)? as u64);
+    if root == 0 || nil == 0 || root == nil || !(1..=most).contains(&size) {
+        return None;
+    }
+    let mut e = mem_u64(mem, root + 0x10)?;
+    for _ in 0..64 {
+        match mem_u64(mem, e + 0x10)? {
+            l if l == nil => break,
+            l => e = l,
+        }
+    }
+    let mut out = Vec::new();
+    while e != nil && e != 0 {
+        if out.len() as u64 >= size {
+            return None;
+        }
+        out.push((mem_u64(mem, e + 0x30)?, e + 0x38));
+        e = mem_u64(mem, e + 0x20)?;
+    }
+    (out.len() as u64 == size).then_some(out)
+}
+
+/// A StringName's text: its String, else its C string.
+fn string_name(mem: &File, sn: u64, wide: u64) -> Option<String> {
+    if let Some(t) = mem_u64(mem, sn + 0x10).filter(|&p| p != 0).and_then(|p| read_chars(mem, p, wide)) {
+        return good_name(&t).then_some(t);
+    }
+    let c = mem_u64(mem, sn + 8).filter(|&p| p != 0)?;
+    let mut b = [0u8; MAX_NAME];
+    let n = mem.read_at(&mut b, c).ok()?;
+    let t = std::str::from_utf8(b[..n].split(|&x| x == 0).next()?).ok()?;
+    good_name(t).then(|| t.to_owned())
+}
+
+/// member_indices at `map`: every index 0..n-1 once, each under a name.
+fn member_table(mem: &File, map: u64, wide: u64) -> Option<HashMap<String, u64>> {
+    let entries = map_entries(mem, map, MAX_MEMBERS)?;
+    let mut seen = vec![false; entries.len()];
+    let mut out = HashMap::new();
+    for (key, value) in entries {
+        let i = mem_u32(mem, value)? as usize;
+        if i >= seen.len() || seen[i] {
+            return None;
+        }
+        seen[i] = true;
+        out.insert(string_name(mem, key, wide)?, i as u64);
+    }
+    Some(out)
+}
+
+/// The layout, when `inst` is a GDScriptInstance whose variables are at `members` (`count` of
+/// them): its owner points back to it, its script has a member table of `count` names and a
+/// path.
+fn detect(heap: &Heap, inst: u64, members: u64, count: u64) -> Option<Layout> {
+    let mem = heap.file();
+    let m = (8..0x40).step_by(8).find(|&m| mem_u64(mem, inst + m) == Some(members))?;
+    for owner in [8u64, 0x10, 0x18].into_iter().filter(|&o| o < m) {
+        let Some(obj) = mem_u64(mem, inst + owner).filter(|&p| heap.is_pointer(p)) else { continue };
+        let Some(instance) = (8..0x100).step_by(8).find(|&k| mem_u64(mem, obj + k) == Some(inst)) else { continue };
+        for script in [8u64, 0x10, 0x18].into_iter().filter(|&s| s != owner && s < m) {
+            let Some(gd) = mem_u64(mem, inst + script).filter(|&p| heap.is_pointer(p)) else { continue };
+            if let Some(lay) = detect_script(heap, gd, count, Layout { owner, script, members: m, instance, indices: 0, path: 0, wide: 0 }) {
+                return Some(lay);
+            }
+        }
+    }
+    None
+}
+
+/// The rest of the layout from a GDScript: its path's characters and member table.
+fn detect_script(heap: &Heap, gd: u64, count: u64, lay: Layout) -> Option<Layout> {
+    let mem = heap.file();
+    for wide in [2u64, 4] {
+        let Some(path) = (0..SCRIPT_SIZE).step_by(8).find(|&p| {
+            mem_u64(mem, gd + p)
+                .filter(|&c| heap.is_pointer(c))
+                .and_then(|c| read_chars(mem, c, wide))
+                .is_some_and(|t| t.strip_prefix("res://").is_some_and(good_script))
+        }) else {
+            continue;
+        };
+        let indices = (0..SCRIPT_SIZE).step_by(8).find(|&j| {
+            mem_u32(mem, gd + j + 16) == Some(count as u32) && member_table(mem, gd + j, wide).is_some_and(|t| t.len() as u64 == count)
+        })?;
+        return Some(Layout { indices, path, wide, ..lay });
+    }
+    None
+}
+
+impl<'a> Godot<'a> {
+    fn new(heap: &'a Heap<'a>, lay: Layout) -> Self {
+        Godot { heap, lay, indices: RefCell::default() }
+    }
+
+    fn mem(&self) -> &File {
+        self.heap.file()
+    }
+
+    fn u32_at(&self, at: u64) -> Option<u32> {
+        mem_u32(self.mem(), at)
+    }
+
+    fn ptr(&self, at: u64) -> Option<u64> {
+        mem_u64(self.mem(), at).filter(|&p| self.heap.is_pointer(p))
+    }
+
+    /// The Variants of a Vector: (first, count).
+    fn vector(&self, data: u64, most: u64) -> Option<(u64, u64)> {
+        let n = self.u32_at(data.checked_sub(4)?)? as u64;
+        (n >= 1 && n <= most).then_some((data, n))
+    }
+
+    /// The script instance of the Object at `obj`, when it runs a GDScript.
+    fn instance_of(&self, obj: u64) -> Option<u64> {
+        let inst = self.ptr(obj + self.lay.instance)?;
+        (mem_u64(self.mem(), inst + self.lay.owner)? == obj).then_some(inst)
+    }
+
+    fn script_of(&self, inst: u64) -> Option<u64> {
+        self.ptr(inst + self.lay.script)
+    }
+
+    fn members(&self, inst: u64) -> Option<(u64, u64)> {
+        self.vector(self.ptr(inst + self.lay.members)?, MAX_MEMBERS)
+    }
+
+    fn script_path(&self, gd: u64) -> Option<String> {
+        let t = read_chars(self.mem(), self.ptr(gd + self.lay.path)?, self.lay.wide)?;
+        t.strip_prefix("res://").filter(|s| good_script(s)).map(str::to_owned)
+    }
+
+    fn table(&self, gd: u64) -> Option<HashMap<String, u64>> {
+        if let Some(t) = self.indices.borrow().get(&gd) {
+            return t.clone();
+        }
+        let t = member_table(self.mem(), gd + self.lay.indices, self.lay.wide);
+        self.indices.borrow_mut().insert(gd, t.clone());
+        t
+    }
+
+    /// The Variant of the variable `name` of the script instance `inst`.
+    fn member(&self, inst: u64, name: &str) -> Option<u64> {
+        let i = *self.table(self.script_of(inst)?)?.get(name)?;
+        let (first, n) = self.members(inst)?;
+        (i < n).then_some(first + i * VARIANT)
+    }
+
+    fn member_name(&self, inst: u64, i: u64) -> Option<String> {
+        self.table(self.script_of(inst)?)?.into_iter().find(|(_, x)| *x == i).map(|(n, _)| n)
+    }
+
+    /// The script instance of the Object a Variant holds.
+    fn object(&self, v: u64) -> Option<u64> {
+        if self.u32_at(v)? != OBJECT {
+            return None;
+        }
+        // References in the second word; other objects in the first, or behind it.
+        let words = [mem_u64(self.mem(), v + 16), mem_u64(self.mem(), v + 8)];
+        let mut objs: Vec<u64> = words.iter().flatten().copied().filter(|&p| self.heap.is_pointer(p)).collect();
+        if let Some(behind) = mem_u64(self.mem(), v + 8).filter(|&p| self.heap.is_pointer(p)).and_then(|p| self.ptr(p)) {
+            objs.push(behind);
+        }
+        objs.into_iter().find_map(|o| self.instance_of(o))
+    }
+
+    /// The Array a Variant holds: (its private part, its elements, their count).
+    fn array(&self, v: u64) -> Option<(u64, u64, u64)> {
+        if self.u32_at(v)? != ARRAY {
+            return None;
+        }
+        let private = self.ptr(v + 8)?;
+        let (first, n) = self.vector(self.ptr(private + 0x10)?, MAX_ELEMENTS)?;
+        Some((private, first, n))
+    }
+
+    fn number(&self, v: u64) -> bool {
+        matches!(self.u32_at(v), Some(INT | REAL))
+    }
+
+    /// The values the path leads to from these script instances.
+    fn walk(&self, roots: &[u64], steps: &[Step]) -> Vec<u64> {
+        let mut out = Vec::new();
+        'root: for &root in roots {
+            let mut inst = Some(root);
+            let mut v = None;
+            for step in steps {
+                v = match (step, inst, v) {
+                    (Step::Member(n), Some(i), _) => self.member(i, n),
+                    (Step::Member(n), None, Some(prev)) => self.object(prev).and_then(|i| self.member(i, n)),
+                    (Step::Index(e), _, Some(prev)) => self.array(prev).filter(|a| *e < a.2).map(|a| a.1 + e * VARIANT),
+                    _ => None,
+                };
+                inst = None;
+                if v.is_none() {
+                    continue 'root;
+                }
+            }
+            if let Some(v) = v.filter(|&v| self.number(v)) {
+                out.push(v + 8);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Every script instance running one of `gds`.
+    fn instances(&self, gds: &[u64]) -> Vec<u64> {
+        self.instances_at(self.heap.referrers(gds))
+    }
+
+    /// The script instances among the places that point to scripts.
+    fn instances_at(&self, refs: impl IntoIterator<Item = u64>) -> Vec<u64> {
+        let mut out: Vec<u64> = refs
+            .into_iter()
+            .filter_map(|at| at.checked_sub(self.lay.script))
+            .filter(|&inst| self.ptr(inst + self.lay.owner).and_then(|o| self.instance_of(o)) == Some(inst))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Where the Variant at `v` is kept: (the script instance, the variable's index) when it
+    /// is a variable, (the Array's private part, the element) when it is in an array.
+    fn holders(&self, vs: &[u64]) -> (Vec<(u64, u64, u64)>, Vec<(u64, u64, u64)>) {
+        let mut starts: Vec<(u64, u64, u64)> = Vec::new();
+        for &v in vs {
+            for i in 0..MAX_ELEMENTS.min(256) {
+                let Some(s) = v.checked_sub(i * VARIANT) else { break };
+                if s >= 4 && self.u32_at(s - 4).is_some_and(|n| n as u64 > i && n as u64 <= MAX_ELEMENTS) {
+                    starts.push((s, v, i));
+                }
+            }
+        }
+        let targets: Vec<u64> = starts.iter().map(|s| s.0).collect();
+        let (mut members, mut arrays) = (Vec::new(), Vec::new());
+        for at in self.heap.referrers(&targets) {
+            let Some(data) = mem_u64(self.mem(), at) else { continue };
+            for &(_, v, i) in starts.iter().filter(|s| s.0 == data) {
+                let Some(inst) = at.checked_sub(self.lay.members) else { continue };
+                if self.ptr(inst + self.lay.owner).and_then(|o| self.instance_of(o)) == Some(inst) {
+                    members.push((inst, i, v));
+                } else if let Some(private) = at.checked_sub(0x10) {
+                    arrays.push((private, i, v));
+                }
+            }
+        }
+        (members, arrays)
+    }
+}
+
+/// A way down from a script instance to the value.
+#[derive(Clone)]
+struct Partial {
+    inst: u64,
+    steps: Vec<Step>,
+}
+
+/// Finds the layout from the value at `target` (an int or real variable of a script), and the
+/// instance and variable it is.
+fn start(heap: &Heap, target: u64) -> Option<(Layout, u64, u64)> {
+    let mem = heap.file();
+    let v = target.checked_sub(8)?;
+    if !matches!(mem_u32(mem, v), Some(INT | REAL)) {
+        return None;
+    }
+    let starts: Vec<(u64, u64)> = (0..MAX_MEMBERS.min(256))
+        .filter_map(|i| Some((v.checked_sub(i * VARIANT)?, i)))
+        .filter(|&(s, i)| mem_u32(mem, s - 4).is_some_and(|n| n as u64 > i && n as u64 <= MAX_MEMBERS))
+        .collect();
+    let targets: Vec<u64> = starts.iter().map(|s| s.0).collect();
+    for at in heap.referrers(&targets) {
+        let Some(data) = mem_u64(mem, at) else { continue };
+        let Some(&(s, i)) = starts.iter().find(|s| s.0 == data) else { continue };
+        let count = mem_u32(mem, s - 4)? as u64;
+        for m in (8..0x40).step_by(8) {
+            if let Some(lay) = at.checked_sub(m).and_then(|inst| detect(heap, inst, s, count)) {
+                return Some((lay, at - lay.members, i));
+            }
+        }
+    }
+    None
+}
+
+/// The layout of this process's Godot, when it was found before.
+fn known_layout(pid: u32) -> Option<Layout> {
+    LAYOUT.lock().unwrap().filter(|(p, _)| *p == pid).map(|(_, l)| l)
+}
+
+fn remember(pid: u32, lay: Layout) {
+    *LAYOUT.lock().unwrap() = Some((pid, lay));
+}
+
+/// A path to the value at `target` when it is a variable of a script: up from its object
+/// through the variables and arrays holding it, to a script only one object runs (a
+/// singleton). With the places it leads to now.
+pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
+    let (lay, inst, i) = start(heap, target)?;
+    remember(heap.pid, lay);
+    let g = Godot::new(heap, lay);
+    let own = Partial { inst, steps: vec![Step::Member(g.member_name(inst, i)?)] };
+    // What a new run of the game finds: the objects running the script with this path (its
+    // characters must be where the search looks, in writable memory).
+    let path_of = |p: &Partial| {
+        let gd = g.script_of(p.inst)?;
+        g.ptr(gd + lay.path)?;
+        Some(ScriptPath { script: g.script_path(gd)?, steps: p.steps.clone() })
+    };
+    let mut level = vec![own.clone()];
+    let mut own_runs = Vec::new();
+    for depth in 0..=MAX_UP {
+        // One pass: the objects running each script here, and what holds each object.
+        let mut gds: Vec<u64> = level.iter().filter_map(|p| g.script_of(p.inst)).collect();
+        gds.sort_unstable();
+        gds.dedup();
+        let objs: Vec<u64> = level.iter().filter_map(|p| mem_u64(heap.file(), p.inst + lay.owner)).collect();
+        let refs = heap.referrers(&[gds.as_slice(), objs.as_slice()].concat());
+        let points_to = |at: u64, set: &[u64]| mem_u64(heap.file(), at).is_some_and(|v| set.contains(&v));
+        let runs = g.instances_at(refs.iter().copied().filter(|&at| points_to(at, &gds)));
+        if depth == 0 {
+            own_runs = runs.clone();
+        }
+        // A script only one object runs (a singleton) is where the path starts.
+        let single = |gd: u64| runs.iter().filter(|&&r| g.script_of(r) == Some(gd)).count() == 1;
+        for p in level.iter().filter(|p| g.script_of(p.inst).is_some_and(single)) {
+            if let Some(path) = path_of(p) {
+                let leads = g.walk(&[p.inst], &path.steps);
+                if leads == [target] {
+                    return Some((path, leads));
+                }
+            }
+        }
+        if depth == MAX_UP {
+            break;
+        }
+        // Who holds each object: a variable of another script, or an array in one.
+        let vars: Vec<(u64, u64)> = refs
+            .iter()
+            .filter(|&&at| points_to(at, &objs))
+            .flat_map(|&at| [at.wrapping_sub(16), at.wrapping_sub(8)])
+            .filter_map(|v| Some((v, g.object(v)?)))
+            .collect();
+        let vs: Vec<u64> = vars.iter().map(|v| v.0).collect();
+        let (members, arrays) = g.holders(&vs);
+        let down = |v: u64| level.iter().find(|p| vars.iter().any(|&(x, i)| x == v && i == p.inst)).map(|p| p.steps.clone());
+        let mut next = Vec::new();
+        for (inst, i, v) in members {
+            let (Some(name), Some(rest)) = (g.member_name(inst, i), down(v)) else { continue };
+            next.push(Partial { inst, steps: [vec![Step::Member(name)], rest].concat() });
+        }
+        // Arrays: the Variant holding each, a variable of a script.
+        let privates: Vec<u64> = arrays.iter().map(|a| a.0).collect();
+        let array_vars: Vec<u64> = match privates.is_empty() {
+            true => Vec::new(),
+            false => heap.referrers(&privates).into_iter().filter_map(|at| at.checked_sub(8)).filter(|&v| g.array(v).is_some()).collect(),
+        };
+        let (owners, _) = g.holders(&array_vars);
+        for (inst, i, av) in owners {
+            let (Some((private, first, _)), Some(name)) = (g.array(av), g.member_name(inst, i)) else { continue };
+            for &(_, e, v) in arrays.iter().filter(|a| a.0 == private && first + a.1 * VARIANT == a.2) {
+                let Some(rest) = down(v) else { continue };
+                next.push(Partial { inst, steps: [vec![Step::Member(name.clone()), Step::Index(e)], rest].concat() });
+            }
+        }
+        next.sort_by(|a, b| (a.inst, &a.steps).partial_cmp(&(b.inst, &b.steps)).unwrap());
+        next.dedup_by(|a, b| a.inst == b.inst && a.steps == b.steps);
+        next.truncate(64);
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    // No singleton above it: the value's own variable in every object running its script,
+    // when they are few.
+    let path = path_of(&own)?;
+    let leads = g.walk(&own_runs, &path.steps);
+    (leads.contains(&target) && leads.len() <= MAX_PLACES).then_some((path, leads))
+}
+
+/// The objects running the path's script, found by the script's path (a few passes over
+/// memory). Finds the layout first when this process's isn't known yet.
+fn find_roots_with(g: &Godot, path: &ScriptPath) -> Vec<u64> {
+    let full = format!("res://{}", path.script);
+    let encoded: Vec<u8> = match g.lay.wide {
+        2 => full.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect(),
+        _ => full.chars().map(|c| c as u32).chain([0]).flat_map(u32::to_le_bytes).collect(),
+    };
+    let strings = find_bytes(g.heap, &encoded);
+    let scripts: Vec<u64> = g.heap.referrers(&strings).into_iter().filter_map(|at| at.checked_sub(g.lay.path)).collect();
+    let scripts: Vec<u64> = scripts.into_iter().filter(|&gd| g.script_path(gd).as_deref() == Some(path.script.as_str())).collect();
+    g.instances(&scripts)
+}
+
+/// Every place these bytes are in writable memory (4-aligned: Godot's strings are).
+fn find_bytes(heap: &Heap, bytes: &[u8]) -> Vec<u64> {
+    let mut found = Vec::new();
+    let Some(head) = bytes.get(..4).map(|h| u32::from_le_bytes([h[0], h[1], h[2], h[3]])) else { return found };
+    heap.each_chunk(bytes.len(), |addr, b, fresh| {
+        for at in (0..fresh).step_by(4) {
+            if b.len() >= at + bytes.len() && u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) == head && &b[at..at + bytes.len()] == bytes {
+                found.push(addr + at as u64);
+            }
+        }
+    });
+    found
+}
+
+/// The script instances the path starts from (searches the game's memory).
+pub fn find_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
+    if let Some(lay) = known_layout(heap.pid) {
+        return find_roots_with(&Godot::new(heap, lay), path);
+    }
+    // A new run of the game: the script's path, then the objects pointing to it, then the
+    // instances pointing to those; the layout comes from the first that fits.
+    let full = format!("res://{}", path.script);
+    for wide in [2u64, 4] {
+        let encoded: Vec<u8> = match wide {
+            2 => full.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect(),
+            _ => full.chars().map(|c| c as u32).chain([0]).flat_map(u32::to_le_bytes).collect(),
+        };
+        let strings = find_bytes(heap, &encoded);
+        if strings.is_empty() {
+            continue;
+        }
+        let refs = heap.referrers(&strings);
+        let mut scripts: Vec<u64> = refs.iter().flat_map(|&at| (0..SCRIPT_SIZE).step_by(8).filter_map(move |p| at.checked_sub(p))).collect();
+        scripts.sort_unstable();
+        scripts.dedup();
+        let ats = heap.referrers(&scripts);
+        let lay = ats.iter().find_map(|&at| {
+            let gd = mem_u64(heap.file(), at)?;
+            [8u64, 0x10, 0x18].into_iter().find_map(|script| {
+                let inst = at.checked_sub(script)?;
+                (script + 8..0x40).step_by(8).find_map(|m| {
+                    let members = mem_u64(heap.file(), inst + m).filter(|&p| heap.is_pointer(p))?;
+                    let count = mem_u32(heap.file(), members - 4).map(u64::from).filter(|n| (1..=MAX_MEMBERS).contains(n))?;
+                    detect(heap, inst, members, count).filter(|l| l.script == script && mem_u64(heap.file(), inst + l.script) == Some(gd))
+                })
+            })
+        });
+        let Some(lay) = lay else { continue };
+        remember(heap.pid, lay);
+        // The same places that point to scripts hold the instances.
+        let g = Godot::new(heap, lay);
+        let ours = |at: &u64| {
+            mem_u64(heap.file(), *at)
+                .filter(|&gd| refs.iter().any(|&r| r == gd + lay.path))
+                .is_some_and(|gd| g.script_path(gd).as_deref() == Some(path.script.as_str()))
+        };
+        return g.instances_at(ats.iter().copied().filter(ours));
+    }
+    Vec::new()
+}
+
+/// Where the path leads from the script instances found before (no search).
+pub fn walk(heap: &Heap, roots: &[u64], path: &ScriptPath) -> Vec<u64> {
+    let Some(lay) = known_layout(heap.pid) else { return Vec::new() };
+    let g = Godot::new(heap, lay);
+    // A root is still one when it still runs the script.
+    let roots: Vec<u64> =
+        roots.iter().copied().filter(|&r| g.script_of(r).and_then(|gd| g.script_path(gd)).as_deref() == Some(path.script.as_str())).collect();
+    g.walk(&roots, &path.steps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_round_trip() {
+        let t = "gd:singletons/run_data.gd.players_data[0].gold";
+        let p = ScriptPath::parse(t).unwrap();
+        assert_eq!(p.script, "singletons/run_data.gd");
+        assert_eq!(p.steps, vec![Step::Member("players_data".into()), Step::Index(0), Step::Member("gold".into())]);
+        assert_eq!(p.text(), t);
+        assert_eq!(p.describe(), "players_data[0].gold in run_data.gd");
+        assert_eq!(ScriptPath::parse("gd:a/b.gd.x[1][2].y").unwrap().text(), "gd:a/b.gd.x[1][2].y");
+        assert!(ScriptPath::parse("gd:a/b.gd.x[0]").is_none());
+        assert!(ScriptPath::parse("gd:a/b.gd").is_none());
+        assert!(ScriptPath::parse("gd:a b.gd.x").is_none());
+        assert!(ScriptPath::parse("{amount|id=0}").is_none());
+    }
+}

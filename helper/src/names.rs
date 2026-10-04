@@ -332,7 +332,7 @@ impl<'a> Heap<'a> {
     }
 
     /// Where pointers to any of `targets` are kept, in one pass over memory.
-    fn referrers(&self, targets: &[u64]) -> Vec<u64> {
+    pub fn referrers(&self, targets: &[u64]) -> Vec<u64> {
         let mut t = targets.to_vec();
         t.sort_unstable();
         let (Some(&lo), Some(&hi)) = (t.first(), t.last()) else { return Vec::new() };

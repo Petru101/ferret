@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::anticheat;
 use crate::ue::{self, UePath};
+use crate::gdscript::{self, ScriptPath};
 use crate::godot::{self, DictPath};
 use crate::names::{self, Heap, NamedPath};
 use crate::pointers::{self, Module, Pointers, PtrPath};
@@ -84,6 +85,24 @@ fn is_gamemaker(pid: u32, exe: &str) -> bool {
         let dir = std::path::Path::new(&r.path).with_file_name("");
         ["data.win", "game.unx", "assets/game.unx"].iter().any(|f| dir.join(f).exists())
     })
+}
+
+/// Godot games load <program>.pck from next to the program, or carry it at the end of the
+/// program (which then ends with its magic, "GDPC").
+fn is_godot(pid: u32) -> bool {
+    let Some(program) = maps(pid).ok().and_then(|m| program_path(pid, &m)) else { return false };
+    let root = Path::new("/proc").join(pid.to_string()).join("root");
+    let inside = |p: &Path| root.join(p.strip_prefix("/").unwrap_or(p));
+    if inside(&program.with_extension("pck")).exists() || program.with_extension("pck").exists() {
+        return true;
+    }
+    let ends_with_magic = |p: &Path| {
+        let Ok(f) = File::open(p) else { return false };
+        let Ok(len) = f.metadata().map(|m| m.len()) else { return false };
+        let mut b = [0u8; 4];
+        len >= 4 && f.read_exact_at(&mut b, len - 4).is_ok() && &b == b"GDPC"
+    };
+    ends_with_magic(&inside(&program)) || ends_with_magic(&program)
 }
 
 /// Anti-cheat loaded in the game, shipped in its folder, or known to its launcher or to
@@ -320,12 +339,14 @@ struct Limit {
     searched_code: bool,
 }
 
-/// A named path of either kind: through objects the game names (Unity, names.rs) or to an entry
-/// of the game's dictionaries (Godot, godot.rs).
+/// A named path of any kind: through objects the game names (Unity, names.rs), to an entry of
+/// the game's dictionaries (Godot, godot.rs), through its scripts' variables (Godot,
+/// gdscript.rs) or through its Unreal objects (ue.rs).
 #[derive(Clone)]
 enum Named {
     Objects(NamedPath),
     Dict(DictPath),
+    Script(ScriptPath),
     Unreal(UePath),
 }
 
@@ -334,6 +355,9 @@ impl Named {
         if text.starts_with("ue:") {
             return UePath::parse(text).map(Named::Unreal);
         }
+        if text.starts_with("gd:") {
+            return ScriptPath::parse(text).map(Named::Script);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -341,7 +365,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:")
     }
 
     /// Where it leads from the roots found before (no search).
@@ -349,6 +373,7 @@ impl Named {
         match self {
             Named::Objects(p) => heap.walk(roots, p),
             Named::Dict(p) => godot::walk(heap, roots, p),
+            Named::Script(p) => gdscript::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
@@ -358,6 +383,7 @@ impl Named {
         match self {
             Named::Objects(p) => heap.find_roots(p),
             Named::Dict(p) => godot::find_roots(heap, p),
+            Named::Script(p) => gdscript::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
@@ -1741,6 +1767,17 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     if let Some((p, leads)) = godot::discover(&heap, target) {
         writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
         return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+    }
+    // A variable of a Godot script is named by the script's path and the variables leading to
+    // it.
+    if let Some((p, leads)) = gdscript::discover(&heap, target) {
+        writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+        return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+    }
+    // Godot's memory isn't laid out like Unity's: bytes there that look like a Unity string
+    // made a path through "lor" in Brotato, which led nowhere after the next wave.
+    if is_godot(s.pid) {
+        return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
     }
     let collected = pointers::collect_pointers(s.pid, mem, s.width)?;
     let found = names::discover(&heap, &collected.0, target);
