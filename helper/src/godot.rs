@@ -298,9 +298,11 @@ pub fn find_roots(heap: &Heap, path: &DictPath) -> Vec<u64> {
 }
 
 /// A path to the value at `target` when it is an entry of a dictionary: its key, the other
-/// keys of its dictionary, and the int of one of them that picks out the fewest dictionaries
-/// (an "id" first: the slot an item is in changes, what it is doesn't). With the places it
-/// leads to now.
+/// keys of its dictionary, and the int of one of them: an "id" when there is one, else the one
+/// that picks out the fewest dictionaries; plus the slot it is in when it is in one: an item can have several stacks,
+/// and the game shows their total (Lumencraft: 200 lumen in the backpack, 1 on the hotbar; a
+/// limit holding every stack at once let pickups and purchases go to the other one). The
+/// player keeps the item in that slot. With the places it leads to now.
 pub fn discover(heap: &Heap, target: u64) -> Option<(DictPath, Vec<u64>)> {
     let d = Dicts::new(heap);
     let (e, shape) = at_value(&d, target)?;
@@ -312,7 +314,8 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(DictPath, Vec<u64>)> {
     let base = DictPath { key: key.clone(), with: siblings.iter().map(|(k, _)| (k.clone(), None)).collect() };
     let all: Vec<u64> = d.with_key(&key).into_iter().filter(|&x| d.fits(x, &base)).collect();
     let mut options = vec![base.clone()];
-    for (k, v) in siblings.iter().filter(|(_, v)| v.is_some()) {
+    // A slot alone would write to whatever the player puts there: it only narrows an item down.
+    for (k, v) in siblings.iter().filter(|(k, v)| v.is_some() && !slot_key(k)) {
         let mut p = base.clone();
         p.with.iter_mut().filter(|(pk, _)| pk == k).for_each(|w| w.1 = *v);
         options.push(p);
@@ -325,8 +328,15 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(DictPath, Vec<u64>)> {
             (p, leads)
         })
         .filter(|(_, leads)| leads.contains(&e) && leads.len() <= MAX_PLACES)
-        .min_by_key(|(p, leads)| (leads.len(), identity(p), p.with.iter().filter(|w| w.1.is_some()).count()))
-        .map(|(p, leads)| (p, values(&d, &leads)))
+        .min_by_key(|(p, leads)| (identity(p), leads.len(), p.with.iter().filter(|w| w.1.is_some()).count()))
+        .map(|(mut p, mut leads)| {
+            let slot = siblings.iter().find(|(k, v)| v.is_some() && slot_key(k));
+            if let Some((k, v)) = slot.filter(|_| identity(&p) == 0) {
+                p.with.iter_mut().filter(|(pk, _)| pk == k).for_each(|w| w.1 = *v);
+                leads.retain(|&x| d.fits(x, &p));
+            }
+            (p, values(&d, &leads))
+        })
 }
 
 /// The element whose value is at `addr`, and its shape.
@@ -347,7 +357,7 @@ pub fn about(heap: &Heap, addr: u64) -> Option<String> {
     let ids: Vec<String> = d
         .siblings(e, shape)
         .into_iter()
-        .filter(|(k, v)| v.is_some() && identity_key(k))
+        .filter(|(k, v)| v.is_some() && (identity_key(k) || slot_key(k)))
         .map(|(k, v)| format!("\"{k}\" is {}", v.unwrap_or_default()))
         .collect();
     Some(match ids.is_empty() {
@@ -359,7 +369,13 @@ pub fn about(heap: &Heap, addr: u64) -> Option<String> {
 /// A key that says what an entry is (rather than where or how much).
 fn identity_key(k: &str) -> bool {
     let k = k.to_lowercase();
-    ["id", "type", "kind", "name"].iter().any(|n| k.contains(n))
+    !slot_key(&k) && ["id", "type", "kind", "name"].iter().any(|n| k.contains(n))
+}
+
+/// A key that says which inventory slot an entry is in. Only these names: a key that moves
+/// (a sort position) would lose the value.
+fn slot_key(k: &str) -> bool {
+    ["index", "slot", "slot_index", "slotindex", "slot_id", "slotid"].contains(&k.to_lowercase().as_str())
 }
 
 #[cfg(test)]
@@ -375,5 +391,13 @@ mod tests {
         assert_eq!(DictPath::parse("{amount|id=-3}").unwrap().with, vec![("id".into(), Some(-3))]);
         assert!(DictPath::parse("{amo unt|id}").is_none());
         assert!(DictPath::parse("\"Inventory\"@10,+38").is_none());
+        let p = DictPath::parse("{amount|id=1,data,index=7}").unwrap();
+        assert_eq!(p.describe(), "\"amount\" where \"id\" is 1 and \"index\" is 7");
+    }
+
+    #[test]
+    fn slot_keys() {
+        assert!(slot_key("index") && slot_key("Slot") && slot_key("slot_id"));
+        assert!(!identity_key("slot_id") && identity_key("item_id") && !slot_key("position"));
     }
 }
