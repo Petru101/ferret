@@ -76,6 +76,16 @@ impl DictPath {
         format!("{{{}|{}}}", self.key, with.join(","))
     }
 
+    /// The same path whatever slot the item is in.
+    fn any_slot(&self) -> DictPath {
+        let with = self.with.iter().map(|(k, v)| (k.clone(), if slot_key(k) { None } else { *v })).collect();
+        DictPath { key: self.key.clone(), with }
+    }
+
+    fn has_slot(&self) -> bool {
+        self.with.iter().any(|(k, v)| v.is_some() && slot_key(k))
+    }
+
     /// In words: ""amount" where "id" is 0".
     pub fn describe(&self) -> String {
         let held: Vec<String> = self.with.iter().filter_map(|(k, v)| Some(format!("\"{k}\" is {}", (*v)?))).collect();
@@ -211,6 +221,20 @@ impl<'a> Dicts<'a> {
         text
     }
 
+    /// The element's number, int or real.
+    fn number(&self, e: u64, shape: Shape) -> Option<f64> {
+        match self.u32_at(e + shape.value() - 8)? {
+            INT => self.int(e, shape).map(|v| v as f64),
+            REAL => self.u64_at(e + shape.value()).map(f64::from_bits),
+            _ => None,
+        }
+    }
+
+    /// The slot the element's dictionary is in, when it has a slot key.
+    fn slot(&self, e: u64, shape: Shape) -> Option<i64> {
+        self.siblings(e, shape).into_iter().find(|(k, v)| v.is_some() && slot_key(k))?.1
+    }
+
     fn int(&self, e: u64, shape: Shape) -> Option<i64> {
         (self.u32_at(e + shape.value() - 8)? == INT).then(|| self.u64_at(e + shape.value()).map(|v| v as i64)).flatten()
     }
@@ -283,16 +307,34 @@ fn values(d: &Dicts, elements: &[u64]) -> Vec<u64> {
     elements.iter().filter_map(|&e| Some(e + d.element(e)?.value())).collect()
 }
 
-/// Elements the path leads to, among those found before (cheap: no search).
+/// Elements the path leads to, among those found before (cheap: no search). A stack found
+/// stays followed when the player moves it to another slot.
 pub fn walk(heap: &Heap, roots: &[u64], path: &DictPath) -> Vec<u64> {
     let d = Dicts::new(heap);
-    values(&d, &roots.iter().copied().filter(|&e| d.fits(e, path)).collect::<Vec<_>>())
+    let path = path.any_slot();
+    values(&d, &roots.iter().copied().filter(|&e| d.fits(e, &path)).collect::<Vec<_>>())
 }
 
-/// Searches the game's memory for the path's elements (the roots `walk` takes).
+/// Searches the game's memory for the path's elements (the roots `walk` takes). The slot saved
+/// is a preference: the game picks slots by pickup order, so on another map the item is
+/// elsewhere (Lumencraft's iron: saved in slot 1, then in 7); then its biggest stack (a full
+/// stack in the backpack rather than the one that overflowed onto the hotbar), with its copies.
 pub fn find_roots(heap: &Heap, path: &DictPath) -> Vec<u64> {
     let d = Dicts::new(heap);
-    let mut found: Vec<u64> = d.with_key(&path.key).into_iter().filter(|&e| d.fits(e, path)).collect();
+    let any = path.any_slot();
+    let all: Vec<u64> = d.with_key(&path.key).into_iter().filter(|&e| d.fits(e, &any)).collect();
+    let mut found: Vec<u64> = all.iter().copied().filter(|&e| d.fits(e, path)).collect();
+    if found.is_empty() && path.has_slot() {
+        let stacks: Vec<(u64, Option<i64>, f64)> = all
+            .iter()
+            .filter_map(|&e| {
+                let shape = d.element(e)?;
+                Some((e, d.slot(e, shape), d.number(e, shape)?))
+            })
+            .collect();
+        let biggest = stacks.iter().max_by(|a, b| a.2.total_cmp(&b.2)).map(|s| s.1);
+        found = stacks.iter().filter(|s| Some(s.1) == biggest).map(|s| s.0).collect();
+    }
     found.truncate(MAX_PLACES);
     found
 }
@@ -393,6 +435,8 @@ mod tests {
         assert!(DictPath::parse("\"Inventory\"@10,+38").is_none());
         let p = DictPath::parse("{amount|id=1,data,index=7}").unwrap();
         assert_eq!(p.describe(), "\"amount\" where \"id\" is 1 and \"index\" is 7");
+        assert!(p.has_slot() && !p.any_slot().has_slot());
+        assert_eq!(p.any_slot().text(), "{amount|id=1,data,index}");
     }
 
     #[test]
