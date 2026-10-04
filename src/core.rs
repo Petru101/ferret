@@ -623,7 +623,15 @@ struct Game {
     /// Named values whose places aren't one value now (the helper's "doubtful" line): never
     /// written.
     named_doubt: Vec<(String, String)>,
+    /// Values whose code patterns aren't in the game's memory yet (a Mono game compiles code
+    /// when it first runs it: at the main menu, Particle Fleet's omni code isn't there), and
+    /// when they were last looked for.
+    waiting: Vec<String>,
+    waited_at: Option<Instant>,
 }
+
+/// How often values waiting for their code are looked for again.
+const WAIT_EVERY: Duration = Duration::from_secs(10);
 
 /// How a value's pointer paths agreed when last followed (the helper's "votes" line).
 #[derive(Clone, Copy)]
@@ -844,7 +852,7 @@ impl Core {
         if self.game.as_ref().map(|g| g.pid) != Some(pid) {
             self.capture = None;
         }
-        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new() });
+        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new(), waiting: Vec::new(), waited_at: None });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -1320,19 +1328,7 @@ impl Core {
                 }
                 continue;
             }
-            let mut resolved = None;
-            self.game()?.via.retain(|(n, _)| n != name);
-            for site in &entry.sites {
-                let reply = self.helper.call(&format!("resolve {site} {}", entry.kind.name()));
-                if let Some((loc, Some(v))) = parse_values(&reply).first() {
-                    resolved = Some((*loc, *v));
-                    if let Some(via) = reply.iter().find_map(|l| l.strip_prefix("via ")) {
-                        self.game()?.via.push((name.clone(), via.to_owned()));
-                    }
-                    break;
-                }
-                self.say(&format!("{name}: {}", reply.join(" ")));
-            }
+            let mut resolved = self.resolve_sites(entry, true)?;
             let paths = entry.followed(&entries);
             if resolved.is_none() && !paths.is_empty() {
                 let (ends, best, votes) = self.follow_votes(entry.kind, &paths);
@@ -1374,34 +1370,86 @@ impl Core {
                 }
             }
             match resolved {
-                Some((loc, v)) => {
-                    self.say(&format!("{name} = {v} (at 0x{:x}, {})", loc.addr, loc.kind.describe()));
+                Some((loc, v)) => self.found_by_site(entry, loc, v)?,
+                None => {
+                    self.say(&format!("{name}: not found yet (the game hasn't run the code that uses it), Ferret looks again every {} s", WAIT_EVERY.as_secs()));
                     let game = self.game()?;
                     game.entries.retain(|(n, _)| n != name);
-                    game.entries.push((name.clone(), loc));
-                    if entry.limit.is_some() {
-                        let (min, max) = entry.shown_range();
-                        match self.apply_limit(entry) {
-                            Ok(()) => self.say(&format!("{name} is kept {}", limit_text(min, max))),
-                            Err(e) => self.say(&format!("{name}: limit not applied: {e}")),
-                        }
-                    } else if !entry.sites.is_empty() {
-                        // The game may replace the object holding it (Particle Fleet does on a
-                        // new map): the helper finds it again.
-                        if let Err(e) = self.apply_limit(entry) {
-                            self.say(&format!("{name}: Ferret can't keep track of it if the game moves it: {e}"));
-                        }
-                    }
+                    game.entries.push((name.clone(), Loc { addr: 0, kind: entry.kind }));
+                    game.waiting.retain(|n| n != name);
+                    game.waiting.push(name.clone());
+                    game.waited_at = Some(Instant::now());
                 }
-                None => self.say(&format!("{name}: not found yet, try restore again once the game has used it")),
             }
         }
         self.say(&format!("restored in {} ms", t.elapsed().as_millis()));
         Ok(())
     }
 
+    /// Finds a value by its code patterns: where it is and its value. `tell`: says why each
+    /// pattern failed.
+    fn resolve_sites(&mut self, entry: &Entry, tell: bool) -> Result<Option<(Loc, i64)>, String> {
+        let name = &entry.name;
+        self.game()?.via.retain(|(n, _)| n != name);
+        for site in &entry.sites {
+            let reply = self.helper.call(&format!("resolve {site} {}", entry.kind.name()));
+            if let Some((loc, Some(v))) = parse_values(&reply).first() {
+                if let Some(via) = reply.iter().find_map(|l| l.strip_prefix("via ")) {
+                    self.game()?.via.push((name.clone(), via.to_owned()));
+                }
+                return Ok(Some((*loc, *v)));
+            }
+            if tell {
+                self.say(&format!("{name}: {}", reply.join(" ")));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A value found by its code patterns (or its pointer paths): shown, and its limit applied.
+    fn found_by_site(&mut self, entry: &Entry, loc: Loc, v: i64) -> Result<(), String> {
+        let name = &entry.name;
+        self.say(&format!("{name} = {v} (at 0x{:x}, {})", loc.addr, loc.kind.describe()));
+        let game = self.game()?;
+        game.entries.retain(|(n, _)| n != name);
+        game.entries.push((name.clone(), loc));
+        game.waiting.retain(|n| n != name);
+        if entry.limit.is_some() {
+            let (min, max) = entry.shown_range();
+            match self.apply_limit(entry) {
+                Ok(()) => self.say(&format!("{name} is kept {}", limit_text(min, max))),
+                Err(e) => self.say(&format!("{name}: limit not applied: {e}")),
+            }
+        } else if !entry.sites.is_empty() {
+            // The game may replace the object holding it (Particle Fleet does on a new map): the
+            // helper finds it again.
+            if let Err(e) = self.apply_limit(entry) {
+                self.say(&format!("{name}: Ferret can't keep track of it if the game moves it: {e}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Looks again for values whose code wasn't in the game's memory yet (every `WAIT_EVERY`).
+    fn look_for_waiting(&mut self) {
+        let Some(game) = self.game.as_ref() else { return };
+        if game.waiting.is_empty() || game.waited_at.is_some_and(|t| t.elapsed() < WAIT_EVERY) {
+            return;
+        }
+        let (exe, waiting) = (game.exe.clone(), game.waiting.clone());
+        if let Some(game) = self.game.as_mut() {
+            game.waited_at = Some(Instant::now());
+        }
+        for entry in read_profile(&exe).into_iter().filter(|e| waiting.contains(&e.name)) {
+            if let Ok(Some((loc, v))) = self.resolve_sites(&entry, false) {
+                self.found_by_site(&entry, loc, v).ok();
+            }
+        }
+    }
+
     pub fn values(&mut self) -> Result<Vec<ValueRow>, String> {
         let exe = self.game()?.exe.clone();
+        self.look_for_waiting();
         self.refresh_paths();
         self.refresh_named();
         self.sync_addresses();
