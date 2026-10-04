@@ -62,6 +62,10 @@ pub struct FindView {
     /// The saved values as listed (name, value, limit), to redraw only on a change.
     saved_rows: RefCell<Vec<(String, String, String)>>,
     replaces: gtk::Label,
+    /// "Searches look first in places shaped like earlier finds" + Forget Them: a shape kept
+    /// pointing Prey's shotgun searches at the pistol's kind of place.
+    shapes_row: gtk::Box,
+    shapes_label: gtk::Label,
     save: gtk::Button,
     /// The places still matching when Ferret couldn't tell which is the value: the player
     /// changes them and watches the game.
@@ -148,6 +152,15 @@ const TYPE_CHOICES: [(&str, &[Kind]); 5] = [
 
 fn frame_box() -> gtk::Box {
     gtk::Box::builder().spacing(12).margin_start(12).margin_end(12).build()
+}
+
+/// Forgets the shapes of earlier finds (the Forget Them button, and the D-Bus `forget-shapes`).
+pub fn forget_shapes(worker: &Worker) {
+    worker.run(|core| {
+        let n = core.forget_shapes();
+        Event::Done(n.map(|n| format!("Forgot {}: searches look everywhere", core::kinds_of_places(n))))
+    });
+    worker.run(|core| Event::Shapes(core.shape_count()));
 }
 
 /// Asks before ruling out one of the places still matching (only Start Over brings it back).
@@ -308,11 +321,23 @@ impl FindView {
         digits_row.append(&digits);
         digits_row.append(&digits_hint);
 
+        let shapes_label = gtk::Label::builder().xalign(0.0).hexpand(true).wrap(true).build();
+        let forget_shapes = gtk::Button::builder()
+            .label("Forget Them")
+            .tooltip_text("Search everywhere instead, until the next value found")
+            .valign(gtk::Align::Center)
+            .build();
+        let shapes_row = frame_box();
+        shapes_row.set_visible(false);
+        shapes_row.append(&shapes_label);
+        shapes_row.append(&forget_shapes);
+
         let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_bottom(12).build();
         page.append(&top);
         page.append(&scroll);
         page.append(&typed_row);
         page.append(&digits_row);
+        page.append(&shapes_row);
         page.append(&result);
         let saved_grid = gtk::Grid::builder().column_spacing(24).row_spacing(4).build();
         let replaces = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["warning"]).visible(false).build();
@@ -402,6 +427,8 @@ impl FindView {
             saved_grid: RefCell::new(saved_grid),
             saved_rows: RefCell::default(),
             replaces,
+            shapes_row,
+            shapes_label,
             save: save.clone(),
             matches,
             matches_list,
@@ -479,6 +506,8 @@ impl FindView {
             view.name.connect_changed(move |_| view_.show_replaces());
             let view_ = view.clone();
             view.result.connect_visible_notify(move |_| view_.show_saved_box());
+            let view_ = view.clone();
+            forget_shapes.connect_clicked(move |b| view_.ask_forget_shapes(b));
         }
         {
             let weak = Rc::downgrade(&view);
@@ -1369,6 +1398,28 @@ impl FindView {
         self.name.set_text("");
         self.nudge(None);
         self.status.set_label("Saved. Pick another number to find more.");
+    }
+
+    pub fn show_shapes(&self, n: usize) {
+        self.shapes_row.set_visible(n > 0);
+        self.shapes_label.set_label(&format!(
+            "New searches look first in places shaped like earlier finds ({}). If they keep landing on the wrong kind of place, forget them.",
+            core::kinds_of_places(n)
+        ));
+    }
+
+    fn ask_forget_shapes(&self, parent: &impl IsA<gtk::Widget>) {
+        let dialog = adw::AlertDialog::new(
+            Some("Forget Where Earlier Finds Were?"),
+            Some("New searches then look everywhere. Ferret learns again from the next values it finds. Saved values aren't affected."),
+        );
+        dialog.add_responses(&[("cancel", "Cancel"), ("forget", "Forget")]);
+        dialog.set_response_appearance("forget", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let worker = self.worker.clone();
+        dialog.connect_response(Some("forget"), move |_, _| forget_shapes(&worker));
+        dialog.present(Some(parent));
     }
 
     /// Types into the save row's name field (the D-Bus `name` action, for tests).

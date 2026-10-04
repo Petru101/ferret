@@ -16,6 +16,16 @@ struct ValueWidgets {
     group: adw::PreferencesGroup,
     value: gtk::Label,
     limit: adw::ExpanderRow,
+    /// "Does the game show 31?" on a value whose pointer paths a restart hasn't confirmed.
+    confirm: adw::ActionRow,
+    confirm_button: gtk::Button,
+}
+
+/// Confirms a value's pointer paths: the player saw the game show the number Ferret reads.
+pub fn confirm_value(worker: &Worker, name: &str) {
+    let name = name.to_owned();
+    worker.run(move |core| Event::Done(core.confirm_paths(&name)));
+    worker.run(|core| Event::Values(core.values()));
 }
 
 pub struct ValuesView {
@@ -123,8 +133,10 @@ impl ValuesView {
             if v.places > 1 {
                 about.push_str(&format!(". Kept in {} places (every stack): setting it sets each", v.places));
             }
-            if v.unconfirmed {
-                about.push_str(". Not confirmed yet: if this number is wrong after restarting the game, find it again and save it under the same name");
+            if v.confirmable {
+                about.push_str(". Not confirmed yet: if the game shows this number, say so below");
+            } else if v.unconfirmed {
+                about.push_str(". Not confirmed yet: restart the game, then check the number here");
             }
             if let Some(d) = &v.doubtful {
                 about.push_str(&format!(". Not written right now: {d}"));
@@ -132,6 +144,12 @@ impl ValuesView {
             w.group.set_description(Some(&about));
             w.value.set_label(&v.value.map_or("?".into(), |n| core::number_text(n, v.decimals)));
             w.limit.set_subtitle(&limit_subtitle(v));
+            w.confirm.set_visible(v.confirmable);
+            if let (true, Some(n)) = (v.confirmable, v.value) {
+                let n = core::number_text(n, v.decimals);
+                w.confirm.set_title(&format!("Does the game show {n}?"));
+                w.confirm_button.set_label(&format!("Yes, It Shows {n}"));
+            }
         }
     }
 
@@ -177,6 +195,18 @@ impl ValuesView {
             set.connect_clicked(move |_| apply_set());
         }
         entry.connect_activate(move |_| apply_set());
+
+        let confirm_button = gtk::Button::builder().valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
+        let confirm = adw::ActionRow::builder()
+            .subtitle("Then Ferret finds it this way from now on, and keeps it in range. If it shows another number, find it again instead.")
+            .visible(false)
+            .build();
+        confirm.add_suffix(&confirm_button);
+        group.add(&confirm);
+        {
+            let (worker, name) = (self.worker.clone(), name.clone());
+            confirm_button.connect_clicked(move |_| confirm_value(&worker, &name));
+        }
 
         let limit = adw::ExpanderRow::builder()
             .title("Keep in Range")
@@ -255,6 +285,6 @@ impl ValuesView {
                 })));
             });
         }
-        ValueWidgets { group, value, limit }
+        ValueWidgets { group, value, limit, confirm, confirm_button }
     }
 }

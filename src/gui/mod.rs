@@ -52,6 +52,8 @@ pub enum Event {
     Idle,
     /// The attached game's learned digits, 0 to 9.
     Digits(Vec<Vec<crate::font::DigitShape>>),
+    /// How many kinds of places earlier finds were in (searches look there first).
+    Shapes(usize),
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
     /// The places still matching, with their values (the player tries them out).
@@ -304,6 +306,7 @@ impl Ui {
         // These can teach Ferret digits.
         if matches!(event, Event::Attached(Ok(_)) | Event::Auto(_) | Event::Typed(_) | Event::ScannedAgain(_)) {
             self.worker.run(|core| Event::Digits(core.digits()));
+            self.worker.run(|core| Event::Shapes(core.shape_count()));
         }
         match event {
             Event::Log(msg) => self.find.log(&msg),
@@ -370,6 +373,7 @@ impl Ui {
             }
             Event::Reset | Event::Idle => {}
             Event::Digits(shapes) => self.find.show_digits(shapes),
+            Event::Shapes(n) => self.find.show_shapes(n),
             Event::Done(Ok(msg)) => self.toast(&msg),
             Event::Saved(Err(e)) => {
                 self.find.save_failed(&e);
@@ -507,6 +511,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("undo", Box::new(|ui, _| ui.find.undo()));
     action("redo", Box::new(|ui, _| ui.find.redo()));
     action("name", Box::new(|ui, name| ui.find.type_name(&name)));
+    action("confirm-value", Box::new(|ui, name| values::confirm_value(&ui.worker, &name)));
+    action("forget-shapes", Box::new(|ui, _| find::forget_shapes(&ui.worker)));
     action("again", Box::new(|ui, _| ui.find.scan_again()));
     action(
         "type",

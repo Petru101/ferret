@@ -407,6 +407,11 @@ fn profile_path(exe: &str) -> PathBuf {
     base.join("profiles").join(format!("{}.profile", exe.to_lowercase()))
 }
 
+/// "one kind of place", "3 kinds of places".
+pub fn kinds_of_places(n: usize) -> String {
+    if n == 1 { "one kind of place".into() } else { format!("{n} kinds of places") }
+}
+
 /// The game's learned digit shapes, next to its profile.
 fn digits_path(exe: &str) -> PathBuf {
     profile_path(exe).with_extension("digits")
@@ -417,6 +422,7 @@ fn shapes_path(exe: &str) -> PathBuf {
     profile_path(exe).with_extension("shapes")
 }
 
+#[derive(Clone)]
 struct Entry {
     name: String,
     kind: Kind,
@@ -668,6 +674,9 @@ pub struct ValueRow {
     pub doubtful: Option<String>,
     /// Places it is kept in (a named path to all of an item's stacks); setting it sets each.
     pub places: usize,
+    /// Saved through pointer paths in an earlier run that this run hasn't confirmed: the player
+    /// can confirm them by saying the game shows `value` (`Core::confirm_paths`).
+    pub confirmable: bool,
 }
 
 pub enum AutoResult {
@@ -1176,6 +1185,57 @@ impl Core {
         }
     }
 
+    /// The player says the game shows the number a value saved through unconfirmed pointer paths
+    /// has now, in a later run: the paths leading there are kept as confirmed, as saving it again
+    /// would (finding it again only to save it wore the player out: Prey starts slowly), and its
+    /// limit applies. Only when the paths clearly agree on one place: a few junk paths can agree
+    /// on a place that happens to hold the same number (Valheim: 6 of 2998).
+    pub fn confirm_paths(&mut self, name: &str) -> Result<String, String> {
+        let name = one_word(name);
+        let (exe, pid) = {
+            let game = self.game()?;
+            (game.exe.clone(), game.pid)
+        };
+        let mut entries = read_profile(&exe);
+        let entry = entries.iter().find(|e| e.name == name).ok_or_else(|| format!("{name} isn't saved"))?;
+        if !entry.unconfirmed() {
+            return Err(format!("{name} is confirmed already"));
+        }
+        if entry.run == Some(pid) {
+            return Err(format!(
+                "{name} was saved in this run of the game, where all its pointer paths lead to it: that proves nothing yet. Confirm it after restarting the game"
+            ));
+        }
+        let (kind, candidates) = (entry.kind, entry.candidates.clone());
+        let args: Vec<String> = candidates.iter().map(|p| path_arg(p)).collect();
+        let (ends, best, votes) = self.follow_votes(kind, &args);
+        let Some((loc, _)) = best else {
+            return Err(format!("none of {name}'s pointer paths lead anywhere now"));
+        };
+        if let Some(v) = votes.filter(|v| !v.clear) {
+            return Err(format!("{name} can't be confirmed: {}", v.doubt()));
+        }
+        let kept: Vec<String> = candidates.iter().zip(&ends).filter(|(_, e)| **e == Some(loc.addr)).map(|(p, _)| p.clone()).collect();
+        let entry = entries.iter_mut().find(|e| e.name == name).expect("found above");
+        entry.paths = kept.clone();
+        entry.candidates.clear();
+        entry.run = Some(pid);
+        let entry = entry.clone();
+        write_profile(&exe, &entries)?;
+        let followed = entry.followed(&entries);
+        let game = self.game()?;
+        game.entries.retain(|(n, _)| *n != name);
+        game.entries.push((name.clone(), loc));
+        game.paths.retain(|(n, _)| *n != name);
+        game.paths.push((name.clone(), followed));
+        self.set_votes(&name, votes);
+        self.say(&format!("{name}: confirmed by the player; {} of {} pointer paths lead to it, kept as confirmed", kept.len(), candidates.len()));
+        if let Err(e) = self.apply_limit(&entry) {
+            self.say(&format!("{name}: limit not applied: {e}"));
+        }
+        Ok(format!("{name} confirmed: Ferret finds it this way from now on"))
+    }
+
     /// Saving a value again after it moved (a restart, a new level) keeps the saved pointer
     /// paths that lead to where it is now: they held up through the move, which fresh ones
     /// haven't yet.
@@ -1260,7 +1320,7 @@ impl Core {
         }
         if entry.limit.is_some() && entry.sites.is_empty() && entry.guessed(&saved, game.pid) {
             return Err(format!(
-                "its pointer paths aren't confirmed yet: find it again and save it as {}, that confirms the right path",
+                "its pointer paths aren't confirmed yet: confirm it in the Values tab if the game shows its number, or find it again and save it as {}",
                 entry.name
             ));
         }
@@ -1424,7 +1484,7 @@ impl Core {
                             if paths.len() < entry.candidates.len() {
                                 self.say(&format!("{name}: following the {} unconfirmed paths that start like other values' confirmed ones", paths.len()));
                             }
-                            self.say(&format!("{name}: its pointer paths aren't confirmed yet; if the number is wrong, find it again and save it as {name}"));
+                            self.say(&format!("{name}: its pointer paths aren't confirmed yet: if the game shows this number, confirm it in the Values tab; if not, find it again and save it as {name}"));
                             if entry.guessed(&entries, pid) {
                                 self.say(&format!("{name}: Ferret won't write it until a path is confirmed"));
                             }
@@ -1621,6 +1681,7 @@ impl Core {
         let values = self.peek_exact(&addrs);
         let limits = self.limits();
         let saved = read_profile(&exe);
+        let pid = self.game()?.pid;
         Ok(entries
             .into_iter()
             .zip(values)
@@ -1640,7 +1701,8 @@ impl Core {
                 // A named value that leads nowhere now (no stack of the item): the last address
                 // holds something else by now (iron showed 1118760170, a float of another object).
                 let value = value.filter(|_| places > 0);
-                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, decimals, limit_state, unconfirmed, doubtful, places }
+                let confirmable = value.is_some() && saved.iter().any(|e| e.name == name && e.unconfirmed() && e.run != Some(pid));
+                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, decimals, limit_state, unconfirmed, doubtful, places, confirmable }
             })
             .collect())
     }
@@ -2006,6 +2068,28 @@ impl Core {
             self.shaped = false;
             self.unshaped = true;
         }
+    }
+
+    /// How many kinds of places earlier finds of this game were in: scans look there first.
+    pub fn shape_count(&self) -> usize {
+        self.shapes.iter().filter(|s| s.distinct()).count()
+    }
+
+    /// Forgets them (a shape can keep pointing searches at the wrong kind of place): scans look
+    /// everywhere until the next find teaches one again.
+    pub fn forget_shapes(&mut self) -> Result<usize, String> {
+        let n = self.shape_count();
+        let exe = self.game()?.exe.clone();
+        self.shapes.clear();
+        match fs::remove_file(shapes_path(&exe)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("could not delete the shapes: {e}")),
+            _ => {}
+        }
+        self.send_shapes();
+        self.shaped = false;
+        self.unshaped = false;
+        self.say(&format!("forgot where earlier finds were ({}): searches look everywhere", kinds_of_places(n)));
+        Ok(n)
     }
 
     fn send_shapes(&mut self) {
