@@ -146,6 +146,12 @@ static LAYOUT: Mutex<Option<(u32, Layout)>> = Mutex::new(None);
 /// together share one search (Lumencraft's hp and stamina in Player.gd: ~5 s each on 2 GB).
 static FOUND: Mutex<Vec<(u32, String, Instant, Vec<u64>)>> = Mutex::new(Vec::new());
 const FOUND_FOR: Duration = Duration::from_secs(10);
+/// None found (between Brotato's waves, no player): soon stale, a wave starts any moment.
+const NONE_FOUND_FOR: Duration = Duration::from_secs(2);
+/// The GDScript objects of each script path found before, per process: a script stays loaded
+/// while objects running it come and go (Brotato's player, every wave), so finding the new
+/// ones takes one pass over memory instead of three.
+static SCRIPTS: Mutex<Vec<(u32, String, Vec<u64>)>> = Mutex::new(Vec::new());
 
 struct Godot<'a> {
     heap: &'a Heap<'a>,
@@ -407,10 +413,20 @@ impl<'a> Godot<'a> {
         matches!(self.u32_at(v), Some(INT | REAL))
     }
 
+    /// Whether a script instance is still in use: a freed object stays readable a while, but
+    /// Godot clears its link to the script instance when it frees it (Brotato frees the player
+    /// every wave).
+    fn alive(&self, inst: u64) -> bool {
+        self.ptr(inst + self.lay.owner).and_then(|o| self.instance_of(o)) == Some(inst)
+    }
+
     /// The values the path leads to from these script instances.
     fn walk(&self, roots: &[u64], steps: &[Step]) -> Vec<u64> {
         let mut out = Vec::new();
         'root: for &root in roots {
+            if !self.alive(root) {
+                continue;
+            }
             let mut inst = Some(root);
             let mut v = None;
             for step in steps {
@@ -728,6 +744,17 @@ pub fn about_all(heap: &Heap, addrs: &[(u64, Kind)]) -> Vec<Option<String>> {
 /// The objects running the path's script, found by the script's path (a few passes over
 /// memory). Finds the layout first when this process's isn't known yet.
 fn find_roots_with(g: &Godot, path: &ScriptPath) -> Vec<u64> {
+    let ours = |gd: &u64| g.script_path(*gd).as_deref() == Some(path.script.as_str());
+    let known: Vec<u64> = SCRIPTS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(pid, script, _)| *pid == g.heap.pid && *script == path.script)
+        .map(|(_, _, gds)| gds.iter().copied().filter(ours).collect())
+        .unwrap_or_default();
+    if !known.is_empty() {
+        return g.instances(&known);
+    }
     let full = format!("res://{}", path.script);
     let encoded: Vec<u8> = match g.lay.wide {
         2 => full.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect(),
@@ -735,7 +762,11 @@ fn find_roots_with(g: &Godot, path: &ScriptPath) -> Vec<u64> {
     };
     let strings = find_bytes(g.heap, &encoded);
     let scripts: Vec<u64> = g.heap.referrers(&strings).into_iter().filter_map(|at| at.checked_sub(g.lay.path)).collect();
-    let scripts: Vec<u64> = scripts.into_iter().filter(|&gd| g.script_path(gd).as_deref() == Some(path.script.as_str())).collect();
+    let scripts: Vec<u64> = scripts.into_iter().filter(ours).collect();
+    let mut known = SCRIPTS.lock().unwrap();
+    known.retain(|(pid, script, _)| *pid == g.heap.pid && *script != path.script);
+    known.push((g.heap.pid, path.script.clone(), scripts.clone()));
+    drop(known);
     g.instances(&scripts)
 }
 
@@ -756,8 +787,12 @@ fn find_bytes(heap: &Heap, bytes: &[u8]) -> Vec<u64> {
 /// The script instances the path starts from (searches the game's memory, unless a search for
 /// the same script just did).
 pub fn find_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
-    let fresh = |(pid, script, at, _): &(u32, String, Instant, Vec<u64>)| *pid == heap.pid && at.elapsed() < FOUND_FOR && *script == path.script;
-    if let Some((_, _, _, roots)) = FOUND.lock().unwrap().iter().find(|f| fresh(f)) {
+    let fresh = |(pid, script, at, roots): &(u32, String, Instant, Vec<u64>)| {
+        *pid == heap.pid && *script == path.script && at.elapsed() < if roots.is_empty() { NONE_FOUND_FOR } else { FOUND_FOR }
+    };
+    // Only while they're all alive: the game may have freed one (a new wave's player).
+    let alive = |roots: &[u64]| known_layout(heap.pid).is_some_and(|lay| roots.iter().all(|&r| Godot::new(heap, lay).alive(r)));
+    if let Some((_, _, _, roots)) = FOUND.lock().unwrap().iter().find(|f| fresh(f) && alive(&f.3)) {
         return roots.clone();
     }
     let roots = search_roots(heap, path);

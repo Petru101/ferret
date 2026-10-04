@@ -121,6 +121,8 @@ const MAX_ELEMENTS: u64 = 1 << 16;
 /// Followed objects per step: a wrong root can't make a walk take forever.
 const MAX_FRONTIER: usize = 1 << 16;
 const CHUNK: usize = 4 << 20;
+/// Memory is readable or not a page at a time.
+const PAGE: u64 = 4096;
 
 /// Text that reads as a name: two letters or more of plain ASCII, and nothing but printable
 /// ASCII and letters. Two random UTF-16 units often decode to letters of some script ("즨̚" in
@@ -302,7 +304,11 @@ impl<'a> Heap<'a> {
                 let want = ((end - addr) as usize).min(CHUNK + overlap);
                 let len = self.mem.read_at(&mut buf[..want], addr).unwrap_or(0);
                 if len == 0 {
-                    break;
+                    // An unreadable page: the rest of the region may be readable. Giving up on
+                    // it hid the Godot stand-in's player from every search by name, now and
+                    // then (wherever it happened to be allocated).
+                    addr = (addr | (PAGE - 1)) + 1;
+                    continue;
                 }
                 let fresh = len.min(CHUNK);
                 f(addr, &buf[..len], fresh);

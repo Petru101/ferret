@@ -1888,6 +1888,7 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
 /// the game's memory twice), and longer once a search found the same objects again (the game
 /// has none of the item right now).
 const NAMED_REFIND: Duration = Duration::from_secs(10);
+const NAMED_REFIND_SCRIPT: Duration = Duration::from_secs(2);
 const NAMED_UNCHANGED: Duration = Duration::from_secs(60);
 
 /// When to count a search for a named path's objects as done, so that the next one waits:
@@ -1905,7 +1906,10 @@ fn named_found_at(old: &[u64], new: &[u64]) -> Instant {
 /// from them, else from a new search (at most every `NAMED_REFIND`).
 fn named_walk(heap: &Heap, path: &Named, roots: &mut Vec<u64>, found_at: &mut Option<Instant>) -> Vec<u64> {
     let leads = path.walk(heap, roots);
-    if !leads.is_empty() || found_at.is_some_and(|t| t.elapsed() < NAMED_REFIND) {
+    // A Godot script's objects are found again in one pass once its script is known (Brotato
+    // makes a new player every wave, and health was lost for up to 10 s after the shop).
+    let every = if matches!(path, Named::Script(_)) { NAMED_REFIND_SCRIPT } else { NAMED_REFIND };
+    if !leads.is_empty() || found_at.is_some_and(|t| t.elapsed() < every) {
         return leads;
     }
     let new = path.find_roots(heap);

@@ -3,12 +3,15 @@ extends Control
 # Commands come from a file (one line, removed once read), as in target.c:
 #   earn/spend N (gold), wood N, hp N, energy X (float), iron N (inventory dictionary,
 #   id 0, also counted in stats), lumen N (id 1), charges N (tools dictionary with
-#   StringName keys, kind 3), wave (keeps a snapshot of the player), show, quit N.
+#   StringName keys, kind 3), wave (keeps a snapshot of the player), hurt N (health of the
+#   player node, entities/player.gd), despawn / spawn / respawn (frees the player node and
+#   makes a new one, as Brotato does every wave), show, quit N.
 # Run: <binary> -- <cmd file> <log file>
 
 var cmd_path := ""
 var log_path := ""
 var since := 0.0
+var player: Node = null
 
 @onready var label: Label = $Label
 
@@ -18,7 +21,19 @@ func _ready() -> void:
 	if args.size() >= 2:
 		cmd_path = args[0]
 		log_path = args[1]
+	spawn()
 	report()
+
+
+func spawn() -> void:
+	player = preload("res://entities/player.gd").new()
+	add_child(player)
+
+
+func despawn() -> void:
+	if player != null:
+		player.queue_free()
+		player = null
 
 
 func _process(delta: float) -> void:
@@ -63,6 +78,17 @@ func run(line: String) -> void:
 			RunData.tools[0][&"charges"] += int(arg)
 		"wave":
 			RunData.next_wave()
+		"hurt":
+			if player != null:
+				player.current_stats.health -= int(arg)
+		"despawn":
+			despawn()
+		"spawn":
+			if player == null:
+				spawn()
+		"respawn":
+			despawn()
+			spawn()
 		"quit":
 			get_tree().quit(int(arg))
 
@@ -78,7 +104,8 @@ func report() -> void:
 	if f == null:
 		f = FileAccess.open(log_path, FileAccess.WRITE)
 	f.seek_end()
-	f.store_line("gold=%d wood=%d hp=%d energy=%.2f iron=%d lumen=%d charges=%d metal_collected=%d wave=%d snapshots=%d" % [
+	var health: int = player.current_stats.health if player != null else -1
+	f.store_line("gold=%d wood=%d hp=%d energy=%.2f iron=%d lumen=%d charges=%d metal_collected=%d wave=%d snapshots=%d health=%d" % [
 		p.gold, p.wood, p.hp, p.energy, RunData.stack(0)["amount"], RunData.stack(1)["amount"],
-		RunData.tools[0][&"charges"], RunData.stats["metal_collected"], RunData.wave, RunData.snapshots.size()])
+		RunData.tools[0][&"charges"], RunData.stats["metal_collected"], RunData.wave, RunData.snapshots.size(), health])
 	f.close()

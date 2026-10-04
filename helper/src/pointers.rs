@@ -239,7 +239,9 @@ pub fn collect_pointers(pid: u32, mem: &File, width: usize) -> io::Result<(Point
             let len = ((end - addr) as usize).min(buf.len());
             let len = mem.read_at(&mut buf[..len], addr).unwrap_or(0);
             if len == 0 {
-                break;
+                // An unreadable page: the rest of the region may be readable.
+                addr = (addr | 0xfff) + 1;
+                continue;
             }
             bytes += len as u64;
             for off in (0..len - len % width).step_by(width) {
