@@ -1744,8 +1744,16 @@ impl Core {
 
     /// Forgets the search in progress, so the next number starts from scratch.
     pub fn reset(&mut self) {
+        // Clearing a search that kept only places shaped like earlier finds: they weren't it, and
+        // the next scan would land on the same kind of place again (Prey: the shotgun's shells
+        // gave one place shaped like the pistol's ammo, three Start Overs in a row). Scans look
+        // everywhere until something is found.
+        if self.search.is_some() && self.shaped {
+            self.unshaped = true;
+            self.say("searches look everywhere now, not first where earlier finds were");
+        }
+        self.shaped = false;
         self.search = None;
-        self.unshaped = false;
         self.helper.call("track");
         self.say("search cleared");
     }

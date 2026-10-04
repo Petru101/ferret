@@ -70,7 +70,9 @@ grep -q "shaped like earlier finds" "$d/out" || fail "the scan didn't prefer sha
 grep -q "^1 candidates left" "$d/out" || fail "expected the new stack's place alone"
 echo "--- gold, with a logs stack of 1000 in a shaped place: falls back to searching everywhere"
 game "stack 1000"
-"$live" reset >/dev/null
+# Undo, not Start Over: clearing a shaped search means it wasn't there, and scans then look
+# everywhere until the next find.
+"$live" undo >/dev/null
 type_n 1000 | tail -n1
 game "earn 5"
 type_n 1005 | tee "$d/out" | tail -n2
