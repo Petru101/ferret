@@ -156,6 +156,8 @@ struct Ui {
     worker: Worker,
     /// The game Ferret is attached to.
     attached: Rc<Cell<Option<u32>>>,
+    /// The game being attached to (restoring its values takes seconds): more clicks on it wait.
+    attaching: Rc<Cell<Option<u32>>>,
     /// The program of a game that quit: attached to again when it starts.
     waiting_for: Rc<RefCell<Option<String>>>,
     /// The names games go by (Steam's), by program, from the games list.
@@ -207,6 +209,7 @@ impl Ui {
             self.waiting_for.replace(None);
             self.toast(&format!("{} started again: opening it", g.name.as_deref().unwrap_or(&g.exe)));
             let pid = g.pid;
+            self.attaching.set(Some(pid));
             self.worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
         }
         let shown: String = games.iter().map(|g| format!("{}:{};", g.pid, g.exe)).collect();
@@ -246,15 +249,18 @@ impl Ui {
             } else {
                 row.set_activatable(true);
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                let (worker, find, nav, page, attached, waiting_for) = (
+                let (worker, find, nav, page, attached, attaching, waiting_for, toasts) = (
                     self.worker.clone(),
                     self.find.clone(),
                     self.nav.clone(),
                     self.game_page.clone(),
                     self.attached.clone(),
+                    self.attaching.clone(),
                     self.waiting_for.clone(),
+                    self.toasts.clone(),
                 );
                 let pid = g.pid;
+                let opening = format!("Opening {}…", g.name.as_deref().unwrap_or(&g.exe));
                 row.connect_activated(move |_| {
                     waiting_for.replace(None);
                     // Back to the same game: everything (a search in progress too) is still there.
@@ -262,6 +268,12 @@ impl Ui {
                         nav.push(&page);
                         return;
                     }
+                    if attaching.get() == Some(pid) {
+                        return;
+                    }
+                    attaching.set(Some(pid));
+                    // Finding saved values again can take seconds in a big game.
+                    toasts.add_toast(adw::Toast::new(&opening));
                     find.stop();
                     worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
                 });
@@ -287,6 +299,7 @@ impl Ui {
             }
             Event::Games(games) => self.show_games(games),
             Event::Attached(Ok((pid, exe))) => {
+                self.attaching.set(None);
                 self.waiting_for.replace(None);
                 if self.attached.replace(Some(pid)) != Some(pid) {
                     self.find.new_game();
@@ -337,9 +350,18 @@ impl Ui {
                 self.find.save_failed(&e);
                 self.toast(&e);
             }
-            Event::Attached(Err(e)) if e.contains('\n') => self.explain("Ferret Can't Open This Game", &e),
-            Event::Attached(Err(e)) | Event::Done(Err(e)) => self.toast(&e),
-            Event::Bug(msg) => self.find.bug(&msg),
+            Event::Attached(Err(e)) => {
+                self.attaching.set(None);
+                match e.contains('\n') {
+                    true => self.explain("Ferret Can't Open This Game", &e),
+                    false => self.toast(&e),
+                }
+            }
+            Event::Done(Err(e)) => self.toast(&e),
+            Event::Bug(msg) => {
+                self.attaching.set(None);
+                self.find.bug(&msg);
+            }
         }
     }
 }
@@ -576,6 +598,7 @@ fn build(app: &adw::Application) {
         tips,
         worker,
         attached: Rc::default(),
+        attaching: Rc::default(),
         waiting_for: Rc::default(),
         game_names: RefCell::default(),
     });
