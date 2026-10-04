@@ -111,7 +111,10 @@ impl ValuesView {
                 rows.insert(v.name.clone(), w);
             }
             let w = &rows[&v.name];
-            let mut about = format!("At 0x{:x}, {}", v.addr, v.kind.describe());
+            let mut about = match v.places {
+                0 => format!("Not in the game right now (none of it, or no save loaded), {}", v.kind.describe()),
+                _ => format!("At 0x{:x}, {}", v.addr, v.kind.describe()),
+            };
             match v.decimals {
                 Some(1) => about.push_str(", shown with one decimal"),
                 Some(d) if d > 1 => about.push_str(&format!(", shown with {d} decimals")),

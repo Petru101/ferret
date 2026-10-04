@@ -1407,6 +1407,9 @@ impl Core {
                 let unconfirmed = saved.iter().any(|e| e.name == name && e.unconfirmed());
                 let doubtful = self.doubtful(&name, &saved);
                 let places = named.iter().find(|(n, _, _)| *n == name).map_or(1, |(_, _, p)| p.len());
+                // A named value that leads nowhere now (no stack of the item): the last address
+                // holds something else by now (iron showed 1118760170, a float of another object).
+                let value = value.filter(|_| places > 0);
                 ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, decimals, limit_state, unconfirmed, doubtful, places }
             })
             .collect())
