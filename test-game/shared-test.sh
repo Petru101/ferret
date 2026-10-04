@@ -61,7 +61,12 @@ game "wood 30"
 game "coins -4"
 "$live" next 38
 "$live" list
-"$live" probe
+# With no screen to read, the probe waits for the game to change the number.
+"$live" probe 38 &
+probing=$!
+sleep 6
+game "coins 2"
+wait $probing
 "$live" save coins
 echo "--- the saved pattern finds coins again"
 "$live" restore

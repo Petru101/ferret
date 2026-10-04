@@ -232,6 +232,12 @@ fn parse_exact_values(lines: &[String]) -> Vec<(Loc, Option<f64>)> {
 }
 
 /// The same, with values as whole numbers, cut off the way games usually display them.
+/// Whether a value in memory is what the screen shows: within 1 (the screen lags), or a decimal
+/// kept as a whole number of tenths (12 for "1.2").
+fn shows(v: i64, n: &Shown) -> bool {
+    (v as f64 - n.value()).abs() <= 1.0 || n.decimals() > 0 && (v - n.scaled()).abs() <= 1
+}
+
 fn parse_values(lines: &[String]) -> Vec<(Loc, Option<i64>)> {
     parse_exact_values(lines).into_iter().map(|(loc, v)| (loc, v.map(|v| (v + 1e-6).floor() as i64))).collect()
 }
@@ -1749,8 +1755,10 @@ impl Core {
     /// own). When neither does (some games only redraw a number when they change it
     /// themselves: Lumencraft), the player changes the number in the game and the real one
     /// carries on from its test value; copies don't. Test writes are undone, keeping what the
-    /// game changed meanwhile.
-    pub fn probe(&mut self) -> Result<Option<Loc>, String> {
+    /// game changed meanwhile. Only places holding `n` (the number on screen) get one: a place
+    /// that only swept past it between reads can be anything (a stand-in's malloc chunk header
+    /// went 0 -> 69 -> 117 across 74 and 85; its test value crashed the game).
+    pub fn probe(&mut self, n: &Shown) -> Result<Option<Loc>, String> {
         let listed = self.helper.call("list");
         if listed.iter().any(|l| l.starts_with("...")) {
             return Err("too many candidates to probe; narrow down first".into());
@@ -1766,9 +1774,17 @@ impl Core {
             let Some(orig) = listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()) else {
                 continue;
             };
-            let Some(Some(shown)) = self.peek(&[loc]).first().copied() else { continue };
+            let Some(Some(now)) = self.peek(&[loc]).first().copied() else { continue };
+            if !shows(now, n) {
+                self.say(&format!("0x{:012x}: holds {now}, not {n}: left alone", loc.addr));
+                continue;
+            }
             let step = PROBE_STEP * (tests.len() as i64 + 1);
-            tests.push(Probe { loc, orig, test: shown + step, step });
+            tests.push(Probe { loc, orig, test: now + step, step });
+        }
+        if tests.is_empty() {
+            self.say(&format!("none of them holds {n} now"));
+            return Ok(None);
         }
         for t in &tests {
             self.helper.call(&format!("write {} {}", t.loc, t.test));
@@ -1992,8 +2008,7 @@ impl Core {
     /// misreads can be anything.
     fn holds(&mut self, loc: Loc, n: &Shown) -> bool {
         let v = self.peek(&[loc])[0];
-        // A decimal may be kept as a whole number of tenths (12 for "1.2").
-        let ok = v.is_some_and(|v| (v as f64 - n.value()).abs() <= 1.0 || n.decimals() > 0 && (v - n.scaled()).abs() <= 1);
+        let ok = v.is_some_and(|v| shows(v, n));
         if !ok {
             self.say(&format!(
                 "the last match holds {} but the screen shows {n}: not it, starting over",
@@ -2123,7 +2138,7 @@ impl Core {
         }
         if (2..=20).contains(&count) && !cancelled(&self.cancel) {
             self.say("checking which one is the real value:");
-            if let Some(loc) = self.probe()? {
+            if let Some(loc) = self.probe(&last)? {
                 self.search = None;
                 self.say(&format!("stored as {}", loc.kind.with_article()));
                 self.learn_from_memory(loc, &last);
@@ -2225,7 +2240,7 @@ impl Core {
             // The same few keep following the value: copies of it. Find the real one.
             2..=20 if unchanged >= 1 => {
                 self.say("checking which one is the real value:");
-                self.probe()?
+                self.probe(&n)?
             }
             _ => None,
         };
