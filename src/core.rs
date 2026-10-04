@@ -110,6 +110,11 @@ impl Helper {
     }
 
     fn call(&mut self, line: &str) -> Vec<String> {
+        self.call_with(line, &mut |_| {})
+    }
+
+    /// `call`, telling `progress` how far a scan is (0.0..=1.0) as the helper reports it.
+    fn call_with(&mut self, line: &str, progress: &mut dyn FnMut(f64)) -> Vec<String> {
         let Some(input) = self.input.as_mut() else {
             return vec!["error: host helper exited".into()];
         };
@@ -125,6 +130,12 @@ impl Helper {
                     return reply;
                 }
                 Ok(_) if l.trim_end() == "end" => return reply,
+                Ok(_) if l.starts_with("progress ") => {
+                    let mut n = l.split_whitespace().skip(1).filter_map(|w| w.parse::<f64>().ok());
+                    if let (Some(done), Some(total)) = (n.next(), n.next()) {
+                        progress(if total > 0.0 { done / total } else { 0.0 });
+                    }
+                }
                 Ok(_) => reply.push(l.trim_end().to_owned()),
             }
         }
@@ -145,6 +156,14 @@ fn match_count(reply: &[String]) -> Option<usize> {
     let words: Vec<&str> = line.split_whitespace().collect();
     let i = words.iter().position(|w| *w == "matches")?;
     words.get(i.checked_sub(1)?)?.parse().ok()
+}
+
+/// Where a search is, for the interface.
+pub enum Scan {
+    /// Scanning all memory for the shown number: how far (0.0..=1.0).
+    Running(String, f64),
+    /// The search has this many places and follows the number from here on.
+    Ready(usize),
 }
 
 /// One of the places still matching a search, as the matches list shows it.
@@ -680,6 +699,9 @@ pub struct Core {
     pub on_status: Option<Box<dyn FnMut(&str) + Send>>,
     /// Told about the places still matching while a search narrows them down (20 or fewer).
     pub on_matches: Option<Box<dyn FnMut(Vec<Match>) + Send>>,
+    /// Told how far a scan of all the game's memory is, and when a search is ready for the
+    /// number to change (the first scan takes seconds: the player mustn't change it meanwhile).
+    pub on_scan: Option<Box<dyn FnMut(Scan) + Send>>,
     /// The value types new scans look for (empty: all of them).
     pub scan_kinds: Vec<Kind>,
     /// The memory around the game's values found so far: new scans try places shaped like them
@@ -722,6 +744,7 @@ impl Core {
             on_frame: None,
             on_status: None,
             on_matches: None,
+            on_scan: None,
             scan_kinds: Vec::new(),
             shapes: Vec::new(),
             shaped: false,
@@ -1676,6 +1699,12 @@ impl Core {
         Ok(self.matches())
     }
 
+    fn ready(&mut self, count: usize) {
+        if let Some(f) = self.on_scan.as_mut() {
+            f(Scan::Ready(count));
+        }
+    }
+
     /// A new scan for `n`, of the value types the player picked, in places shaped like earlier
     /// finds when there are any (unless the value turned out not to be in one).
     fn scan(&mut self, n: &Shown) -> Vec<String> {
@@ -1687,7 +1716,15 @@ impl Core {
         if self.unshaped {
             cmd += " all";
         }
-        let reply = self.helper.call(&cmd);
+        let shown = n.to_string();
+        let on_scan = &mut self.on_scan;
+        let mut tell = |done| {
+            if let Some(f) = on_scan.as_mut() {
+                f(Scan::Running(shown.clone(), done));
+            }
+        };
+        tell(0.0);
+        let reply = self.helper.call_with(&cmd, &mut tell);
         self.shaped = reply.first().is_some_and(|l| l.contains("shaped like"));
         reply
     }
@@ -2068,6 +2105,7 @@ impl Core {
         }
         self.search = Some((count, 0));
         self.tell_matches(count);
+        self.ready(count);
         let mut last = first.clone();
         let mut unchanged_rounds = 0;
         // A number nothing fits: a misread or something covering the number, unless it's read
@@ -2097,6 +2135,7 @@ impl Core {
                 count = match_count(&reply).unwrap_or(0);
                 confirm = false;
                 unchanged_rounds = 0;
+                self.ready(count);
             } else {
                 unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
                 // Every change: the listed values follow the game.
@@ -2214,7 +2253,9 @@ impl Core {
             None => {
                 let reply = self.scan(&n);
                 self.say(&format!("typed {n}: {}", reply.join(" ")));
-                (match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?, 0)
+                let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()));
+                self.ready(*count.as_ref().unwrap_or(&0));
+                (count?, 0)
             }
         };
         self.search = Some((count, unchanged));

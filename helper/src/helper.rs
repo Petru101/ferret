@@ -1009,9 +1009,12 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     let shape_kinds: Vec<Kind> = kinds.iter().copied().filter(|k| shapes.iter().any(|sh| sh.kind == *k)).collect();
     let mut scan = None;
     if !shape_kinds.is_empty() && shape_kinds.len() < kinds.len() {
-        scan = Some(into.run(&shape_kinds)).filter(|r| !r.shaped.is_empty());
+        scan = Some(into.run(&shape_kinds, out)).filter(|r| !r.shaped.is_empty());
     }
-    let r = scan.unwrap_or_else(|| into.run(&kinds));
+    let r = match scan {
+        Some(r) => r,
+        None => into.run(&kinds, out),
+    };
     let all = r.found.len();
     let step = format!("scan {arg}");
     let within = if r.shaped.is_empty() {
@@ -1051,14 +1054,25 @@ struct MemScanned {
 }
 
 impl MemScan<'_> {
-    fn run(&self, kinds: &[Kind]) -> MemScanned {
+    /// Writes "progress <bytes done> <bytes in all>" lines as it goes (at most ten a second), so
+    /// the interface can show how far the scan is: the first one takes seconds.
+    fn run(&self, kinds: &[Kind], out: &mut impl Write) -> MemScanned {
         let (mem, n) = (self.mem, self.n);
         let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0 };
         let mut buf = vec![0u8; 4 << 20];
+        let total: u64 = self.regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
+        let mut done = 0u64;
+        let mut told = Instant::now();
+        let _ = writeln!(out, "progress 0 {total}");
         for reg in self.regions.iter().filter(|r| scannable(r)) {
             let mut addr = reg.start;
             while addr < reg.end {
+                if told.elapsed() >= Duration::from_millis(100) {
+                    let _ = writeln!(out, "progress {done} {total}");
+                    told = Instant::now();
+                }
                 let len = ((reg.end - addr) as usize).min(buf.len());
+                done += len as u64;
                 match mem.read_at(&mut buf[..len], addr) {
                     Ok(len) if len > 0 => {
                         r.bytes += len as u64;

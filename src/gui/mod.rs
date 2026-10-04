@@ -24,6 +24,9 @@ pub enum Event {
     Log(String),
     /// Something the player has to do now for the search to go on.
     Status(String),
+    /// How far a scan of the game's memory is, or that the search is ready for the number to
+    /// change.
+    Scan(crate::core::Scan),
     /// The core could not start (for example the host helper is missing).
     Failed(String),
     Games(Vec<GameProcess>),
@@ -107,6 +110,10 @@ fn start_worker(cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> (Worker, 
         let matches = events_tx.clone();
         core.on_matches = Some(Box::new(move |list| {
             matches.send_blocking(Event::Matches(Ok(list))).ok();
+        }));
+        let scans = events_tx.clone();
+        core.on_scan = Some(Box::new(move |s| {
+            scans.send_blocking(Event::Scan(s)).ok();
         }));
         let frames = events_tx.clone();
         let mut shown = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -283,7 +290,7 @@ impl Ui {
     }
 
     fn handle(self: &Rc<Self>, event: Event) {
-        if !matches!(event, Event::Log(_) | Event::Status(_) | Event::Failed(_) | Event::Frame(..)) {
+        if !matches!(event, Event::Log(_) | Event::Status(_) | Event::Scan(_) | Event::Failed(_) | Event::Frame(..)) {
             self.worker.pending.set(self.worker.pending.get().saturating_sub(1));
         }
         // These can teach Ferret digits.
@@ -293,6 +300,7 @@ impl Ui {
         match event {
             Event::Log(msg) => self.find.log(&msg),
             Event::Status(msg) => self.find.ask(&msg),
+            Event::Scan(s) => self.find.scan(s),
             Event::Failed(e) => {
                 self.games_error.set_description(Some(&e));
                 self.games_stack.set_visible_child_name("error");
@@ -515,6 +523,11 @@ fn load_css() {
          label.news.flash { background-color: alpha(@accent_bg_color, 0.65); transition: none; } \
          label.news.success { background-color: alpha(@success_color, 0.15); } \
          label.news.success.flash { background-color: alpha(@success_color, 0.5); transition: none; } \
+         .scan-card { padding: 18px 24px; border-radius: 16px; border: 3px solid @warning_color; \
+         background-color: mix(@window_bg_color, @warning_color, 0.25); } \
+         .scan-card.ready { border-color: @success_color; background-color: mix(@window_bg_color, @success_color, 0.3); } \
+         .scan-card progressbar trough, .scan-card progressbar progress { min-height: 14px; border-radius: 7px; } \
+         .scan-card progressbar text { font-size: 1.4em; font-weight: bold; color: @window_fg_color; opacity: 1; } \
          .tip { background-color: alpha(@accent_bg_color, 0.15); padding: 6px 6px 6px 12px; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {

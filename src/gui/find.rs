@@ -38,6 +38,14 @@ pub struct FindView {
     /// The value types new searches look for (`TYPE_CHOICES`).
     types: gtk::DropDown,
     spinner: gtk::Spinner,
+    /// Over the game picture while a scan of all memory runs (the player mustn't change the
+    /// number then; they took the small spinner for done, more than once), then "Ready!".
+    scan_card: gtk::Box,
+    scan_title: gtk::Label,
+    scan_hint: gtk::Label,
+    scan_bar: gtk::ProgressBar,
+    /// Counts the card's changes, so "Ready!" hides itself only if nothing came after it.
+    scan_shown: Rc<Cell<u32>>,
     log: gtk::TextView,
     result: gtk::Box,
     name: gtk::Entry,
@@ -158,6 +166,26 @@ impl FindView {
         overlay.set_child(Some(&picture));
         overlay.add_overlay(&area);
         let scroll = gtk::ScrolledWindow::builder().child(&overlay).vexpand(true).build();
+        let scan_title = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).css_classes(["title-1"]).build();
+        let scan_bar = gtk::ProgressBar::builder().show_text(true).width_request(360).build();
+        let scan_hint = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).css_classes(["title-3"]).build();
+        let scan_card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(14)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .margin_start(24)
+            .margin_end(24)
+            .css_classes(["scan-card"])
+            .can_target(false)
+            .visible(false)
+            .build();
+        scan_card.append(&scan_title);
+        scan_card.append(&scan_bar);
+        scan_card.append(&scan_hint);
+        // Over the visible part of the picture, not the picture itself (it scrolls when zoomed).
+        let stage = gtk::Overlay::builder().child(&scroll).vexpand(true).build();
+        stage.add_overlay(&scan_card);
 
         let capture = gtk::Button::builder().icon_name("camera-photo-symbolic").tooltip_text("Capture again").build();
         let zoom = gtk::ToggleButton::builder().icon_name("zoom-original-symbolic").tooltip_text("Actual size").build();
@@ -269,7 +297,7 @@ impl FindView {
 
         let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_bottom(12).build();
         page.append(&top);
-        page.append(&scroll);
+        page.append(&stage);
         page.append(&typed_row);
         page.append(&digits_row);
         page.append(&result);
@@ -335,6 +363,11 @@ impl FindView {
             undo,
             types: types.clone(),
             spinner,
+            scan_card,
+            scan_title,
+            scan_hint,
+            scan_bar,
+            scan_shown: Rc::default(),
             log,
             result,
             name,
@@ -689,7 +722,7 @@ impl FindView {
         self.stop.set_visible(true);
         self.again.set_visible(true);
         self.busy(true);
-        self.status.set_label("Watching the number. Play normally; every change narrows it down.");
+        self.status.set_label("Reading the number on screen…");
         self.start.set_label("Start");
         let confirmed = self.unconfirmed.take();
         self.worker.run(move |core| {
@@ -701,6 +734,7 @@ impl FindView {
     }
 
     pub fn auto_done(&self, r: Result<AutoResult, String>) {
+        self.hide_scan();
         self.stop.set_visible(false);
         self.start.set_visible(true);
         self.start_over.set_visible(true);
@@ -728,6 +762,58 @@ impl FindView {
                 self.refresh_matches();
             }
         }
+    }
+
+    /// The first scan of a search takes seconds (8 on Lumencraft's 2 GB), and a number changed
+    /// meanwhile spoils it: a big card over the game says so until it's done, and then, while
+    /// Start runs, that the number can change now.
+    pub fn scan(&self, s: core::Scan) {
+        let shown = self.scan_shown.get() + 1;
+        self.scan_shown.set(shown);
+        match s {
+            core::Scan::Running(n, done) => {
+                let title = format!("Scanning the game's memory for {n}…");
+                if self.scan_title.label() != title {
+                    self.scan_title.set_label(&title);
+                    self.scan_hint.set_label("Don't change the number in the game yet.");
+                    self.status.set_label(&format!("Scanning the game's memory for {n}. Don't change the number in the game until it's done."));
+                }
+                self.scan_card.remove_css_class("ready");
+                self.scan_bar.set_fraction(done.clamp(0.0, 1.0));
+                self.scan_bar.set_visible(true);
+                self.scan_card.set_visible(true);
+            }
+            // A typed number's search says how it went when it ends.
+            core::Scan::Ready(n) if self.typed.is_editable() && self.stop.is_visible() && !self.cancel.load(Ordering::Relaxed) => {
+                self.scan_title.set_label("Ready!");
+                self.scan_hint.set_label(&format!(
+                    "{} {}. Change the number in the game now.",
+                    grouped(n),
+                    if n == 1 { "place matches" } else { "places match" }
+                ));
+                self.scan_card.add_css_class("ready");
+                self.scan_bar.set_visible(false);
+                self.scan_card.set_visible(true);
+                self.announce(&format!(
+                    "Ready: {} {}. Now change the number in the game; every change narrows it down.",
+                    grouped(n),
+                    if n == 1 { "place matches" } else { "places match" }
+                ), false);
+                let (card, now) = (self.scan_card.clone(), self.scan_shown.clone());
+                glib::timeout_add_local_once(Duration::from_secs(4), move || {
+                    if now.get() == shown {
+                        card.set_visible(false);
+                    }
+                });
+            }
+            core::Scan::Ready(_) => self.hide_scan(),
+        }
+    }
+
+    fn hide_scan(&self) {
+        self.scan_shown.set(self.scan_shown.get() + 1);
+        self.scan_card.set_visible(false);
+        self.scan_title.set_label("");
     }
 
     /// A job panicked: whatever was running ends, so the page doesn't wait for it forever.
@@ -802,6 +888,7 @@ impl FindView {
 
     /// The end of a step taken with a number (typed, or read by Scan Again).
     fn narrowed(&self, r: Result<AutoResult, String>, next: &str) {
+        self.hide_scan();
         self.stop.set_visible(false);
         self.busy(false);
         self.typed_searching(false);
@@ -930,6 +1017,7 @@ impl FindView {
 
     /// Attached to another game: nothing picked or found in the last one applies.
     pub fn new_game(&self) {
+        self.hide_scan();
         self.last_count.set(None);
         self.again.set_visible(false);
         self.matches.set_visible(false);
