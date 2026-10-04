@@ -142,6 +142,77 @@ impl Helper {
     }
 }
 
+/// A named path through the engine's own names (Unreal objects, Mono classes, Godot scripts and
+/// dictionaries): nothing better to upgrade it to.
+fn engine_path(text: &str) -> bool {
+    ["ue:", "mono:", "gd:", "{"].iter().any(|p| text.starts_with(p))
+}
+
+struct UpgradeJob {
+    pid: u32,
+    name: String,
+    loc: Loc,
+}
+
+/// An engine path that leads to a saved value's place: its text, how many places it leads to
+/// and what it means.
+struct Upgrade {
+    pid: u32,
+    name: String,
+    loc: Loc,
+    text: String,
+    places: usize,
+    about: String,
+}
+
+/// Asks its own helper for engine paths to saved values found some weaker way (a code
+/// pattern, pointer paths, a path through a name the game merely holds), away from the
+/// worker: a search for a Unity class takes seconds (38 on Particle Fleet).
+struct Upgrader {
+    jobs: std::sync::mpsc::Sender<UpgradeJob>,
+    done: std::sync::mpsc::Receiver<Upgrade>,
+}
+
+impl Upgrader {
+    fn start() -> Self {
+        let (jobs, todo) = std::sync::mpsc::channel::<UpgradeJob>();
+        let (found, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut helper, mut attached) = (None, 0);
+            for job in todo {
+                if helper.is_none() {
+                    helper = Helper::start().ok();
+                }
+                let Some(h) = helper.as_mut() else { continue };
+                if attached != job.pid {
+                    h.call(&format!("attach {}", job.pid));
+                    attached = job.pid;
+                }
+                let reply = h.call(&format!("names {} unreal", job.loc));
+                let upgrade = reply.iter().filter_map(|l| l.strip_prefix("named ")).find_map(|line| {
+                    let mut f = line.splitn(3, ' ');
+                    let (text, _) = (f.next()?, f.next()?);
+                    let check = h.call(&format!("named {} {text}", job.loc.kind.name()));
+                    let places = parse_exact_values(&check);
+                    let fits = !check.iter().any(|l| l.starts_with("doubtful ")) && places.iter().any(|(p, _)| p.addr == job.loc.addr);
+                    fits.then(|| Upgrade {
+                        pid: job.pid,
+                        name: job.name.clone(),
+                        loc: job.loc,
+                        text: text.to_owned(),
+                        places: places.len(),
+                        about: f.next().unwrap_or_default().to_owned(),
+                    })
+                });
+                if upgrade.is_some_and(|u| found.send(u).is_err()) {
+                    break;
+                }
+            }
+        });
+        Upgrader { jobs, done }
+    }
+}
+
 impl Drop for Helper {
     // Closing its input ends the helper, which also stops any limits.
     fn drop(&mut self) {
@@ -628,6 +699,8 @@ struct Game {
     /// when they were last looked for.
     waiting: Vec<String>,
     waited_at: Option<Instant>,
+    /// Values already handed to the upgrader in this run.
+    upgrade_asked: Vec<String>,
 }
 
 /// How often values waiting for their code are looked for again.
@@ -689,6 +762,8 @@ struct Probe {
 
 pub struct Core {
     helper: Helper,
+    /// Looks for better ways to find saved values, in the background (started when needed).
+    upgrader: Option<Upgrader>,
     capture: Option<WindowCapture>,
     words: Vec<Word>,
     area: Option<Rect>,
@@ -753,6 +828,7 @@ impl Core {
         Ok(Self {
             log_name,
             helper: Helper::start()?,
+            upgrader: None,
             capture: None,
             words: Vec::new(),
             area: None,
@@ -852,7 +928,7 @@ impl Core {
         if self.game.as_ref().map(|g| g.pid) != Some(pid) {
             self.capture = None;
         }
-        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new(), waiting: Vec::new(), waited_at: None });
+        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new(), waiting: Vec::new(), waited_at: None, upgrade_asked: Vec::new() });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -1430,6 +1506,91 @@ impl Core {
         Ok(())
     }
 
+    /// Hands values found this run some weaker way to the upgrader (once a run each), and saves
+    /// the engine paths it found for them.
+    fn upgrades(&mut self) {
+        let done: Vec<Upgrade> = self.upgrader.as_ref().map(|u| u.done.try_iter().collect()).unwrap_or_default();
+        for u in done {
+            if let Err(e) = self.upgrade(&u) {
+                self.say(&format!("{}: could not save it by name: {e}", u.name));
+            }
+        }
+        let Some(game) = self.game.as_ref() else { return };
+        let fresh: Vec<(String, Loc)> = game.entries.iter().filter(|(n, l)| l.addr != 0 && !game.upgrade_asked.contains(n)).cloned().collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let saved = read_profile(&game.exe);
+        let mut jobs = Vec::new();
+        for (name, loc) in &fresh {
+            let Some(e) = saved.iter().find(|e| e.name == *name) else { continue };
+            let engine = e.named.first().is_some_and(|t| engine_path(t));
+            // A name leading to every stack of an item: an engine path leads to fewer places.
+            let stacks = game.named.iter().any(|(n, _, l)| n == name && l.len() > 1);
+            // Pointer paths no run confirmed may lead to the wrong place: never written, and
+            // never made into a name that would be.
+            let unsure = e.named.is_empty() && e.sites.is_empty() && e.unconfirmed();
+            if !engine && !stacks && !unsure && e.foreign_type().is_none() {
+                jobs.push(UpgradeJob { pid: game.pid, name: name.clone(), loc: *loc });
+            }
+        }
+        if let Some(game) = self.game.as_mut() {
+            game.upgrade_asked.extend(fresh.into_iter().map(|(n, _)| n));
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        let upgrader = self.upgrader.get_or_insert_with(Upgrader::start);
+        for job in jobs {
+            upgrader.jobs.send(job).ok();
+        }
+    }
+
+    /// Saves a value by the engine path found for it, in place of the weaker way it was saved
+    /// (its limit stays). Nothing when it moved or was saved again meanwhile.
+    fn upgrade(&mut self, u: &Upgrade) -> Result<(), String> {
+        let Some(game) = self.game.as_mut().filter(|g| g.pid == u.pid) else { return Ok(()) };
+        if !game.entries.iter().any(|(n, l)| *n == u.name && l.addr == u.loc.addr) {
+            return Ok(());
+        }
+        let mut entries = read_profile(&game.exe);
+        let Some(e) = entries.iter_mut().find(|e| e.name == u.name && e.kind == u.loc.kind) else { return Ok(()) };
+        if e.named.first().is_some_and(|t| engine_path(t)) {
+            return Ok(());
+        }
+        let was = match (e.sites.is_empty(), e.named.is_empty()) {
+            (false, _) => "code patterns",
+            (true, false) => "a name the game merely holds",
+            (true, true) => "pointer paths",
+        };
+        e.sites.clear();
+        e.paths.clear();
+        e.candidates.clear();
+        e.named = vec![u.text.clone()];
+        e.run = Some(u.pid);
+        let limited = e.limit.is_some();
+        write_profile(&game.exe, &entries)?;
+        game.paths.retain(|(n, _)| *n != u.name);
+        game.votes.retain(|(n, _)| *n != u.name);
+        game.via.retain(|(n, _)| *n != u.name);
+        game.waiting.retain(|n| *n != u.name);
+        game.named.retain(|(n, _, _)| *n != u.name);
+        game.named.push((u.name.clone(), u.text.clone(), vec![u.loc]));
+        self.set_named_doubt(&u.name, None);
+        // The helper followed it the old way (code patterns, paths): by name from now on.
+        self.helper.call(&format!("unlimit {}", u.name));
+        if limited {
+            if let Some(entry) = entries.iter().find(|e| e.name == u.name) {
+                self.apply_limit(entry)?;
+            }
+        }
+        self.say(&format!(
+            "{}: now saved by name ({}, {} now) instead of by {was}: Ferret finds it that way after restarts and game updates",
+            u.name, u.about, u.places
+        ));
+        Ok(())
+    }
+
     /// Looks again for values whose code wasn't in the game's memory yet (every `WAIT_EVERY`).
     fn look_for_waiting(&mut self) {
         let Some(game) = self.game.as_ref() else { return };
@@ -1450,6 +1611,7 @@ impl Core {
     pub fn values(&mut self) -> Result<Vec<ValueRow>, String> {
         let exe = self.game()?.exe.clone();
         self.look_for_waiting();
+        self.upgrades();
         self.refresh_paths();
         self.refresh_named();
         self.sync_addresses();
