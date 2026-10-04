@@ -31,6 +31,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::names::Heap;
+use crate::helper::Kind;
 
 const VARIANT: u64 = 24;
 const INT: u32 = 2;
@@ -613,6 +614,115 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
     let path = path_of(&own)?;
     let leads = g.walk(&own_runs, &path.steps);
     (leads.contains(&target) && leads.len() <= MAX_PLACES).then_some((path, leads))
+}
+
+/// What the places at `addrs` are when they are script variables, in words: "gold in
+/// player_data.gd, in players_data[0] of run_data.gd" (the variable, then what holds its object,
+/// one level up), or "gold in player_data.gd (an object no script variable holds)". Brotato
+/// keeps a snapshot of the player's data each wave whose gold looked just like the live one in
+/// the matches list. All of them at once: a few passes over memory, not a climb each.
+pub fn about_all(heap: &Heap, addrs: &[(u64, Kind)]) -> Vec<Option<String>> {
+    let mem = heap.file();
+    let mut out = vec![None; addrs.len()];
+    // A number Variant: an int64 (the match is its low half, the high half its sign) or a
+    // double. Junk passing this would each cost a detect per pointer to it (61 s for 20 places
+    // matching a common number on the stand-in).
+    let variant = |a: u64, kind: Kind| -> Option<u64> {
+        let v = a.checked_sub(8)?;
+        let ok = match (mem_u32(mem, v)?, kind) {
+            (INT, Kind::I32) => {
+                let (lo, hi) = (mem_u32(mem, a)?, mem_u32(mem, a + 4)?);
+                hi == if (lo as i32) < 0 { u32::MAX } else { 0 }
+            }
+            (REAL, Kind::F64) => true,
+            _ => false,
+        };
+        ok.then_some(v)
+    };
+    // (which address, where the variables would start, which one it is, where the size is)
+    let mut starts: Vec<(usize, u64, u64, u64)> = Vec::new();
+    let known = known_layout(heap.pid);
+    for (k, &(a, kind)) in addrs.iter().enumerate() {
+        let Some(v) = variant(a, kind) else { continue };
+        for &cow in SIZES.iter().filter(|&&c| known.is_none_or(|l| l.cow == c)) {
+            for i in 0..MAX_MEMBERS.min(256) {
+                let Some(s) = v.checked_sub(i * VARIANT) else { break };
+                if cow_size(mem, s, cow).is_some_and(|n| n > i && n <= MAX_MEMBERS) {
+                    starts.push((k, s, i, cow));
+                }
+            }
+        }
+    }
+    if starts.is_empty() {
+        return out;
+    }
+    let mut targets: Vec<u64> = starts.iter().map(|s| s.1).collect();
+    targets.sort_unstable();
+    targets.dedup();
+    // (which address, its script instance, which variable)
+    let mut vars: Vec<(usize, u64, u64)> = Vec::new();
+    let mut lay = known;
+    for at in heap.referrers(&targets) {
+        let Some(data) = mem_u64(mem, at) else { continue };
+        for &(k, s, i, cow) in starts.iter().filter(|s| s.1 == data) {
+            if vars.iter().any(|v| v.0 == k) {
+                continue;
+            }
+            // With the layout known, an instance is checked by its owner pointing back to it.
+            if let Some(l) = lay {
+                let g = Godot::new(heap, l);
+                let inst = at.wrapping_sub(l.members);
+                if g.ptr(inst + l.owner).and_then(|o| g.instance_of(o)) == Some(inst) {
+                    vars.push((k, inst, i));
+                }
+                continue;
+            }
+            let Some(count) = cow_size(mem, s, cow) else { continue };
+            let found = (8..0x40).step_by(8).find_map(|m| detect(heap, at.checked_sub(m)?, s, count, cow));
+            if let Some(l) = found {
+                lay = Some(l);
+                vars.push((k, at - l.members, i));
+            }
+        }
+    }
+    let Some(lay) = lay else { return out };
+    remember(heap.pid, lay);
+    let g = Godot::new(heap, lay);
+    let file = |inst: u64| g.script_of(inst).and_then(|gd| g.script_path(gd)).map(|p| p.rsplit('/').next().unwrap_or(&p).to_owned());
+    // One level up: the Variants holding each object, and the variables (or arrays in them)
+    // those are.
+    let objs: Vec<u64> = vars.iter().filter_map(|v| mem_u64(mem, v.1 + lay.owner)).collect();
+    let held: Vec<(u64, u64)> = heap
+        .referrers(&objs)
+        .into_iter()
+        .flat_map(|at| [at.wrapping_sub(16), at.wrapping_sub(8)])
+        .filter_map(|v| Some((v, g.object(v)?)))
+        .collect();
+    let vs: Vec<u64> = held.iter().map(|h| h.0).collect();
+    let (members, arrays) = if vs.is_empty() { (Vec::new(), Vec::new()) } else { g.holders(&vs) };
+    let privates: Vec<u64> = arrays.iter().map(|a| a.0).collect();
+    let array_vars: Vec<u64> = match privates.is_empty() {
+        true => Vec::new(),
+        false => heap.referrers(&privates).into_iter().filter_map(|at| at.checked_sub(8)).filter(|&v| g.array(v).is_some()).collect(),
+    };
+    let (owners, _) = if array_vars.is_empty() { (Vec::new(), Vec::new()) } else { g.holders(&array_vars) };
+    let holder = |inst: u64| -> Option<String> {
+        let vs: Vec<u64> = held.iter().filter(|h| h.1 == inst).map(|h| h.0).collect();
+        if let Some(&(h, i, _)) = members.iter().find(|m| vs.contains(&m.2)) {
+            return Some(format!("{} of {}", g.member_name(h, i)?, file(h)?));
+        }
+        let &(private, e, _) = arrays.iter().find(|a| vs.contains(&a.2))?;
+        let &(h, i, _) = owners.iter().find(|o| g.array(o.2).is_some_and(|a| a.0 == private))?;
+        Some(format!("{}[{e}] of {}", g.member_name(h, i)?, file(h)?))
+    };
+    for &(k, inst, i) in &vars {
+        let (Some(name), Some(script)) = (g.member_name(inst, i), file(inst)) else { continue };
+        out[k] = Some(match holder(inst) {
+            Some(h) => format!("{name} in {script}, in {h}"),
+            None => format!("{name} in {script} (an object no script variable holds)"),
+        });
+    }
+    out
 }
 
 /// The objects running the path's script, found by the script's path (a few passes over

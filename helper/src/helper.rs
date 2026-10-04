@@ -194,7 +194,7 @@ fn owner_uid(pid: u32) -> Option<u32> {
 // --- How a value is stored. Addresses in commands are "<hex>[:type]", i32 when left out.
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Kind {
+pub(crate) enum Kind {
     I32,
     F32,
     F64,
@@ -1448,7 +1448,8 @@ fn cmd_about(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         return writeln!(out, "error: not attached");
     };
     let heap = Heap::new(s.pid, mem, s.width)?;
-    let addrs: Vec<u64> = arg.split_whitespace().filter_map(parse_loc).map(|(a, _)| a).collect();
+    let locs: Vec<(u64, Kind)> = arg.split_whitespace().filter_map(parse_loc).collect();
+    let addrs: Vec<u64> = locs.iter().map(|l| l.0).collect();
     let new: Vec<u64> = addrs.iter().copied().filter(|a| !s.abouts.contains_key(a)).collect();
     let mut texts: Vec<Option<String>> = new.iter().map(|&a| godot::about(&heap, a).or_else(|| mono::about(&heap, a))).collect();
     // Unreal places in one pass over the objects (a fraction of a second).
@@ -1458,6 +1459,16 @@ fn cmd_about(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         for (a, f) in unnamed.iter().zip(found) {
             if let Some(i) = new.iter().position(|n| n == a) {
                 texts[i] = f.first().map(|(p, _)| p.describe());
+            }
+        }
+    }
+    // Godot script variables, one level up from each (a few passes over memory for all).
+    let unnamed: Vec<u64> = new.iter().zip(&texts).filter(|(_, t)| t.is_none()).map(|(a, _)| *a).collect();
+    if !unnamed.is_empty() && is_godot(s.pid) {
+        let unnamed: Vec<(u64, Kind)> = unnamed.iter().filter_map(|a| locs.iter().find(|l| l.0 == *a).copied()).collect();
+        for ((a, _), f) in unnamed.iter().zip(gdscript::about_all(&heap, &unnamed)) {
+            if let (Some(i), Some(f)) = (new.iter().position(|n| n == a), f) {
+                texts[i] = Some(f);
             }
         }
     }
