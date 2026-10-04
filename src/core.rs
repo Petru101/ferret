@@ -158,12 +158,22 @@ fn match_count(reply: &[String]) -> Option<usize> {
     words.get(i.checked_sub(1)?)?.parse().ok()
 }
 
-/// Where a search is, for the interface.
-pub enum Scan {
-    /// Scanning all memory for the shown number: how far (0.0..=1.0).
-    Running(String, f64),
+/// What Ferret is busy with and whether the player has something to do, for the interface
+/// (the player watches the game, and took a small spinner for done more than once).
+pub enum Phase {
+    /// Scanning all memory for the shown number: how far (0.0..=1.0). The number mustn't change.
+    Scanning(String, f64),
     /// The search has this many places and follows the number from here on.
     Ready(usize),
+    /// A change on screen narrowed the search down to this many places.
+    Watching(usize),
+    /// Testing which of this many places is the value: how far. Nothing to do.
+    Checking(usize, f64),
+    /// The player has to change the number in the game: this many places left, seconds to do it.
+    YourTurn(usize, u64),
+    /// Finding saved values again on attach: the game's program, the value, its number and how
+    /// many there are.
+    Restoring(String, String, usize, usize),
 }
 
 /// One of the places still matching a search, as the matches list shows it.
@@ -699,9 +709,8 @@ pub struct Core {
     pub on_status: Option<Box<dyn FnMut(&str) + Send>>,
     /// Told about the places still matching while a search narrows them down (20 or fewer).
     pub on_matches: Option<Box<dyn FnMut(Vec<Match>) + Send>>,
-    /// Told how far a scan of all the game's memory is, and when a search is ready for the
-    /// number to change (the first scan takes seconds: the player mustn't change it meanwhile).
-    pub on_scan: Option<Box<dyn FnMut(Scan) + Send>>,
+    /// Told what a search or a restore is doing, and when the player has to act.
+    pub on_phase: Option<Box<dyn FnMut(Phase) + Send>>,
     /// The value types new scans look for (empty: all of them).
     pub scan_kinds: Vec<Kind>,
     /// The memory around the game's values found so far: new scans try places shaped like them
@@ -744,7 +753,7 @@ impl Core {
             on_frame: None,
             on_status: None,
             on_matches: None,
-            on_scan: None,
+            on_phase: None,
             scan_kinds: Vec::new(),
             shapes: Vec::new(),
             shaped: false,
@@ -1265,8 +1274,9 @@ impl Core {
             return Err(format!("nothing saved for {exe}"));
         }
         let t = Instant::now();
-        for entry in &entries {
+        for (i, entry) in entries.iter().enumerate() {
             let name = &entry.name;
+            self.phase(Phase::Restoring(exe.clone(), name.clone(), i, entries.len()));
             if let Some(kind) = entry.foreign_type() {
                 self.say(&format!("{name}: saved by a newer Ferret (value type {kind}), which this one can't read; restart Ferret"));
                 continue;
@@ -1702,10 +1712,14 @@ impl Core {
         Ok(self.matches())
     }
 
-    fn ready(&mut self, count: usize) {
-        if let Some(f) = self.on_scan.as_mut() {
-            f(Scan::Ready(count));
+    fn phase(&mut self, p: Phase) {
+        if let Some(f) = self.on_phase.as_mut() {
+            f(p);
         }
+    }
+
+    fn ready(&mut self, count: usize) {
+        self.phase(Phase::Ready(count));
     }
 
     /// A new scan for `n`, of the value types the player picked, in places shaped like earlier
@@ -1720,10 +1734,10 @@ impl Core {
             cmd += " all";
         }
         let shown = n.to_string();
-        let on_scan = &mut self.on_scan;
+        let on_phase = &mut self.on_phase;
         let mut tell = |done| {
-            if let Some(f) = on_scan.as_mut() {
-                f(Scan::Running(shown.clone(), done));
+            if let Some(f) = on_phase.as_mut() {
+                f(Phase::Scanning(shown.clone(), done));
             }
         };
         tell(0.0);
@@ -1834,6 +1848,7 @@ impl Core {
             self.say(&format!("none of them holds {n} now"));
             return Ok(None);
         }
+        self.phase(Phase::Checking(tests.len(), 0.0));
         for t in &tests {
             self.helper.call(&format!("write {} {}", t.loc, t.test));
         }
@@ -1928,7 +1943,9 @@ impl Core {
     fn probe_one_by_one(&mut self, tests: &[Probe], kept: &[bool]) -> Option<(usize, String)> {
         self.say("checking them one at a time");
         let locs: Vec<Loc> = tests.iter().map(|t| t.loc).collect();
-        for k in (0..tests.len()).filter(|&k| kept[k]) {
+        let checked: Vec<usize> = (0..tests.len()).filter(|&k| kept[k]).collect();
+        for (i, &k) in checked.iter().enumerate() {
+            self.phase(Phase::Checking(tests.len(), (i + 1) as f64 / (checked.len() + 1) as f64));
             let loc = tests[k].loc;
             let listed = self.helper.call(&format!("peek {loc}"));
             let Some(orig) = listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()) else { continue };
@@ -1982,6 +1999,7 @@ impl Core {
             "neither the screen nor the other places told which one it is: waiting up to {} s for the game to change it",
             WAIT.as_secs()
         ));
+        self.phase(Phase::YourTurn(watched.len(), WAIT.as_secs()));
         self.status(&format!(
             "Now change the number in the game once (pick some up or use some): Ferret waits and watches which \
              of the {} places the game carries on from. Stop gives up.",
@@ -2031,6 +2049,7 @@ impl Core {
             return true;
         };
         let test = shown + 10;
+        self.phase(Phase::Checking(1, 0.0));
         self.helper.call(&format!("write {loc} {test}"));
         std::thread::sleep(Duration::from_millis(1500));
         let now = self.peek(&[loc])[0];
@@ -2143,6 +2162,7 @@ impl Core {
                 unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
                 // Every change: the listed values follow the game.
                 self.tell_matches(new_count);
+                self.phase(Phase::Watching(new_count));
                 count = new_count;
                 confirm = false;
             }

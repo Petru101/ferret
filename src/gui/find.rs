@@ -13,6 +13,7 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::{gdk, glib};
 
+use super::phase::PhaseCard;
 use super::{Event, Worker};
 use crate::core::{self, AutoResult, Kind};
 use crate::font::DigitShape;
@@ -38,14 +39,8 @@ pub struct FindView {
     /// The value types new searches look for (`TYPE_CHOICES`).
     types: gtk::DropDown,
     spinner: gtk::Spinner,
-    /// Over the game picture while a scan of all memory runs (the player mustn't change the
-    /// number then; they took the small spinner for done, more than once), then "Ready!".
-    scan_card: gtk::Box,
-    scan_title: gtk::Label,
-    scan_hint: gtk::Label,
-    scan_bar: gtk::ProgressBar,
-    /// Counts the card's changes, so "Ready!" hides itself only if nothing came after it.
-    scan_shown: Rc<Cell<u32>>,
+    /// The big card saying what a search is doing and when it's the player's turn.
+    phase: Rc<PhaseCard>,
     log: gtk::TextView,
     result: gtk::Box,
     name: gtk::Entry,
@@ -71,7 +66,7 @@ pub struct FindView {
 }
 
 /// 5040383 -> "5,040,383".
-fn grouped(n: usize) -> String {
+pub(super) fn grouped(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -154,7 +149,7 @@ fn ask_drop(worker: &Worker, loc: core::Loc, value: &str, parent: &impl IsA<gtk:
 }
 
 impl FindView {
-    pub fn new(worker: Worker, cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> Rc<Self> {
+    pub fn new(worker: Worker, cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>, phase: Rc<PhaseCard>) -> Rc<Self> {
         let picture = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::ScaleDown)
             .can_shrink(true)
@@ -166,26 +161,6 @@ impl FindView {
         overlay.set_child(Some(&picture));
         overlay.add_overlay(&area);
         let scroll = gtk::ScrolledWindow::builder().child(&overlay).vexpand(true).build();
-        let scan_title = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).css_classes(["title-1"]).build();
-        let scan_bar = gtk::ProgressBar::builder().show_text(true).width_request(360).build();
-        let scan_hint = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).css_classes(["title-3"]).build();
-        let scan_card = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(14)
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .margin_start(24)
-            .margin_end(24)
-            .css_classes(["scan-card"])
-            .can_target(false)
-            .visible(false)
-            .build();
-        scan_card.append(&scan_title);
-        scan_card.append(&scan_bar);
-        scan_card.append(&scan_hint);
-        // Over the visible part of the picture, not the picture itself (it scrolls when zoomed).
-        let stage = gtk::Overlay::builder().child(&scroll).vexpand(true).build();
-        stage.add_overlay(&scan_card);
 
         let capture = gtk::Button::builder().icon_name("camera-photo-symbolic").tooltip_text("Capture again").build();
         let zoom = gtk::ToggleButton::builder().icon_name("zoom-original-symbolic").tooltip_text("Actual size").build();
@@ -297,7 +272,7 @@ impl FindView {
 
         let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_bottom(12).build();
         page.append(&top);
-        page.append(&stage);
+        page.append(&scroll);
         page.append(&typed_row);
         page.append(&digits_row);
         page.append(&result);
@@ -363,11 +338,7 @@ impl FindView {
             undo,
             types: types.clone(),
             spinner,
-            scan_card,
-            scan_title,
-            scan_hint,
-            scan_bar,
-            scan_shown: Rc::default(),
+            phase,
             log,
             result,
             name,
@@ -754,66 +725,55 @@ impl FindView {
                 } else {
                     "Press Start to continue and let the number change a few more times."
                 };
-                self.announce(&format!("{}. {next}", self.count_text(n)), false);
+                let text = self.count_text(n);
+                self.announce(&format!("{text}. {next}"), false);
+                self.phase.done(false, &text, next);
                 self.list_matches(n);
             }
-            Err(e) => {
-                self.status.set_label(&e);
-                self.refresh_matches();
-            }
+            Err(e) => self.stopped(&e),
         }
     }
 
-    /// The first scan of a search takes seconds (8 on Lumencraft's 2 GB), and a number changed
-    /// meanwhile spoils it: a big card over the game says so until it's done, and then, while
-    /// Start runs, that the number can change now.
-    pub fn scan(&self, s: core::Scan) {
-        let shown = self.scan_shown.get() + 1;
-        self.scan_shown.set(shown);
-        match s {
-            core::Scan::Running(n, done) => {
-                let title = format!("Scanning the game's memory for {n}…");
-                if self.scan_title.label() != title {
-                    self.scan_title.set_label(&title);
-                    self.scan_hint.set_label("Don't change the number in the game yet.");
-                    self.status.set_label(&format!("Scanning the game's memory for {n}. Don't change the number in the game until it's done."));
+    /// A search that ended without an answer: why, in the status line and on the card.
+    fn stopped(&self, why: &str) {
+        self.status.set_label(why);
+        let mut why = why.to_owned();
+        if let Some(c) = why.get(..1) {
+            why.replace_range(..1, &c.to_uppercase());
+        }
+        self.phase.done(false, "The search stopped", &why);
+        self.refresh_matches();
+    }
+
+    /// What a search is doing. "Ready!" and the strip only while Start runs: a typed number's
+    /// search says how it went when it ends.
+    pub fn phase(&self, p: core::Phase) {
+        let start_runs = self.typed.is_editable() && self.stop.is_visible() && !self.cancel.load(Ordering::Relaxed);
+        match p {
+            core::Phase::Scanning(n, done) => {
+                let status = format!("Scanning the game's memory for {n}. Don't change the number in the game until it's done.");
+                if self.status.label() != status {
+                    self.status.set_label(&status);
                 }
-                self.scan_card.remove_css_class("ready");
-                self.scan_bar.set_fraction(done.clamp(0.0, 1.0));
-                self.scan_bar.set_visible(true);
-                self.scan_card.set_visible(true);
+                self.phase.scanning(&n, done);
             }
-            // A typed number's search says how it went when it ends.
-            core::Scan::Ready(n) if self.typed.is_editable() && self.stop.is_visible() && !self.cancel.load(Ordering::Relaxed) => {
-                self.scan_title.set_label("Ready!");
-                self.scan_hint.set_label(&format!(
-                    "{} {}. Change the number in the game now.",
-                    grouped(n),
-                    if n == 1 { "place matches" } else { "places match" }
-                ));
-                self.scan_card.add_css_class("ready");
-                self.scan_bar.set_visible(false);
-                self.scan_card.set_visible(true);
-                self.announce(&format!(
-                    "Ready: {} {}. Now change the number in the game; every change narrows it down.",
-                    grouped(n),
-                    if n == 1 { "place matches" } else { "places match" }
-                ), false);
-                let (card, now) = (self.scan_card.clone(), self.scan_shown.clone());
-                glib::timeout_add_local_once(Duration::from_secs(4), move || {
-                    if now.get() == shown {
-                        card.set_visible(false);
-                    }
-                });
+            core::Phase::Ready(n) if start_runs => {
+                self.phase.ready(n);
+                self.announce(
+                    &format!("Ready: {}. Now change the number in the game; every change narrows it down.", self.count_text(n)),
+                    false,
+                );
             }
-            core::Scan::Ready(_) => self.hide_scan(),
+            core::Phase::Watching(n) if start_runs => self.phase.watching(n),
+            core::Phase::Ready(_) | core::Phase::Watching(_) => self.phase.hide(),
+            core::Phase::Checking(n, done) => self.phase.checking(n, done),
+            core::Phase::YourTurn(n, secs) => self.phase.your_turn(n, secs),
+            core::Phase::Restoring(..) => {}
         }
     }
 
     fn hide_scan(&self) {
-        self.scan_shown.set(self.scan_shown.get() + 1);
-        self.scan_card.set_visible(false);
-        self.scan_title.set_label("");
+        self.phase.hide();
     }
 
     /// A job panicked: whatever was running ends, so the page doesn't wait for it forever.
@@ -828,6 +788,7 @@ impl FindView {
         let at = format!("0x{:x} ({})", loc.addr, loc.kind.describe());
         self.last_count.set(None);
         self.announce(&format!("Found it! It's at {at}. Give it a name below to keep it."), true);
+        self.phase.done(true, "Found it!", "Give it a name below to keep it.");
         self.log_found(&format!("Found it: {at}"));
         self.result.set_visible(true);
         self.name.grab_focus();
@@ -897,14 +858,13 @@ impl FindView {
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Several(n)) => {
-                self.announce(&format!("{}. {next}", self.count_text(n)), false);
+                let text = self.count_text(n);
+                self.announce(&format!("{text}. {next}"), false);
+                self.phase.done(false, &text, next);
                 self.list_matches(n);
                 self.again.set_visible(true);
             }
-            Err(e) => {
-                self.status.set_label(&e);
-                self.refresh_matches();
-            }
+            Err(e) => self.stopped(&e),
         }
     }
 

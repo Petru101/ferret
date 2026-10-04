@@ -3,6 +3,7 @@
 // interface sends it jobs and gets events back.
 
 mod find;
+mod phase;
 mod tips;
 mod values;
 
@@ -24,9 +25,8 @@ pub enum Event {
     Log(String),
     /// Something the player has to do now for the search to go on.
     Status(String),
-    /// How far a scan of the game's memory is, or that the search is ready for the number to
-    /// change.
-    Scan(crate::core::Scan),
+    /// What a search or a restore is doing, and when the player has to act.
+    Phase(crate::core::Phase),
     /// The core could not start (for example the host helper is missing).
     Failed(String),
     Games(Vec<GameProcess>),
@@ -111,9 +111,9 @@ fn start_worker(cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> (Worker, 
         core.on_matches = Some(Box::new(move |list| {
             matches.send_blocking(Event::Matches(Ok(list))).ok();
         }));
-        let scans = events_tx.clone();
-        core.on_scan = Some(Box::new(move |s| {
-            scans.send_blocking(Event::Scan(s)).ok();
+        let phases = events_tx.clone();
+        core.on_phase = Some(Box::new(move |p| {
+            phases.send_blocking(Event::Phase(p)).ok();
         }));
         let frames = events_tx.clone();
         let mut shown = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -159,6 +159,7 @@ struct Ui {
     stack: adw::ViewStack,
     values: Rc<values::ValuesView>,
     find: Rc<find::FindView>,
+    phase: Rc<phase::PhaseCard>,
     tips: Rc<tips::Tips>,
     worker: Worker,
     /// The game Ferret is attached to.
@@ -290,7 +291,7 @@ impl Ui {
     }
 
     fn handle(self: &Rc<Self>, event: Event) {
-        if !matches!(event, Event::Log(_) | Event::Status(_) | Event::Scan(_) | Event::Failed(_) | Event::Frame(..)) {
+        if !matches!(event, Event::Log(_) | Event::Status(_) | Event::Phase(_) | Event::Failed(_) | Event::Frame(..)) {
             self.worker.pending.set(self.worker.pending.get().saturating_sub(1));
         }
         // These can teach Ferret digits.
@@ -300,7 +301,11 @@ impl Ui {
         match event {
             Event::Log(msg) => self.find.log(&msg),
             Event::Status(msg) => self.find.ask(&msg),
-            Event::Scan(s) => self.find.scan(s),
+            Event::Phase(crate::core::Phase::Restoring(exe, name, i, n)) => {
+                let game = self.game_names.borrow().get(&exe).cloned().unwrap_or(exe);
+                self.phase.restoring(&game, &name, i, n);
+            }
+            Event::Phase(p) => self.find.phase(p),
             Event::Failed(e) => {
                 self.games_error.set_description(Some(&e));
                 self.games_stack.set_visible_child_name("error");
@@ -308,6 +313,7 @@ impl Ui {
             Event::Games(games) => self.show_games(games),
             Event::Attached(Ok((pid, exe))) => {
                 self.attaching.set(None);
+                self.phase.hide();
                 self.waiting_for.replace(None);
                 if self.attached.replace(Some(pid)) != Some(pid) {
                     self.find.new_game();
@@ -360,6 +366,7 @@ impl Ui {
             }
             Event::Attached(Err(e)) => {
                 self.attaching.set(None);
+                self.phase.hide();
                 match e.contains('\n') {
                     true => self.explain("Ferret Can't Open This Game", &e),
                     false => self.toast(&e),
@@ -368,6 +375,7 @@ impl Ui {
             Event::Done(Err(e)) => self.toast(&e),
             Event::Bug(msg) => {
                 self.attaching.set(None);
+                self.phase.hide();
                 self.find.bug(&msg);
             }
         }
@@ -496,6 +504,21 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     );
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
     action("tip", Box::new(|ui, how| ui.tips.close(how == "never")));
+    // Shows the status card in one state, for looking at it (`turn` can't be set up easily).
+    action(
+        "phase",
+        Box::new(|ui, what| match what.as_str() {
+            "scan" => ui.phase.scanning("192", 0.4),
+            "ready" => ui.phase.ready(5094),
+            "watch" => ui.phase.watching(183),
+            "check" => ui.phase.checking(3, 0.5),
+            "turn" => ui.phase.your_turn(3, 180),
+            "restore" => ui.phase.restoring("Lumencraft", "lumen", 2, 5),
+            "found" => ui.phase.done(true, "Found it!", "Give it a name below to keep it."),
+            "several" => ui.phase.done(false, "7 places match", "Change the number in the game, then type the new one."),
+            _ => ui.phase.hide(),
+        }),
+    );
     action("remove", Box::new(|ui, name| values::ask_remove(&ui.worker, name.trim(), &ui.stack)));
     action(
         "forget",
@@ -523,11 +546,17 @@ fn load_css() {
          label.news.flash { background-color: alpha(@accent_bg_color, 0.65); transition: none; } \
          label.news.success { background-color: alpha(@success_color, 0.15); } \
          label.news.success.flash { background-color: alpha(@success_color, 0.5); transition: none; } \
-         .scan-card { padding: 18px 24px; border-radius: 16px; border: 3px solid @warning_color; \
-         background-color: mix(@window_bg_color, @warning_color, 0.25); } \
-         .scan-card.ready { border-color: @success_color; background-color: mix(@window_bg_color, @success_color, 0.3); } \
-         .scan-card progressbar trough, .scan-card progressbar progress { min-height: 14px; border-radius: 7px; } \
-         .scan-card progressbar text { font-size: 1.4em; font-weight: bold; color: @window_fg_color; opacity: 1; } \
+         .phase-card { padding: 18px 24px; border-radius: 16px; border: 3px solid @warning_color; \
+         background-color: mix(@window_bg_color, @warning_color, 0.25); box-shadow: 0 4px 16px alpha(black, 0.3); \
+         transition: background-color 300ms ease-out; } \
+         .phase-card.ready { border-color: @success_color; background-color: mix(@window_bg_color, @success_color, 0.3); } \
+         .phase-card.watching { padding: 8px 20px; border-color: @accent_bg_color; \
+         background-color: mix(@window_bg_color, @accent_bg_color, 0.2); } \
+         .phase-card.done { border-color: @accent_bg_color; background-color: mix(@window_bg_color, @accent_bg_color, 0.2); } \
+         .phase-card.turn { border-color: @accent_bg_color; background-color: mix(@window_bg_color, @accent_bg_color, 0.25); } \
+         .phase-card.turn.flash { background-color: mix(@window_bg_color, @accent_bg_color, 0.6); } \
+         .phase-card progressbar trough, .phase-card progressbar progress { min-height: 14px; border-radius: 7px; } \
+         .phase-card progressbar text { font-size: 1.4em; font-weight: bold; color: @window_fg_color; opacity: 1; } \
          .tip { background-color: alpha(@accent_bg_color, 0.15); padding: 6px 6px 6px 12px; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
@@ -546,7 +575,8 @@ fn build(app: &adw::Application) {
         let stack = stack.clone();
         values::ValuesView::new(worker.clone(), move || stack.set_visible_child_name("find"))
     };
-    let find = find::FindView::new(worker.clone(), cancel, scan_now);
+    let phase = phase::PhaseCard::new();
+    let find = find::FindView::new(worker.clone(), cancel, scan_now, phase.clone());
     stack.add_titled_with_icon(&values.root, Some("values"), "Values", "view-list-symbolic");
     stack.add_titled_with_icon(&find.root, Some("find"), "Find Value", "edit-find-symbolic");
 
@@ -586,8 +616,11 @@ fn build(app: &adw::Application) {
     nav.set_pop_on_escape(false);
     nav.add(&games_page(&games, &games_stack, &games_error, &refresh, &banners[1]));
 
+    // Over every page: the player may look at the Values tab or the games list meanwhile.
+    let over = gtk::Overlay::builder().child(&nav).build();
+    over.add_overlay(&phase.root);
     let toasts = adw::ToastOverlay::new();
-    toasts.set_child(Some(&nav));
+    toasts.set_child(Some(&over));
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Ferret")
@@ -608,6 +641,7 @@ fn build(app: &adw::Application) {
         stack,
         values,
         find,
+        phase,
         tips,
         worker,
         attached: Rc::default(),
