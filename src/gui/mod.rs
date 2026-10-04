@@ -62,6 +62,8 @@ pub enum Event {
     /// A frame the watched number was just read from, and the watched area: shown while
     /// searching (at most one a second).
     Frame(gtk::gdk::Texture, Option<crate::ocr::Rect>),
+    /// What a read of the watched box saw (None: no number there now).
+    Seen(Option<String>),
     /// A job panicked (a bug): what it said. The core lives on for the next job.
     Bug(String),
 }
@@ -125,6 +127,10 @@ fn start_worker(cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> (Worker, 
                     shown = std::time::Instant::now();
                 }
             }
+        }));
+        let seen = events_tx.clone();
+        core.on_read = Some(Box::new(move |n| {
+            seen.send_blocking(Event::Seen(n.map(|n| n.to_string()))).ok();
         }));
         for job in jobs_rx {
             // A bug in one job mustn't take the core and the helper with it: the window would
@@ -291,7 +297,7 @@ impl Ui {
     }
 
     fn handle(self: &Rc<Self>, event: Event) {
-        if !matches!(event, Event::Log(_) | Event::Status(_) | Event::Phase(_) | Event::Failed(_) | Event::Frame(..)) {
+        if !matches!(event, Event::Log(_) | Event::Status(_) | Event::Phase(_) | Event::Failed(_) | Event::Frame(..) | Event::Seen(_)) {
             self.worker.pending.set(self.worker.pending.get().saturating_sub(1));
         }
         // These can teach Ferret digits.
@@ -339,6 +345,7 @@ impl Ui {
             Event::Numbers(r) => self.find.numbers(r),
             Event::Read(r, area, kept) => self.find.read(r, area, kept),
             Event::Frame(t, area) => self.find.show_frame(t, area),
+            Event::Seen(n) => self.find.seen(n),
             Event::Matches(Ok(list)) => self.find.show_matches(list),
             Event::Chosen(Ok(loc)) => self.find.chosen(loc),
             Event::Matches(Err(e)) | Event::Chosen(Err(e)) => self.toast(&e),
@@ -478,6 +485,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("find", Box::new(|ui, _| ui.find.start()));
+    action("confirm", Box::new(|ui, yes| ui.find.answer_read(yes == "yes")));
     action(
         "try",
         Box::new(|ui, arg| {
@@ -516,6 +524,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
             "restore" => ui.phase.restoring("Lumencraft", "lumen", 2, 5),
             "found" => ui.phase.done(true, "Found it!", "Give it a name below to keep it."),
             "several" => ui.phase.done(false, "7 places match", "Change the number in the game, then type the new one."),
+            "change" => ui.phase.change_now("7 places match. Then type the new number here."),
             _ => ui.phase.hide(),
         }),
     );
@@ -557,6 +566,12 @@ fn load_css() {
          .phase-card.turn.flash { background-color: mix(@window_bg_color, @accent_bg_color, 0.6); } \
          .phase-card progressbar trough, .phase-card progressbar progress { min-height: 14px; border-radius: 7px; } \
          .phase-card progressbar text { font-size: 1.4em; font-weight: bold; color: @window_fg_color; opacity: 1; } \
+         @keyframes nudge { from { box-shadow: 0 0 0 0 alpha(@accent_bg_color, 0.9); } \
+         to { box-shadow: 0 0 0 12px alpha(@accent_bg_color, 0); } } \
+         button.nudge { animation: nudge 1.3s ease-out infinite; } \
+         .pick-hint { font-size: 1.4em; font-weight: bold; padding: 10px 18px; border-radius: 12px; \
+         background-color: alpha(@accent_bg_color, 0.92); color: @accent_fg_color; box-shadow: 0 2px 8px alpha(black, 0.4); } \
+         .read-number { font-size: 40px; font-weight: 800; font-feature-settings: \"tnum\"; } \
          .tip { background-color: alpha(@accent_bg_color, 0.15); padding: 6px 6px 6px 12px; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {

@@ -26,8 +26,17 @@ pub struct FindView {
     texture: RefCell<Option<gdk::Texture>>,
     words: RefCell<Vec<Word>>,
     selection: RefCell<Option<Rect>>,
-    /// A read the player hasn't confirmed yet (PaddleOCR's, not the learned digits').
+    /// Over the game picture while no number is picked (the user, typing numbers, forgot to
+    /// pick the only number on screen and wondered why nothing read it).
+    pick_hint: gtk::Label,
+    /// The selection was made by Ferret (the only number found), not the player.
+    auto_picked: Cell<bool>,
+    /// What the last read of the box saw, drawn next to it (None inside: no number there).
+    seen: RefCell<Option<Option<String>>>,
+    /// A read the player hasn't confirmed yet (PaddleOCR's, not the learned digits'), and the
+    /// dialog asking about it. Start waits for the answer.
     unconfirmed: RefCell<Option<Shown>>,
+    question: RefCell<Option<adw::AlertDialog>>,
     /// Drag start and current point, in widget coordinates.
     drag: RefCell<Option<(f64, f64, f64, f64)>>,
     status: gtk::Label,
@@ -44,6 +53,7 @@ pub struct FindView {
     log: gtk::TextView,
     result: gtk::Box,
     name: gtk::Entry,
+    save: gtk::Button,
     /// The places still matching when Ferret couldn't tell which is the value: the player
     /// changes them and watches the game.
     matches: gtk::Box,
@@ -55,6 +65,8 @@ pub struct FindView {
     match_rows: RefCell<Vec<adw::ActionRow>>,
     typed: gtk::Entry,
     typed_go: gtk::Button,
+    /// The last number typed: Scan Again offers it when there's no box to read.
+    last_typed: RefCell<String>,
     /// How many places matched after the last search, to show how far a search narrowed it.
     last_count: Cell<Option<usize>>,
     digits: gtk::Box,
@@ -160,6 +172,19 @@ impl FindView {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&picture));
         overlay.add_overlay(&area);
+        let pick_hint = gtk::Label::builder()
+            .label("Click the number you want to change, or drag a box around it")
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Start)
+            .margin_top(12)
+            .margin_start(12)
+            .margin_end(12)
+            .can_target(false)
+            .css_classes(["pick-hint"])
+            .build();
+        overlay.add_overlay(&pick_hint);
         let scroll = gtk::ScrolledWindow::builder().child(&overlay).vexpand(true).build();
 
         let capture = gtk::Button::builder().icon_name("camera-photo-symbolic").tooltip_text("Capture again").build();
@@ -328,7 +353,11 @@ impl FindView {
             texture: RefCell::default(),
             words: RefCell::default(),
             selection: RefCell::default(),
+            pick_hint,
+            auto_picked: Cell::default(),
+            seen: RefCell::default(),
             unconfirmed: RefCell::default(),
+            question: RefCell::default(),
             drag: RefCell::default(),
             status,
             crop,
@@ -342,12 +371,14 @@ impl FindView {
             log,
             result,
             name,
+            save: save.clone(),
             matches,
             matches_list,
             listed: RefCell::default(),
             match_rows: RefCell::default(),
             typed,
             typed_go: typed_go.clone(),
+            last_typed: RefCell::default(),
             last_count: Cell::default(),
             digits,
             digits_hint,
@@ -461,8 +492,10 @@ impl FindView {
 
     fn draw(&self, cr: &gtk::cairo::Context) {
         let rect = |r: (f64, f64, f64, f64)| cr.rectangle(r.0 - 2.0, r.1 - 2.0, r.2 + 4.0, r.3 + 4.0);
-        cr.set_line_width(1.5);
-        cr.set_source_rgba(0.21, 0.52, 0.89, 0.8);
+        // Bolder while nothing is picked: they're what to click.
+        let none = self.selection.borrow().is_none();
+        cr.set_line_width(if none { 3.0 } else { 1.5 });
+        cr.set_source_rgba(0.21, 0.52, 0.89, if none { 1.0 } else { 0.8 });
         for w in self.words.borrow().iter() {
             if let Some(r) = self.to_widget(w.rect) {
                 rect(r);
@@ -474,10 +507,51 @@ impl FindView {
         if let Some(r) = self.selection.borrow().and_then(|r| self.to_widget(r)) {
             rect(r);
             cr.stroke().ok();
+            if let Some(seen) = self.seen.borrow().as_ref() {
+                self.draw_seen(cr, r, seen.as_deref());
+            }
         }
         if let Some((x0, y0, x1, y1)) = *self.drag.borrow() {
             cr.rectangle(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs());
             cr.stroke().ok();
+        }
+    }
+
+    /// "reads 50" under the box (above it near the bottom), so a misread shows while it happens.
+    fn draw_seen(&self, cr: &gtk::cairo::Context, r: (f64, f64, f64, f64), seen: Option<&str>) {
+        let text = seen.map_or("no number".to_owned(), |n| format!("reads {n}"));
+        cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
+        cr.set_font_size(15.0);
+        let Ok(ext) = cr.text_extents(&text) else { return };
+        let (pad, h) = (6.0, 15.0 + 10.0);
+        let w = ext.width() + 2.0 * pad;
+        let x = r.0.min(self.area.width() as f64 - w).max(0.0);
+        let below = r.1 + r.3 + 6.0;
+        let y = if below + h <= self.area.height() as f64 { below } else { (r.1 - 6.0 - h).max(0.0) };
+        match seen {
+            Some(_) => cr.set_source_rgba(0.9, 0.38, 0.0, 0.95),
+            None => cr.set_source_rgba(0.3, 0.3, 0.3, 0.9),
+        }
+        cr.rectangle(x, y, w, h);
+        cr.fill().ok();
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.move_to(x + pad - ext.x_bearing(), y + h / 2.0 - ext.y_bearing() - ext.height() / 2.0);
+        cr.show_text(&text).ok();
+    }
+
+    /// What the last read of the box saw.
+    pub fn seen(&self, n: Option<String>) {
+        self.seen.replace(Some(n));
+        self.area.queue_draw();
+    }
+
+    /// Makes the button to press next pulse (none: nothing to press, or the entry has the focus).
+    fn nudge(&self, next: Option<&gtk::Button>) {
+        for b in [&self.start, &self.typed_go, &self.save] {
+            b.remove_css_class("nudge");
+        }
+        if let Some(b) = next {
+            b.add_css_class("nudge");
         }
     }
 
@@ -583,10 +657,17 @@ impl FindView {
                 self.picture.set_paintable(Some(&texture));
                 *self.texture.borrow_mut() = Some(texture);
                 self.log(&format!("{} numbers found on screen", words.len()));
+                let only = (words.len() == 1 && self.selection.borrow().is_none()).then(|| ocr::watch_area(words[0].rect));
                 *self.words.borrow_mut() = words;
                 self.root.set_visible_child_name("pick");
                 self.status.set_label("Click a number, or drag a box around it.");
+                self.pick_hint.set_visible(self.selection.borrow().is_none());
                 self.area.queue_draw();
+                // One number on screen: most likely the one, and the player can still pick another.
+                if let Some(area) = only {
+                    self.select(area);
+                    self.auto_picked.set(true);
+                }
             }
             Err(e) => {
                 self.status.set_label(&format!("Could not capture the window: {e}"));
@@ -597,6 +678,10 @@ impl FindView {
 
     pub fn select(&self, area: Rect) {
         *self.selection.borrow_mut() = Some(area);
+        self.auto_picked.set(false);
+        self.pick_hint.set_visible(false);
+        self.seen.replace(None);
+        self.nudge(None);
         self.area.queue_draw();
         self.busy(true);
         self.status.set_label("Reading…");
@@ -624,27 +709,94 @@ impl FindView {
             self.area.queue_draw();
         }
         self.unconfirmed.replace(None);
-        self.start.set_label("Start");
+        let picked = if self.auto_picked.take() {
+            "Picked the only number on screen (not the one? Click or drag a box around the right one). "
+        } else {
+            ""
+        };
         match r {
             Ok(Some((n, true))) => {
-                self.status.set_label(&format!("Reads {n}. Press Start, then play until the number changes a couple of times."));
+                self.status.set_label(&format!("{picked}Reads {n}. Press Start, then play until the number changes a couple of times."));
                 self.start.set_sensitive(true);
+                self.nudge(Some(&self.start));
             }
-            // PaddleOCR's read: ask, and learn the game's digits from the answer.
+            // PaddleOCR's read: ask, and learn the game's digits from the answer. Not on Start: a
+            // player who wanted to start confirmed a misread (YAW's heart icon learned as a 0).
             Ok(Some((n, false))) => {
-                self.status.set_label(&format!("Reads {n}. Is that what the game shows? If not, type the right number below."));
-                self.unconfirmed.replace(Some(n));
-                self.start.set_label("Yes, Start");
-                self.start.set_sensitive(true);
+                self.status.set_label(&format!("{picked}Reads {n}? Answer the question first."));
+                self.start.set_sensitive(false);
+                self.ask_read(n);
             }
             Ok(None) => {
                 self.status.set_label("Can't read a number there. Type the number the game shows below; Ferret learns the game's digits from it. Or try a tighter box.");
                 self.start.set_sensitive(false);
+                self.typed.grab_focus();
             }
             Err(e) => self.status.set_label(&e),
         }
         if let Some(n) = kept {
             self.ask_keep(n);
+        }
+    }
+
+    /// Shows the box next to the number read from it and asks whether they're the same.
+    fn ask_read(self: &Rc<Self>, n: Shown) {
+        let dialog = adw::AlertDialog::new(
+            Some("Is This the Number?"),
+            Some("Compare the picture of your box with what Ferret read. Ferret learns how the game draws its digits from your answer."),
+        );
+        let crop = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Contain)
+            .height_request(96)
+            .width_request(240)
+            .build();
+        if let Ok(t) = gdk::Texture::from_filename(core::cache_dir().join("area.png")) {
+            crop.set_paintable(Some(&t));
+        }
+        let read = gtk::Label::builder().label(n.to_string()).css_classes(["read-number"]).build();
+        let side = |title: &str, w: &gtk::Widget| {
+            let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).hexpand(true).build();
+            b.append(&gtk::Label::builder().label(title).css_classes(["caption-heading", "dim-label"]).build());
+            b.append(w);
+            b
+        };
+        let both = gtk::Box::builder().spacing(18).build();
+        both.append(&side("Your box in the game", crop.upcast_ref()));
+        both.append(&side("Ferret reads", read.upcast_ref()));
+        dialog.set_extra_child(Some(&both));
+        dialog.add_responses(&[("no", "No, I'll Type It"), ("yes", &format!("Yes, It Shows {n}"))]);
+        dialog.set_response_appearance("yes", adw::ResponseAppearance::Suggested);
+        // No default: Enter mustn't answer for the player.
+        dialog.set_close_response("no");
+        self.unconfirmed.replace(Some(n));
+        let view = self.clone();
+        dialog.connect_response(None, move |_, r| {
+            view.question.replace(None);
+            view.answer_read(r == "yes");
+        });
+        self.question.replace(Some(dialog.clone()));
+        dialog.present(Some(&self.root));
+    }
+
+    /// The player's answer to `ask_read` (also the D-Bus `confirm yes|no` action).
+    pub fn answer_read(&self, yes: bool) {
+        // Taken first: closing the dialog answers it with its close response ("no").
+        let n = self.unconfirmed.take();
+        if let Some(q) = self.question.take() {
+            q.force_close();
+        }
+        let Some(n) = n else { return };
+        if yes {
+            self.status.set_label(&format!("Reads {n}. Press Start, then play until the number changes a couple of times."));
+            self.start.set_sensitive(true);
+            self.nudge(Some(&self.start));
+            self.worker.run(move |core| {
+                core.confirm(&n);
+                Event::Digits(core.digits())
+            });
+        } else {
+            self.status.set_label("Type the number the game shows below; Ferret learns the game's digits from it. Or try a tighter box.");
+            self.typed.grab_focus();
         }
     }
 
@@ -686,7 +838,12 @@ impl FindView {
     }
 
     pub fn start(&self) {
+        // The D-Bus `find` action doesn't go through the button.
+        if self.unconfirmed.borrow().is_some() {
+            return;
+        }
         self.result.set_visible(false);
+        self.nudge(None);
         self.start.set_visible(false);
         self.start_over.set_visible(false);
         self.undo.set_visible(false);
@@ -694,14 +851,7 @@ impl FindView {
         self.again.set_visible(true);
         self.busy(true);
         self.status.set_label("Reading the number on screen…");
-        self.start.set_label("Start");
-        let confirmed = self.unconfirmed.take();
-        self.worker.run(move |core| {
-            if let Some(n) = confirmed {
-                core.confirm(&n);
-            }
-            Event::Auto(core.auto(Duration::from_secs(600)))
-        });
+        self.worker.run(move |core| Event::Auto(core.auto(Duration::from_secs(600))));
     }
 
     pub fn auto_done(&self, r: Result<AutoResult, String>) {
@@ -729,6 +879,7 @@ impl FindView {
                 self.announce(&format!("{text}. {next}"), false);
                 self.phase.done(false, &text, next);
                 self.list_matches(n);
+                self.nudge(Some(&self.start));
             }
             Err(e) => self.stopped(&e),
         }
@@ -769,6 +920,11 @@ impl FindView {
             core::Phase::Checking(n, done) => self.phase.checking(n, done),
             core::Phase::YourTurn(n, secs) => self.phase.your_turn(n, secs),
             core::Phase::Restoring(..) => {}
+            core::Phase::BoxChanging => self.phase.done(
+                false,
+                "The box keeps changing",
+                "It may take in something that moves or blinks. Pick the number again with a box around its digits only.",
+            ),
         }
     }
 
@@ -792,6 +948,7 @@ impl FindView {
         self.log_found(&format!("Found it: {at}"));
         self.result.set_visible(true);
         self.name.grab_focus();
+        self.nudge(Some(&self.save));
     }
 
     pub fn type_number(&self, text: &str) {
@@ -807,11 +964,12 @@ impl FindView {
             return;
         };
         interrupt(&self.cancel, &self.stop);
+        self.last_typed.replace(text.trim().to_owned());
+        self.nudge(None);
         self.result.set_visible(false);
         self.typed_searching(true);
         self.searching(true);
         self.unconfirmed.replace(None);
-        self.start.set_label("Start");
         self.busy(true);
         self.status.set_label(&format!("Looking for {n}…"));
         self.worker.run(move |core| Event::Typed(core.typed(n)));
@@ -819,7 +977,7 @@ impl FindView {
 
     pub fn typed_done(&self, r: Result<AutoResult, String>) {
         self.typed.set_text("");
-        self.narrowed(r, "Change the number in the game, then type the new one.");
+        self.narrowed(r, "Change the number in the game, then type the new one.", true);
         self.typed.grab_focus();
     }
 
@@ -834,6 +992,18 @@ impl FindView {
             self.status.set_label("Scanning again with the number on screen…");
             return;
         }
+        // Nothing to read: the player says what the game shows (the same number, most likely).
+        if self.selection.borrow().is_none() {
+            self.typed.set_text(&self.last_typed.borrow());
+            self.typed.grab_focus();
+            self.typed.select_region(0, -1);
+            self.nudge(Some(&self.typed_go));
+            self.announce(
+                "No number picked, so Ferret can't read it. If the game still shows the number below, press Search; else type the one it shows now.",
+                false,
+            );
+            return;
+        }
         self.result.set_visible(false);
         self.again.set_sensitive(false);
         self.typed_searching(true);
@@ -844,11 +1014,13 @@ impl FindView {
     }
 
     pub fn scanned_again(&self, r: Result<AutoResult, String>) {
-        self.narrowed(r, "Press Scan Again whenever the number stays the same, or Start to follow its changes.");
+        self.narrowed(r, "Press Scan Again whenever the number stays the same, or Start to follow its changes.", false);
     }
 
     /// The end of a step taken with a number (typed, or read by Scan Again).
-    fn narrowed(&self, r: Result<AutoResult, String>, next: &str) {
+    /// `change`: the next step is changing the number in the game (typed numbers): the card
+    /// blinks and says so.
+    fn narrowed(&self, r: Result<AutoResult, String>, next: &str, change: bool) {
         self.hide_scan();
         self.stop.set_visible(false);
         self.busy(false);
@@ -860,7 +1032,11 @@ impl FindView {
             Ok(AutoResult::Several(n)) => {
                 let text = self.count_text(n);
                 self.announce(&format!("{text}. {next}"), false);
-                self.phase.done(false, &text, next);
+                if change {
+                    self.phase.change_now(&format!("{text}. Then type the new number here."));
+                } else {
+                    self.phase.done(false, &text, next);
+                }
                 self.list_matches(n);
                 self.again.set_visible(true);
             }
@@ -986,10 +1162,12 @@ impl FindView {
         *self.texture.borrow_mut() = None;
         self.words.borrow_mut().clear();
         *self.selection.borrow_mut() = None;
+        self.pick_hint.set_visible(true);
+        self.seen.replace(None);
+        self.nudge(None);
         self.unconfirmed.replace(None);
         self.result.set_visible(false);
         self.typed.set_text("");
-        self.start.set_label("Start");
         self.start.set_sensitive(false);
         self.status.set_label("Click a number, or drag a box around it.");
         self.root.set_visible_child_name("intro");
@@ -1141,6 +1319,7 @@ impl FindView {
         self.result.set_sensitive(true);
         self.result.set_visible(false);
         self.name.set_text("");
+        self.nudge(None);
         self.status.set_label("Saved. Pick another number to find more.");
     }
 

@@ -140,6 +140,28 @@ impl PhaseCard {
         });
     }
 
+    /// A typed number narrowed the search: the player changes the number in the game next.
+    /// Blinks for a few seconds.
+    pub fn change_now(self: &Rc<Self>, hint: &str) {
+        let shown = self.show("turn", "Now change the number in the game", None, hint);
+        let (card, start) = (self.clone(), Instant::now());
+        glib::timeout_add_local(Duration::from_millis(600), move || {
+            if card.shown.get() != shown {
+                return glib::ControlFlow::Break;
+            }
+            if start.elapsed() >= Duration::from_secs(6) {
+                card.hide();
+                return glib::ControlFlow::Break;
+            }
+            if card.root.has_css_class("flash") {
+                card.root.remove_css_class("flash");
+            } else {
+                card.root.add_css_class("flash");
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     /// How a search, or a step of it, ended: for a few seconds (the status line keeps it).
     pub fn done(self: &Rc<Self>, found: bool, title: &str, hint: &str) {
         let shown = self.show(if found { "ready" } else { "done" }, title, None, hint);

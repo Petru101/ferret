@@ -174,6 +174,8 @@ pub enum Phase {
     /// Finding saved values again on attach: the game's program, the value, its number and how
     /// many there are.
     Restoring(String, String, usize, usize),
+    /// The watched box stopped showing the number for the third time since the pick.
+    BoxChanging,
 }
 
 /// One of the places still matching a search, as the matches list shows it.
@@ -683,9 +685,11 @@ pub struct Core {
     words: Vec<Word>,
     area: Option<Rect>,
     /// How the watched area looked when it was picked: reads and learning only happen while it
-    /// still looks like that. `hidden` = it doesn't now (told to the player once).
+    /// still looks like that. `hidden` = it doesn't now (told to the player once); `hides` =
+    /// how often that happened since the pick (often: the box takes in something that moves).
     picked_look: Option<ocr::Look>,
     hidden: bool,
+    hides: u32,
     game: Option<Game>,
     /// The attached game's digits, as learned so far.
     font: Font,
@@ -705,6 +709,9 @@ pub struct Core {
     /// Told about every frame the watched number is read from, and where the watched area is
     /// after it (the interface shows the game as the search sees it).
     pub on_frame: Option<Box<dyn FnMut(&Path, Option<Rect>) + Send>>,
+    /// Told what each read of the watched area saw: the number, or None (nothing readable, or
+    /// the box doesn't show the number now).
+    pub on_read: Option<Box<dyn FnMut(Option<&Shown>) + Send>>,
     /// Told when the player has to do something for the search to go on.
     pub on_status: Option<Box<dyn FnMut(&str) + Send>>,
     /// Told about the places still matching while a search narrows them down (20 or fewer).
@@ -743,6 +750,7 @@ impl Core {
             area: None,
             picked_look: None,
             hidden: false,
+            hides: 0,
             game: None,
             font: Font::default(),
             search: None,
@@ -751,6 +759,7 @@ impl Core {
             cancel: Arc::new(AtomicBool::new(false)),
             scan_now: Arc::new(AtomicBool::new(false)),
             on_frame: None,
+            on_read: None,
             on_status: None,
             on_matches: None,
             on_phase: None,
@@ -1518,6 +1527,7 @@ impl Core {
         self.area = Some(area);
         self.picked_look = None;
         self.hidden = false;
+        self.hides = 0;
         kept
     }
 
@@ -1567,10 +1577,15 @@ impl Core {
         if let Some(f) = self.on_frame.as_mut() {
             f(frame, self.area);
         }
-        if !self.shows_picked(frame) {
-            return Ok(None);
+        let read = if self.shows_picked(frame) {
+            ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font))?
+        } else {
+            None
+        };
+        if let Some(f) = self.on_read.as_mut() {
+            f(read.as_ref().map(|(n, _)| n));
         }
-        ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font))
+        Ok(read)
     }
 
     /// Whether the watched area of `frame` still looks like when it was picked. Tells the
@@ -1580,14 +1595,23 @@ impl Core {
         let shows = ocr::Look::of(frame, area).is_ok_and(|now| now.like(picked));
         if shows == self.hidden {
             self.hidden = !shows;
+            if !shows {
+                self.hides += 1;
+            }
             let msg = if shows {
                 "The number is back in the box."
+            } else if self.hides >= 3 {
+                "The box keeps changing: it may take in something that moves or blinks around the \
+                 number. Pick the number again with a box around its digits only."
             } else {
                 "The box doesn't show the number now (it looks different from when you picked it: \
                  a menu or the inventory closed?). Ferret waits until it's back."
             };
             self.say(msg);
             self.status(msg);
+            if !shows && self.hides == 3 {
+                self.phase(Phase::BoxChanging);
+            }
         }
         shows
     }
@@ -1604,6 +1628,7 @@ impl Core {
         let frame = self.frame()?;
         self.picked_look = ocr::Look::of(&frame, area).ok();
         self.hidden = false;
+        self.hides = 0;
         let read = self.read_frame(&frame)?;
         fs::rename(&frame, cache_dir().join("picked.png")).map_err(|e| e.to_string())?;
         Ok(read)
@@ -2232,6 +2257,12 @@ impl Core {
             let area = self.area;
             if let Some(f) = self.on_frame.as_mut() {
                 f(&frame, area);
+            }
+        } else if self.capture.is_some() {
+            // Only to show the game as it is now (without a session, a grab would open the
+            // desktop's window picker).
+            if let (Ok(frame), Some(f)) = (self.frame(), self.on_frame.as_mut()) {
+                f(&frame, None);
             }
         }
         self.typed_search(n)
