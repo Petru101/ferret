@@ -909,6 +909,8 @@ impl Core {
         let decimals = if loc.kind.whole() { self.searched_decimals } else { 0 };
         let game = self.game()?;
         let mut entries = read_profile(&game.exe);
+        // Saving a value again (to find it a better way) keeps its limit.
+        let limit = entries.iter().find(|e| e.name == name).and_then(|e| e.limit.clone());
         entries.retain(|e| e.name != name);
         let named_text: Vec<String> = named.iter().map(|(t, _, _)| t.clone()).collect();
         let mut entry = Entry {
@@ -919,7 +921,7 @@ impl Core {
             candidates,
             run: Some(pid),
             named: named_text.clone(),
-            limit: None,
+            limit,
             decimals,
             other: Vec::new(),
         };
@@ -941,7 +943,13 @@ impl Core {
         if let Some(text) = named_text.first() {
             game.named.push((name.to_owned(), text.clone(), vec![loc]));
         }
-        if let Some(entry) = entries.last().filter(|e| !e.sites.is_empty()) {
+        if let Some(entry) = entries.last().filter(|e| e.limit.is_some()) {
+            let (min, max) = entry.shown_range();
+            match self.apply_limit(entry) {
+                Ok(()) => self.say(&format!("{name} is kept {}", limit_text(min, max))),
+                Err(e) => self.say(&format!("{name}: limit not applied: {e}")),
+            }
+        } else if let Some(entry) = entries.last().filter(|e| !e.sites.is_empty()) {
             if let Err(e) = self.apply_limit(entry) {
                 self.say(&format!("{name}: Ferret can't keep track of it if the game moves it: {e}"));
             }
