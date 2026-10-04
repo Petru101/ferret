@@ -949,7 +949,9 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             *s = Session { pid, mem: Some(f), exe: exe.clone(), width, doubles_only, ..Session::default() };
             let regions = maps(pid)?;
             let rw: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
-            writeln!(out, "attached to {pid}: {}", cmdline(pid))?;
+            // Only the program: launchers pass login tokens as arguments (Heroic's Epic games get
+            // -AUTH_PASSWORD=<code>), and the log is kept.
+            writeln!(out, "attached to {pid}: {}", cmdline(pid).split(' ').next().unwrap_or_default())?;
             writeln!(out, "exe: {exe}")?;
             writeln!(out, "{} mappings, {} MiB writable, {}-bit", regions.len(), rw >> 20, width * 8)?;
             if doubles_only {
