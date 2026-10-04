@@ -1781,7 +1781,11 @@ impl Core {
                 return Ok(Some(loc));
             }
         }
-        self.say("no candidate behaved like the real value (is the game paused?)");
+        let why = match self.cancel.load(Ordering::Relaxed) {
+            true => "stopped before the game changed the number",
+            false => "the number didn't change in the game while Ferret waited (is the game paused?)",
+        };
+        self.say(&format!("no candidate behaved like the real value: {why}"));
         Ok(None)
     }
 
@@ -1792,7 +1796,9 @@ impl Core {
     /// carries on from its test value (in memory, and on screen once redrawn), copies don't.
     /// All undone after, keeping what the player gathered meanwhile.
     fn probe_in_game(&mut self, kept: &[(Loc, String)]) -> Option<Loc> {
-        const WAIT: Duration = Duration::from_secs(45);
+        // The player has to go to the game and gather or use some (Astro Colony's copper: 45 s
+        // ran out first); Stop gives up sooner.
+        const WAIT: Duration = Duration::from_secs(180);
         // Steps 100 apart: a change of up to 49 from one test value is still that one.
         const NEAR: i64 = 49;
         let addrs: Vec<Loc> = kept.iter().map(|(l, _)| *l).collect();
@@ -1812,8 +1818,8 @@ impl Core {
             WAIT.as_secs()
         ));
         self.status(&format!(
-            "Change the number in the game once (pick some up or use some): Ferret is watching which of the {} \
-             places the game carries on from.",
+            "Now change the number in the game once (pick some up or use some): Ferret waits and watches which \
+             of the {} places the game carries on from. Stop gives up.",
             tests.len()
         ));
         let start = Instant::now();
@@ -2053,6 +2059,8 @@ impl Core {
     /// number also teaches Ferret how the game draws its digits.
     pub fn typed(&mut self, n: Shown) -> Result<AutoResult, String> {
         self.game()?;
+        // A Stop pressed after the last search ended would end this one's wait for the game.
+        self.cancel.store(false, Ordering::Relaxed);
         if self.area.is_some() {
             let frame = self.frame()?;
             self.learn(&frame, &n, false);
@@ -2068,6 +2076,7 @@ impl Core {
     /// that changed meanwhile are other things.
     pub fn scan_again(&mut self) -> Result<AutoResult, String> {
         self.game()?;
+        self.cancel.store(false, Ordering::Relaxed);
         if self.search.is_none() {
             return Err("Nothing to narrow down yet: press Start or type the number the game shows.".into());
         }

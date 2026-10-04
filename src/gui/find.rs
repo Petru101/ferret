@@ -669,6 +669,10 @@ impl FindView {
     /// Something the player has to do now (the search waits for it).
     pub fn ask(&self, msg: &str) {
         self.announce(msg, false);
+        // The search waits for the player (the probe): it can be given up, typed or not.
+        if !self.typed.is_editable() || self.stop.is_visible() {
+            self.stop.set_visible(true);
+        }
     }
 
     /// The places listed stay while a typed number is searched for (it updates them), but can't
@@ -798,6 +802,7 @@ impl FindView {
 
     /// The end of a step taken with a number (typed, or read by Scan Again).
     fn narrowed(&self, r: Result<AutoResult, String>, next: &str) {
+        self.stop.set_visible(false);
         self.busy(false);
         self.typed_searching(false);
         self.searching(false);

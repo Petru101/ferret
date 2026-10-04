@@ -31,19 +31,17 @@ sleep 2
 "$live" type 1000 | tail -n1
 game "earn 5"
 "$live" type 1005 | tail -n1
-game "earn 7"
-"$live" type 1012 | tail -n1
 # Gold's stack copies follow a test write, which already settles it: pair gold with a decoy
 # holding the same number that nothing follows (hp, the int before it).
 gold=$("$live" list | grep '^0x' | grep -v '^0x7ff' | head -n1 | cut -d' ' -f1)
 gold=${gold%%:*}
 hp=$(printf '%x' $((gold - 4)))
-"$live" write "$hp" 1012 | tail -n1
+"$live" write "$hp" 1005 | tail -n1
 "$live" track "$gold" "$hp"
-# The same places left a few times in a row: the check runs, and waits for the game.
+# The same places left: the check runs, and waits for the game.
 for _ in 1 2 3 4; do
     before=$(wc -l < "$out")
-    printf 'type 1012\n' > "$here/run/$FERRET_SESSION/in"
+    printf 'type 1005\n' > "$here/run/$FERRET_SESSION/in"
     until tail -n +"$((before + 1))" "$out" | grep -q "waiting up to\|^found it\|^error\|candidates left"; do sleep 0.3; done
     tail -n +"$((before + 1))" "$out" | grep -q "waiting up to" && break
     tail -n +"$((before + 1))" "$out" | grep -q "^found it\|^error" && { tail -n +"$((before + 1))" "$out"; fail "settled without the in-game check"; }
@@ -53,5 +51,5 @@ until tail -n +"$((before + 1))" "$out" | grep -q "^found it\|^error\|candidates
 tail -n +"$((before + 1))" "$out" | tee "$d/out"
 grep -q "^found it" "$d/out" || fail "gold not found"
 game "show"
-tail -n1 "$d/log" | grep -q "gold=1015 " || fail "the test write on gold wasn't undone (or the 3 earned were lost)"
+tail -n1 "$d/log" | grep -q "gold=1008 " || fail "the test write on gold wasn't undone (or the 3 earned were lost)"
 echo PASS
