@@ -13,6 +13,13 @@
 // Windows, UTF-32 on Linux) and member_indices, a Map<StringName, MemberInfo> (red-black tree:
 // { root, nil, size }, elements { color, right, left, parent, next, prev, key, value }, the
 // index first in the value); a StringName points to { refcount, const char *cname, String name }.
+// Godot 4 (found on Godot 4.7 and the 4.6 source): strings are UTF-32 everywhere, Vectors and
+// Strings keep their size as a u64 8 bytes before the data (4.3, 4.4) or 16 bytes before it,
+// after the capacity (4.5+; a u32 just before it up to 4.2, as in Godot 3), member_indices is a
+// HashMap ({ elements, hashes, head, tail, u32 capacity index, u32 size }; elements { next,
+// prev, key, value }, in insertion order from head), a StringName's String is at +8 (4.5+;
+// earlier a C string there and the String at +0x10), Object is Variant type 24 and Array 28,
+// and a GDScriptInstance keeps its owner's ObjectID before the owner.
 // Text form: gd:singletons/run_data.gd.players_data[0].gold = the variable "gold" of element 0
 // of the variable "players_data" of the (only) object running res://singletons/run_data.gd.
 
@@ -27,13 +34,17 @@ use crate::names::Heap;
 const VARIANT: u64 = 24;
 const INT: u32 = 2;
 const REAL: u32 = 3;
-const OBJECT: u32 = 17;
-const ARRAY: u32 = 19;
+/// Variant types in Godot 3 and in Godot 4.
+const OBJECT: [u32; 2] = [17, 24];
+const ARRAY: [u32; 2] = [19, 28];
+/// Where a Vector's or String's size is, in bytes before its data: a u32 right before it
+/// (Godot 3, 4.0-4.2), a u64 8 bytes before (4.3, 4.4) or 16 bytes before (4.5+).
+const SIZES: [u64; 3] = [4, 8, 16];
 /// Variables per script and elements per array Ferret looks through.
 const MAX_MEMBERS: u64 = 1024;
 const MAX_ELEMENTS: u64 = 1 << 16;
 /// Bytes of a GDScript object searched for its path and its member table.
-const SCRIPT_SIZE: u64 = 0x800;
+const SCRIPT_SIZE: u64 = 0x1000;
 /// Objects above the value's own.
 const MAX_UP: usize = 4;
 /// A path leading to more places than this is too loose to write through.
@@ -118,8 +129,12 @@ struct Layout {
     /// GDScript -> member_indices, its path's characters.
     indices: u64,
     path: u64,
-    /// Bytes per character: 2 (Windows) or 4 (Linux).
+    /// Bytes per character: 2 (Godot 3 on Windows) or 4.
     wide: u64,
+    /// Where sizes are (`SIZES`).
+    cow: u64,
+    /// Godot 4: member_indices is a HashMap, Variant types are Godot 4's.
+    v4: bool,
 }
 
 /// The layout found last, by process.
@@ -144,9 +159,17 @@ fn mem_u64(mem: &File, at: u64) -> Option<u64> {
     Some(u64::from_le_bytes(b))
 }
 
-/// A Godot string's characters at `p` (the count, with the terminating 0, is the u32 before).
-fn read_chars(mem: &File, p: u64, wide: u64) -> Option<String> {
-    let n = mem_u32(mem, p.checked_sub(4)?)? as u64;
+/// The size of the Vector or String whose data is at `data`.
+fn cow_size(mem: &File, data: u64, cow: u64) -> Option<u64> {
+    match cow {
+        4 => mem_u32(mem, data.checked_sub(4)?).map(u64::from),
+        _ => mem_u64(mem, data.checked_sub(cow)?),
+    }
+}
+
+/// A Godot string's characters at `p` (its size counts the terminating 0).
+fn read_chars(mem: &File, p: u64, wide: u64, cow: u64) -> Option<String> {
+    let n = cow_size(mem, p, cow)?;
     if !(2..=4 * MAX_NAME as u64).contains(&n) {
         return None;
     }
@@ -156,6 +179,25 @@ fn read_chars(mem: &File, p: u64, wide: u64) -> Option<String> {
         2 => String::from_utf16(&b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()).ok(),
         _ => b.chunks(4).map(|c| char::from_u32(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect(),
     }
+}
+
+/// The entries of a Godot 4 HashMap at `map`: (key, address of the value), in order.
+fn hash_entries(mem: &File, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
+    let (head, tail) = (mem_u64(mem, map + 0x10)?, mem_u64(mem, map + 0x18)?);
+    let (capacity, size) = (mem_u32(mem, map + 0x20)?, mem_u32(mem, map + 0x24)? as u64);
+    if head == 0 || tail == 0 || capacity > 40 || !(1..=most).contains(&size) {
+        return None;
+    }
+    let (mut out, mut e, mut prev) = (Vec::new(), head, 0);
+    while e != 0 {
+        if out.len() as u64 >= size || mem_u64(mem, e + 8)? != prev {
+            return None;
+        }
+        out.push((mem_u64(mem, e + 0x10)?, e + 0x18));
+        prev = e;
+        e = mem_u64(mem, e)?;
+    }
+    (out.len() as u64 == size && prev == tail).then_some(out)
 }
 
 /// The entries of a Map at `map` ({ root, nil, size }): (key, address of the value), in order.
@@ -182,10 +224,14 @@ fn map_entries(mem: &File, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
     (out.len() as u64 == size).then_some(out)
 }
 
-/// A StringName's text: its String, else its C string.
-fn string_name(mem: &File, sn: u64, wide: u64) -> Option<String> {
-    if let Some(t) = mem_u64(mem, sn + 0x10).filter(|&p| p != 0).and_then(|p| read_chars(mem, p, wide)) {
-        return good_name(&t).then_some(t);
+/// A StringName's text: its String (at +0x10, or +8 in Godot 4.5+), else its C string.
+fn string_name(mem: &File, sn: u64, wide: u64, cow: u64) -> Option<String> {
+    for at in [0x10, 8] {
+        if let Some(t) = mem_u64(mem, sn + at).filter(|&p| p != 0).and_then(|p| read_chars(mem, p, wide, cow)) {
+            if good_name(&t) {
+                return Some(t);
+            }
+        }
     }
     let c = mem_u64(mem, sn + 8).filter(|&p| p != 0)?;
     let mut b = [0u8; MAX_NAME];
@@ -195,8 +241,11 @@ fn string_name(mem: &File, sn: u64, wide: u64) -> Option<String> {
 }
 
 /// member_indices at `map`: every index 0..n-1 once, each under a name.
-fn member_table(mem: &File, map: u64, wide: u64) -> Option<HashMap<String, u64>> {
-    let entries = map_entries(mem, map, MAX_MEMBERS)?;
+fn member_table(mem: &File, map: u64, lay: &Layout) -> Option<HashMap<String, u64>> {
+    let entries = match lay.v4 {
+        true => hash_entries(mem, map, MAX_MEMBERS)?,
+        false => map_entries(mem, map, MAX_MEMBERS)?,
+    };
     let mut seen = vec![false; entries.len()];
     let mut out = HashMap::new();
     for (key, value) in entries {
@@ -205,15 +254,15 @@ fn member_table(mem: &File, map: u64, wide: u64) -> Option<HashMap<String, u64>>
             return None;
         }
         seen[i] = true;
-        out.insert(string_name(mem, key, wide)?, i as u64);
+        out.insert(string_name(mem, key, lay.wide, lay.cow)?, i as u64);
     }
     Some(out)
 }
 
 /// The layout, when `inst` is a GDScriptInstance whose variables are at `members` (`count` of
-/// them): its owner points back to it, its script has a member table of `count` names and a
-/// path.
-fn detect(heap: &Heap, inst: u64, members: u64, count: u64) -> Option<Layout> {
+/// them, the size found `cow` bytes before them): its owner points back to it, its script has a
+/// member table of `count` names and a path.
+fn detect(heap: &Heap, inst: u64, members: u64, count: u64, cow: u64) -> Option<Layout> {
     let mem = heap.file();
     let m = (8..0x40).step_by(8).find(|&m| mem_u64(mem, inst + m) == Some(members))?;
     for owner in [8u64, 0x10, 0x18].into_iter().filter(|&o| o < m) {
@@ -221,7 +270,8 @@ fn detect(heap: &Heap, inst: u64, members: u64, count: u64) -> Option<Layout> {
         let Some(instance) = (8..0x100).step_by(8).find(|&k| mem_u64(mem, obj + k) == Some(inst)) else { continue };
         for script in [8u64, 0x10, 0x18].into_iter().filter(|&s| s != owner && s < m) {
             let Some(gd) = mem_u64(mem, inst + script).filter(|&p| heap.is_pointer(p)) else { continue };
-            if let Some(lay) = detect_script(heap, gd, count, Layout { owner, script, members: m, instance, indices: 0, path: 0, wide: 0 }) {
+            let lay = Layout { owner, script, members: m, instance, indices: 0, path: 0, wide: 0, cow, v4: false };
+            if let Some(lay) = detect_script(heap, gd, count, lay) {
                 return Some(lay);
             }
         }
@@ -236,15 +286,22 @@ fn detect_script(heap: &Heap, gd: u64, count: u64, lay: Layout) -> Option<Layout
         let Some(path) = (0..SCRIPT_SIZE).step_by(8).find(|&p| {
             mem_u64(mem, gd + p)
                 .filter(|&c| heap.is_pointer(c))
-                .and_then(|c| read_chars(mem, c, wide))
+                .and_then(|c| read_chars(mem, c, wide, lay.cow))
                 .is_some_and(|t| t.strip_prefix("res://").is_some_and(good_script))
         }) else {
             continue;
         };
-        let indices = (0..SCRIPT_SIZE).step_by(8).find(|&j| {
-            mem_u32(mem, gd + j + 16) == Some(count as u32) && member_table(mem, gd + j, wide).is_some_and(|t| t.len() as u64 == count)
-        })?;
-        return Some(Layout { indices, path, wide, ..lay });
+        // A Map's size is at +16, a HashMap's at +0x24.
+        for (v4, size) in [(false, 16), (true, 0x24)] {
+            let lay = Layout { path, wide, v4, ..lay };
+            let indices = (0..SCRIPT_SIZE).step_by(8).find(|&j| {
+                mem_u32(mem, gd + j + size) == Some(count as u32) && member_table(mem, gd + j, &lay).is_some_and(|t| t.len() as u64 == count)
+            });
+            if let Some(indices) = indices {
+                return Some(Layout { indices, ..lay });
+            }
+        }
+        return None;
     }
     None
 }
@@ -266,9 +323,13 @@ impl<'a> Godot<'a> {
         mem_u64(self.mem(), at).filter(|&p| self.heap.is_pointer(p))
     }
 
+    fn size(&self, data: u64) -> Option<u64> {
+        cow_size(self.mem(), data, self.lay.cow)
+    }
+
     /// The Variants of a Vector: (first, count).
     fn vector(&self, data: u64, most: u64) -> Option<(u64, u64)> {
-        let n = self.u32_at(data.checked_sub(4)?)? as u64;
+        let n = self.size(data)?;
         (n >= 1 && n <= most).then_some((data, n))
     }
 
@@ -287,7 +348,7 @@ impl<'a> Godot<'a> {
     }
 
     fn script_path(&self, gd: u64) -> Option<String> {
-        let t = read_chars(self.mem(), self.ptr(gd + self.lay.path)?, self.lay.wide)?;
+        let t = read_chars(self.mem(), self.ptr(gd + self.lay.path)?, self.lay.wide, self.lay.cow)?;
         t.strip_prefix("res://").filter(|s| good_script(s)).map(str::to_owned)
     }
 
@@ -295,7 +356,7 @@ impl<'a> Godot<'a> {
         if let Some(t) = self.indices.borrow().get(&gd) {
             return t.clone();
         }
-        let t = member_table(self.mem(), gd + self.lay.indices, self.lay.wide);
+        let t = member_table(self.mem(), gd + self.lay.indices, &self.lay);
         self.indices.borrow_mut().insert(gd, t.clone());
         t
     }
@@ -313,7 +374,7 @@ impl<'a> Godot<'a> {
 
     /// The script instance of the Object a Variant holds.
     fn object(&self, v: u64) -> Option<u64> {
-        if self.u32_at(v)? != OBJECT {
+        if self.u32_at(v)? != OBJECT[self.lay.v4 as usize] {
             return None;
         }
         // References in the second word; other objects in the first, or behind it.
@@ -327,7 +388,7 @@ impl<'a> Godot<'a> {
 
     /// The Array a Variant holds: (its private part, its elements, their count).
     fn array(&self, v: u64) -> Option<(u64, u64, u64)> {
-        if self.u32_at(v)? != ARRAY {
+        if self.u32_at(v)? != ARRAY[self.lay.v4 as usize] {
             return None;
         }
         let private = self.ptr(v + 8)?;
@@ -390,7 +451,7 @@ impl<'a> Godot<'a> {
         for &v in vs {
             for i in 0..MAX_ELEMENTS.min(256) {
                 let Some(s) = v.checked_sub(i * VARIANT) else { break };
-                if s >= 4 && self.u32_at(s - 4).is_some_and(|n| n as u64 > i && n as u64 <= MAX_ELEMENTS) {
+                if self.size(s).is_some_and(|n| n > i && n <= MAX_ELEMENTS) {
                     starts.push((s, v, i));
                 }
             }
@@ -427,18 +488,26 @@ fn start(heap: &Heap, target: u64) -> Option<(Layout, u64, u64)> {
     if !matches!(mem_u32(mem, v), Some(INT | REAL)) {
         return None;
     }
-    let starts: Vec<(u64, u64)> = (0..MAX_MEMBERS.min(256))
-        .filter_map(|i| Some((v.checked_sub(i * VARIANT)?, i)))
-        .filter(|&(s, i)| mem_u32(mem, s - 4).is_some_and(|n| n as u64 > i && n as u64 <= MAX_MEMBERS))
+    // (where the variables start, the size there, which one the value is, where the size is)
+    let starts: Vec<(u64, u64, u64, u64)> = SIZES
+        .iter()
+        .flat_map(|&cow| (0..MAX_MEMBERS.min(256)).map(move |i| (cow, i)))
+        .filter_map(|(cow, i)| {
+            let s = v.checked_sub(i * VARIANT)?;
+            let n = cow_size(mem, s, cow).filter(|&n| n > i && n <= MAX_MEMBERS)?;
+            Some((s, n, i, cow))
+        })
         .collect();
-    let targets: Vec<u64> = starts.iter().map(|s| s.0).collect();
+    let mut targets: Vec<u64> = starts.iter().map(|s| s.0).collect();
+    targets.sort_unstable();
+    targets.dedup();
     for at in heap.referrers(&targets) {
         let Some(data) = mem_u64(mem, at) else { continue };
-        let Some(&(s, i)) = starts.iter().find(|s| s.0 == data) else { continue };
-        let count = mem_u32(mem, s - 4)? as u64;
-        for m in (8..0x40).step_by(8) {
-            if let Some(lay) = at.checked_sub(m).and_then(|inst| detect(heap, inst, s, count)) {
-                return Some((lay, at - lay.members, i));
+        for &(s, count, i, cow) in starts.iter().filter(|s| s.0 == data) {
+            for m in (8..0x40).step_by(8) {
+                if let Some(lay) = at.checked_sub(m).and_then(|inst| detect(heap, inst, s, count, cow)) {
+                    return Some((lay, at - lay.members, i));
+                }
             }
         }
     }
@@ -596,8 +665,10 @@ pub fn find_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
                 let inst = at.checked_sub(script)?;
                 (script + 8..0x40).step_by(8).find_map(|m| {
                     let members = mem_u64(heap.file(), inst + m).filter(|&p| heap.is_pointer(p))?;
-                    let count = mem_u32(heap.file(), members - 4).map(u64::from).filter(|n| (1..=MAX_MEMBERS).contains(n))?;
-                    detect(heap, inst, members, count).filter(|l| l.script == script && mem_u64(heap.file(), inst + l.script) == Some(gd))
+                    SIZES.iter().find_map(|&cow| {
+                        let count = cow_size(heap.file(), members, cow).filter(|n| (1..=MAX_MEMBERS).contains(n))?;
+                        detect(heap, inst, members, count, cow).filter(|l| l.script == script && mem_u64(heap.file(), inst + l.script) == Some(gd))
+                    })
                 })
             })
         });
