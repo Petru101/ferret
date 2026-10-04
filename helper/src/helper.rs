@@ -882,7 +882,7 @@ fn draws_like_a_game(pid: u32) -> bool {
     let mut driver = false;
     for r in &regions {
         let name = r.path.rsplit('/').next().unwrap_or_default();
-        if ["libgtk-3.", "libgtk-4.", "libQt5Core.", "libQt6Core.", "libcef."].iter().any(|t| name.starts_with(t)) {
+        if desktop_toolkit(name) {
             return false;
         }
         driver |= ["libGLX_", "libEGL_", "libvulkan_", "libnvidia-glcore.", "libnvidia-eglcore.", "libgallium", "amdvlk"]
@@ -891,6 +891,31 @@ fn draws_like_a_game(pid: u32) -> bool {
             || name.ends_with("_dri.so");
     }
     driver
+}
+
+/// A library only desktop apps load: GTK, Qt, Chromium Embedded (Linux names and Windows DLLs).
+fn desktop_toolkit(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["libgtk-3.", "libgtk-4.", "libqt5core.", "libqt6core.", "libcef.", "qt5core.dll", "qt6core.dll"]
+        .iter()
+        .any(|t| name.starts_with(t))
+}
+
+/// Windows programs under Wine that aren't games: Wine's own (csrss.exe, lsass.exe, ... from
+/// its lib/wine folder), Chromium helpers, and launchers' windows and services (the EA app's
+/// use Chromium Embedded and Qt; it showed up as ten games).
+fn windows_non_game(pid: u32) -> bool {
+    if cmdline(pid).contains(" --type=") {
+        return true;
+    }
+    let Ok(regions) = maps(pid) else { return true };
+    if regions.iter().any(|r| desktop_toolkit(r.path.rsplit('/').next().unwrap_or_default())) {
+        return true;
+    }
+    program_path(pid, &regions).is_some_and(|p| {
+        let p = p.to_string_lossy().to_ascii_lowercase();
+        ["/lib/wine/", "/lib64/wine/", "/drive_c/windows/"].iter().any(|d| p.contains(d))
+    })
 }
 
 /// Running games, one per line: pid, program name, Steam app ID, anti-cheat, the name its
@@ -916,7 +941,7 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         if not_game || lower.contains("crashhandler") || lower.contains("crashreport") {
             continue;
         }
-        if !(windows || app_id.is_some() || draws_like_a_game(pid)) {
+        if !(windows || app_id.is_some() || draws_like_a_game(pid)) || windows && windows_non_game(pid) {
             continue;
         }
         let dash = |s: Option<&str>| s.filter(|s| !s.is_empty()).unwrap_or("-").to_owned();

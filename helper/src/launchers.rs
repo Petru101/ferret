@@ -24,6 +24,11 @@ const SHARED_MODES: &[&str] = &["multiplayer", "co-operative", "massively-multip
 /// AreWeAntiCheatYet's games.json (MIT), trimmed by data/areweanticheatyet/update.sh.
 const BUNDLED: &str = include_str!("../../data/areweanticheatyet/games.json");
 
+/// AreWeAntiCheatYet entries that are wrong (name, Steam app ID), skipped in its list and
+/// Heroic's copy: Prey (2017, Steam 480490) is listed with PunkBuster, which only Prey (2006)
+/// had, for its multiplayer.
+const WRONG: &[(&str, &str)] = &[("Prey", "480490")];
+
 /// The games list asks every second; a game's launcher info doesn't change while it runs.
 static CACHE: Mutex<Option<HashMap<String, About>>> = Mutex::new(None);
 
@@ -152,10 +157,15 @@ fn listed_anti_cheat(dirs: &[PathBuf], ids: &Ids, name: Option<&str>) -> Option<
     let steam = ids.steam.map(|id| id.to_string());
     heroic.iter().chain(bundled).flat_map(Value::arr).find_map(|g| {
         let store = g.get("storeIds");
-        let by_steam = steam.is_some() && store.and_then(|s| s.get("steam")?.str()) == steam.as_deref();
+        let listed_steam = store.and_then(|s| s.get("steam")?.str());
+        let listed_name = g.get("name").and_then(Value::str);
+        if WRONG.iter().any(|&(n, id)| listed_name == Some(n) && listed_steam == Some(id)) {
+            return None;
+        }
+        let by_steam = steam.is_some() && listed_steam == steam.as_deref();
         let namespace = store.and_then(|s| s.get("epic")?.get("namespace")?.str());
         let by_epic = ids.namespace.is_some() && namespace == ids.namespace.as_deref();
-        let by_name = name.is_some() && g.get("name").and_then(Value::str).map(simple) == name;
+        let by_name = name.is_some() && listed_name.map(simple) == name;
         if !(by_steam || by_epic || by_name) {
             return None;
         }
