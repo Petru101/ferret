@@ -866,7 +866,7 @@ const NOT_GAMES: &[&str] = &[
     "steam.exe", "services.exe", "winedevice.exe", "explorer.exe", "plugplay.exe", "rpcss.exe", "svchost.exe",
     "conhost.exe", "tabtip.exe", "start.exe", "wineboot.exe", "winemenubuilder.exe", "rundll32.exe",
     "steamwebhelper.exe", "mscorsvw.exe", "ngen.exe", "reaper", "pressure-vessel-wrap", "pv-adverb", "python3",
-    "srt-bwrap", "bwrap", "steam-runtime-launcher-service", "x86_64-linux-gnu-srt-launch", "wineserver", "sh",
+    "srt-bwrap", "bwrap", "wineserver", "sh",
     "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep", "umu.exe", "xalia.exe",
     "xwayland", "gamescope", "gamescope-wl", "gpu-screen-recorder", "mpv", "ffplay",
 ];
@@ -910,7 +910,10 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let env = environ(pid);
         let app_id = steam_id(&env);
         let windows = lower.ends_with(".exe");
-        if NOT_GAMES.contains(&lower.as_str()) || lower.contains("crashhandler") || lower.contains("crashreport") {
+        // Steam's runtime starts a launcher service next to Proton games, with the game's app ID
+        // (steam-runtime-launcher-service, now <arch>-srt-launcher-service).
+        let not_game = NOT_GAMES.contains(&lower.as_str()) || lower.ends_with("-launcher-service");
+        if not_game || lower.contains("crashhandler") || lower.contains("crashreport") {
             continue;
         }
         if !(windows || app_id.is_some() || draws_like_a_game(pid)) {
