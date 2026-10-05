@@ -14,8 +14,11 @@ start)
     rm -f "$HOME"/.var/app/io.github.Petru101.Ferret/data/profiles/target*.shapes
     rm -rf "$dir" && mkdir -p "$dir" && mkfifo "$dir/in"
     systemctl --user stop "ferret-$session" 2>/dev/null || true
+    # FERRET_PIPEWIRE_NODE=<id>: read that PipeWire node instead of a window picked through the
+    # portal (a game in a headless gamescope).
+    extra=${FERRET_PIPEWIRE_NODE:+--filesystem=xdg-run/pipewire-0 --env=FERRET_PIPEWIRE_NODE=$FERRET_PIPEWIRE_NODE}
     systemd-run --user --quiet --collect --unit="ferret-$session" sh -c \
-        "sleep infinity > '$dir/in' & flatpak run io.github.Petru101.Ferret --cli < '$dir/in' > '$dir/out' 2>&1; kill \$!"
+        "sleep infinity > '$dir/in' & flatpak run $extra io.github.Petru101.Ferret --cli < '$dir/in' > '$dir/out' 2>&1; kill \$!"
     echo "session started"
     ;;
 stop)

@@ -21,6 +21,10 @@ pub struct WindowCapture {
     conn: Connection,
     session: String,
     node: u32,
+    /// A PipeWire node read without the portal (`FERRET_PIPEWIRE_NODE`, for tests: a game in a
+    /// headless gamescope publishes its picture as a node; the flatpak needs
+    /// `--filesystem=xdg-run/pipewire-0` to reach PipeWire then).
+    direct: bool,
 }
 
 fn data_dir() -> PathBuf {
@@ -65,6 +69,9 @@ fn request(
 impl WindowCapture {
     pub fn start() -> Result<Self, String> {
         let conn = Connection::session().map_err(|e| e.to_string())?;
+        if let Some(node) = std::env::var("FERRET_PIPEWIRE_NODE").ok().and_then(|n| n.parse().ok()) {
+            return Ok(Self { conn, session: String::new(), node, direct: true });
+        }
 
         let res = request(&conn, "ferret_create", |p| {
             let opts = HashMap::from([
@@ -109,26 +116,31 @@ impl WindowCapture {
         let Some(Value::U32(node)) = stream.fields().first() else {
             return Err("stream has no PipeWire node".into());
         };
-        Ok(Self { conn, session, node: *node })
+        Ok(Self { conn, session, node: *node, direct: false })
     }
 
     /// Saves the window's current frame as a PNG.
     pub fn grab(&self, out: &Path) -> Result<(), String> {
-        let portal = Proxy::new(&self.conn, DEST, PATH, "org.freedesktop.portal.ScreenCast").map_err(|e| e.to_string())?;
-        let session = ObjectPath::try_from(self.session.as_str()).map_err(|e| e.to_string())?;
         // Each GStreamer run needs its own PipeWire connection.
-        let fd: OwnedFd = portal
-            .call("OpenPipeWireRemote", &(&session, HashMap::<&str, Value>::new()))
-            .map_err(|e| e.to_string())?;
-        let raw = fd.as_raw_fd();
-        unsafe { libc::fcntl(raw, libc::F_SETFD, 0) };
+        let fd: Option<OwnedFd> = if self.direct {
+            None
+        } else {
+            let portal = Proxy::new(&self.conn, DEST, PATH, "org.freedesktop.portal.ScreenCast").map_err(|e| e.to_string())?;
+            let session = ObjectPath::try_from(self.session.as_str()).map_err(|e| e.to_string())?;
+            Some(portal.call("OpenPipeWireRemote", &(&session, HashMap::<&str, Value>::new())).map_err(|e| e.to_string())?)
+        };
+        let raw = fd.as_ref().map(|fd| fd.as_raw_fd());
+        if let Some(raw) = raw {
+            unsafe { libc::fcntl(raw, libc::F_SETFD, 0) };
+        }
         // A new connection first gets the last frame the previous one saw (after a resize: the
         // old size), so keep the second. keepalive-time resends a frame when the game doesn't
         // draw a new one.
         let each = format!("{}.%d", out.display());
         let run = Command::new("timeout")
-            .args(["10", "gst-launch-1.0", "-q"])
-            .args(["pipewiresrc", &format!("fd={raw}"), &format!("path={}", self.node), "num-buffers=2", "keepalive-time=250"])
+            .args(["10", "gst-launch-1.0", "-q", "pipewiresrc"])
+            .args(raw.map(|raw| format!("fd={raw}")))
+            .args([&format!("path={}", self.node), "num-buffers=2", "keepalive-time=250"])
             .args(["!", "videoconvert", "!", "video/x-raw,format=RGB", "!", "pngenc", "!", "multifilesink"])
             .arg(format!("location={each}"))
             .stdout(Stdio::null())

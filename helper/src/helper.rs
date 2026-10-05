@@ -238,13 +238,14 @@ impl Kind {
     }
 
     /// Whether a value that went from `lo` to `hi` (either way round) meanwhile can be what the
-    /// screen showed as `n`. Games show fractions rounded or cut off; a decimal like 1.2 may
-    /// be kept as a whole number of tenths (12).
+    /// screen showed as `n`. Games show fractions rounded, cut off or rounded up (countdowns:
+    /// Lumencraft's wave timer shows 6:37 with 396.4 s left); a decimal like 1.2 may be kept as
+    /// a whole number of tenths (12).
     fn fits(self, lo: f64, hi: f64, n: Shown) -> bool {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
             Kind::I32 | Kind::Xor => lo <= n.scaled && n.scaled <= hi,
-            Kind::F32 | Kind::F64 => lo < n.value + n.step && hi >= n.value - n.step / 2.0,
+            Kind::F32 | Kind::F64 => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
 
