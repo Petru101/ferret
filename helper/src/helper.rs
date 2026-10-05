@@ -454,13 +454,20 @@ fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
     mem.read_exact_at(&mut g, addr).ok().map(|_| g)
 }
 
+/// How often limits check their values (and write the ones out of range), and how often they
+/// find where the values are (pointer paths, named paths). Lumencraft's lumen took a moment to
+/// come back after a purchase.
+const LIMIT_WRITE_EVERY: Duration = Duration::from_millis(50);
+const LIMIT_FIND_EVERY: Duration = Duration::from_millis(250);
+
 /// Keeps limited values in range; paused limits are found again through their
 /// saved code patterns and then resume. Values found through code patterns are also found
 /// again every 10 s, and through the static pointer their object comes from (when there is
 /// one) on every check. A limit with no bounds only keeps the address current.
 fn limiter_loop(shared: SharedLimiter) {
+    let mut found_at = Instant::now() - LIMIT_FIND_EVERY;
     loop {
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(LIMIT_WRITE_EVERY);
         let due: Vec<(String, Vec<Site>, bool)>;
         let named_due: Vec<(String, Named)>;
         let (pid, mem, width) = {
@@ -468,11 +475,17 @@ fn limiter_loop(shared: SharedLimiter) {
             let Limiter { pid, mem, width, modules, limits } = &mut *guard;
             let Some(mem) = mem.as_ref() else { continue };
             let now = Instant::now();
+            // Where the values are: every `LIMIT_FIND_EVERY`; in between, only their values
+            // are checked.
+            let find = found_at.elapsed() >= LIMIT_FIND_EVERY;
+            if find {
+                found_at = now;
+            }
             // Pointer paths are cheap to follow: re-find the value on every check.
-            if limits.iter().any(|l| !l.paths.is_empty() && l.paused.is_some() && l.retry_at <= now) {
+            if find && limits.iter().any(|l| !l.paths.is_empty() && l.paused.is_some() && l.retry_at <= now) {
                 *modules = pointers::modules(*pid, mem);
             }
-            for l in limits.iter_mut().filter(|l| !l.paths.is_empty() && (l.paused.is_none() || l.retry_at <= now)) {
+            for l in limits.iter_mut().filter(|l| find && !l.paths.is_empty() && (l.paused.is_none() || l.retry_at <= now)) {
                 match pointers::vote(mem, modules, *width, &l.paths) {
                     Some(v) if !v.clear() => {
                         l.paused = Some("its pointer paths don't agree on where it is, not writing");
@@ -491,7 +504,7 @@ fn limiter_loop(shared: SharedLimiter) {
                     }
                 }
             }
-            let heap = limits.iter().any(|l| l.named.is_some()).then(|| Heap::new(*pid, mem, *width).ok()).flatten();
+            let heap = (find && limits.iter().any(|l| l.named.is_some())).then(|| Heap::new(*pid, mem, *width).ok()).flatten();
             for l in limits.iter_mut() {
                 let (Some(n), Some(heap)) = (l.named.as_mut(), heap.as_ref()) else { continue };
                 // Searching memory for its objects again takes seconds: done without the lock.
@@ -511,6 +524,7 @@ fn limiter_loop(shared: SharedLimiter) {
             }
             named_due = limits
                 .iter()
+                .filter(|_| find)
                 .filter_map(|l| {
                     let n = l.named.as_ref()?;
                     (n.addrs.is_empty() && n.found_at.is_none_or(|t| t.elapsed() >= NAMED_REFIND)).then(|| (l.name.clone(), n.path.clone()))
@@ -553,7 +567,7 @@ fn limiter_loop(shared: SharedLimiter) {
             let now = Instant::now();
             due = limits
                 .iter()
-                .filter(|l| l.paths.is_empty() && l.named.is_none())
+                .filter(|l| find && l.paths.is_empty() && l.named.is_none())
                 .filter(|l| if l.paused.is_some() { l.retry_at <= now } else { l.checked_at + RECHECK_EVERY <= now })
                 .map(|l| (l.name.clone(), l.sites.clone(), !l.searched_code))
                 .collect();
@@ -1242,12 +1256,14 @@ fn cmd_mark(out: &mut impl Write, s: &mut Session) -> io::Result<()> {
     writeln!(out, "marked {} matches", s.candidates.len())
 }
 
-fn cmd_list(out: &mut impl Write, s: &Session) -> io::Result<()> {
-    for c in s.candidates.iter().take(20) {
+/// list [n]: the first n matches (20).
+fn cmd_list(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let most = arg.trim().parse().unwrap_or(20);
+    for c in s.candidates.iter().take(most) {
         writeln!(out, "{}", s.describe(c.addr(), c.kind()))?;
     }
-    if s.candidates.len() > 20 {
-        writeln!(out, "... {} more", s.candidates.len() - 20)?;
+    if s.candidates.len() > most {
+        writeln!(out, "... {} more", s.candidates.len() - most)?;
     }
     Ok(())
 }
@@ -2021,7 +2037,7 @@ pub fn run() {
             "mark" => cmd_mark(&mut out, &mut session),
             "undo" => cmd_undo(&mut out, &mut session),
             "redo" => cmd_redo(&mut out, &mut session),
-            "list" => cmd_list(&mut out, &session),
+            "list" => cmd_list(&mut out, &session, arg),
             "write" => cmd_write(&mut out, &session, arg),
             "set" => cmd_set(&mut out, &session, arg),
             "peek" => cmd_peek(&mut out, &session, arg),
@@ -2045,7 +2061,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing
