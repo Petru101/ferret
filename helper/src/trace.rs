@@ -17,7 +17,12 @@ pub const DR7_EXECUTE: u64 = 1;
 
 pub struct Hit {
     pub regs: Regs,
+    /// Which breakpoint fired (0-3, as armed).
+    pub slot: usize,
 }
+
+/// Debug status bits of breakpoints 0-3: set when one of ours fired.
+const DR6_HITS: u64 = 0xf;
 
 pub struct Tracer {
     tids: Vec<i32>,
@@ -69,7 +74,7 @@ impl Tracer {
                 Some((_, st)) if is_event_stop(st) => return true,
                 Some((_, st)) if libc::WIFSTOPPED(st) => {
                     let sig = libc::WSTOPSIG(st);
-                    if sig == libc::SIGTRAP && debugreg(tid, 6) & 1 != 0 {
+                    if sig == libc::SIGTRAP && debugreg(tid, 6) & DR6_HITS != 0 {
                         // Our own breakpoint: never pass it on to the game.
                         set_debugreg(tid, 6, 0);
                         set_debugreg(tid, 7, 0);
@@ -85,9 +90,21 @@ impl Tracer {
 
     /// Sets breakpoint 0 on every thread.
     pub fn arm(&mut self, addr: u64, dr7: u64) -> usize {
+        self.arm_slots(&[addr], dr7)
+    }
+
+    /// Execute breakpoints on up to 4 instructions at once (the CPU has 4 slots); a hit's
+    /// `slot` is the instruction's index.
+    pub fn arm_execute(&mut self, instrs: &[u64]) -> usize {
+        let dr7 = (0..instrs.len().min(4)).fold(0, |dr7, n| dr7 | DR7_EXECUTE << (2 * n));
+        self.arm_slots(instrs, dr7)
+    }
+
+    fn arm_slots(&mut self, addrs: &[u64], dr7: u64) -> usize {
         let tids = std::mem::take(&mut self.tids);
         for tid in tids {
-            if self.stop(tid) && set_debugreg(tid, 0, addr) && set_debugreg(tid, 6, 0) && set_debugreg(tid, 7, dr7) {
+            let set = |tid| addrs.iter().take(4).enumerate().all(|(n, &a)| set_debugreg(tid, n, a));
+            if self.stop(tid) && set(tid) && set_debugreg(tid, 6, 0) && set_debugreg(tid, 7, dr7) {
                 ptrace(libc::PTRACE_CONT, tid, 0, 0);
                 self.tids.push(tid);
             } else {
@@ -124,14 +141,15 @@ impl Tracer {
                 continue;
             }
             let sig = libc::WSTOPSIG(st);
-            if sig != libc::SIGTRAP || debugreg(tid, 6) & 1 == 0 {
+            let dr6 = if sig == libc::SIGTRAP { debugreg(tid, 6) & DR6_HITS } else { 0 };
+            if dr6 == 0 {
                 ptrace(libc::PTRACE_CONT, tid, 0, sig as usize);
                 continue;
             }
             set_debugreg(tid, 6, 0);
             let mut regs: Regs = unsafe { std::mem::zeroed() };
             ptrace(libc::PTRACE_GETREGS, tid, 0, &mut regs as *mut Regs as usize);
-            if !on_hit(&Hit { regs }) {
+            if !on_hit(&Hit { regs, slot: dr6.trailing_zeros() as usize }) {
                 self.parked.insert(tid);
                 return;
             }
@@ -145,7 +163,9 @@ impl Drop for Tracer {
         for &tid in &self.tids {
             if self.parked.contains(&tid) || self.stop(tid) {
                 set_debugreg(tid, 7, 0);
-                set_debugreg(tid, 0, 0);
+                for n in 0..4 {
+                    set_debugreg(tid, n, 0);
+                }
                 ptrace(libc::PTRACE_DETACH, tid, 0, 0);
             }
         }

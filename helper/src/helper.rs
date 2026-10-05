@@ -595,9 +595,13 @@ fn limiter_loop(shared: SharedLimiter) {
         }
         // Resolving traces the game for a moment, so it runs without holding the lock.
         for (name, sites, search_code) in due {
-            let mut found = sites
-                .iter()
-                .find_map(|site| Some((resolve_site(pid, &mem, site, width, RESOLVE_WAIT).ok()?, site.disp)));
+            let mut found = resolve_values(pid, &mem, std::slice::from_ref(&sites), width, RESOLVE_WAIT)
+                .pop()
+                .and_then(Result::ok)
+                .map(|r| {
+                    let disp = r.disp;
+                    (r, disp)
+                });
             // The code that ran may not show where the object comes from; another site's may
             // (searching the code for every site is slow: once per value).
             if let Some((r, _)) = found.as_mut().filter(|(r, _)| r.holder.is_none() && search_code) {
@@ -673,10 +677,13 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
     };
     let (addr, kind) = addr;
     let guard_addr = addr.wrapping_sub(sites.first().map_or(0, |s| s.disp) as u64);
+    // Address 0: not found yet (the game hasn't run its code); found in the background like a
+    // value the game moved, instead of holding up the restore.
+    let waiting = addr == 0 && !sites.is_empty();
     // Paths are followed on every check, so they need no guard (and the value may not exist yet).
     let guard = match read_guard(mem, guard_addr) {
         Some(g) => g,
-        None if !paths.is_empty() || !named.is_empty() => [0; 4],
+        None if waiting || !paths.is_empty() || !named.is_empty() => [0; 4],
         None => return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}"),
     };
     l.limits.retain(|l| l.name != *name);
@@ -693,7 +700,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         guard,
         fixes: 0,
         restores: 0,
-        paused: None,
+        paused: waiting.then_some("not found yet (the game hasn't run the code that uses it), waiting"),
         retry_at: Instant::now(),
         checked_at: Instant::now(),
         searched_code: false,
@@ -1761,6 +1768,8 @@ impl Site {
 /// static pointer, that pointer as a path (good for this run only).
 struct Resolved {
     addr: u64,
+    /// The displacement of the site that led there (the object starts that far before).
+    disp: i64,
     is_64bit: bool,
     holder: Option<PtrPath>,
 }
@@ -1826,10 +1835,103 @@ fn resolve_site(pid: u32, mem: &File, site: &Site, width: usize, timeout: Durati
         // The thread is stopped here, so the static pointer still holds what it loaded.
         let addr = trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64);
         let is_64bit = trace::is_64bit(&hit.regs);
-        resolved = Some(Resolved { addr, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
+        resolved = Some(Resolved { addr, disp: site.disp, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
         false
     });
     resolved.ok_or(format!("the code at 0x{instr:x} did not run within {} s", timeout.as_secs()))
+}
+
+/// Finds several values by their code patterns at once: up to 4 instructions are armed
+/// together (one per value first), so a restore waits `timeout` per 4 instructions instead of
+/// per instruction (Wolfenstein: three sites of a value only firing runs, 10 s each, held up
+/// everything else). One result per value: where it led, or why not.
+fn resolve_values(pid: u32, mem: &File, values: &[Vec<Site>], width: usize, timeout: Duration) -> Vec<Result<Resolved, String>> {
+    let mut results: Vec<Result<Resolved, String>> = values.iter().map(|_| Err("none of its code ran meanwhile".into())).collect();
+    // (value, site, instruction), first sites of every value first.
+    let mut pending = Vec::new();
+    let most = values.iter().map(Vec::len).max().unwrap_or(0);
+    for n in 0..most {
+        for (v, sites) in values.iter().enumerate() {
+            let Some(site) = sites.get(n) else { continue };
+            match find_pattern(pid, mem, &site.pat, 2) {
+                Ok(found) if found.len() == 1 => pending.push((v, n, found[0] + site.off)),
+                Ok(found) if n == 0 && sites.len() == 1 => {
+                    results[v] = Err(format!("pattern found {} times (the game may not have run that code yet)", found.len()))
+                }
+                Ok(_) => {}
+                Err(e) => results[v] = Err(e.to_string()),
+            }
+        }
+    }
+    let _tracing = TRACING.lock().unwrap();
+    let mut done = vec![false; values.len()];
+    while pending.iter().any(|(v, _, _)| !done[*v]) {
+        pending.retain(|(v, _, _)| !done[*v]);
+        let round: Vec<(usize, usize, u64)> = pending.drain(..pending.len().min(4)).collect();
+        let instrs: Vec<u64> = round.iter().map(|r| r.2).collect();
+        let mut tracer = match trace::Tracer::attach(pid) {
+            Ok(t) => t,
+            Err(e) => {
+                for (v, _, _) in &round {
+                    results[*v] = Err(format!("cannot trace the game: {e}"));
+                }
+                return results;
+            }
+        };
+        tracer.arm_execute(&instrs);
+        tracer.watch(timeout, |hit| {
+            let Some(&(v, n, instr)) = round.get(hit.slot) else { return true };
+            if !done[v] {
+                let site = &values[v][n];
+                let addr = trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64);
+                let is_64bit = trace::is_64bit(&hit.regs);
+                results[v] = Ok(Resolved { addr, disp: site.disp, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
+                done[v] = true;
+            }
+            round.iter().any(|(v, _, _)| !done[*v])
+        });
+    }
+    results
+}
+
+/// resolve-all <seconds> | <name> <type> <pattern> <offset> <register> <displacement> [<pattern>
+/// ...] | <name> ...: every value's code patterns armed together; per value a line "<name>
+/// <addr:type> = <value>" (and "<name> via <path>"), or "<name> error: <why>".
+fn cmd_resolve_all(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let mut parts = arg.split('|');
+    let secs: f64 = parts.next().and_then(|t| t.trim().parse().ok()).unwrap_or(2.0);
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: attach first");
+    };
+    let mut values = Vec::new();
+    for part in parts {
+        let f: Vec<&str> = part.split_whitespace().collect();
+        let (Some(name), Some(kind)) = (f.first(), f.get(1).and_then(|k| Kind::parse(k))) else {
+            return writeln!(out, "error: usage: resolve-all <seconds> | <name> <type> <pattern> <offset> <register> <displacement> ... | ...");
+        };
+        let sites: Option<Vec<Site>> = f[2..].chunks(4).map(Site::parse).collect();
+        let Some(sites) = sites.filter(|s| !s.is_empty()) else {
+            return writeln!(out, "error: {name}: bad code pattern");
+        };
+        values.push((name.to_string(), kind, sites));
+    }
+    let sites: Vec<Vec<Site>> = values.iter_mut().map(|(_, _, s)| std::mem::take(s)).collect();
+    let results = resolve_values(s.pid, mem, &sites, s.width, Duration::from_secs_f64(secs));
+    for ((name, kind, _), r) in values.iter().zip(results) {
+        match r {
+            Ok(Resolved { addr, holder, .. }) => match s.read(addr, *kind) {
+                Some(_) => {
+                    writeln!(out, "{name} {}", s.describe(addr, *kind))?;
+                    if let Some(h) = holder {
+                        writeln!(out, "{name} via {}", h.text())?;
+                    }
+                }
+                None => writeln!(out, "{name} error: resolved to unreadable 0x{addr:x}")?,
+            },
+            Err(e) => writeln!(out, "{name} error: {e}")?,
+        }
+    }
+    Ok(())
 }
 
 /// ptrscan <hex addr[:type]> [depth] [max offset, hex] [max paths]: pointer paths to the address, best
@@ -2107,6 +2209,7 @@ pub fn run() {
             "track" => cmd_track(&mut out, &mut session, arg),
             "sites" => cmd_sites(&mut out, &session, arg),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
+            "resolve-all" => cmd_resolve_all(&mut out, &mut session, arg),
             "ptrscan" => cmd_ptrscan(&mut out, &mut session, arg),
             "names" => cmd_names(&mut out, &mut session, arg),
             "named" => cmd_named(&mut out, &mut session, arg),

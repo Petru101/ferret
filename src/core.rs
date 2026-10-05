@@ -741,17 +741,15 @@ struct Game {
     /// Named values whose places aren't one value now (the helper's "doubtful" line): never
     /// written.
     named_doubt: Vec<(String, String)>,
-    /// Values whose code patterns aren't in the game's memory yet (a Mono game compiles code
-    /// when it first runs it: at the main menu, Particle Fleet's omni code isn't there), and
-    /// when they were last looked for.
-    waiting: Vec<String>,
-    waited_at: Option<Instant>,
     /// Values already handed to the upgrader in this run.
     upgrade_asked: Vec<String>,
 }
 
-/// How often values waiting for their code are looked for again.
-const WAIT_EVERY: Duration = Duration::from_secs(10);
+/// How long a restore waits for the code of values saved by code pattern (all of them at once,
+/// 4 instructions at a time). Values whose code doesn't run meanwhile (ammo: only when firing;
+/// a Mono game compiles code when it first runs it, Particle Fleet's omni isn't there at the
+/// main menu) are found by the helper in the background.
+const RESTORE_WAIT: Duration = Duration::from_secs(2);
 
 /// How a value's pointer paths agreed when last followed (the helper's "votes" line).
 #[derive(Clone, Copy)]
@@ -975,7 +973,7 @@ impl Core {
         if self.game.as_ref().map(|g| g.pid) != Some(pid) {
             self.capture = None;
         }
-        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new(), waiting: Vec::new(), waited_at: None, upgrade_asked: Vec::new() });
+        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new(), upgrade_asked: Vec::new() });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -1469,6 +1467,11 @@ impl Core {
             return Err(format!("nothing saved for {exe}"));
         }
         let t = Instant::now();
+        let by_code: Vec<&Entry> = entries.iter().filter(|e| e.foreign_type().is_none() && e.named.is_empty() && !e.sites.is_empty()).collect();
+        if let Some(first) = by_code.first() {
+            self.phase(Phase::Restoring(exe.clone(), first.name.clone(), 0, entries.len()));
+        }
+        let mut by_code = self.resolve_all(&by_code, RESTORE_WAIT)?;
         for (i, entry) in entries.iter().enumerate() {
             let name = &entry.name;
             self.phase(Phase::Restoring(exe.clone(), name.clone(), i, entries.len()));
@@ -1505,7 +1508,15 @@ impl Core {
                 }
                 continue;
             }
-            let mut resolved = self.resolve_sites(entry, true)?;
+            let mut why_not = None;
+            let mut resolved = match by_code.iter().position(|(n, _)| n == name).map(|i| by_code.remove(i).1) {
+                Some(Ok(found)) => Some(found),
+                Some(Err(why)) => {
+                    why_not = Some(why);
+                    None
+                }
+                None => None,
+            };
             let paths = entry.followed(&entries);
             if resolved.is_none() && !paths.is_empty() {
                 let (ends, best, votes) = self.follow_votes(entry.kind, &paths);
@@ -1549,13 +1560,15 @@ impl Core {
             match resolved {
                 Some((loc, v)) => self.found_by_site(entry, loc, v)?,
                 None => {
-                    self.say(&format!("{name}: not found yet (the game hasn't run the code that uses it), Ferret looks again every {} s", WAIT_EVERY.as_secs()));
+                    let why = why_not.unwrap_or_else(|| "the game hasn't run the code that uses it".into());
+                    self.say(&format!("{name}: not found yet ({why}), Ferret keeps looking for it in the background"));
                     let game = self.game()?;
                     game.entries.retain(|(n, _)| n != name);
                     game.entries.push((name.clone(), Loc { addr: 0, kind: entry.kind }));
-                    game.waiting.retain(|n| n != name);
-                    game.waiting.push(name.clone());
-                    game.waited_at = Some(Instant::now());
+                    // The helper finds it when the code runs (and applies its limit then).
+                    if let Err(e) = self.apply_limit(entry) {
+                        self.say(&format!("{name}: can't look for it in the background: {e}"));
+                    }
                 }
             }
         }
@@ -1563,24 +1576,40 @@ impl Core {
         Ok(())
     }
 
-    /// Finds a value by its code patterns: where it is and its value. `tell`: says why each
-    /// pattern failed.
-    fn resolve_sites(&mut self, entry: &Entry, tell: bool) -> Result<Option<(Loc, i64)>, String> {
-        let name = &entry.name;
-        self.game()?.via.retain(|(n, _)| n != name);
-        for site in &entry.sites {
-            let reply = self.helper.call(&format!("resolve {site} {}", entry.kind.name()));
-            if let Some((loc, Some(v))) = parse_values(&reply).first() {
-                if let Some(via) = reply.iter().find_map(|l| l.strip_prefix("via ")) {
-                    self.game()?.via.push((name.clone(), via.to_owned()));
-                }
-                return Ok(Some((*loc, *v)));
-            }
-            if tell {
-                self.say(&format!("{name}: {}", reply.join(" ")));
-            }
+    /// Finds values by their code patterns, all at once: per value where it is and its value,
+    /// or why not.
+    fn resolve_all(&mut self, entries: &[&Entry], wait: Duration) -> Result<Vec<(String, Result<(Loc, i64), String>)>, String> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(None)
+        let mut cmd = format!("resolve-all {}", wait.as_secs_f64());
+        for e in entries {
+            cmd += &format!(" | {} {} {}", e.name, e.kind.name(), e.sites.join(" "));
+        }
+        let reply = self.helper.call(&cmd);
+        if let Some(e) = reply.first().filter(|l| l.starts_with("error:")) {
+            return Err(e.clone());
+        }
+        let mut found = Vec::new();
+        for e in entries {
+            let name = &e.name;
+            self.game()?.via.retain(|(n, _)| n != name);
+            let mine: Vec<&str> = reply.iter().filter_map(|l| l.strip_prefix(name.as_str())?.strip_prefix(' ')).collect();
+            let result = match mine.iter().find_map(|l| l.strip_prefix("error: ")) {
+                Some(why) => Err(why.to_owned()),
+                None => match parse_values(&mine.iter().map(|l| l.to_string()).collect::<Vec<_>>()).first() {
+                    Some((loc, Some(v))) => {
+                        if let Some(via) = mine.iter().find_map(|l| l.strip_prefix("via ")) {
+                            self.game()?.via.push((name.clone(), via.to_owned()));
+                        }
+                        Ok((*loc, *v))
+                    }
+                    _ => Err(format!("no answer from the helper ({})", mine.join(" "))),
+                },
+            };
+            found.push((name.clone(), result));
+        }
+        Ok(found)
     }
 
     /// A value found by its code patterns (or its pointer paths): shown, and its limit applied.
@@ -1590,7 +1619,6 @@ impl Core {
         let game = self.game()?;
         game.entries.retain(|(n, _)| n != name);
         game.entries.push((name.clone(), loc));
-        game.waiting.retain(|n| n != name);
         if entry.limit.is_some() {
             let (min, max) = entry.shown_range();
             match self.apply_limit(entry) {
@@ -1674,7 +1702,6 @@ impl Core {
         game.paths.retain(|(n, _)| *n != u.name);
         game.votes.retain(|(n, _)| *n != u.name);
         game.via.retain(|(n, _)| *n != u.name);
-        game.waiting.retain(|n| *n != u.name);
         game.named.retain(|(n, _, _)| *n != u.name);
         game.named.push((u.name.clone(), u.text.clone(), vec![u.loc]));
         self.set_named_doubt(&u.name, None);
@@ -1692,26 +1719,8 @@ impl Core {
         Ok(())
     }
 
-    /// Looks again for values whose code wasn't in the game's memory yet (every `WAIT_EVERY`).
-    fn look_for_waiting(&mut self) {
-        let Some(game) = self.game.as_ref() else { return };
-        if game.waiting.is_empty() || game.waited_at.is_some_and(|t| t.elapsed() < WAIT_EVERY) {
-            return;
-        }
-        let (exe, waiting) = (game.exe.clone(), game.waiting.clone());
-        if let Some(game) = self.game.as_mut() {
-            game.waited_at = Some(Instant::now());
-        }
-        for entry in read_profile(&exe).into_iter().filter(|e| waiting.contains(&e.name)) {
-            if let Ok(Some((loc, v))) = self.resolve_sites(&entry, false) {
-                self.found_by_site(&entry, loc, v).ok();
-            }
-        }
-    }
-
     pub fn values(&mut self) -> Result<Vec<ValueRow>, String> {
         let exe = self.game()?.exe.clone();
-        self.look_for_waiting();
         self.upgrades();
         self.refresh_paths();
         self.refresh_named();
