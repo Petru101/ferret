@@ -22,6 +22,11 @@
 // and a GDScriptInstance keeps its owner's ObjectID before the owner.
 // Text form: gd:singletons/run_data.gd.players_data[0].gold = the variable "gold" of element 0
 // of the variable "players_data" of the (only) object running res://singletons/run_data.gd.
+// gd:entities/enemy.gd@/root/Main/Boss.current_stats.health = the same from the object running
+// enemy.gd at that place in the scene tree (for scripts many objects run).
+// The scene tree: a Node points to its parent and keeps its children (Godot 3: a Vector<Node *>,
+// Godot 4: a HashMap<StringName, Node *>) and its name (a StringName); the root is named
+// "root". Learned from any node Ferret meets, it finds objects again by pointer reads.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -63,6 +68,10 @@ pub enum Step {
 pub struct ScriptPath {
     /// The script's path without "res://".
     script: String,
+    /// Only the object at this place in the scene tree (names below /root; None = any child,
+    /// for names the engine made up, "@Node@12"): for a script many objects run (enemy.gd and
+    /// the boss among them).
+    nodes: Option<Vec<Option<String>>>,
     steps: Vec<Step>,
 }
 
@@ -77,8 +86,24 @@ fn good_script(s: &str) -> bool {
 impl ScriptPath {
     pub fn parse(text: &str) -> Option<Self> {
         let rest = text.strip_prefix("gd:")?;
-        let at = rest.find(".gd.")? + 3;
-        let (script, steps_text) = (&rest[..at], &rest[at + 1..]);
+        let (script, nodes, steps_text) = match rest.split_once('@') {
+            Some((script, tail)) => {
+                let (place, steps) = tail.split_once('.')?;
+                let node = |n: &str| match n {
+                    "*" => Some(None),
+                    _ => decode(n).filter(|n| good_node(n)).map(Some),
+                };
+                let nodes = match place.strip_prefix("/root")? {
+                    "" => Vec::new(),
+                    below => below.strip_prefix('/')?.split('/').map(node).collect::<Option<_>>()?,
+                };
+                (script, Some(nodes), steps)
+            }
+            None => {
+                let at = rest.find(".gd.")? + 3;
+                (&rest[..at], None, &rest[at + 1..])
+            }
+        };
         let mut steps = Vec::new();
         for part in steps_text.split('.') {
             let (name, mut idx) = part.split_once('[').map_or((part, ""), |(n, i)| (n, i));
@@ -95,11 +120,17 @@ impl ScriptPath {
                 }
             }
         }
-        (good_script(script) && matches!(steps.last(), Some(Step::Member(_)))).then(|| ScriptPath { script: script.to_owned(), steps })
+        (good_script(script) && matches!(steps.last(), Some(Step::Member(_)))).then(|| ScriptPath { script: script.to_owned(), nodes, steps })
+    }
+
+    /// What tells the objects it starts from: the script and the place.
+    fn roots_key(&self) -> String {
+        format!("{}{}", self.script, self.nodes.as_ref().map(|n| format!("@{}", place_text(n))).unwrap_or_default())
     }
 
     pub fn text(&self) -> String {
-        format!("gd:{}{}", self.script, self.steps_text())
+        let place = self.nodes.as_ref().map(|n| format!("@{}", place_text(n))).unwrap_or_default();
+        format!("gd:{}{place}{}", self.script, self.steps_text())
     }
 
     fn steps_text(&self) -> String {
@@ -115,8 +146,57 @@ impl ScriptPath {
     /// In words: "players_data[0].gold in run_data.gd".
     pub fn describe(&self) -> String {
         let file = self.script.rsplit('/').next().unwrap_or(&self.script);
-        format!("{} in {file}", &self.steps_text()[1..])
+        let place = self.nodes.as_ref().map(|n| format!(" at {}", place_words(n))).unwrap_or_default();
+        format!("{} in {file}{place}", &self.steps_text()[1..])
     }
+}
+
+/// "/root/Main/*" (names percent-encoded).
+fn place_text(nodes: &[Option<String>]) -> String {
+    let below: String = nodes.iter().map(|n| format!("/{}", n.as_deref().map_or("*".to_owned(), encode))).collect();
+    format!("/root{below}")
+}
+
+/// "/root/Main/Big Boss", for people.
+fn place_words(nodes: &[Option<String>]) -> String {
+    let below: String = nodes.iter().map(|n| format!("/{}", n.as_deref().unwrap_or("*"))).collect();
+    format!("/root{below}")
+}
+
+/// A node name as Godot allows it (no "." ":" "@" "/" "%" '"'), not made up by the engine.
+fn good_node(n: &str) -> bool {
+    !n.is_empty() && n.len() <= MAX_NAME && !n.chars().any(|c| c.is_control() || ".:@/%\"".contains(c))
+}
+
+fn encode(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            out.push(c);
+        } else {
+            let mut b = [0u8; 4];
+            for byte in c.encode_utf8(&mut b).bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+fn decode(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            out.push(u8::from_str_radix(text.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Where the engine keeps things, as found on the running game.
@@ -142,8 +222,9 @@ struct Layout {
 /// The layout found last, by process.
 static LAYOUT: Mutex<Option<(u32, Layout)>> = Mutex::new(None);
 
-/// Script instances found lately, by process and script: values of one script restored
-/// together share one search (Lumencraft's hp and stamina in Player.gd: ~5 s each on 2 GB).
+/// Script instances found lately in memory, by process and script (and place): values of one
+/// script restored together share one search (Lumencraft's hp and stamina in Player.gd: ~5 s
+/// each on 2 GB).
 static FOUND: Mutex<Vec<(u32, String, Instant, Vec<u64>)>> = Mutex::new(Vec::new());
 const FOUND_FOR: Duration = Duration::from_secs(10);
 /// None found (between Brotato's waves, no player): soon stale, a wave starts any moment.
@@ -152,6 +233,28 @@ const NONE_FOUND_FOR: Duration = Duration::from_secs(2);
 /// while objects running it come and go (Brotato's player, every wave), so finding the new
 /// ones takes one pass over memory instead of three.
 static SCRIPTS: Mutex<Vec<(u32, String, Vec<u64>)>> = Mutex::new(Vec::new());
+
+/// Where a Node keeps its place in the scene tree, found on the running game: its parent, its
+/// children (Godot 3: a Vector<Node *>, `children` = where its data pointer is; Godot 4: a
+/// HashMap<StringName, Node *>) and its name (a StringName).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Tree {
+    parent: u64,
+    children: u64,
+    map: bool,
+    name: u64,
+}
+
+/// The scene tree's root (the main Viewport or Window, named "root") and the layout, by
+/// process: the root lives as long as the game, so objects in the tree are found again by
+/// pointer reads, not passes over memory.
+static TREE: Mutex<Option<(u32, u64, Tree)>> = Mutex::new(None);
+/// Scripts whose objects were found in the scene tree, by process: they are looked for there
+/// only (Brotato's player is gone during the shop; searching memory for it cost a pass).
+static IN_TREE: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+const MAX_CHILDREN: u64 = 1 << 16;
+const MAX_DEPTH: usize = 64;
+const MAX_NODES: usize = 1 << 17;
 
 struct Godot<'a> {
     heap: &'a Heap<'a>,
@@ -239,9 +342,13 @@ fn map_entries(mem: &File, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
 
 /// A StringName's text: its String (at +0x10, or +8 in Godot 4.5+), else its C string.
 fn string_name(mem: &File, sn: u64, wide: u64, cow: u64) -> Option<String> {
+    string_name_if(mem, sn, wide, cow, good_name)
+}
+
+fn string_name_if(mem: &File, sn: u64, wide: u64, cow: u64, good: impl Fn(&str) -> bool) -> Option<String> {
     for at in [0x10, 8] {
         if let Some(t) = mem_u64(mem, sn + at).filter(|&p| p != 0).and_then(|p| read_chars(mem, p, wide, cow)) {
-            if good_name(&t) {
+            if good(&t) {
                 return Some(t);
             }
         }
@@ -250,7 +357,7 @@ fn string_name(mem: &File, sn: u64, wide: u64, cow: u64) -> Option<String> {
     let mut b = [0u8; MAX_NAME];
     let n = mem.read_at(&mut b, c).ok()?;
     let t = std::str::from_utf8(b[..n].split(|&x| x == 0).next()?).ok()?;
-    good_name(t).then(|| t.to_owned())
+    good(t).then(|| t.to_owned())
 }
 
 /// member_indices at `map`: every index 0..n-1 once, each under a name.
@@ -494,6 +601,221 @@ impl<'a> Godot<'a> {
         }
         (members, arrays)
     }
+
+    /// The children of a node (none: empty).
+    fn kids(&self, t: &Tree, node: u64) -> Option<Vec<u64>> {
+        let (mem, at) = (self.mem(), node + t.children);
+        if t.map {
+            if mem_u64(mem, at + 0x10)? == 0 {
+                return (mem_u32(mem, at + 0x24)? == 0).then(Vec::new);
+            }
+            return hash_entries(mem, at, MAX_CHILDREN)?.into_iter().map(|(_, v)| self.ptr(v)).collect();
+        }
+        match mem_u64(mem, at)? {
+            0 => Some(Vec::new()),
+            data => {
+                let (first, n) = self.vector(self.heap.is_pointer(data).then_some(data)?, MAX_CHILDREN)?;
+                (0..n).map(|i| self.ptr(first + 8 * i)).collect()
+            }
+        }
+    }
+
+    /// A node's name, made-up ones ("@Node@12") too.
+    fn node_name(&self, t: &Tree, node: u64) -> Option<String> {
+        let sn = self.ptr(node + t.name)?;
+        string_name_if(self.mem(), sn, self.lay.wide, self.lay.cow, |n| !n.is_empty() && n.len() <= MAX_NAME && !n.chars().any(char::is_control))
+    }
+
+    /// The nodes from `node` up to the one without a parent (each in its parent's children).
+    fn climb(&self, t: &Tree, node: u64) -> Option<Vec<u64>> {
+        let mut chain = vec![node];
+        while chain.len() <= MAX_DEPTH {
+            let x = *chain.last()?;
+            let up = mem_u64(self.mem(), x + t.parent)?;
+            if up == 0 {
+                return Some(chain);
+            }
+            if !self.heap.is_pointer(up) || !self.kids(t, up)?.contains(&x) {
+                return None;
+            }
+            chain.push(up);
+        }
+        None
+    }
+
+    /// The layout and the root, when `obj` is a node in the scene tree: a field points to a
+    /// node whose children (a field soon after) hold it, and so on up to a node named "root".
+    fn detect_tree(&self, obj: u64) -> Option<(Tree, u64)> {
+        let mut b = vec![0u8; 0x400];
+        self.mem().read_exact_at(&mut b, obj).ok()?;
+        let word = |o: u64| u64::from_le_bytes(b[o as usize..o as usize + 8].try_into().unwrap());
+        for parent in (8..0x3c0).step_by(8) {
+            let q = word(parent);
+            if q == obj || !self.heap.is_pointer(q) {
+                continue;
+            }
+            for children in (parent + 8..parent + 0x40).step_by(8) {
+                for map in [true, false] {
+                    let t = Tree { parent, children, map, name: 0 };
+                    if !self.kids(&t, q).is_some_and(|k| k.contains(&obj)) {
+                        continue;
+                    }
+                    let Some(chain) = self.climb(&t, obj) else { continue };
+                    let root = *chain.last()?;
+                    for name in (children + 8..children + 0x100).step_by(8) {
+                        let t = Tree { name, ..t };
+                        if self.node_name(&t, root).as_deref() == Some("root") && chain.iter().all(|&n| self.node_name(&t, n).is_some()) {
+                            return Some((t, root));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The scene tree: known, or found from one of these objects (when one is a node in it).
+    fn tree(&self, objs: &[u64]) -> Option<(Tree, u64)> {
+        let known = *TREE.lock().unwrap();
+        if let Some((_, root, t)) = known.filter(|k| k.0 == self.heap.pid) {
+            if self.node_name(&t, root).as_deref() == Some("root") {
+                return Some((t, root));
+            }
+        }
+        let (t, root) = objs.iter().take(8).find_map(|&o| self.detect_tree(o))?;
+        *TREE.lock().unwrap() = Some((self.heap.pid, root, t));
+        Some((t, root))
+    }
+
+    /// The names from below the root down to `obj` (None for names the engine made up), when
+    /// it is in the tree.
+    fn place(&self, t: &Tree, root: u64, obj: u64) -> Option<Vec<Option<String>>> {
+        let chain = self.climb(t, obj)?;
+        if *chain.last()? != root {
+            return None;
+        }
+        chain.iter().rev().skip(1).map(|&n| self.node_name(t, n).map(|name| good_node(&name).then_some(name))).collect()
+    }
+
+    /// The nodes at this place below the root (None: any child).
+    fn at_place(&self, t: &Tree, root: u64, nodes: &[Option<String>]) -> Vec<u64> {
+        let mut level = vec![root];
+        for want in nodes {
+            let mut next = Vec::new();
+            for &n in &level {
+                for k in self.kids(t, n).unwrap_or_default() {
+                    if want.as_ref().is_none_or(|w| self.node_name(t, k).as_ref() == Some(w)) {
+                        next.push(k);
+                    }
+                }
+                if next.len() > MAX_NODES {
+                    break;
+                }
+            }
+            level = next;
+        }
+        level
+    }
+
+    /// Every node in the tree.
+    fn all_nodes(&self, t: &Tree, root: u64) -> Vec<u64> {
+        let mut out = vec![root];
+        let mut i = 0;
+        while i < out.len() && out.len() < MAX_NODES {
+            out.extend(self.kids(t, out[i]).unwrap_or_default());
+            i += 1;
+        }
+        out
+    }
+
+    /// The script instances of these objects that run `script`.
+    fn running(&self, objs: &[u64], script: &str) -> Vec<u64> {
+        let mut ours: HashMap<u64, bool> = HashMap::new();
+        objs.iter()
+            .filter_map(|&o| {
+                let inst = self.instance_of(o)?;
+                let gd = self.script_of(inst)?;
+                (*ours.entry(gd).or_insert_with(|| self.script_path(gd).as_deref() == Some(script))).then_some(inst)
+            })
+            .collect()
+    }
+
+    /// The objects the path starts from, found in the scene tree (None: the tree isn't known).
+    fn tree_roots(&self, path: &ScriptPath) -> Option<Vec<u64>> {
+        let (t, root) = self.tree(&[])?;
+        let objs = match &path.nodes {
+            Some(n) => self.at_place(&t, root, n),
+            None => self.all_nodes(&t, root),
+        };
+        let roots = self.running(&objs, &path.script);
+        if !roots.is_empty() {
+            self.mark_in_tree(&path.script);
+        }
+        Some(roots)
+    }
+
+    fn mark_in_tree(&self, script: &str) {
+        let mut known = IN_TREE.lock().unwrap();
+        if !known.iter().any(|(pid, s)| *pid == self.heap.pid && *s == script) {
+            known.retain(|(pid, _)| *pid == self.heap.pid);
+            known.push((self.heap.pid, script.to_owned()));
+        }
+    }
+
+    /// After a search of memory: learns the scene tree from the objects found, and keeps those
+    /// at the path's place.
+    fn settle(&self, path: &ScriptPath, roots: Vec<u64>) -> Vec<u64> {
+        let owner = |r: u64| mem_u64(self.mem(), r + self.lay.owner).unwrap_or(0);
+        let objs: Vec<u64> = roots.iter().map(|&r| owner(r)).collect();
+        let Some((t, root)) = self.tree(&objs) else {
+            return if path.nodes.is_some() { Vec::new() } else { roots };
+        };
+        if objs.iter().any(|&o| self.climb(&t, o).is_some_and(|c| c.last() == Some(&root))) {
+            self.mark_in_tree(&path.script);
+        }
+        match &path.nodes {
+            Some(n) => {
+                let here = self.at_place(&t, root, n);
+                roots.into_iter().filter(|&r| here.contains(&owner(r))).collect()
+            }
+            None => roots,
+        }
+    }
+}
+
+/// The scene tree as text, a node a line with its script ("/root/Main/Boss entities/enemy.gd"),
+/// once a script path was found or followed in this run (the layouts come from there).
+pub fn tree_text(heap: &Heap) -> Option<Vec<String>> {
+    let g = Godot::new(heap, known_layout(heap.pid)?);
+    let mut out = vec![format!("layout {:?}", g.lay)];
+    let Some((t, root)) = g.tree(&[]) else {
+        out.push("no scene tree known yet".into());
+        return Some(out);
+    };
+    out.push(format!("tree {t:?}, root 0x{root:x}"));
+    let mut stack = vec![(root, "/root".to_owned())];
+    while let Some((n, place)) = stack.pop() {
+        let script = g.instance_of(n).and_then(|i| g.script_of(i)).and_then(|gd| g.script_path(gd)).unwrap_or_default();
+        out.push(format!("{place} {script}").trim_end().to_owned());
+        if out.len() >= 2000 {
+            break;
+        }
+        for k in g.kids(&t, n).unwrap_or_default().into_iter().rev() {
+            stack.push((k, format!("{place}/{}", g.node_name(&t, k).unwrap_or_else(|| "?".into()))));
+        }
+    }
+    Some(out)
+}
+
+/// Whether the path's objects are looked for in the scene tree only (pointer reads), not in
+/// all of memory.
+pub fn in_tree(pid: u32, path: &ScriptPath) -> bool {
+    knows_tree(pid) && (path.nodes.is_some() || IN_TREE.lock().unwrap().iter().any(|(p, s)| *p == pid && *s == path.script))
+}
+
+/// Whether this process's scene tree is known: looking there is cheap to repeat.
+pub fn knows_tree(pid: u32) -> bool {
+    TREE.lock().unwrap().is_some_and(|t| t.0 == pid)
 }
 
 /// A way down from a script instance to the value.
@@ -559,9 +881,11 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
     let path_of = |p: &Partial| {
         let gd = g.script_of(p.inst)?;
         g.ptr(gd + lay.path)?;
-        Some(ScriptPath { script: g.script_path(gd)?, steps: p.steps.clone() })
+        Some(ScriptPath { script: g.script_path(gd)?, nodes: None, steps: p.steps.clone() })
     };
+    let owner = |p: &Partial| mem_u64(heap.file(), p.inst + lay.owner);
     let mut level = vec![own.clone()];
+    let mut levels = Vec::new();
     let mut own_runs = Vec::new();
     for depth in 0..=MAX_UP {
         // One pass: the objects running each script here, and what holds each object.
@@ -581,10 +905,13 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
             if let Some(path) = path_of(p) {
                 let leads = g.walk(&[p.inst], &path.steps);
                 if leads == [target] {
+                    // Its object found again in the scene tree when it is a node there.
+                    g.tree(&owner(p).into_iter().collect::<Vec<_>>());
                     return Some((path, leads));
                 }
             }
         }
+        levels.push(level.clone());
         if depth == MAX_UP {
             break;
         }
@@ -625,8 +952,19 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
         }
         level = next;
     }
-    // No singleton above it: the value's own variable in every object running its script,
-    // when they are few.
+    // No singleton above it: the object at its place in the scene tree among those running
+    // the script (the boss among enemies), the value's own object first.
+    for p in levels.iter().flatten() {
+        let Some(obj) = owner(p) else { continue };
+        let Some((t, root)) = g.tree(&[obj]) else { continue };
+        let (Some(nodes), Some(mut path)) = (g.place(&t, root, obj), path_of(p)) else { continue };
+        let leads = g.walk(&g.running(&g.at_place(&t, root, &nodes), &path.script), &path.steps);
+        if leads == [target] {
+            path.nodes = Some(nodes);
+            return Some((path, leads));
+        }
+    }
+    // Else the value's own variable in every object running its script, when they are few.
     let path = path_of(&own)?;
     let leads = g.walk(&own_runs, &path.steps);
     (leads.contains(&target) && leads.len() <= MAX_PLACES).then_some((path, leads))
@@ -704,7 +1042,14 @@ pub fn about_all(heap: &Heap, addrs: &[(u64, Kind)]) -> Vec<Option<String>> {
     let Some(lay) = lay else { return out };
     remember(heap.pid, lay);
     let g = Godot::new(heap, lay);
-    let file = |inst: u64| g.script_of(inst).and_then(|gd| g.script_path(gd)).map(|p| p.rsplit('/').next().unwrap_or(&p).to_owned());
+    // Script names with their object's place in the scene tree when it is a node with a name
+    // there ("enemy.gd at /root/Main/Boss": three objects run enemy.gd).
+    let at = |inst: u64| -> String {
+        let obj = mem_u64(mem, inst + lay.owner).unwrap_or(0);
+        let place = g.tree(&[obj]).and_then(|(t, root)| g.place(&t, root, obj));
+        place.filter(|p| !p.is_empty() && p.iter().all(Option::is_some)).map(|p| format!(" at {}", place_words(&p))).unwrap_or_default()
+    };
+    let file = |inst: u64| g.script_of(inst).and_then(|gd| g.script_path(gd)).map(|p| format!("{}{}", p.rsplit('/').next().unwrap_or(&p), at(inst)));
     // One level up: the Variants holding each object, and the variables (or arrays in them)
     // those are.
     let objs: Vec<u64> = vars.iter().filter_map(|v| mem_u64(mem, v.1 + lay.owner)).collect();
@@ -735,6 +1080,7 @@ pub fn about_all(heap: &Heap, addrs: &[(u64, Kind)]) -> Vec<Option<String>> {
         let (Some(name), Some(script)) = (g.member_name(inst, i), file(inst)) else { continue };
         out[k] = Some(match holder(inst) {
             Some(h) => format!("{name} in {script}, in {h}"),
+            None if !at(inst).is_empty() => format!("{name} in {script}"),
             None => format!("{name} in {script} (an object no script variable holds)"),
         });
     }
@@ -787,8 +1133,19 @@ fn find_bytes(heap: &Heap, bytes: &[u8]) -> Vec<u64> {
 /// The script instances the path starts from (searches the game's memory, unless a search for
 /// the same script just did).
 pub fn find_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
-    let fresh = |(pid, script, at, roots): &(u32, String, Instant, Vec<u64>)| {
-        *pid == heap.pid && *script == path.script && at.elapsed() < if roots.is_empty() { NONE_FOUND_FOR } else { FOUND_FOR }
+    // In the scene tree once it's known: pointer reads. Found nothing there: the script's
+    // objects may not be nodes (or not be there yet), so memory too, unless they were found in
+    // the tree before.
+    if let Some(lay) = known_layout(heap.pid) {
+        if let Some(roots) = Godot::new(heap, lay).tree_roots(path) {
+            if !roots.is_empty() || in_tree(heap.pid, path) {
+                return roots;
+            }
+        }
+    }
+    let key = path.roots_key();
+    let fresh = |(pid, k, at, roots): &(u32, String, Instant, Vec<u64>)| {
+        *pid == heap.pid && *k == key && at.elapsed() < if roots.is_empty() { NONE_FOUND_FOR } else { FOUND_FOR }
     };
     // Only while they're all alive: the game may have freed one (a new wave's player).
     let alive = |roots: &[u64]| known_layout(heap.pid).is_some_and(|lay| roots.iter().all(|&r| Godot::new(heap, lay).alive(r)));
@@ -797,14 +1154,16 @@ pub fn find_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
     }
     let roots = search_roots(heap, path);
     let mut found = FOUND.lock().unwrap();
-    found.retain(|(pid, script, at, _)| *pid == heap.pid && at.elapsed() < FOUND_FOR && *script != path.script);
-    found.push((heap.pid, path.script.clone(), Instant::now(), roots.clone()));
+    found.retain(|(pid, k, at, _)| *pid == heap.pid && at.elapsed() < FOUND_FOR && *k != key);
+    found.push((heap.pid, key, Instant::now(), roots.clone()));
     roots
 }
 
+/// Searches memory for the objects running the path's script (a few passes).
 fn search_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
     if let Some(lay) = known_layout(heap.pid) {
-        return find_roots_with(&Godot::new(heap, lay), path);
+        let g = Godot::new(heap, lay);
+        return g.settle(path, find_roots_with(&g, path));
     }
     // A new run of the game: the script's path, then the objects pointing to it, then the
     // instances pointing to those; the layout comes from the first that fits. Characters are
@@ -825,7 +1184,9 @@ fn search_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
         scripts.sort_unstable();
         scripts.dedup();
         let ats = heap.referrers(&scripts);
+        let mut seen = 0;
         let lay = ats.iter().find_map(|&at| {
+            seen = at;
             let gd = mem_u64(heap.file(), at)?;
             [8u64, 0x10, 0x18].into_iter().find_map(|script| {
                 let inst = at.checked_sub(script)?;
@@ -847,7 +1208,14 @@ fn search_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
                 .filter(|&gd| refs.iter().any(|&r| r == gd + lay.path))
                 .is_some_and(|gd| g.script_path(gd).as_deref() == Some(path.script.as_str()))
         };
-        return g.instances_at(ats.iter().copied().filter(ours));
+        let roots = g.instances_at(ats.iter().copied().filter(ours));
+        // The scene tree also from the object the layout came from, when the script's own
+        // aren't around (Brotato's shop: no player).
+        if roots.is_empty() {
+            let inst = seen.wrapping_sub(lay.script);
+            g.tree(&mem_u64(heap.file(), inst + lay.owner).into_iter().collect::<Vec<_>>());
+        }
+        return g.settle(path, roots);
     }
     Vec::new()
 }
@@ -879,5 +1247,20 @@ mod tests {
         assert!(ScriptPath::parse("gd:a/b.gd").is_none());
         assert!(ScriptPath::parse("gd:a b.gd.x").is_none());
         assert!(ScriptPath::parse("{amount|id=0}").is_none());
+    }
+
+    #[test]
+    fn place_round_trip() {
+        let t = "gd:entities/enemy.gd@/root/Main/*/Big%20Boss.current_stats.health";
+        let p = ScriptPath::parse(t).unwrap();
+        assert_eq!(p.script, "entities/enemy.gd");
+        assert_eq!(p.nodes, Some(vec![Some("Main".into()), None, Some("Big Boss".into())]));
+        assert_eq!(p.steps, vec![Step::Member("current_stats".into()), Step::Member("health".into())]);
+        assert_eq!(p.text(), t);
+        assert_eq!(p.describe(), "current_stats.health in enemy.gd at /root/Main/*/Big Boss");
+        assert_eq!(ScriptPath::parse("gd:a.gd@/root.x").unwrap().nodes, Some(vec![]));
+        assert!(ScriptPath::parse("gd:a.gd@/Main.x").is_none());
+        assert!(ScriptPath::parse("gd:a.gd@/root/A%2EB.x").is_none());
+        assert!(ScriptPath::parse("gd:a.gd@/root/A").is_none());
     }
 }

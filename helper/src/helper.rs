@@ -1889,6 +1889,9 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
 /// has none of the item right now).
 const NAMED_REFIND: Duration = Duration::from_secs(10);
 const NAMED_REFIND_SCRIPT: Duration = Duration::from_secs(2);
+/// Godot objects once the scene tree is known: a few pointer reads (searches of memory still
+/// wait `NAMED_REFIND_SCRIPT`, gdscript.rs keeps their results that long).
+const NAMED_REFIND_TREE: Duration = Duration::from_millis(250);
 const NAMED_UNCHANGED: Duration = Duration::from_secs(60);
 
 /// When to count a search for a named path's objects as done, so that the next one waits:
@@ -1906,9 +1909,14 @@ fn named_found_at(old: &[u64], new: &[u64]) -> Instant {
 /// from them, else from a new search (at most every `NAMED_REFIND`).
 fn named_walk(heap: &Heap, path: &Named, roots: &mut Vec<u64>, found_at: &mut Option<Instant>) -> Vec<u64> {
     let leads = path.walk(heap, roots);
-    // A Godot script's objects are found again in one pass once its script is known (Brotato
-    // makes a new player every wave, and health was lost for up to 10 s after the shop).
-    let every = if matches!(path, Named::Script(_)) { NAMED_REFIND_SCRIPT } else { NAMED_REFIND };
+    // A Godot script's objects are found again in the scene tree, or in one pass once its
+    // script is known (Brotato makes a new player every wave, and health was lost for up to
+    // 10 s after the shop).
+    let every = match path {
+        Named::Script(_) if gdscript::knows_tree(heap.pid) => NAMED_REFIND_TREE,
+        Named::Script(_) => NAMED_REFIND_SCRIPT,
+        _ => NAMED_REFIND,
+    };
     if !leads.is_empty() || found_at.is_some_and(|t| t.elapsed() < every) {
         return leads;
     }
@@ -1951,6 +1959,19 @@ fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         Err(e) => return writeln!(out, "error: {e}"),
     }
     writeln!(out, "in {} ms", t.elapsed().as_millis())
+}
+
+/// gdtree: a Godot game's scene tree, a node a line with its script (after a script path was
+/// found or followed).
+fn cmd_gdtree(out: &mut impl Write, s: &Session) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    match gdscript::tree_text(&heap) {
+        Some(lines) => lines.iter().try_for_each(|l| writeln!(out, "{l}")),
+        None => writeln!(out, "error: not known to be a Godot game yet (find or follow a script variable first)"),
+    }
 }
 
 /// resolve <site> [type] [seconds]: "0x<addr>:<type> = <value>", then "via +<static>,<disp>"
@@ -2017,13 +2038,14 @@ pub fn run() {
             "names" => cmd_names(&mut out, &mut session, arg),
             "named" => cmd_named(&mut out, &mut session, arg),
             "ue" => cmd_ue(&mut out, &session, arg),
+            "gdtree" => cmd_gdtree(&mut out, &session),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list, peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing
