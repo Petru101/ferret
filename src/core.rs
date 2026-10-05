@@ -482,6 +482,11 @@ struct Entry {
     limit: Option<String>,
     /// How many decimals the game shows a whole number with: 1 = kept in tenths ("1.2" is 12).
     decimals: u32,
+    /// The value (in the game's units) last seen in a place Ferret trusted, kept while its
+    /// pointer paths are unconfirmed: after a restart, the one place they lead to that still
+    /// holds it is the value (games keep it in their save), not what most paths agree on
+    /// (Andromeda: 461 of 2951 led to a 1, the 32 right ones to the credits).
+    last: Option<f64>,
     /// Lines this build doesn't understand (from a newer one), saved back unchanged.
     other: Vec<String>,
 }
@@ -495,7 +500,8 @@ pub fn one_word(name: &str) -> String {
 /// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
 /// missing), its "site ...", "path ...", "named ..." and "candidate ..." lines, "run <pid>" (where the
 /// candidates came from), an optional "limit <min|-> <max|->" line and "decimals <n>" for a
-/// whole number shown with decimals. Other lines are kept
+/// whole number shown with decimals, "last <value>" while its pointer paths are unconfirmed.
+/// Other lines are kept
 /// with their entry, so a build older than the profile doesn't drop what it doesn't know.
 fn read_profile(exe: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
@@ -514,6 +520,7 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 named: Vec::new(),
                 limit: None,
                 decimals: 0,
+                last: None,
                 other: Vec::new(),
             });
         } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
@@ -532,6 +539,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.limit = Some(limit.trim().to_owned());
         } else if let (Some(d), Some(e)) = (line.strip_prefix("decimals ").and_then(|d| d.trim().parse().ok()), entries.last_mut()) {
             e.decimals = d;
+        } else if let (Some(v), Some(e)) = (line.strip_prefix("last ").and_then(|v| v.trim().parse().ok()), entries.last_mut()) {
+            e.last = Some(v);
         } else if let (false, Some(e)) = (line.trim().is_empty(), entries.last_mut()) {
             e.other.push(line.to_owned());
         }
@@ -568,6 +577,9 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         if e.decimals > 0 {
             text.push_str(&format!("decimals {}\n", e.decimals));
+        }
+        if let Some(v) = e.last.filter(|_| e.unconfirmed()) {
+            text.push_str(&format!("last {v}\n"));
         }
         for l in &e.other {
             text.push_str(&format!("{l}\n"));
@@ -743,6 +755,8 @@ struct Game {
     named_doubt: Vec<(String, String)>,
     /// Values already handed to the upgrader in this run.
     upgrade_asked: Vec<String>,
+    /// When `last` values were last written to the profile.
+    last_written: Option<Instant>,
 }
 
 /// How long a restore waits for the code of values saved by code pattern (all of them at once,
@@ -750,6 +764,18 @@ struct Game {
 /// a Mono game compiles code when it first runs it, Particle Fleet's omni isn't there at the
 /// main menu) are found by the helper in the background.
 const RESTORE_WAIT: Duration = Duration::from_secs(2);
+
+/// How often values seen in trusted places are written to the profile as `last`.
+const LAST_EVERY: Duration = Duration::from_secs(10);
+
+/// A value whose number has at least this many digits as shown (100 and up) is distinctive
+/// enough for the one place holding it to confirm pointer paths without the player.
+const DISTINCTIVE: f64 = 100.0;
+
+/// Two values of a type that are the same number (floats: up to rounding).
+fn same_value(kind: Kind, a: f64, b: f64) -> bool {
+    if kind.whole() { (a - b).abs() < 0.5 } else { (a - b).abs() <= 1e-4 * b.abs().max(1.0) }
+}
 
 /// How a value's pointer paths agreed when last followed (the helper's "votes" line).
 #[derive(Clone, Copy)]
@@ -973,7 +999,7 @@ impl Core {
         if self.game.as_ref().map(|g| g.pid) != Some(pid) {
             self.capture = None;
         }
-        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new(), upgrade_asked: Vec::new() });
+        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new(), last_written: None, upgrade_asked: Vec::new() });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -1081,6 +1107,7 @@ impl Core {
             )
         };
         let decimals = if loc.kind.whole() { self.searched_decimals } else { 0 };
+        let last = self.peek_exact(&[loc]).pop().flatten();
         let game = self.game()?;
         let mut entries = read_profile(&game.exe);
         // Saving a value again (to find it a better way) keeps its limit.
@@ -1097,6 +1124,7 @@ impl Core {
             named: named_text.clone(),
             limit,
             decimals,
+            last,
             other: Vec::new(),
         };
         let known = entry.known(&entries);
@@ -1245,7 +1273,14 @@ impl Core {
                 "{name} was saved in this run of the game, where all its pointer paths lead to it: that proves nothing yet. Confirm it after restarting the game"
             ));
         }
-        let (kind, candidates) = (entry.kind, entry.candidates.clone());
+        let (kind, mut candidates) = (entry.kind, entry.candidates.clone());
+        // Only the ones followed now: the number from last time may have picked them.
+        if let Some((_, following)) = self.game()?.paths.iter().find(|(n, _)| *n == name) {
+            let narrowed: Vec<String> = candidates.iter().filter(|c| following.contains(&path_arg(c))).cloned().collect();
+            if !narrowed.is_empty() {
+                candidates = narrowed;
+            }
+        }
         let args: Vec<String> = candidates.iter().map(|p| path_arg(p)).collect();
         let (ends, best, votes) = self.follow_votes(kind, &args);
         let Some((loc, _)) = best else {
@@ -1509,6 +1544,8 @@ impl Core {
                 continue;
             }
             let mut why_not = None;
+            // Set when the number from last time confirms its pointer paths here.
+            let mut confirmed: Option<Entry> = None;
             let mut resolved = match by_code.iter().position(|(n, _)| n == name).map(|i| by_code.remove(i).1) {
                 Some(Ok(found)) => Some(found),
                 Some(Err(why)) => {
@@ -1519,7 +1556,41 @@ impl Core {
             };
             let paths = entry.followed(&entries);
             if resolved.is_none() && !paths.is_empty() {
-                let (ends, best, votes) = self.follow_votes(entry.kind, &paths);
+                let (ends, mut best, mut votes) = self.follow_votes(entry.kind, &paths);
+                let mut paths = paths;
+                // Whether the number from last time picked the place (and said so).
+                let mut by_last = false;
+                if let Some((loc, v, kept)) = entry.run.filter(|&r| r != pid).and_then(|_| self.held_last(entry, &paths, &ends)) {
+                    let shown = number_text(entry.last.unwrap_or_default() / entry.scale(), entry.shown_decimals());
+                    if (entry.last.unwrap_or_default() / entry.scale()).abs() >= DISTINCTIVE {
+                        let mut saved = read_profile(&exe);
+                        if let Some(e) = saved.iter_mut().find(|e| e.name == *name) {
+                            e.paths = e.candidates.iter().filter(|c| kept.contains(&path_arg(c))).cloned().collect();
+                            e.candidates.clear();
+                            e.run = Some(pid);
+                            e.last = None;
+                            confirmed = Some(e.clone());
+                        }
+                        write_profile(&exe, &saved)?;
+                        self.say(&format!(
+                            "{name}: {} of {} pointer paths lead to the one place holding {shown}, its number last time: kept as confirmed",
+                            kept.len(),
+                            paths.len()
+                        ));
+                    } else {
+                        self.say(&format!(
+                            "{name}: the one place holding {shown}, its number last time, is Ferret's best guess ({} of {} pointer paths lead there): if the game shows this number, confirm it in the Values tab",
+                            kept.len(),
+                            paths.len()
+                        ));
+                    }
+                    // Followed only through those from now on.
+                    let (_, b, v2) = self.follow_votes(entry.kind, &kept);
+                    best = b.or(Some((loc, Some(v))));
+                    votes = v2;
+                    paths = kept;
+                    by_last = true;
+                }
                 self.set_votes(name, votes);
                 // Keep following them: before a save is loaded they may lead nowhere yet.
                 let game = self.game()?;
@@ -1527,17 +1598,23 @@ impl Core {
                 game.paths.push((name.clone(), paths.clone()));
                 match best {
                     Some((loc, Some(v))) => {
-                        let agree = ends.iter().filter(|e| **e == Some(loc.addr)).count();
-                        self.say(&format!("{name}: {agree} of {} pointer paths lead to it", paths.len()));
+                        if !by_last {
+                            let agree = ends.iter().filter(|e| **e == Some(loc.addr)).count();
+                            self.say(&format!("{name}: {agree} of {} pointer paths lead to it", paths.len()));
+                        }
                         if let Some(v) = votes.filter(|v| !v.clear) {
                             self.say(&format!("{name}: {}: Ferret won't write it until they agree", v.doubt()));
                         }
-                        if entry.unconfirmed() {
-                            if paths.len() < entry.candidates.len() {
-                                self.say(&format!("{name}: following the {} unconfirmed paths that start like other values' confirmed ones", paths.len()));
+                        if confirmed.is_none() && entry.unconfirmed() {
+                            if !by_last {
+                                if paths.len() < entry.candidates.len() {
+                                    self.say(&format!("{name}: following the {} unconfirmed paths that start like other values' confirmed ones", paths.len()));
+                                }
+                                self.say(&format!("{name}: its pointer paths aren't confirmed yet: if the game shows this number, confirm it in the Values tab; if not, find it again and save it as {name}"));
                             }
-                            self.say(&format!("{name}: its pointer paths aren't confirmed yet: if the game shows this number, confirm it in the Values tab; if not, find it again and save it as {name}"));
-                            if entry.guessed(&entries, pid) {
+                            // Read again: the number from last time may have confirmed another
+                            // value's paths, which this one's may start like.
+                            if entry.guessed(&read_profile(&exe), pid) {
                                 self.say(&format!("{name}: Ferret won't write it until a path is confirmed"));
                             }
                         }
@@ -1557,6 +1634,7 @@ impl Core {
                     }
                 }
             }
+            let entry = confirmed.as_ref().unwrap_or(entry);
             match resolved {
                 Some((loc, v)) => self.found_by_site(entry, loc, v)?,
                 None => {
@@ -1719,6 +1797,51 @@ impl Core {
         Ok(())
     }
 
+    /// Keeps the number of each value with unconfirmed pointer paths while it is somewhere
+    /// Ferret trusts (the run it was saved in, agreeing paths), for `held_last` after a restart.
+    fn remember_last(&mut self, shown: &[(String, Loc)], values: &[Option<f64>], saved: &[Entry]) {
+        let Some(game) = self.game.as_ref() else { return };
+        if game.last_written.is_some_and(|t| t.elapsed() < LAST_EVERY) {
+            return;
+        }
+        let seen: Vec<(String, f64)> = shown
+            .iter()
+            .zip(values)
+            .filter(|((name, loc), _)| loc.addr != 0 && self.doubtful(name, saved).is_none())
+            .filter_map(|((name, _), v)| Some((name.clone(), (*v)?)))
+            .collect();
+        let mut entries = saved.to_vec();
+        let mut changed = false;
+        for (name, v) in seen {
+            if let Some(e) = entries.iter_mut().find(|e| e.name == name && e.unconfirmed() && !e.last.is_some_and(|l| same_value(e.kind, l, v))) {
+                e.last = Some(v);
+                changed = true;
+            }
+        }
+        let exe = game.exe.clone();
+        if changed && write_profile(&exe, &entries).is_err() {
+            return;
+        }
+        if let Some(game) = self.game.as_mut() {
+            game.last_written = Some(Instant::now());
+        }
+    }
+
+    /// The one place `ends` lead to that holds the value's number from last time (`last`), its
+    /// value, and the paths (helper form) that lead there. `None` when no place or several do.
+    fn held_last(&mut self, entry: &Entry, paths: &[String], ends: &[Option<u64>]) -> Option<(Loc, i64, Vec<String>)> {
+        let last = entry.last?;
+        let mut places: Vec<Loc> = ends.iter().flatten().map(|&addr| Loc { addr, kind: entry.kind }).collect();
+        places.sort_by_key(|l| l.addr);
+        places.dedup();
+        let values = self.peek_exact(&places);
+        let holding: Vec<(Loc, f64)> =
+            places.into_iter().zip(values).filter_map(|(l, v)| Some((l, v?))).filter(|(_, v)| same_value(entry.kind, *v, last)).collect();
+        let [(loc, v)] = holding.as_slice() else { return None };
+        let kept = paths.iter().zip(ends).filter(|(_, e)| **e == Some(loc.addr)).map(|(p, _)| p.clone()).collect();
+        Some((*loc, (v + 1e-6).floor() as i64, kept))
+    }
+
     pub fn values(&mut self) -> Result<Vec<ValueRow>, String> {
         let exe = self.game()?.exe.clone();
         self.upgrades();
@@ -1732,6 +1855,7 @@ impl Core {
         let limits = self.limits();
         let saved = read_profile(&exe);
         let pid = self.game()?.pid;
+        self.remember_last(&entries, &values, &saved);
         Ok(entries
             .into_iter()
             .zip(values)
@@ -2764,8 +2888,17 @@ mod tests {
             named: Vec::new(),
             limit: None,
             decimals,
+            last: None,
             other: Vec::new(),
         }
+    }
+
+    #[test]
+    fn same_numbers() {
+        assert!(same_value(Kind::I32, 145156.0, 145156.0));
+        assert!(!same_value(Kind::I32, 145157.0, 145156.0));
+        assert!(same_value(Kind::F32, 127.00001, 127.0));
+        assert!(!same_value(Kind::F64, 127.5, 127.0));
     }
 
     #[test]
