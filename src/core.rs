@@ -115,12 +115,47 @@ impl Helper {
 
     /// `call`, telling `progress` how far a scan is (0.0..=1.0) as the helper reports it.
     fn call_with(&mut self, line: &str, progress: &mut dyn FnMut(f64)) -> Vec<String> {
-        let Some(input) = self.input.as_mut() else {
-            return vec!["error: host helper exited".into()];
-        };
-        if writeln!(input, "{line}").and_then(|_| input.flush()).is_err() {
+        if !self.send(line) {
             return vec!["error: host helper exited".into()];
         }
+        self.reply(progress)
+    }
+
+    /// `call`, sending the helper a `cancel` line once `cancel` is set meanwhile (it ends a
+    /// `sites ... wait`; the helper doesn't answer it).
+    fn call_cancellable(&mut self, line: &str, cancel: &Arc<AtomicBool>) -> Vec<String> {
+        use std::os::fd::AsFd;
+        if !self.send(line) {
+            return vec!["error: host helper exited".into()];
+        }
+        let done = Arc::new(AtomicBool::new(false));
+        let watcher = self.input.as_ref().and_then(|i| i.as_fd().try_clone_to_owned().ok()).map(|fd| {
+            let (done, cancel) = (done.clone(), cancel.clone());
+            std::thread::spawn(move || {
+                let mut input = fs::File::from(fd);
+                while !done.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed) {
+                        writeln!(input, "cancel").ok();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+        });
+        let reply = self.reply(&mut |_| {});
+        done.store(true, Ordering::Relaxed);
+        if let Some(w) = watcher {
+            w.join().ok();
+        }
+        reply
+    }
+
+    fn send(&mut self, line: &str) -> bool {
+        self.input.as_mut().is_some_and(|input| writeln!(input, "{line}").and_then(|_| input.flush()).is_ok())
+    }
+
+    /// The reply to the line sent last: its lines up to `end`.
+    fn reply(&mut self, progress: &mut dyn FnMut(f64)) -> Vec<String> {
         let mut reply = Vec::new();
         loop {
             let mut l = String::new();
@@ -242,6 +277,9 @@ pub enum Phase {
     Checking(usize, f64),
     /// The player has to change the number in the game: this many places left, seconds to do it.
     YourTurn(usize, u64),
+    /// Saving: nothing touched the value yet, so the player changes it in the game while Ferret
+    /// watches which code does. Until it does or the player cancels.
+    SaveTurn,
     /// Finding saved values again on attach: the game's program, the value, its number and how
     /// many there are.
     Restoring(String, String, usize, usize),
@@ -1000,7 +1038,7 @@ impl Core {
         for l in reply.iter().filter(|l| !l.starts_with("site ")) {
             self.say(l);
         }
-        let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
+        let mut sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
         let (mut paths, mut candidates) = (Vec::new(), Vec::new());
         let pid = self.game()?.pid;
         if sites.is_empty() && named.is_none() {
@@ -1013,6 +1051,9 @@ impl Core {
             };
             self.say(&format!("{why}; looking for objects the game names that lead to it"));
             named = self.named_path(loc, false);
+            if named.is_none() && accessed == Some(0) {
+                sites = self.sites_when_changed(loc);
+            }
         }
         if sites.is_empty() && named.is_none() {
             self.say("no names lead to it; looking for pointers that lead to it instead");
@@ -2321,6 +2362,34 @@ impl Core {
             }
         }
         None
+    }
+
+    /// Code patterns for a value nothing touched while Ferret watched: many only change when the
+    /// player acts (ammo when firing), and the code that changes them then is the lasting way to
+    /// find them (pointer paths to Wolfenstein's ammo were luck and broke at a restart). The
+    /// player changes the number in the game; Ferret watches until the game touches it or the
+    /// player cancels. Only with a window to ask in (the CLI's scripts expect the old way).
+    fn sites_when_changed(&mut self, loc: Loc) -> Vec<String> {
+        if self.on_phase.is_none() {
+            return Vec::new();
+        }
+        self.cancel.store(false, Ordering::Relaxed);
+        self.phase(Phase::SaveTurn);
+        self.status(
+            "Now change the number in the game once (use some or pick some up): Ferret watches which of the game's code \
+             does it, the surest way to find it again. Cancel saves it another way.",
+        );
+        let cancel = self.cancel.clone();
+        let reply = self.helper.call_cancellable(&format!("sites {loc} 1 wait"), &cancel);
+        let cancelled = self.cancel.swap(false, Ordering::Relaxed);
+        self.phase(Phase::Checking(1, 0.0));
+        for l in reply.iter().filter(|l| !l.starts_with("site ")) {
+            self.say(l);
+        }
+        if cancelled && !reply.iter().any(|l| l.starts_with("site ")) {
+            self.say("stopped waiting for the game to change it");
+        }
+        reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect()
     }
 
     /// The player changes the number in the game while every candidate that kept its test

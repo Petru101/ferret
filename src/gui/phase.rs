@@ -1,6 +1,7 @@
 // A big card in the middle of the window saying what Ferret is busy with and whether the
 // player has to do something: scanning (don't change the number yet), ready (change it now),
-// checking places (nothing to do), your turn (change it in the game, with a countdown), and
+// checking places (nothing to do), your turn (change it in the game: a countdown while a
+// search waits, none while a save waits for the code that changes it), and
 // opening a game (finding its saved values). While Start follows the number it shrinks to a
 // strip at the bottom. The player watches the game and is tired: a small spinner and a status
 // line were taken for "done" more than once.
@@ -41,8 +42,6 @@ impl PhaseCard {
         let bar = gtk::ProgressBar::builder().show_text(true).width_request(360).build();
         let hint = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).build();
         let give_up = gtk::Button::builder()
-            .label("Stop Waiting")
-            .tooltip_text("Undo the test values and list the places, to try them one by one")
             .halign(gtk::Align::Center)
             .css_classes(["pill"])
             .visible(false)
@@ -138,8 +137,7 @@ impl PhaseCard {
             )
         };
         let shown = self.show("turn", "Your turn: change the number in the game!", Some(1.0), &hint(secs));
-        self.give_up.set_visible(true);
-        self.root.set_can_target(true);
+        self.offer_button("Stop Waiting", "Undo the test values and list the places, to try them one by one");
         let (card, start) = (self.clone(), Instant::now());
         glib::timeout_add_local(Duration::from_millis(600), move || {
             if card.shown.get() != shown {
@@ -155,6 +153,39 @@ impl PhaseCard {
             }
             glib::ControlFlow::Continue
         });
+    }
+
+    /// Saving: the player changes the number so Ferret sees which code does. No countdown (the
+    /// player may need a while to get to where it changes); blinks until Cancel or the change.
+    pub fn save_turn(self: &Rc<Self>) {
+        let shown = self.show(
+            "turn",
+            "Your turn: change the number in the game!",
+            None,
+            "Use some or pick some up, once. Ferret watches which of the game's code changes it, \
+             the surest way to find it again after a restart.",
+        );
+        self.offer_button("Cancel", "Stop waiting and save it another way, which may not last a restart");
+        let card = self.clone();
+        glib::timeout_add_local(Duration::from_millis(600), move || {
+            if card.shown.get() != shown {
+                return glib::ControlFlow::Break;
+            }
+            if card.root.has_css_class("flash") {
+                card.root.remove_css_class("flash");
+            } else {
+                card.root.add_css_class("flash");
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Shows the card's button (it stops what the card waits for); the card takes clicks then.
+    fn offer_button(&self, label: &str, tooltip: &str) {
+        self.give_up.set_label(label);
+        self.give_up.set_tooltip_text(Some(tooltip));
+        self.give_up.set_visible(true);
+        self.root.set_can_target(true);
     }
 
     /// A typed number narrowed the search: the player changes the number in the game next.

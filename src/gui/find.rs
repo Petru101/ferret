@@ -987,6 +987,7 @@ impl FindView {
             core::Phase::Ready(_) | core::Phase::Watching(_) => self.phase.hide(),
             core::Phase::Checking(n, done) => self.phase.checking(n, done),
             core::Phase::YourTurn(n, secs) => self.phase.your_turn(n, secs),
+            core::Phase::SaveTurn => self.phase.save_turn(),
             core::Phase::Restoring(..) => {}
             core::Phase::BoxChanging => self.phase.done(
                 false,
@@ -1392,6 +1393,7 @@ impl FindView {
     }
 
     pub fn saved(&self) {
+        self.phase.hide();
         self.busy(false);
         self.result.set_sensitive(true);
         self.result.set_visible(false);
@@ -1485,6 +1487,7 @@ impl FindView {
     }
 
     pub fn save_failed(&self, e: &str) {
+        self.phase.hide();
         self.busy(false);
         self.result.set_sensitive(true);
         self.status.set_label(&format!("Not saved: {e}"));

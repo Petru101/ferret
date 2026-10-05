@@ -99,9 +99,15 @@ impl Tracer {
 
     /// Runs the game until `timeout`, calling `on_hit` for each breakpoint hit.
     /// When `on_hit` returns false, the thread stays stopped and waiting ends.
-    pub fn watch(&mut self, timeout: Duration, mut on_hit: impl FnMut(&Hit) -> bool) {
+    pub fn watch(&mut self, timeout: Duration, on_hit: impl FnMut(&Hit) -> bool) {
         let start = Instant::now();
-        while start.elapsed() < timeout {
+        self.watch_until(|| start.elapsed() >= timeout, on_hit)
+    }
+
+    /// Lets the game run, calling `on_hit` at every breakpoint hit (false = stop), until `done`
+    /// or the game's threads are gone.
+    pub fn watch_until(&mut self, mut done: impl FnMut() -> bool, mut on_hit: impl FnMut(&Hit) -> bool) {
+        while !done() && !self.tids.is_empty() {
             let Some((tid, st)) = wait(-1, libc::WNOHANG) else {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;

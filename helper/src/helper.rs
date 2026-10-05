@@ -1585,9 +1585,13 @@ fn find_pattern(pid: u32, mem: &File, pat: &[Option<u8>], limit: usize) -> io::R
 fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
     let (Some((target, _)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: sites <hex addr[:type]> [seconds] (after attach)");
+        return writeln!(out, "error: usage: sites <hex addr[:type]> [seconds] [wait] (after attach)");
     };
     let secs = it.next().and_then(|v| v.parse().ok()).unwrap_or(5);
+    // "wait": until the game touches it (then `secs` more, for the other instructions that do),
+    // or until the frontend sends a line (`cancel`): values that only change when the player
+    // acts (ammo when firing) go untouched for minutes.
+    let wait = it.next() == Some("wait");
     let mut hits: Vec<(u64, trace::Regs)> = Vec::new();
     {
         let _tracing = TRACING.lock().unwrap();
@@ -1596,8 +1600,23 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
             Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
         };
         let threads = tracer.arm(target, trace::DR7_ACCESS_4);
-        writeln!(out, "watching 0x{target:x} on {threads} threads for {secs} s")?;
-        tracer.watch(Duration::from_secs(secs), |hit| {
+        if wait {
+            writeln!(out, "watching 0x{target:x} on {threads} threads until the game touches it")?;
+        } else {
+            writeln!(out, "watching 0x{target:x} on {threads} threads for {secs} s")?;
+        }
+        out.flush()?;
+        let start = Instant::now();
+        let first = std::cell::Cell::new(None::<Instant>);
+        let done = || match first.get() {
+            Some(t) if wait => t.elapsed() >= Duration::from_secs(secs),
+            _ if wait => frontend_spoke(),
+            _ => start.elapsed() >= Duration::from_secs(secs),
+        };
+        tracer.watch_until(done, |hit| {
+            if first.get().is_none() {
+                first.set(Some(Instant::now()));
+            }
             if !hits.iter().any(|(rip, _)| *rip == hit.regs.rip) {
                 hits.push((hit.regs.rip, hit.regs));
             }
@@ -1661,6 +1680,13 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 }
 
 const SITE_TARGETS_MAX: usize = 8;
+
+/// Whether the frontend sent a line (or went away) while a command runs: the line stays unread
+/// for the main loop. Commands come one at a time, so nothing sits in stdin's buffer meanwhile.
+fn frontend_spoke() -> bool {
+    let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+    unsafe { libc::poll(&mut fd, 1, 0) > 0 }
+}
 
 /// The distinct addresses the instruction at `instr` reads as [base + disp] while the game runs
 /// for up to `timeout` (stops early after enough of them).
@@ -2027,6 +2053,11 @@ pub fn run() {
         let Ok(line) = line else { break };
         let (cmd, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
         let arg = arg.trim();
+        // Ends a `sites ... wait` early; one arriving after it ended on its own changes nothing,
+        // and gets no reply (the frontend doesn't wait for one).
+        if cmd == "cancel" {
+            continue;
+        }
         let res = match cmd {
             "info" => cmd_info(&mut out),
             "ps" => cmd_ps(&mut out, arg),
@@ -2061,7 +2092,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr>, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

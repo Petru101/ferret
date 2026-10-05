@@ -533,6 +533,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
             "watch" => ui.phase.watching(183),
             "check" => ui.phase.checking(3, 0.5),
             "turn" => ui.phase.your_turn(3, 180),
+            "save" => ui.phase.save_turn(),
             "restore" => ui.phase.restoring("Lumencraft", "lumen", 2, 5),
             "found" => ui.phase.done(true, "Found it!", "Give it a name below to keep it."),
             "several" => ui.phase.done(false, "7 places match", "Change the number in the game, then type the new one."),
