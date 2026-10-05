@@ -58,6 +58,13 @@ fn environ(pid: u32) -> HashMap<String, String> {
         .collect()
 }
 
+/// The program as started (argv[0]); Wine paths have spaces ("E:\\Mass Effect Andromeda\\...").
+fn argv0(pid: u32) -> String {
+    fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|b| String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap_or_default()).into_owned())
+        .unwrap_or_default()
+}
+
 fn cmdline(pid: u32) -> String {
     fs::read(format!("/proc/{pid}/cmdline"))
         .map(|b| {
@@ -903,12 +910,28 @@ fn draws_like_a_game(pid: u32) -> bool {
         if desktop_toolkit(name) {
             return false;
         }
-        driver |= ["libGLX_", "libEGL_", "libvulkan_", "libnvidia-glcore.", "libnvidia-eglcore.", "libgallium", "amdvlk"]
-            .iter()
-            .any(|d| name.starts_with(d))
-            || name.ends_with("_dri.so");
+        driver |= gpu_driver(name);
     }
     driver
+}
+
+/// A GPU driver's library: loaded once a program draws with the GPU.
+fn gpu_driver(name: &str) -> bool {
+    ["libGLX_", "libEGL_", "libvulkan_", "libnvidia-glcore.", "libnvidia-eglcore.", "libgallium", "amdvlk"]
+        .iter()
+        .any(|d| name.starts_with(d))
+        || name.ends_with("_dri.so")
+}
+
+/// A launcher's install: its folder or the one above ships Qt or Chromium Embedded DLLs (seen
+/// through the process's root, for sandboxed launchers).
+fn launcher_folder(pid: u32, program: &Path) -> bool {
+    let ships_toolkit = |dir: &Path| {
+        fs::read_dir(format!("/proc/{pid}/root{}", dir.display())).is_ok_and(|entries| {
+            entries.flatten().any(|e| e.file_name().to_str().is_some_and(|n| n.to_ascii_lowercase().ends_with(".dll") && desktop_toolkit(n)))
+        })
+    };
+    program.ancestors().skip(1).take(2).any(ships_toolkit)
 }
 
 /// A library only desktop apps load: GTK, Qt, Chromium Embedded (Linux names and Windows DLLs).
@@ -921,19 +944,21 @@ fn desktop_toolkit(name: &str) -> bool {
 
 /// Windows programs under Wine that aren't games: Wine's own (csrss.exe, lsass.exe, ... from
 /// its lib/wine folder), Chromium helpers, and launchers' windows and services (the EA app's
-/// use Chromium Embedded and Qt; it showed up as ten games).
+/// use Chromium Embedded and Qt; it showed up as ten games), also their helpers that load
+/// neither and don't draw (the EA app starts compatibility32\EADesktop.exe next to every game).
 fn windows_non_game(pid: u32) -> bool {
     if cmdline(pid).contains(" --type=") {
         return true;
     }
     let Ok(regions) = maps(pid) else { return true };
-    if regions.iter().any(|r| desktop_toolkit(r.path.rsplit('/').next().unwrap_or_default())) {
+    let names = || regions.iter().map(|r| r.path.rsplit('/').next().unwrap_or_default());
+    if names().any(desktop_toolkit) {
         return true;
     }
-    program_path(pid, &regions).is_some_and(|p| {
-        let p = p.to_string_lossy().to_ascii_lowercase();
-        ["/lib/wine/", "/lib64/wine/", "/drive_c/windows/"].iter().any(|d| p.contains(d))
-    })
+    let Some(program) = program_path(pid, &regions) else { return false };
+    let lower = program.to_string_lossy().to_ascii_lowercase();
+    ["/lib/wine/", "/lib64/wine/", "/drive_c/windows/"].iter().any(|d| lower.contains(d))
+        || !names().any(gpu_driver) && launcher_folder(pid, &program)
 }
 
 /// Running games, one per line: pid, program name, Steam app ID, anti-cheat, the name its
@@ -1005,7 +1030,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             let rw: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
             // Only the program: launchers pass login tokens as arguments (Heroic's Epic games get
             // -AUTH_PASSWORD=<code>), and the log is kept.
-            writeln!(out, "attached to {pid}: {}", cmdline(pid).split(' ').next().unwrap_or_default())?;
+            writeln!(out, "attached to {pid}: {}", argv0(pid))?;
             writeln!(out, "exe: {exe}")?;
             writeln!(out, "{} mappings, {} MiB writable, {}-bit", regions.len(), rw >> 20, width * 8)?;
             if doubles_only {
