@@ -184,7 +184,11 @@ pub fn is_64bit(regs: &Regs) -> bool {
     regs.cs == 0x33
 }
 
-/// A memory access of the form [base register + displacement] (displacement may be 0).
+/// A memory access of the form [base register + displacement] (displacement may be 0). For
+/// [base + index * scale + displacement] the displacement is where it went from the base this
+/// time (target - base): arrays indexed by item type keep each item at its own place in the
+/// object (Quake II's `client->pers.inventory[item]`, `dec [rcx+rax*4+0x2e8]`), so the same
+/// instruction finds this item again from the object.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Access {
     pub start: u64,
@@ -266,11 +270,9 @@ pub fn decode_access(code: &[u8], code_addr: u64, after: u64, target: u64, regs:
                 let mut matched = Vec::new();
                 let mut clobbered = Vec::new();
                 for &rex in rexes {
-                    if let Some(s) = sib_byte {
-                        if (s >> 3) & 7 != 4 || rex & 0x02 != 0 {
-                            continue; // indexed addressing is out of scope here
-                        }
-                    }
+                    // SIB index 4 without REX.X means no index register.
+                    let index = sib_byte.map(|s| (s >> 3) & 7 | (rex & 2) << 2).filter(|&i| i != 4);
+                    let scale = sib_byte.map_or(1, |s| 1u64 << (s >> 6));
                     let base = low_base | (rex & 1) << 3;
                     // A REX prefix must come last, so only operand-size/SSE prefixes can precede it.
                     // (A 0x4x byte before those is the end of the previous instruction.)
@@ -281,10 +283,24 @@ pub fn decode_access(code: &[u8], code_addr: u64, after: u64, target: u64, regs:
                         legacy += 1;
                     }
                     let dest = (modrm >> 3) & 7 | (rex & 4) << 1;
+                    // Loads into a register: it holds the value afterwards, not what it held.
+                    let loads = |r: u8| dest == r && if two_byte { matches!(op, 0xB6 | 0xB7 | 0xBE | 0xBF) } else { matches!(op, 0x8B | 0x63) };
+                    let low = |a: u64| a & 0xFFFF_FFFF;
+                    let from_base = target.wrapping_sub(reg(regs, base)) as i64;
+                    let (hits, disp) = match index {
+                        None => (low(reg(regs, base).wrapping_add(disp as u64)) == low(target), disp),
+                        Some(i) => {
+                            let step = from_base.wrapping_sub(disp);
+                            let fits = step.rem_euclid(scale as i64) == 0 && step.unsigned_abs() < 1 << 24;
+                            // A loaded-over index can't be checked; the rest of the address can.
+                            let same = loads(i) || low(reg(regs, i).wrapping_mul(scale).wrapping_add(disp as u64)) == low(step.wrapping_add(disp) as u64);
+                            (fits && same && !loads(base), from_base)
+                        }
+                    };
                     let access = Access { start: code_addr + start as u64, len: end - start, base, disp };
-                    if reg(regs, base).wrapping_add(disp as u64) & 0xFFFF_FFFF == target & 0xFFFF_FFFF {
+                    if hits {
                         matched.push(access);
-                    } else if !two_byte && matches!(op, 0x8B | 0x63) && dest == base {
+                    } else if index.is_none() && !two_byte && matches!(op, 0x8B | 0x63) && dest == base {
                         // `mov reg, [reg+disp]` (or movsxd) overwrites its own base register.
                         clobbered.push(access);
                     }
@@ -349,5 +365,31 @@ mod tests {
         // 0x63 is arpl in 32-bit code.
         regs.cs = 0x23;
         assert!(decode_access(&code, 0x1000, 0x1008, 0x7f00_0000_0038, &regs).is_empty());
+    }
+
+    #[test]
+    fn indexed() {
+        // Quake II RTX firing the shotgun: movsxd rax,[rcx+0xdc8]; dec dword [rcx+rax*4+0x2e8]
+        // (the shells in client->pers.inventory[item]): kept as the place from the object.
+        let code = [0x48, 0x63, 0x81, 0xc8, 0x0d, 0x00, 0x00, 0xff, 0x8c, 0x81, 0xe8, 0x02, 0x00, 0x00];
+        let mut regs: Regs = unsafe { std::mem::zeroed() };
+        regs.cs = 0x33;
+        regs.rcx = 0x24b_0000;
+        regs.rax = 7;
+        let target = 0x24b_0000 + 0x2e8 + 7 * 4;
+        let found = decode_access(&code, 0x1000, 0x100e, target, &regs);
+        assert_eq!(found, vec![Access { start: 0x1007, len: 7, base: 1, disp: 0x2e8 + 28 }]);
+
+        // Another index reaches another place: not this one.
+        regs.rax = 8;
+        assert!(decode_access(&code, 0x1000, 0x100e, target, &regs).is_empty());
+
+        // movzx eax, word [rdx+rax*4+0x2e8] loads over its index: the rest still has to fit.
+        let code = [0x0f, 0xb7, 0x84, 0x82, 0xe8, 0x02, 0x00, 0x00];
+        regs.rdx = 0x24b_0000;
+        regs.rax = 0x55;
+        let found = decode_access(&code, 0x1000, 0x1008, target, &regs);
+        assert_eq!(found, vec![Access { start: 0x1000, len: 8, base: 2, disp: 0x2e8 + 28 }]);
+        assert!(decode_access(&code, 0x1000, 0x1008, target + 2, &regs).is_empty());
     }
 }
