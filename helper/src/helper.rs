@@ -7,6 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -314,8 +315,16 @@ fn parse_loc(a: &str) -> Option<(u64, Kind)> {
     Some((parse_addr(addr)?, kind))
 }
 
+/// Writable memory that can hold the game's values. Not the GPU driver's mappings
+/// (`/dev/nvidia0`, `/dev/dri/*`, dma-bufs): video memory reads very slowly through
+/// `/proc/<pid>/mem` (on Creeper World 4, 157 MB of them took 3.7 s of a 4 s pass; the game's
+/// own 1.2 GB took 0.3 s).
 pub fn scannable(r: &Region) -> bool {
-    r.perms.starts_with("rw") && !matches!(r.path.as_str(), "[vvar]" | "[vvar_vclock]" | "[vsyscall]")
+    let device = r.path.starts_with("/dev/") && !r.path.starts_with("/dev/shm/") && !r.path.starts_with("/dev/zero");
+    r.perms.starts_with("rw")
+        && !device
+        && !r.path.contains("dmabuf")
+        && !matches!(r.path.as_str(), "[vvar]" | "[vvar_vclock]" | "[vsyscall]")
 }
 
 // --- Limits: keep a value within a range, writing only when the game moves it out.
@@ -1158,68 +1167,99 @@ struct MemScanned {
 
 impl MemScan<'_> {
     /// Writes "progress <bytes done> <bytes in all>" lines as it goes (at most ten a second), so
-    /// the interface can show how far the scan is: the first one takes seconds.
+    /// the interface can show how far the scan is. Chunks are checked on several threads (the
+    /// checks, not the reading, took most of a scan: 5.7 s for 1.2 GB on one); the matches come
+    /// out in address order all the same.
     fn run(&self, kinds: &[Kind], out: &mut impl Write) -> MemScanned {
+        const CHUNK: usize = 4 << 20;
+        let chunks: Vec<(u64, usize)> = self
+            .regions
+            .iter()
+            .filter(|r| scannable(r))
+            .flat_map(|r| (r.start..r.end).step_by(CHUNK).map(move |a| (a, ((r.end - a) as usize).min(CHUNK))))
+            .collect();
+        let total: u64 = chunks.iter().map(|c| c.1 as u64).sum();
+        // Half the cores at most, so the game itself keeps running smoothly.
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 6);
+        let (next, done) = (AtomicUsize::new(0), AtomicU64::new(0));
+        let _ = writeln!(out, "progress 0 {total}");
+        let mut parts: Vec<(usize, MemScanned)> = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut buf = vec![0u8; CHUNK];
+                        let mut mine = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(&(addr, len)) = chunks.get(i) else { return mine };
+                            mine.push((i, self.chunk(kinds, &mut buf[..len], addr)));
+                            done.fetch_add(len as u64, Ordering::Relaxed);
+                        }
+                    })
+                })
+                .collect();
+            while !workers.iter().all(|w| w.is_finished()) {
+                std::thread::sleep(Duration::from_millis(100));
+                let _ = writeln!(out, "progress {} {total}", done.load(Ordering::Relaxed));
+            }
+            workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
+        });
+        parts.sort_by_key(|p| p.0);
+        let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0 };
+        for (_, p) in parts {
+            r.found.extend(p.found);
+            r.shaped.extend(p.shaped);
+            r.bytes += p.bytes;
+            r.unreadable += p.unreadable;
+        }
+        r
+    }
+
+    /// The matches in one chunk of memory, read into `buf`.
+    fn chunk(&self, kinds: &[Kind], buf: &mut [u8], addr: u64) -> MemScanned {
         let (mem, n) = (self.mem, self.n);
         let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0 };
-        let mut buf = vec![0u8; 4 << 20];
-        let total: u64 = self.regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
-        let mut done = 0u64;
-        let mut told = Instant::now();
-        let _ = writeln!(out, "progress 0 {total}");
-        for reg in self.regions.iter().filter(|r| scannable(r)) {
-            let mut addr = reg.start;
-            while addr < reg.end {
-                if told.elapsed() >= Duration::from_millis(100) {
-                    let _ = writeln!(out, "progress {done} {total}");
-                    told = Instant::now();
-                }
-                let len = ((reg.end - addr) as usize).min(buf.len());
-                done += len as u64;
-                match mem.read_at(&mut buf[..len], addr) {
-                    Ok(len) if len > 0 => {
-                        r.bytes += len as u64;
-                        for off in (0..len.saturating_sub(3)).step_by(4) {
-                            // Doubles are 8-aligned. Integers and pointers read as floats come out
-                            // as zero or next to nothing (1e-40, 1e-300), never a number on screen.
-                            for &kind in kinds {
-                                let b = &buf[off..(off + kind.size()).min(len)];
-                                if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
-                                    continue;
-                                }
-                                // A real key is never 0; skipping those also leaves plain integers
-                                // next to a zero to the i32 check.
-                                if kind == Kind::Xor && (b[..4] == [0; 4] || b[4..] == [0; 4]) {
-                                    continue;
-                                }
-                                let value = kind.decode(b);
-                                if matches!(kind, Kind::F32 | Kind::F64) && !(value.abs() >= 1e-3) {
-                                    continue;
-                                }
-                                // The scan runs after the screen was read: allow for a fraction
-                                // that has moved on by up to 1 since.
-                                let hit = match kind {
-                                    Kind::I32 | Kind::Xor => value == n.scaled,
-                                    Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
-                                };
-                                if hit {
-                                    let at = addr + off as u64;
-                                    let c = Candidate::new(at, kind, value);
-                                    let around = |o: i64, n: usize| {
-                                        le_at(&buf[..len], off as i64 + o, n).or_else(|| read_le(mem, at.wrapping_add_signed(o), n))
-                                    };
-                                    if self.shapes.iter().any(|sh| sh.kind == kind && sh.fits(around, self.mapped, self.width)) {
-                                        r.shaped.push(c);
-                                    }
-                                    r.found.push(c);
-                                }
+        match mem.read_at(buf, addr) {
+            Ok(len) if len > 0 => {
+                r.bytes += len as u64;
+                for off in (0..len.saturating_sub(3)).step_by(4) {
+                    // Doubles are 8-aligned. Integers and pointers read as floats come out
+                    // as zero or next to nothing (1e-40, 1e-300), never a number on screen.
+                    for &kind in kinds {
+                        let b = &buf[off..(off + kind.size()).min(len)];
+                        if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
+                            continue;
+                        }
+                        // A real key is never 0; skipping those also leaves plain integers
+                        // next to a zero to the i32 check.
+                        if kind == Kind::Xor && (b[..4] == [0; 4] || b[4..] == [0; 4]) {
+                            continue;
+                        }
+                        let value = kind.decode(b);
+                        if matches!(kind, Kind::F32 | Kind::F64) && !(value.abs() >= 1e-3) {
+                            continue;
+                        }
+                        // The scan runs after the screen was read: allow for a fraction
+                        // that has moved on by up to 1 since.
+                        let hit = match kind {
+                            Kind::I32 | Kind::Xor => value == n.scaled,
+                            Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
+                        };
+                        if hit {
+                            let at = addr + off as u64;
+                            let c = Candidate::new(at, kind, value);
+                            let around = |o: i64, n: usize| {
+                                le_at(&buf[..len], off as i64 + o, n).or_else(|| read_le(mem, at.wrapping_add_signed(o), n))
+                            };
+                            if self.shapes.iter().any(|sh| sh.kind == kind && sh.fits(around, self.mapped, self.width)) {
+                                r.shaped.push(c);
                             }
+                            r.found.push(c);
                         }
                     }
-                    _ => r.unreadable += len as u64,
                 }
-                addr += len as u64;
             }
+            _ => r.unreadable += buf.len() as u64,
         }
         r
     }
