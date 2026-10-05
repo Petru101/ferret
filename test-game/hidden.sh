@@ -7,10 +7,12 @@
 #   hidden.sh node <name>            the PipeWire node with the game's picture
 #   hidden.sh key <name> <key>...    xdotool keys (Return, Escape, Down, w, ctrl+s...)
 #   hidden.sh hold <name> <key> <s>  hold a key for s seconds
+#   hidden.sh click <name> <x> <y> [button] [s]   click at a spot of the game's picture
+#                                                  (held down for s seconds)
 #   hidden.sh shot <name> <out.png>  save the current frame
 #   hidden.sh stop <name>
-# The mouse can't be moved there (gamescope owns the pointer; xdotool's moves do nothing):
-# use the keyboard, and bind actions to keys in the game's settings.
+# The mouse works for Wine/Proton games (they take the X pointer's position); native games
+# that read relative mouse motion (Lumencraft, Godot/SDL) ignore it: use their keyboard.
 set -eu
 unit="hidden-${2:-}"
 gamescope_pid() { systemctl --user show -p MainPID --value "$unit"; }
@@ -54,6 +56,18 @@ hold)
     sleep "$4"
     DISPLAY=$d xdotool keyup "$3"
     ;;
+click)
+    d=$(display)
+    DISPLAY=$d xdotool mousemove "$3" "$4"
+    sleep 0.2
+    if [ -n "${6:-}" ]; then
+        DISPLAY=$d xdotool mousedown "${5:-1}"
+        sleep "$6"
+        DISPLAY=$d xdotool mouseup "${5:-1}"
+    else
+        DISPLAY=$d xdotool click "${5:-1}"
+    fi
+    ;;
 shot)
     out=$(realpath -m "$3")
     timeout 10 gst-launch-1.0 -q pipewiresrc path="$(node)" num-buffers=2 ! videoconvert ! pngenc snapshot=false ! multifilesink location="$out.%d" >/dev/null
@@ -65,7 +79,7 @@ stop)
     echo "stopped $unit"
     ;;
 *)
-    sed -n '2,13p' "$0"
+    sed -n '2,15p' "$0"
     exit 1
     ;;
 esac

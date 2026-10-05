@@ -19,7 +19,9 @@
 //   FProperty: ArrayDim @0x38, ElementSize @0x3C, Offset @0x4C, and @0x78 the struct of a
 //   StructProperty, the inner property of an ArrayProperty, the class of an ObjectProperty, the
 //   key property of a MapProperty (value property @0x80).
-// The layout is checked on the engine's own Guid struct (A, B, C, D: four ints).
+//   From UE 5.4 FField's Owner (FFieldVariant) is one tagged pointer instead of a pointer and a
+//   bool, so everything after it is 8 bytes earlier (Starship Troopers: Ultimate Bug War!, 5.6).
+// The layout is checked on the engine's own Guid struct (A, B, C, D: four ints), in both forms.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -93,6 +95,8 @@ pub struct Prop {
 pub struct Ue {
     objects: u64,
     blocks: u64,
+    /// How much earlier FField's fields after Owner are (0, or 8 from UE 5.4).
+    shift: u64,
     names: Mutex<HashMap<u32, Option<String>>>,
     props: Mutex<HashMap<u64, Arc<Vec<Prop>>>>,
     containers: Mutex<HashMap<u64, bool>>,
@@ -129,9 +133,18 @@ impl Ue {
         }
         let objects = objects.ok_or("no Unreal object list found")?;
         let blocks = blocks.ok_or("no Unreal name pool found")?;
-        let ue = Ue { objects, blocks, names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
-        ue.check_layout(mem)?;
-        Ok(ue)
+        let mut ue = Ue { objects, blocks, shift: 0, names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
+        let mut why = String::new();
+        for shift in [0, 8] {
+            ue.shift = shift;
+            ue.props.lock().unwrap().clear();
+            match ue.check_layout(mem) {
+                Ok(()) => return Ok(ue),
+                Err(e) if why.is_empty() => why = e,
+                Err(_) => {}
+            }
+        }
+        Err(why)
     }
 
     /// The engine's Guid struct must read as four ints at 0, 4, 8 and 12.
@@ -257,7 +270,7 @@ impl Ue {
                     }
                     out.push(p);
                 }
-                f = ptr_at(mem, field + FIELD_NEXT);
+                f = ptr_at(mem, field + FIELD_NEXT - self.shift);
             }
         }
         let out = Arc::new(out);
@@ -269,13 +282,13 @@ impl Ue {
     pub fn prop(&self, mem: &File, field: u64) -> Option<Prop> {
         let kind = self.fname(mem, ptr_at(mem, field + FIELD_CLASS)?)?;
         Some(Prop {
-            name: self.fname(mem, field + FIELD_NAME)?,
+            name: self.fname(mem, field + FIELD_NAME - self.shift)?,
             kind,
-            offset: i32_at(mem, field + PROP_OFFSET)?.max(0) as u64,
-            size: i32_at(mem, field + PROP_SIZE)?.max(0) as u64,
-            dim: i32_at(mem, field + PROP_DIM)?.max(1) as u64,
-            extra: u64_at(mem, field + PROP_EXTRA).unwrap_or(0),
-            extra2: u64_at(mem, field + PROP_EXTRA2).unwrap_or(0),
+            offset: i32_at(mem, field + PROP_OFFSET - self.shift)?.max(0) as u64,
+            size: i32_at(mem, field + PROP_SIZE - self.shift)?.max(0) as u64,
+            dim: i32_at(mem, field + PROP_DIM - self.shift)?.max(1) as u64,
+            extra: u64_at(mem, field + PROP_EXTRA - self.shift).unwrap_or(0),
+            extra2: u64_at(mem, field + PROP_EXTRA2 - self.shift).unwrap_or(0),
             inner: None,
             value: None,
         })
