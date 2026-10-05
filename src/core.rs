@@ -183,6 +183,23 @@ fn engine_path(text: &str) -> bool {
     ["ue:", "mono:", "il2cpp:", "gd:", "{"].iter().any(|p| text.starts_with(p))
 }
 
+/// A Unity class path: searching for its class and objects takes seconds (9 on Creeper World
+/// 4, two passes over its memory), so its code patterns are kept too and tried first (1.2 s
+/// there); the name finds it when they stop working (a game update) and gets them traced
+/// again.
+fn backed_by_code(text: &str) -> bool {
+    ["mono:", "il2cpp:"].iter().any(|p| text.starts_with(p))
+}
+
+/// Whether a number found through code patterns could be the value: random bytes read as a
+/// float are mostly huge or tiny (a pattern that matches in the wrong place after an update).
+fn plausible(kind: Kind, v: f64) -> bool {
+    match kind {
+        Kind::F32 | Kind::F64 => v == 0.0 || (1e-9..1e15).contains(&v.abs()),
+        _ => true,
+    }
+}
+
 struct UpgradeJob {
     pid: u32,
     name: String,
@@ -487,6 +504,13 @@ struct Entry {
     /// holds it is the value (games keep it in their save), not what most paths agree on
     /// (Andromeda: 461 of 2951 led to a 1, the 32 right ones to the credits).
     last: Option<f64>,
+    /// The game's build its code patterns were traced or last checked in (helper `build`):
+    /// after an update they are checked against its name before being trusted.
+    build: Option<String>,
+    /// The game's build in which tracing a value found by name saw nothing touch it (ULTRAKILL's
+    /// health while the player isn't hit): not traced again at restores until the next build
+    /// (saving it again traces it).
+    untraced: Option<String>,
     /// Lines this build doesn't understand (from a newer one), saved back unchanged.
     other: Vec<String>,
 }
@@ -500,7 +524,8 @@ pub fn one_word(name: &str) -> String {
 /// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
 /// missing), its "site ...", "path ...", "named ..." and "candidate ..." lines, "run <pid>" (where the
 /// candidates came from), an optional "limit <min|-> <max|->" line and "decimals <n>" for a
-/// whole number shown with decimals, "last <value>" while its pointer paths are unconfirmed.
+/// whole number shown with decimals, "last <value>" while its pointer paths are unconfirmed,
+/// "build <stamp>" with code patterns, "untraced <stamp>" (see Entry).
 /// Other lines are kept
 /// with their entry, so a build older than the profile doesn't drop what it doesn't know.
 fn read_profile(exe: &str) -> Vec<Entry> {
@@ -521,6 +546,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 limit: None,
                 decimals: 0,
                 last: None,
+                build: None,
+                untraced: None,
                 other: Vec::new(),
             });
         } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
@@ -541,6 +568,10 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.decimals = d;
         } else if let (Some(v), Some(e)) = (line.strip_prefix("last ").and_then(|v| v.trim().parse().ok()), entries.last_mut()) {
             e.last = Some(v);
+        } else if let (Some(b), Some(e)) = (line.strip_prefix("build "), entries.last_mut()) {
+            e.build = Some(b.trim().to_owned());
+        } else if let (Some(b), Some(e)) = (line.strip_prefix("untraced "), entries.last_mut()) {
+            e.untraced = Some(b.trim().to_owned());
         } else if let (false, Some(e)) = (line.trim().is_empty(), entries.last_mut()) {
             e.other.push(line.to_owned());
         }
@@ -580,6 +611,12 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         if let Some(v) = e.last.filter(|_| e.unconfirmed()) {
             text.push_str(&format!("last {v}\n"));
+        }
+        if let Some(b) = e.build.as_ref().filter(|_| !e.sites.is_empty()) {
+            text.push_str(&format!("build {b}\n"));
+        }
+        if let Some(b) = &e.untraced {
+            text.push_str(&format!("untraced {b}\n"));
         }
         for l in &e.other {
             text.push_str(&format!("{l}\n"));
@@ -757,6 +794,8 @@ struct Game {
     upgrade_asked: Vec<String>,
     /// When `last` values were last written to the profile.
     last_written: Option<Instant>,
+    /// The game's build stamp (helper `build`), when it could be read.
+    build: Option<String>,
 }
 
 /// How long a restore waits for the code of values saved by code pattern (all of them at once,
@@ -764,6 +803,11 @@ struct Game {
 /// a Mono game compiles code when it first runs it, Particle Fleet's omni isn't there at the
 /// main menu) are found by the helper in the background.
 const RESTORE_WAIT: Duration = Duration::from_secs(2);
+
+/// How a code pattern's miss starts when what it found can't be the value.
+const IMPLAUSIBLE: &str = "it read a number no game keeps";
+/// The helper's reason when a value's code didn't run while it waited.
+const NOT_RUN: &str = "none of its code ran meanwhile";
 
 /// How often values seen in trusted places are written to the profile as `last`.
 const LAST_EVERY: Duration = Duration::from_secs(10);
@@ -999,7 +1043,20 @@ impl Core {
         if self.game.as_ref().map(|g| g.pid) != Some(pid) {
             self.capture = None;
         }
-        self.game = Some(Game { pid, exe: exe.clone(), entries: Vec::new(), paths: Vec::new(), votes: Vec::new(), via: Vec::new(), named: Vec::new(), named_doubt: Vec::new(), last_written: None, upgrade_asked: Vec::new() });
+        let build = self.helper.call("build").iter().find_map(|l| l.strip_prefix("build ")).map(str::to_owned);
+        self.game = Some(Game {
+            pid,
+            exe: exe.clone(),
+            entries: Vec::new(),
+            paths: Vec::new(),
+            votes: Vec::new(),
+            via: Vec::new(),
+            named: Vec::new(),
+            named_doubt: Vec::new(),
+            last_written: None,
+            upgrade_asked: Vec::new(),
+            build,
+        });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
@@ -1051,13 +1108,13 @@ impl Core {
         let [(loc, _)] = parse_values(&listed)[..] else {
             return Err("narrow down to exactly one address first".into());
         };
-        // Unreal and Unity (Mono) games name their objects' classes and fields: a name holds up
+        // Unreal and Unity games name their objects' classes and fields: a name holds up
         // across restarts and updates (code patterns break when the game replaces objects), and
-        // needs no tracing.
+        // needs no tracing. Unity's are slow to search for: their code patterns are kept too.
         let mut named = self.named_path(loc, true);
-        let reply = match named {
-            Some(_) => Vec::new(),
-            None => self.helper.call(&format!("sites {loc}")),
+        let reply = match &named {
+            Some((text, _, _)) if !backed_by_code(text) => Vec::new(),
+            _ => self.helper.call(&format!("sites {loc}")),
         };
         for l in reply.iter().filter(|l| !l.starts_with("site ")) {
             self.say(l);
@@ -1094,7 +1151,9 @@ impl Core {
                 candidates = self.pointer_paths(loc).map_err(|e| format!("Ferret can't find it again by code or by name, and {e}"))?;
             }
         }
-        let how = if !sites.is_empty() {
+        let how = if let (false, Some((_, places, about))) = (sites.is_empty(), &named) {
+            format!("by name: {about}, {places} now, and {} code patterns, tried first", sites.len())
+        } else if !sites.is_empty() {
             format!("{} code patterns", sites.len())
         } else if let Some((_, places, about)) = &named {
             format!("by name: {about}, {places} now")
@@ -1109,6 +1168,7 @@ impl Core {
         let decimals = if loc.kind.whole() { self.searched_decimals } else { 0 };
         let last = self.peek_exact(&[loc]).pop().flatten();
         let game = self.game()?;
+        let build = game.build.clone();
         let mut entries = read_profile(&game.exe);
         // Saving a value again (to find it a better way) keeps its limit.
         let limit = entries.iter().find(|e| e.name == name).and_then(|e| e.limit.clone());
@@ -1125,6 +1185,8 @@ impl Core {
             limit,
             decimals,
             last,
+            build,
+            untraced: None,
             other: Vec::new(),
         };
         let known = entry.known(&entries);
@@ -1502,7 +1564,10 @@ impl Core {
             return Err(format!("nothing saved for {exe}"));
         }
         let t = Instant::now();
-        let by_code: Vec<&Entry> = entries.iter().filter(|e| e.foreign_type().is_none() && e.named.is_empty() && !e.sites.is_empty()).collect();
+        let by_code: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.foreign_type().is_none() && !e.sites.is_empty() && e.named.first().is_none_or(|t| backed_by_code(t)))
+            .collect();
         if let Some(first) = by_code.first() {
             self.phase(Phase::Restoring(exe.clone(), first.name.clone(), 0, entries.len()));
         }
@@ -1515,10 +1580,18 @@ impl Core {
                 continue;
             }
             if let Some(text) = entry.named.first() {
+                let by_site = by_code.iter().position(|(n, _)| n == name).map(|i| by_code.remove(i).1);
+                let same_build = entry.build.is_some() && entry.build == self.game()?.build;
+                // Its code patterns found it (fast), in the build they were checked in.
+                if let (Some(Ok((loc, v))), true) = (&by_site, same_build) {
+                    self.found_by_site(entry, *loc, *v)?;
+                    continue;
+                }
                 let (places, doubt) = self.follow_named(entry.kind, text);
                 if let Some(why) = &doubt {
                     self.say(&format!("{name}: its name doesn't lead to one value ({why}): never written; find it again and save it as {name}"));
                 }
+                let one_value = doubt.is_none();
                 self.set_named_doubt(name, doubt);
                 let locs: Vec<Loc> = places.iter().map(|(l, _)| *l).collect();
                 let game = self.game()?;
@@ -1533,6 +1606,9 @@ impl Core {
                         let more = if places.len() > 1 { format!(", and {} more places it is kept in", places.len() - 1) } else { String::new() };
                         self.say(&format!("{name} = {v} (found by name at 0x{:x}{more})", loc.addr));
                     }
+                }
+                if let (true, Some((loc, _)), true) = (backed_by_code(text), places.first(), one_value) {
+                    self.check_sites(entry, by_site, *loc, &places)?;
                 }
                 if entry.limit.is_some() {
                     let (min, max) = entry.shown_range();
@@ -1637,6 +1713,14 @@ impl Core {
             let entry = confirmed.as_ref().unwrap_or(entry);
             match resolved {
                 Some((loc, v)) => self.found_by_site(entry, loc, v)?,
+                None if why_not.as_ref().is_some_and(|w| w.starts_with(IMPLAUSIBLE)) => {
+                    // Looking again would find the same wrong place (and a limit write there).
+                    let why = why_not.unwrap_or_default();
+                    self.say(&format!("{name}: its code patterns lead to something else ({why}; the game was updated?): find it again and save it as {name}"));
+                    let game = self.game()?;
+                    game.entries.retain(|(n, _)| n != name);
+                    game.entries.push((name.clone(), Loc { addr: 0, kind: entry.kind }));
+                }
                 None => {
                     let why = why_not.unwrap_or_else(|| "the game hasn't run the code that uses it".into());
                     self.say(&format!("{name}: not found yet ({why}), Ferret keeps looking for it in the background"));
@@ -1675,12 +1759,14 @@ impl Core {
             let mine: Vec<&str> = reply.iter().filter_map(|l| l.strip_prefix(name.as_str())?.strip_prefix(' ')).collect();
             let result = match mine.iter().find_map(|l| l.strip_prefix("error: ")) {
                 Some(why) => Err(why.to_owned()),
-                None => match parse_values(&mine.iter().map(|l| l.to_string()).collect::<Vec<_>>()).first() {
+                None => match parse_exact_values(&mine.iter().map(|l| l.to_string()).collect::<Vec<_>>()).first() {
+                    Some((loc, Some(v))) if !plausible(loc.kind, *v) => Err(format!("{IMPLAUSIBLE}: {v:e}")),
                     Some((loc, Some(v))) => {
+                        let v = (v + 1e-6).floor() as i64;
                         if let Some(via) = mine.iter().find_map(|l| l.strip_prefix("via ")) {
                             self.game()?.via.push((name.clone(), via.to_owned()));
                         }
-                        Ok((*loc, *v))
+                        Ok((*loc, v))
                     }
                     _ => Err(format!("no answer from the helper ({})", mine.join(" "))),
                 },
@@ -1688,6 +1774,76 @@ impl Core {
             found.push((name.clone(), result));
         }
         Ok(found)
+    }
+
+    /// A value found by name whose code patterns were tried first: when they found it too, they
+    /// hold up in this build; when they found something else (or nothing) in another build,
+    /// they are traced again where the name leads, so the next restart is fast again.
+    /// `by_site`: None when it has none yet (saved by name before they were kept too).
+    fn check_sites(&mut self, entry: &Entry, by_site: Option<Result<(Loc, i64), String>>, loc: Loc, places: &[(Loc, Option<f64>)]) -> Result<(), String> {
+        let name = &entry.name;
+        let build = self.game()?.build.clone();
+        let tried = build.is_some() && entry.untraced == build;
+        let Some(by_site) = by_site else {
+            if tried {
+                return Ok(());
+            }
+            self.say(&format!("{name}: tracing the code that uses it, so the next restart finds it faster"));
+            return self.retrace(name, loc, false);
+        };
+        let why = match by_site {
+            Ok((l, _)) if places.iter().any(|(p, _)| p.addr == l.addr) => {
+                if entry.build != build {
+                    self.say(&format!("{name}: its code patterns still find it in this version of the game"));
+                    self.update_entry(name, |e| e.build = build.clone())?;
+                }
+                return Ok(());
+            }
+            Ok((l, _)) => format!("they led to 0x{:x}, not where its name leads", l.addr),
+            // Its code didn't run meanwhile: nothing tells whether they still work.
+            Err(why) if why.starts_with(NOT_RUN) || why.starts_with("cannot trace") => return Ok(()),
+            Err(why) => why,
+        };
+        let wrong = why.starts_with("they led") || why.starts_with(IMPLAUSIBLE);
+        if tried && !wrong {
+            return Ok(());
+        }
+        self.say(&format!("{name}: its code patterns no longer find it ({why}): tracing it again"));
+        self.retrace(name, loc, wrong)
+    }
+
+    /// Traces the code using a value found by name and saves its patterns; `wrong`: the old
+    /// ones found something else, dropped when no new ones come.
+    fn retrace(&mut self, name: &str, loc: Loc, wrong: bool) -> Result<(), String> {
+        let build = self.game()?.build.clone();
+        let reply = self.helper.call(&format!("sites {loc}"));
+        let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
+        if !sites.is_empty() {
+            self.say(&format!("{name}: {} new code patterns saved: the next restart finds it fast again", sites.len()));
+            return self.update_entry(name, |e| {
+                e.sites = sites.clone();
+                e.build = build.clone();
+                e.untraced = None;
+            });
+        }
+        let dropped = if wrong { "; its old code patterns are dropped" } else { "" };
+        self.say(&format!(
+            "{name}: the game didn't touch it meanwhile{dropped}; it's found by name (tried again after a game update, or when saved again)"
+        ));
+        self.update_entry(name, |e| {
+            if wrong {
+                e.sites.clear();
+            }
+            e.untraced = build.clone();
+        })
+    }
+
+    /// Changes a saved value in the profile.
+    fn update_entry(&mut self, name: &str, change: impl Fn(&mut Entry)) -> Result<(), String> {
+        let exe = self.game()?.exe.clone();
+        let mut saved = read_profile(&exe);
+        saved.iter_mut().filter(|e| e.name == name).for_each(change);
+        write_profile(&exe, &saved).map(|_| ())
     }
 
     /// A value found by its code patterns (or its pointer paths): shown, and its limit applied.
@@ -1770,6 +1926,18 @@ impl Core {
             (true, false) => "a name the game merely holds",
             (true, true) => "pointer paths",
         };
+        // Code patterns that found it this run stay, tried first (a Unity class search is slow);
+        // this run goes on following it by them.
+        if backed_by_code(&u.text) && !e.sites.is_empty() {
+            e.named = vec![u.text.clone()];
+            e.build = game.build.clone();
+            write_profile(&game.exe, &entries)?;
+            self.say(&format!(
+                "{}: also saved by name ({}, {} now): Ferret finds it that way when its code patterns stop working (after a game update)",
+                u.name, u.about, u.places
+            ));
+            return Ok(());
+        }
         e.sites.clear();
         e.paths.clear();
         e.candidates.clear();
@@ -2889,6 +3057,8 @@ mod tests {
             limit: None,
             decimals,
             last: None,
+            build: None,
+            untraced: None,
             other: Vec::new(),
         }
     }
@@ -2899,6 +3069,13 @@ mod tests {
         assert!(!same_value(Kind::I32, 145157.0, 145156.0));
         assert!(same_value(Kind::F32, 127.00001, 127.0));
         assert!(!same_value(Kind::F64, 127.5, 127.0));
+    }
+
+    #[test]
+    fn plausible_numbers() {
+        assert!(plausible(Kind::F32, 36.333) && plausible(Kind::F32, 0.0) && plausible(Kind::F64, -0.25));
+        assert!(!plausible(Kind::F32, 3.4e38) && !plausible(Kind::F32, 1.2e-40));
+        assert!(plausible(Kind::I32, 4e9));
     }
 
     #[test]

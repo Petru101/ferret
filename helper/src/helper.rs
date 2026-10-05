@@ -440,6 +440,9 @@ struct NamedLimit {
     roots: Vec<u64>,
     found_at: Option<Instant>,
     addrs: Vec<u64>,
+    /// A search for its objects is running (in a thread of its own: it takes seconds, and the
+    /// value may be limited meanwhile at the address its code patterns found).
+    searching: bool,
 }
 
 #[derive(Default)]
@@ -517,7 +520,10 @@ fn limiter_loop(shared: SharedLimiter) {
                 let (Some(n), Some(heap)) = (l.named.as_mut(), heap.as_ref()) else { continue };
                 // Searching memory for its objects again takes seconds: done without the lock.
                 let leads = n.path.walk(heap, &n.roots);
-                if leads.is_empty() {
+                if leads.is_empty() && n.found_at.is_none() && !l.sites.is_empty() && l.addr != 0 {
+                    // Found by its code patterns (fast) while the first search by name runs.
+                    l.paused = None;
+                } else if leads.is_empty() {
                     l.paused = Some(match n.found_at {
                         None => "looking for it by name",
                         Some(_) => "it isn't anywhere right now (none in the game?), waiting",
@@ -534,16 +540,20 @@ fn limiter_loop(shared: SharedLimiter) {
                 n.addrs = leads;
             }
             named_due = limits
-                .iter()
+                .iter_mut()
                 .filter(|_| find)
                 .filter_map(|l| {
-                    let n = l.named.as_ref()?;
-                    (n.addrs.is_empty() && n.found_at.is_none_or(|t| t.elapsed() >= NAMED_REFIND)).then(|| (l.name.clone(), n.path.clone()))
+                    let n = l.named.as_mut()?;
+                    let due = !n.searching && n.addrs.is_empty() && n.found_at.is_none_or(|t| t.elapsed() >= NAMED_REFIND);
+                    n.searching |= due;
+                    due.then(|| (l.name.clone(), n.path.clone()))
                 })
                 .collect();
             for l in limits.iter_mut().filter(|l| l.paused.is_none()) {
                 if let Some(n) = &l.named {
-                    for &addr in &n.addrs {
+                    let interim = [l.addr];
+                    let addrs = if n.addrs.is_empty() { &interim[..] } else { &n.addrs[..] };
+                    for &addr in addrs {
                         let Some(v) = read_value(mem, addr, l.kind) else { continue };
                         let target = match (l.min, l.max) {
                             (_, Some(max)) if v > max => max,
@@ -586,15 +596,19 @@ fn limiter_loop(shared: SharedLimiter) {
             (*pid, mem, *width)
         };
         for (name, path) in named_due {
-            let roots = Heap::new(pid, &mem, width).map(|h| path.find_roots(&h)).unwrap_or_default();
-            let mut guard = shared.lock().unwrap();
-            if guard.pid != pid {
-                break;
-            }
-            if let Some(n) = guard.limits.iter_mut().find(|l| l.name == name).and_then(|l| l.named.as_mut()) {
-                n.found_at = Some(named_found_at(&n.roots, &roots));
-                n.roots = roots;
-            }
+            let (Ok(mem), shared) = (mem.try_clone(), shared.clone()) else { continue };
+            std::thread::spawn(move || {
+                let roots = Heap::new(pid, &mem, width).map(|h| path.find_roots(&h)).unwrap_or_default();
+                let mut guard = shared.lock().unwrap();
+                if guard.pid != pid {
+                    return;
+                }
+                if let Some(n) = guard.limits.iter_mut().find(|l| l.name == name).and_then(|l| l.named.as_mut()) {
+                    n.found_at = Some(named_found_at(&n.roots, &roots));
+                    n.roots = roots;
+                    n.searching = false;
+                }
+            });
         }
         // Resolving traces the game for a moment, so it runs without holding the lock.
         for (name, sites, search_code) in due {
@@ -698,7 +712,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         max,
         sites,
         paths,
-        named: named.pop().map(|path| NamedLimit { path, roots: Vec::new(), found_at: None, addrs: Vec::new() }),
+        named: named.pop().map(|path| NamedLimit { path, roots: Vec::new(), found_at: None, addrs: Vec::new(), searching: false }),
         guard_addr,
         guard,
         fixes: 0,
@@ -1618,6 +1632,37 @@ fn find_pattern(pid: u32, mem: &File, pat: &[Option<u8>], limit: usize) -> io::R
 /// "What accesses this address": watches it with a hardware breakpoint for a
 /// few seconds and prints a restart-proof pattern for each instruction found.
 /// Output lines: site <pattern> <offset of instruction in pattern> <base register> <displacement>
+/// build: "build <hex>", a stamp of the files holding the game's code (size and modification
+/// time of the program, IL2CPP's GameAssembly and Mono's Assembly-CSharp.dll): it changes when
+/// the game is updated, when code patterns saved before may find the wrong place.
+fn cmd_build(out: &mut impl Write, s: &Session) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let regions = maps(s.pid)?;
+    let exe = exe_name(s.pid).to_lowercase();
+    let file_name = |p: &str| p.rsplit('/').next().unwrap_or_default().to_lowercase();
+    let mut files: Vec<String> = regions.iter().map(|r| r.path.clone()).filter(|p| p.starts_with('/') && (file_name(p) == exe || file_name(p).starts_with("gameassembly."))).collect();
+    // Mono reads it from <Game>_Data/Managed (not always mapped).
+    if let Some(data) = regions.iter().find_map(|r| r.path.find("_Data/").map(|i| r.path[..i + 5].to_owned())) {
+        files.push(format!("{data}/Managed/Assembly-CSharp.dll"));
+    }
+    files.sort();
+    files.dedup();
+    // FNV-1a over each file's path, size and time.
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut stamped = 0;
+    for f in &files {
+        let Ok(m) = fs::metadata(format!("/proc/{}/root{f}", s.pid)) else { continue };
+        for b in format!("{f} {} {}", m.len(), m.mtime()).bytes() {
+            hash = (hash ^ b as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        stamped += 1;
+    }
+    match stamped {
+        0 => writeln!(out, "error: the game's program file isn't readable"),
+        _ => writeln!(out, "build {hash:016x}"),
+    }
+}
+
 fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
     let (Some((target, _)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
@@ -1858,12 +1903,16 @@ fn resolve_values(pid: u32, mem: &File, values: &[Vec<Site>], width: usize, time
             let Some(site) = sites.get(n) else { continue };
             match find_pattern(pid, mem, &site.pat, 2) {
                 Ok(found) if found.len() == 1 => pending.push((v, n, found[0] + site.off)),
-                Ok(found) if n == 0 && sites.len() == 1 => {
-                    results[v] = Err(format!("pattern found {} times (the game may not have run that code yet)", found.len()))
-                }
                 Ok(_) => {}
                 Err(e) => results[v] = Err(e.to_string()),
             }
+        }
+    }
+    // None of its patterns is in the game's code once: changed by an update (or a Mono game
+    // hasn't compiled that code yet).
+    for (v, sites) in values.iter().enumerate() {
+        if !sites.is_empty() && !pending.iter().any(|p| p.0 == v) && results[v].as_ref().is_err_and(|e| e.starts_with("none of its code")) {
+            results[v] = Err("its code patterns aren't in the game's code: the game was updated, or hasn't run that code yet".into());
         }
     }
     let _tracing = TRACING.lock().unwrap();
@@ -2211,6 +2260,7 @@ pub fn run() {
             "shapes" => cmd_shapes(&mut out, &mut session, arg),
             "track" => cmd_track(&mut out, &mut session, arg),
             "sites" => cmd_sites(&mut out, &session, arg),
+            "build" => cmd_build(&mut out, &session),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
             "resolve-all" => cmd_resolve_all(&mut out, &mut session, arg),
             "ptrscan" => cmd_ptrscan(&mut out, &mut session, arg),
