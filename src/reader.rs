@@ -26,7 +26,10 @@ const LINE_H: u32 = 48;
 /// A picked number's digits must each be read with at least this probability, else the read
 /// doesn't count (a guess narrowed searches past the real value: Quake II RTX's chunky digits
 /// read 19 as 10 with its 0 at 0.02 and 8 as 3 at 0.005; right digits there were >= 0.93).
-const MIN_DIGIT_PROB: f32 = 0.6;
+/// On the bench right reads went as low as 0.57 (Creeper World 4's "77" under a cut-off
+/// "STORE"), 0.58 and 0.6 (Graveyard Keeper's "0"s), wrong ones as high as 0.52 (Quake's 11
+/// read as 10 by the whole-box fallback), 0.49 ("098P" for 09BP), 0.40 and 0.37: a thin gap.
+const MIN_DIGIT_PROB: f32 = 0.55;
 
 struct Reader {
     det: Model,
