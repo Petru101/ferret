@@ -96,6 +96,18 @@ fn is_gamemaker(pid: u32, exe: &str) -> bool {
     })
 }
 
+/// Java games run on a JVM (HotSpot's libjvm.so, or jvm.dll under Proton). Its garbage collector
+/// moves objects around, and one instruction of its bytecode interpreter writes the int fields
+/// of every object: a code pattern found there led a limit into another object's reference field
+/// and crashed Shattered Pixel Dungeon.
+fn is_java(pid: u32) -> bool {
+    let Ok(regions) = maps(pid) else { return false };
+    regions.iter().any(|r| {
+        let name = r.path.rsplit(['/', '\\']).next().unwrap_or_default();
+        name == "libjvm.so" || name.eq_ignore_ascii_case("jvm.dll")
+    })
+}
+
 /// Godot games load <program>.pck from next to the program, or carry it at the end of the
 /// program (which then ends with its magic, "GDPC").
 fn is_godot(pid: u32) -> bool {
@@ -812,6 +824,8 @@ struct Session {
     width: usize,
     /// The game stores numbers only as doubles: scans look for nothing else.
     doubles_only: bool,
+    /// A Java game: code patterns are refused (see `is_java`).
+    java: bool,
     candidates: Vec<Candidate>,
     /// The matches before each step of the search (newest last) and the command that took it,
     /// for `undo`.
@@ -1058,7 +1072,8 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             let width = pointers::pointer_width(pid, &f, &modules, &exe);
             *limiter.lock().unwrap() = Limiter { pid, mem: f.try_clone().ok(), width, modules, limits: Vec::new() };
             let doubles_only = is_gamemaker(pid, &exe);
-            *s = Session { pid, mem: Some(f), exe: exe.clone(), width, doubles_only, ..Session::default() };
+            let java = is_java(pid);
+            *s = Session { pid, mem: Some(f), exe: exe.clone(), width, doubles_only, java, ..Session::default() };
             let regions = maps(pid)?;
             let rw: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
             // Only the program: launchers pass login tokens as arguments (Heroic's Epic games get
@@ -1068,6 +1083,9 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             writeln!(out, "{} mappings, {} MiB writable, {}-bit", regions.len(), rw >> 20, width * 8)?;
             if doubles_only {
                 writeln!(out, "GameMaker game: it keeps numbers as doubles, searching only those")?;
+            }
+            if java {
+                writeln!(out, "{JAVA}")?;
             }
             Ok(())
         }
@@ -1703,7 +1721,12 @@ fn cmd_build(out: &mut impl Write, s: &Session) -> io::Result<()> {
     }
 }
 
+const JAVA: &str = "Java game: it moves its objects around and shares its code between values, so values can't be saved yet";
+
 fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    if s.java {
+        return writeln!(out, "error: {JAVA}");
+    }
     let mut it = arg.split_whitespace();
     let (Some((target, _)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
         return writeln!(out, "error: usage: sites <hex addr[:type]> [seconds] [wait] (after attach)");
@@ -1990,6 +2013,9 @@ fn resolve_values(pid: u32, mem: &File, values: &[Vec<Site>], width: usize, time
 /// ...] | <name> ...: every value's code patterns armed together; per value a line "<name>
 /// <addr:type> = <value>" (and "<name> via <path>"), or "<name> error: <why>".
 fn cmd_resolve_all(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    if s.java {
+        return writeln!(out, "error: {JAVA}");
+    }
     let mut parts = arg.split('|');
     let secs: f64 = parts.next().and_then(|t| t.trim().parse().ok()).unwrap_or(2.0);
     let Some(mem) = s.mem.as_ref() else {
@@ -2239,6 +2265,9 @@ fn cmd_gdtree(out: &mut impl Write, s: &Session) -> io::Result<()> {
 /// resolve <site> [type] [seconds]: "0x<addr>:<type> = <value>", then "via +<static>,<disp>"
 /// when the object comes from a static pointer (a path to follow for the rest of this run).
 fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    if s.java {
+        return writeln!(out, "error: {JAVA}");
+    }
     let f: Vec<&str> = arg.split_whitespace().collect();
     let (Some(site), Some(mem)) = (Site::parse(&f), s.mem.as_ref()) else {
         return writeln!(out, "error: usage: resolve <pattern> <offset> <register> <displacement> [type] [seconds]");

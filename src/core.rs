@@ -796,6 +796,8 @@ struct Game {
     last_written: Option<Instant>,
     /// The game's build stamp (helper `build`), when it could be read.
     build: Option<String>,
+    /// A Java game (the helper's attach says so): nothing is saved or restored there.
+    java: bool,
 }
 
 /// How long a restore waits for the code of values saved by code pattern (all of them at once,
@@ -1056,6 +1058,7 @@ impl Core {
             last_written: None,
             upgrade_asked: Vec::new(),
             build,
+            java: reply.iter().any(|l| l.starts_with("Java game: ")),
         });
         self.search = None;
         self.font = Font::load(&digits_path(&exe));
@@ -1072,7 +1075,9 @@ impl Core {
             };
             self.say(&format!("knows how {exe} keeps {kinds}: searches look there first"));
         }
-        if !read_profile(&exe).is_empty() {
+        if !read_profile(&exe).is_empty() && self.game()?.java {
+            self.say(&format!("saved values for {exe} are left alone: Java games can't be found again safely yet"));
+        } else if !read_profile(&exe).is_empty() {
             self.say(&format!("found saved values for {exe}, restoring:"));
             self.restore()?;
         }
@@ -1103,7 +1108,9 @@ impl Core {
         if name.is_empty() {
             return Err("the value needs a name".into());
         }
-        self.game()?;
+        if self.game()?.java {
+            return Err("Java games can't be saved yet: Java moves its objects around in memory and shares its code between values, so Ferret can't find this value again safely. Changing it now still works.".into());
+        }
         let listed = self.helper.call("list");
         let [(loc, _)] = parse_values(&listed)[..] else {
             return Err("narrow down to exactly one address first".into());
