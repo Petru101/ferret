@@ -23,6 +23,10 @@ const BOX_THRESH: f32 = 0.45;
 const UNCLIP: f32 = 1.4;
 /// Recognition input height.
 const LINE_H: u32 = 48;
+/// A picked number's digits must each be read with at least this probability, else the read
+/// doesn't count (a guess narrowed searches past the real value: Quake II RTX's chunky digits
+/// read 19 as 10 with its 0 at 0.02 and 8 as 3 at 0.005; right digits there were >= 0.93).
+const MIN_DIGIT_PROB: f32 = 0.6;
 
 struct Reader {
     det: Model,
@@ -36,6 +40,8 @@ struct Line {
     text: String,
     chars: Vec<(String, f32)>,
     rect: Rect,
+    /// The probability of the least likely digit (1 without digits).
+    weakest_digit: f32,
 }
 
 /// Where the models are: installed with the app, or `FERRET_OCR_MODELS` (tools run outside it).
@@ -146,18 +152,22 @@ impl Reader {
             !digits || c == 0 || self.chars.get(c - 1).is_some_and(|s| s.chars().all(|ch| ch.is_ascii_digit() || "/.:,".contains(ch)))
         };
         let mut chars = Vec::new();
+        let mut weakest_digit = 1f32;
         let mut last = 0;
         for t in 0..steps {
             let row = &probs[t * classes..(t + 1) * classes];
             let best = (0..classes).filter(|c| allowed(*c)).max_by(|a, b| row[*a].total_cmp(&row[*b]))?;
             if best != 0 && best != last {
                 if let Some(c) = self.chars.get(best - 1) {
+                    if c.chars().all(|ch| ch.is_ascii_digit()) {
+                        weakest_digit = weakest_digit.min(row[best]);
+                    }
                     chars.push((c.clone(), b.x as f32 + (t as f32 + 0.5) / steps as f32 * b.w as f32));
                 }
             }
             last = best;
         }
-        Some(Line { text: chars.iter().map(|c| c.0.as_str()).collect(), chars, rect: b })
+        Some(Line { text: chars.iter().map(|c| c.0.as_str()).collect(), chars, rect: b, weakest_digit })
     }
 }
 
@@ -221,19 +231,20 @@ fn clip(img: &RgbImage, area: Rect) -> Option<Rect> {
 
 /// The number shown inside `area`, read from that rectangle only: the text detected there
 /// (enlarged 3x, small HUD text is under the detector's size), the tallest line with a number;
-/// else the whole rectangle as one line of digits.
+/// else the whole rectangle as one line of digits. Lines with a doubtful digit don't count.
 pub fn read_box(img: &RgbImage, area: Rect) -> Result<Option<Shown>, String> {
     let r = reader()?;
     let Some(a) = clip(img, area) else { return Ok(None) };
     let crop = imageops::crop_imm(img, a.x, a.y, a.w, a.h).to_image();
     let big = imageops::resize(&crop, a.w * 3, a.h * 3, imageops::FilterType::Triangle);
-    let mut lines: Vec<Line> = r.detect(&big).into_iter().filter_map(|b| r.recognize(&big, b, false)).collect();
+    let sure = |l: &Line| l.weakest_digit >= MIN_DIGIT_PROB;
+    let mut lines: Vec<Line> = r.detect(&big).into_iter().filter_map(|b| r.recognize(&big, b, false)).filter(sure).collect();
     lines.sort_by_key(|l| std::cmp::Reverse(l.rect.h));
     if let Some(n) = lines.iter().find_map(|l| first_number(&l.text)) {
         return Ok(Some(n));
     }
     let whole = Rect { x: 0, y: 0, w: a.w, h: a.h };
-    Ok(r.recognize(&crop, whole, true).and_then(|l| first_number(&l.text)))
+    Ok(r.recognize(&crop, whole, true).filter(sure).and_then(|l| first_number(&l.text)))
 }
 
 /// What `area` says, letters and all (the learner skips labels like "AMMO").

@@ -776,7 +776,25 @@ pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font
     if let Some(n) = read.as_ref().filter(|n| cands.iter().any(|c| reads_as(c, n))) {
         return Ok(Some((n.clone(), true)));
     }
-    Ok(font_read(font, &cands).map(|(_, n)| (n, true)).or(read.map(|n| (n, false))))
+    // Digits the learned ones read that are only part of PaddleOCR's number, with ink over half
+    // the number's height beside them, missed the rest (Quake II RTX's "17" read as "1": its 7
+    // breaks into pieces of other colours, none a whole glyph). Small letters beside them are
+    // not digits (Infested Planet's "09BP", where PaddleOCR reads the B as 8).
+    let part_of = |f: &Shown, p: &Shown| f.digits() != p.digits() && p.digits().contains(&f.digits());
+    let ink_beside = |i: usize| {
+        let read = number_glyphs(&cands[i].glyphs);
+        let (Some(x0), Some(x1), Some(h)) =
+            (read.iter().map(|g| g.x).min(), read.iter().map(|g| g.x + g.w).max(), read.iter().map(|g| g.h).max())
+        else {
+            return false;
+        };
+        cands.iter().flat_map(|c| &c.glyphs).any(|g| !g.cut && (g.x >= x1 || g.x + g.w <= x0) && g.h * 2 > h)
+    };
+    match (font_read(font, &cands), read) {
+        (Some((i, f)), Some(p)) if part_of(&f, &p) && ink_beside(i) => Ok(Some((p, false))),
+        (Some((_, f)), _) => Ok(Some((f, true))),
+        (None, p) => Ok(p.map(|n| (n, false))),
+    }
 }
 
 /// Learns the game's digits from `area` showing `n`. The glyphs must split into the number's

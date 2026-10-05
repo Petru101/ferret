@@ -70,7 +70,7 @@ click)
     ;;
 shot)
     out=$(realpath -m "$3")
-    timeout 10 gst-launch-1.0 -q pipewiresrc path="$(node)" num-buffers=2 ! videoconvert ! pngenc snapshot=false ! multifilesink location="$out.%d" >/dev/null
+    timeout 10 gst-launch-1.0 -q pipewiresrc path="$(node)" num-buffers=2 keepalive-time=250 ! videoconvert ! pngenc snapshot=false ! multifilesink location="$out.%d" >/dev/null
     mv "$out.1" "$out" && rm -f "$out.0"
     echo "saved $out"
     ;;
