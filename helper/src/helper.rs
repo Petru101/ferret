@@ -351,7 +351,7 @@ struct Limit {
 /// A named path of any kind: through objects the game names (Unity, names.rs), to an entry of
 /// the game's dictionaries (Godot, godot.rs), through its scripts' variables (Godot,
 /// gdscript.rs), through its Unreal objects (ue.rs) or to a field of a Mono class's live
-/// objects (Unity, mono.rs).
+/// objects (Unity, Mono or IL2CPP; mono.rs).
 #[derive(Clone)]
 enum Named {
     Objects(NamedPath),
@@ -369,7 +369,7 @@ impl Named {
         if text.starts_with("gd:") {
             return ScriptPath::parse(text).map(Named::Script);
         }
-        if text.starts_with("mono:") {
+        if text.starts_with("mono:") || text.starts_with("il2cpp:") {
             return MonoPath::parse(text).map(Named::Mono);
         }
         match text.starts_with('{') {
@@ -379,7 +379,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:")
     }
 
     /// Where it leads from the roots found before (no search).
@@ -518,7 +518,10 @@ fn limiter_loop(shared: SharedLimiter) {
                 // Searching memory for its objects again takes seconds: done without the lock.
                 let leads = n.path.walk(heap, &n.roots);
                 if leads.is_empty() {
-                    l.paused = Some("it isn't anywhere right now (none in the game?), waiting");
+                    l.paused = Some(match n.found_at {
+                        None => "looking for it by name",
+                        Some(_) => "it isn't anywhere right now (none in the game?), waiting",
+                    });
                 } else if named_doubt(mem, &leads, l.kind, &n.path).is_some() {
                     l.paused = Some("its name leads to places that aren't one value, not written");
                 } else {
@@ -1994,7 +1997,7 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 }
 
 /// names <hex addr[:type]> [unreal]: named paths that lead to the value now, best first ("unreal": only
-/// the engine's own: Unreal objects and Mono classes, no tracing or pointer map needed): "named <path>
+/// the engine's own: Unreal objects and Unity classes, no tracing or pointer map needed): "named <path>
 /// <places it leads to> <what it means>" (see names.rs), then a summary line.
 fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let (addr, only_unreal) = match arg.trim().strip_suffix(" unreal") {
@@ -2016,7 +2019,7 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
             return writeln!(out, "{} named paths in {} ms", found.len().min(5), t.elapsed().as_millis());
         }
     }
-    // A field of a Unity (Mono) class's only live object: by the class's name, past the
+    // A field of a Unity (Mono or IL2CPP) class's only live object: by the class's name, past the
     // objects the game replaces (a checkpoint's new player).
     if let Some((p, leads)) = mono::discover(&heap, target) {
         writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;

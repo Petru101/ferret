@@ -177,10 +177,10 @@ impl Helper {
     }
 }
 
-/// A named path through the engine's own names (Unreal objects, Mono classes, Godot scripts and
+/// A named path through the engine's own names (Unreal objects, Unity classes, Godot scripts and
 /// dictionaries): nothing better to upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "gd:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "{"].iter().any(|p| text.starts_with(p))
 }
 
 struct UpgradeJob {
