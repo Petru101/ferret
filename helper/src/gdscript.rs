@@ -252,6 +252,10 @@ static TREE: Mutex<Option<(u32, u64, Tree)>> = Mutex::new(None);
 /// Scripts whose objects were found in the scene tree, by process: they are looked for there
 /// only (Brotato's player is gone during the shop; searching memory for it cost a pass).
 static IN_TREE: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+/// Where each script's objects were found in the tree last (their parents), by process, and
+/// when the whole tree was looked through for them.
+static HOMES: Mutex<Vec<(u32, String, Instant, Vec<u64>)>> = Mutex::new(Vec::new());
+const WHOLE_TREE_EVERY: Duration = Duration::from_secs(1);
 const MAX_CHILDREN: u64 = 1 << 16;
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 1 << 17;
@@ -743,15 +747,54 @@ impl<'a> Godot<'a> {
     /// The objects the path starts from, found in the scene tree (None: the tree isn't known).
     fn tree_roots(&self, path: &ScriptPath) -> Option<Vec<u64>> {
         let (t, root) = self.tree(&[])?;
-        let objs = match &path.nodes {
-            Some(n) => self.at_place(&t, root, n),
-            None => self.all_nodes(&t, root),
+        let roots = match &path.nodes {
+            Some(n) => self.running(&self.at_place(&t, root, n), &path.script),
+            None => self.anywhere(&t, root, &path.script),
         };
-        let roots = self.running(&objs, &path.script);
         if !roots.is_empty() {
             self.mark_in_tree(&path.script);
         }
         Some(roots)
+    }
+
+    /// The script's objects anywhere in the tree: first among the children of the nodes they
+    /// were last found under (a new wave's player comes back there), the whole tree at most
+    /// every `WHOLE_TREE_EVERY` (Lumencraft: 11.5k nodes, ~70 ms).
+    fn anywhere(&self, t: &Tree, root: u64, script: &str) -> Vec<u64> {
+        let pid = self.heap.pid;
+        let home = HOMES.lock().unwrap().iter().find(|h| h.0 == pid && h.1 == script).map(|h| (h.2, h.3.clone()));
+        if let Some((walked, parents)) = home {
+            let in_tree = |&p: &u64| self.climb(t, p).is_some_and(|c| c.last() == Some(&root));
+            let near: Vec<u64> = parents.iter().filter(|p| in_tree(p)).flat_map(|&p| self.kids(t, p).unwrap_or_default()).collect();
+            let roots = self.running(&near, script);
+            if !roots.is_empty() || walked.elapsed() < WHOLE_TREE_EVERY {
+                return roots;
+            }
+        }
+        let roots = self.running(&self.all_nodes(t, root), script);
+        self.remember_home(t, script, &roots, true);
+        roots
+    }
+
+    /// Notes the nodes these objects of the script are under (and that the whole tree was
+    /// just looked through).
+    fn remember_home(&self, t: &Tree, script: &str, roots: &[u64], walked: bool) {
+        let pid = self.heap.pid;
+        let mut parents: Vec<u64> = roots.iter().filter_map(|&r| mem_u64(self.mem(), mem_u64(self.mem(), r + self.lay.owner)? + t.parent)).collect();
+        parents.sort_unstable();
+        parents.dedup();
+        let mut homes = HOMES.lock().unwrap();
+        let old = homes.iter().position(|h| h.0 == pid && h.1 == script).map(|i| homes.remove(i));
+        let at = match (walked, &old) {
+            (false, Some(h)) => h.2,
+            (false, None) => Instant::now() - WHOLE_TREE_EVERY,
+            (true, _) => Instant::now(),
+        };
+        if parents.is_empty() {
+            parents = old.map(|h| h.3).unwrap_or_default();
+        }
+        homes.retain(|h| h.0 == pid);
+        homes.push((pid, script.to_owned(), at, parents));
     }
 
     fn mark_in_tree(&self, script: &str) {
@@ -772,6 +815,7 @@ impl<'a> Godot<'a> {
         };
         if objs.iter().any(|&o| self.climb(&t, o).is_some_and(|c| c.last() == Some(&root))) {
             self.mark_in_tree(&path.script);
+            self.remember_home(&t, &path.script, &roots, false);
         }
         match &path.nodes {
             Some(n) => {
@@ -793,11 +837,14 @@ pub fn tree_text(heap: &Heap) -> Option<Vec<String>> {
         return Some(out);
     };
     out.push(format!("tree {t:?}, root 0x{root:x}"));
+    let t0 = Instant::now();
+    let all = g.all_nodes(&t, root).len();
+    out.push(format!("{all} nodes, read in {} ms", t0.elapsed().as_millis()));
     let mut stack = vec![(root, "/root".to_owned())];
     while let Some((n, place)) = stack.pop() {
         let script = g.instance_of(n).and_then(|i| g.script_of(i)).and_then(|gd| g.script_path(gd)).unwrap_or_default();
         out.push(format!("{place} {script}").trim_end().to_owned());
-        if out.len() >= 2000 {
+        if out.len() >= 20000 {
             break;
         }
         for k in g.kids(&t, n).unwrap_or_default().into_iter().rev() {
