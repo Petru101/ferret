@@ -3,6 +3,7 @@
 // interface sends it jobs and gets events back.
 
 mod find;
+mod hotkeys;
 mod notify;
 mod phase;
 mod tips;
@@ -77,6 +78,8 @@ pub enum Event {
     /// The window was closed: the saved values kept in range (Ferret stays in the background
     /// for them; none: it quits).
     Closing(Vec<String>),
+    /// The limits hotkey: whether limits are on now, and their names.
+    Switched(Result<(bool, Vec<String>), String>),
 }
 
 type Job = Box<dyn FnOnce(&mut Core) -> Event + Send>;
@@ -179,6 +182,7 @@ struct Ui {
     phase: Rc<phase::PhaseCard>,
     tips: Rc<tips::Tips>,
     notify: Rc<notify::Notifier>,
+    hotkeys: Rc<hotkeys::Hotkeys>,
     worker: Worker,
     /// The game Ferret is attached to.
     attached: Rc<Cell<Option<u32>>>,
@@ -221,11 +225,10 @@ impl Ui {
     /// (the Background portal; the first time it asks the player), and a notification says so,
     /// with a way to quit.
     fn keep_running(self: &Rc<Self>, names: &[String]) {
-        let list = match names {
-            [one] => one.clone(),
-            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-            [] => return,
-        };
+        if names.is_empty() {
+            return;
+        }
+        let list = listed(names);
         self.background.set(true);
         let Some(app) = self.app() else { return };
         let notify = {
@@ -310,6 +313,24 @@ impl Ui {
             gio::Cancellable::NONE,
             |_| {},
         );
+    }
+
+    /// A hotkey was pressed (in the game, most likely: a notification says what it did).
+    fn hotkey(&self, id: &str) {
+        let refused = match id {
+            "limits" => {
+                self.worker.run(|core| Event::Switched(core.switch_limits()));
+                None
+            }
+            "search" if self.attached.get().is_none() => Some(("Can't search yet", "Open the game in Ferret first.")),
+            "search" => self.find.hotkey_search().map(|why| ("Can't search yet", why)),
+            "again" => self.find.hotkey_again().map(|why| ("Can't scan again yet", why)),
+            _ => None,
+        };
+        if let Some((title, why)) = refused {
+            self.toast(why);
+            self.notify.send(title, why, None, Some(6));
+        }
     }
 
     /// The window is back: Ferret is an ordinary window again.
@@ -522,6 +543,19 @@ impl Ui {
             Event::Closing(_) if self.window.is_visible() => {}
             Event::Closing(names) if names.is_empty() => self.quit(),
             Event::Closing(names) => self.keep_running(&names),
+            Event::Switched(Ok((on, names))) => {
+                let (title, body) = match on {
+                    true => ("Limits on", format!("Ferret keeps {} in range again.", listed(&names))),
+                    false => ("Limits off", format!("{} can change freely until you turn limits on again.", listed(&names))),
+                };
+                self.toast(&format!("{title}: {body}"));
+                self.notify.send(title, &body, None, Some(4));
+                self.worker.run(|core| Event::Values(core.values()));
+            }
+            Event::Switched(Err(e)) => {
+                self.toast(&e);
+                self.notify.send("Limits", &e, None, Some(4));
+            }
             Event::Reset | Event::Idle => {}
             Event::Digits(shapes) => self.find.show_digits(shapes),
             Event::Shapes(n) => self.find.show_shapes(n),
@@ -676,6 +710,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
     action("tip", Box::new(|ui, how| ui.tips.close(how == "never")));
     action("close", Box::new(|ui, _| ui.window.close()));
+    // What a hotkey does, without the portal: `limits`, `search`, `again`.
+    action("hotkey", Box::new(|ui, id| ui.hotkey(&id)));
     // Shows the status card in one state, for looking at it (`turn` can't be set up easily).
     action(
         "phase",
@@ -770,6 +806,8 @@ fn build(app: &adw::Application) {
     let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&switcher));
+    let hotkeys = hotkeys::Hotkeys::new();
+    header.pack_end(&hotkeys.button);
     // One per page (a widget has one parent), shown together.
     let banners = [(); 2].map(|_| adw::Banner::builder().title("A newer version of Ferret is installed").button_label("Restart").build());
     banners.iter().for_each(|b| b.set_action_name(Some("app.restart")));
@@ -832,6 +870,7 @@ fn build(app: &adw::Application) {
         phase,
         tips,
         notify,
+        hotkeys,
         worker,
         attached: Rc::default(),
         attaching: Rc::default(),
@@ -925,9 +964,26 @@ fn build(app: &adw::Application) {
         quit.connect_activate(move |_, _| app.quit());
     }
     app.add_action(&quit);
+    {
+        let ui2 = Rc::downgrade(&ui);
+        ui.hotkeys.on_key(move |id| {
+            if let Some(ui) = ui2.upgrade() {
+                ui.hotkey(id);
+            }
+        });
+    }
     ui.worker.run(|core| Event::Games(core.games()));
     add_debug_actions(app, &ui);
     ui.window.present();
+}
+
+/// "a", "a and b", "a, b and c".
+fn listed(names: &[String]) -> String {
+    match names {
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        [] => String::new(),
+    }
 }
 
 pub fn run() -> glib::ExitCode {

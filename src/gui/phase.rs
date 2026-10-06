@@ -134,6 +134,7 @@ impl PhaseCard {
             false => format!("{} \u{2192} {}", grouped(before), places(after)),
         };
         let shown = self.show("done", "Scanned again", None, &hint);
+        self.notify.send("Scanned again", &hint, None, Some(4));
         let card = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(3), move || {
             if card.shown.get() == shown {

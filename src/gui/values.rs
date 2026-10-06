@@ -49,6 +49,7 @@ fn state_text(state: &str) -> String {
 
 fn limit_subtitle(v: &ValueRow) -> String {
     match &v.limit_state {
+        Some(state) if state.ends_with("turned off") => format!("Turned off with the hotkey · keeps {} when on", core::limit_text(v.min, v.max)),
         Some(state) => format!("Kept {} · {}", core::limit_text(v.min, v.max), state_text(state)),
         None => "Off".into(),
     }

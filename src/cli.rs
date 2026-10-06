@@ -7,7 +7,7 @@ use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
-restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, remove <name>";
+restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>";
 
 fn bound(v: &str) -> Result<Option<f64>, String> {
     match v {
@@ -110,6 +110,10 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                 let places = if v.places > 1 { format!("  in {} places", v.places) } else { String::new() };
                 println!("{:<12} {value} (at 0x{:x}, {}){places}{limit}{doubt}", v.name, v.addr, v.kind.describe());
             }
+        }
+        "switch" => {
+            let (on, names) = core.switch_limits()?;
+            println!("limits {}: {}", if on { "on" } else { "off" }, names.join(", "));
         }
         "limit" => {
             let f: Vec<&str> = arg.split_whitespace().collect();

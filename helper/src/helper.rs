@@ -367,6 +367,8 @@ struct Limit {
     changed: bool,
     unchanged: Option<f64>,
     paused: Option<&'static str>,
+    /// Turned off by the player (`switch`, a hotkey): still followed, never written.
+    off: bool,
     retry_at: Instant,
     /// When its code patterns last found it (the object may be replaced while the old one stays
     /// readable, which the guard can't see).
@@ -584,7 +586,7 @@ fn limiter_loop(shared: SharedLimiter) {
                     let interim = [l.addr];
                     let addrs = if n.addrs.is_empty() { &interim[..] } else { &n.addrs[..] };
                     for &addr in addrs {
-                        let Some(v) = read_value(mem, addr, l.kind) else { continue };
+                        let Some(v) = read_value(mem, addr, l.kind).filter(|_| !l.off) else { continue };
                         let target = match (l.min, l.max) {
                             (_, Some(max)) if v > max => max,
                             (Some(min), _) if v < min => min,
@@ -614,6 +616,9 @@ fn limiter_loop(shared: SharedLimiter) {
                             continue;
                         }
                     }
+                }
+                if l.off {
+                    continue;
                 }
                 let target = match (l.min, l.max) {
                     (_, Some(max)) if v > max => max,
@@ -742,6 +747,8 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         None if waiting || !paths.is_empty() || !named.is_empty() => [0; 4],
         None => return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}"),
     };
+    // Found again or given new bounds: a limit the player turned off stays off.
+    let off = l.limits.iter().any(|l| l.name == *name && l.off);
     l.limits.retain(|l| l.name != *name);
     let changed = paths.is_empty();
     l.limits.push(Limit {
@@ -760,6 +767,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         changed,
         unchanged: None,
         paused: waiting.then_some("not found yet (the game hasn't run the code that uses it), waiting"),
+        off,
         retry_at: Instant::now(),
         checked_at: Instant::now(),
         searched_code: false,
@@ -770,6 +778,32 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
 fn cmd_unlimit(out: &mut impl Write, limiter: &SharedLimiter, name: &str) -> io::Result<()> {
     limiter.lock().unwrap().limits.retain(|l| l.name != name);
     writeln!(out, "no longer limiting {name}")
+}
+
+/// switch <name|*> <on|off|toggle>: turns limits off (followed, never written) or on again.
+/// `*`: every limit with bounds; toggle turns them all off when any is on. One line per limit
+/// switched: <name> on|off.
+fn cmd_switch(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
+    let (Some(name), Some(how)) = (arg.split_whitespace().next(), arg.split_whitespace().nth(1)) else {
+        return writeln!(out, "error: usage: switch <name|*> <on|off|toggle>");
+    };
+    let mut l = limiter.lock().unwrap();
+    let mut chosen: Vec<&mut Limit> =
+        l.limits.iter_mut().filter(|l| if name == "*" { l.min.is_some() || l.max.is_some() } else { l.name == name }).collect();
+    if chosen.is_empty() {
+        return writeln!(out, "error: no limit called {name}");
+    }
+    let off = match how {
+        "on" => false,
+        "off" => true,
+        "toggle" => chosen.iter().any(|l| !l.off),
+        _ => return writeln!(out, "error: usage: switch <name|*> <on|off|toggle>"),
+    };
+    for l in chosen.iter_mut() {
+        l.off = off;
+        writeln!(out, "{} {}", l.name, if off { "off" } else { "on" })?;
+    }
+    Ok(())
 }
 
 /// One line per limit: <name> <hex addr> <min|-> <max|-> fixed N times, restored M times, <state>
@@ -785,7 +819,12 @@ fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
             show(l.max),
             l.fixes,
             l.restores,
-            l.paused.unwrap_or(if l.changed { "active" } else { "waiting for the game to change it once before writing" })
+            match (l.off, l.paused) {
+                (true, _) => "turned off",
+                (false, Some(why)) => why,
+                (false, None) if l.changed => "active",
+                (false, None) => "waiting for the game to change it once before writing",
+            }
         )?;
     }
     Ok(())
@@ -2460,10 +2499,11 @@ pub fn run() {
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),
+            "switch" => cmd_switch(&mut out, &limiter, arg),
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

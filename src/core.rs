@@ -1628,8 +1628,31 @@ impl Core {
         if self.game().is_err() {
             return Vec::new();
         }
-        // Not the values registered with no bounds ("- -") so their address stays current.
-        self.limits().into_iter().filter(|(_, _, rest)| !rest.starts_with("- - ")).map(|(name, _, _)| name).collect()
+        // Not the values registered with no bounds ("- -") so their address stays current, nor
+        // limits the player turned off.
+        self.limits()
+            .into_iter()
+            .filter(|(_, _, rest)| !rest.starts_with("- - ") && !rest.ends_with("turned off"))
+            .map(|(name, _, _)| name)
+            .collect()
+    }
+
+    /// Turns all the game's limits off (followed, never written) when any is on, else on again
+    /// (a hotkey: a cutscene or a fair fight). Until the next attach; not saved. Whether they're
+    /// on now and their names.
+    pub fn switch_limits(&mut self) -> Result<(bool, Vec<String>), String> {
+        self.game()?;
+        let reply = self.helper.call("switch * toggle");
+        if reply.iter().any(|l| l.starts_with("error: no limit")) {
+            return Err("Nothing is kept in range in this game".into());
+        }
+        if let Some(e) = first_error(&reply) {
+            return Err(e);
+        }
+        let on = reply.iter().any(|l| l.ends_with(" on"));
+        let names: Vec<String> = reply.iter().filter_map(|l| l.rsplit_once(' ').map(|(n, _)| n.to_owned())).collect();
+        self.say(&format!("Limits {}: {}", if on { "on" } else { "off" }, names.join(", ")));
+        Ok((on, names))
     }
 
     /// Limits the helper enforces: name, current address, and the rest of its line.

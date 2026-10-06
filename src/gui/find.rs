@@ -1188,6 +1188,28 @@ impl FindView {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// The search hotkey: Stop while a search runs (Stop Waiting too), else Start, as the
+    /// buttons would; why not when neither can.
+    pub fn hotkey_search(&self) -> Option<&'static str> {
+        if self.stop.is_visible() {
+            self.stop();
+        } else if self.start.is_visible() && self.start.is_sensitive() && self.typed.is_editable() {
+            self.start();
+        } else {
+            return Some("Pick the number in Ferret's Find Value tab first.");
+        }
+        None
+    }
+
+    /// The Scan Again hotkey; why not when the button isn't there.
+    pub fn hotkey_again(&self) -> Option<&'static str> {
+        if !self.again.is_visible() || !self.again.is_sensitive() || self.selection.borrow().is_none() {
+            return Some("Scan Again works once a search has places to check and a number is picked.");
+        }
+        self.scan_again();
+        None
+    }
+
     /// Forgets the matches so far; the picked number and the captured frame stay.
     pub fn start_over(&self) {
         self.last_count.set(None);
