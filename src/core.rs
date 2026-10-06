@@ -2289,6 +2289,15 @@ impl Core {
         }
         let exe = self.game()?.exe.clone();
         let saved = read_profile(&exe);
+        // Kept at least some number and nothing more (Keep It): the minimum moves to the new
+        // number, first, so the limit doesn't put the old one back (the player set Age of War's
+        // base health to 1000 and 1100 while it was kept at least 992.45).
+        if let Some((min, None)) = saved.iter().find(|e| e.name == name).map(|e| e.shown_range()).filter(|r| r.0.is_some()) {
+            if min != Some(value) {
+                self.limit(name, Some(value), None)?;
+            }
+        }
+        let saved = read_profile(&exe);
         let value = match saved.iter().find(|e| e.name == name) {
             Some(entry) => entry.to_memory(value)?,
             None => value,

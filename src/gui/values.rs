@@ -26,6 +26,10 @@ struct ValueWidgets {
     /// The number now, as the game shows it.
     current: Rc<Cell<Option<f64>>>,
     keep_it: Rc<dyn Fn()>,
+    /// The range as last shown (at least, at most), and what fills the fields with another one
+    /// without applying it: Set moves a Keep It minimum to the new number in the core.
+    shown_limit: Cell<(Option<f64>, Option<f64>)>,
+    fill_limit: Rc<dyn Fn(Option<f64>, Option<f64>)>,
 }
 
 /// Confirms a value's pointer paths: the player saw the game show the number Ferret reads.
@@ -164,6 +168,9 @@ impl ValuesView {
             w.set.set_sensitive(!v.read_only);
             w.limit.set_sensitive(!v.read_only);
             w.current.set(v.value);
+            if w.shown_limit.replace((v.min, v.max)) != (v.min, v.max) {
+                (w.fill_limit)(v.min, v.max);
+            }
             w.keep.set_sensitive(v.value.is_some_and(|n| n > 0.0));
             w.group.set_description(Some(&about));
             let shown = v.value.map_or("?".into(), |n| core::number_text(n, v.decimals));
@@ -359,7 +366,7 @@ impl ValuesView {
         }
         let current: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(v.value));
         let keep_it: Rc<dyn Fn()> = {
-            let (current, limit, min, endless) = (current.clone(), limit.clone(), min.clone(), endless.clone());
+            let (current, limit, min, endless, filling) = (current.clone(), limit.clone(), min.clone(), endless.clone(), filling.clone());
             Rc::new(move || {
                 let Some(n) = current.get().filter(|&n| n > 0.0) else { return };
                 // Rounded down to the field's digits: never above what the game has now.
@@ -376,6 +383,21 @@ impl ValuesView {
             let keep_it = keep_it.clone();
             keep.connect_clicked(move |_| keep_it());
         }
-        ValueWidgets { group, value, limit, confirm, confirm_button, set: set_box, keep, current, keep_it }
+        let fill_limit: Rc<dyn Fn(Option<f64>, Option<f64>)> = {
+            let (limit, min, max, endless, filling) = (limit.clone(), min.clone(), max.clone(), endless.clone(), filling.clone());
+            Rc::new(move |lo, hi| {
+                filling.set(true);
+                endless.set_active(lo.is_some() && hi.is_none());
+                if let Some(hi) = hi {
+                    max.set_value(hi);
+                }
+                max.set_subtitle(if endless.is_active() { "No maximum" } else { "" });
+                min.set_value(lo.unwrap_or(0.0));
+                limit.set_enable_expansion(lo.is_some() || hi.is_some());
+                filling.set(false);
+            })
+        };
+        let shown_limit = Cell::new((v.min, v.max));
+        ValueWidgets { group, value, limit, confirm, confirm_button, set: set_box, keep, current, keep_it, shown_limit, fill_limit }
     }
 }
