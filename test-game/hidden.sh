@@ -58,7 +58,15 @@ hold)
     ;;
 click)
     d=$(display)
-    DISPLAY=$d xdotool mousemove "$3" "$4"
+    # gamescope scales a smaller window up to fit the picture (Ruffle's 650x474): find the spot
+    # in the window's own coordinates.
+    screen=$(DISPLAY=$d xdotool getdisplaygeometry)
+    win=$(for w in $(DISPLAY=$d xdotool search --onlyvisible --name .); do
+        DISPLAY=$d xdotool getwindowgeometry --shell "$w" | sed -n 's/^WIDTH=//p; s/^HEIGHT=//p' | tr '\n' ' '; echo
+    done | sort -n | tail -1)
+    x=$(echo "$3 $4 $screen $win" | awk '{ W = $3; H = $4; w = $5 ? $5 : W; h = $6 ? $6 : H
+        s = W / w < H / h ? W / w : H / h; printf "%d %d", ($1 - (W - w * s) / 2) / s, ($2 - (H - h * s) / 2) / s }')
+    DISPLAY=$d xdotool mousemove ${x% *} ${x#* }
     sleep 0.2
     if [ -n "${6:-}" ]; then
         DISPLAY=$d xdotool mousedown "${5:-1}"

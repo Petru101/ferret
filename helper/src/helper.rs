@@ -2132,10 +2132,11 @@ fn cmd_ptrscan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<(
     let levels: Vec<String> = r.levels.iter().map(|n| n.to_string()).collect();
     writeln!(
         out,
-        "{} paths ({} from {}; {} more that step from one object into the next more than {} times dropped), {} pointers in {} MiB, addresses per step back: {}, in {} ms",
+        "{} paths ({} from {}, {} from the main thread's stack; {} more that step from one object into the next more than {} times dropped), {} pointers in {} MiB, addresses per step back: {}, in {} ms",
         r.paths.len(),
         r.paths.iter().filter(|p| p.module.eq_ignore_ascii_case(&s.exe)).count(),
         s.exe,
+        r.paths.iter().filter(|p| p.module == pointers::STACK).count(),
         r.dropped,
         r.crossings,
         r.pointers,

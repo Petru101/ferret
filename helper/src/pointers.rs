@@ -3,6 +3,9 @@
 // does. Following one needs no tracing, and it works for values that only shared code touches.
 // Text form: "<module>+<hex offset>,<hex offset>,...": read the pointer at module+offset, add the
 // next offset and read again, ...; the last offset leads to the value itself.
+// Native games also start paths in the main thread's stack (Cheat Engine's THREADSTACK0), counted
+// down from where its stack starts: "[stack]-1a8,...". Rust programs (Ruffle) keep their state
+// there, reachable from no global.
 
 use std::fs::{self, File};
 use std::io;
@@ -17,6 +20,21 @@ pub struct Module {
     pub end: u64,
     /// Another loaded file has the same name: offsets from it would be ambiguous.
     pub ambiguous: bool,
+    /// The main thread's stack (`STACK`): offsets count down from `end`.
+    pub stack: bool,
+}
+
+pub const STACK: &str = "[stack]";
+/// How far below where the main thread's stack starts its slots count as roots: the frames of
+/// main and the loop it runs stay put for the whole run, deeper ones come and go.
+const STACK_ROOTS: u64 = 64 << 10;
+
+/// Where the main thread's stack starts (`startstack` in /proc/<pid>/stat: the address of argc;
+/// argv's and the environment's strings are above it, the frames below).
+fn stack_start(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields after the name (which may hold spaces); startstack is the 28th field.
+    stat.rsplit_once(')')?.1.split_whitespace().nth(25)?.parse().ok().filter(|&a| a != 0)
 }
 
 fn read_u32(mem: &File, addr: u64) -> Option<u32> {
@@ -59,17 +77,26 @@ pub fn modules(pid: u32, mem: &File) -> Vec<Module> {
             Some((_, m)) => m.end = m.end.max(r.end),
             None => {
                 let name = path.rsplit('/').next().unwrap_or(path).to_owned();
-                mods.push((path.clone(), Module { name, start: r.start, end: r.end, ambiguous: false }));
+                mods.push((path.clone(), Module { name, start: r.start, end: r.end, ambiguous: false, stack: false }));
             }
         }
     }
     // A Windows program's sections are not all mapped from its file under Wine.
+    let mut wine = false;
     for (_, m) in &mut mods {
         if let Some((_, size)) = pe_image(mem, m.start) {
             m.end = m.end.max(m.start + size);
+            wine = true;
         }
     }
     let mut mods: Vec<Module> = mods.into_iter().map(|(_, m)| m).collect();
+    // Under Wine the game's threads run on stacks of Wine's own, not this one.
+    if let (false, Some(top)) = (wine, stack_start(pid)) {
+        if let Some(r) = regions.iter().find(|r| r.start < top && top <= r.end) {
+            let start = r.start.max(top.saturating_sub(STACK_ROOTS));
+            mods.push(Module { name: STACK.to_owned(), start, end: top, ambiguous: false, stack: true });
+        }
+    }
     for i in 0..mods.len() {
         let dup = mods.iter().enumerate().any(|(j, o)| j != i && o.name.eq_ignore_ascii_case(&mods[i].name));
         mods[i].ambiguous = dup;
@@ -110,7 +137,11 @@ impl PtrPath {
     /// No module ("+3a1b2c,66c") = an absolute address, only good for this run of the game.
     pub fn parse(text: &str) -> Option<Self> {
         let mut parts = text.split(',');
-        let (module, base) = parts.next()?.rsplit_once('+')?;
+        let root = parts.next()?;
+        let (module, base) = match root.strip_prefix(STACK) {
+            Some(below) => (STACK, below.strip_prefix('-')?),
+            None => root.rsplit_once('+')?,
+        };
         let hex = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok();
         let offsets = parts.map(hex).collect::<Option<Vec<_>>>()?;
         if offsets.is_empty() {
@@ -121,22 +152,27 @@ impl PtrPath {
 
     pub fn text(&self) -> String {
         let offsets: Vec<String> = self.offsets.iter().map(|o| format!("{o:x}")).collect();
-        format!("{}+{:x},{}", self.module.replace(' ', "%20"), self.base, offsets.join(","))
+        let sign = if self.module == STACK { '-' } else { '+' };
+        format!("{}{sign}{:x},{}", self.module.replace(' ', "%20"), self.base, offsets.join(","))
     }
 
-    /// Where the path leads right now. Values are aligned: a path that ends anywhere else
-    /// went through something that changed.
+    /// Where the path leads right now. Values are aligned and in the game's memory: a path that
+    /// ends anywhere else went through something that changed (Age of War: 64 of 247 paths shared
+    /// a step into junk and agreed on an unmapped address, outvoting the real one).
     pub fn follow(&self, mem: &File, mods: &[Module], width: usize) -> Option<u64> {
-        Some(self.pointers(mem, mods, width)?.last()? + self.offsets.last()?).filter(|a| a % 4 == 0)
+        Some(self.pointers(mem, mods, width)?.last()? + self.offsets.last()?).filter(|&a| a % 4 == 0 && read_u32(mem, a).is_some())
     }
 
     /// The pointers read along the path right now, one per offset.
     fn pointers(&self, mem: &File, mods: &[Module], width: usize) -> Option<Vec<u64>> {
-        let start = match self.module.as_str() {
-            "" => 0,
-            name => mods.iter().find(|m| !m.ambiguous && m.name.eq_ignore_ascii_case(name))?.start,
+        let root = match self.module.as_str() {
+            "" => self.base,
+            name => {
+                let m = mods.iter().find(|m| !m.ambiguous && m.name.eq_ignore_ascii_case(name))?;
+                if m.stack { m.end.checked_sub(self.base)? } else { m.start + self.base }
+            }
         };
-        let mut read = vec![read_ptr(mem, start + self.base, width)?];
+        let mut read = vec![read_ptr(mem, root, width)?];
         for off in &self.offsets[..self.offsets.len() - 1] {
             if *read.last()? < 0x10000 {
                 return None;
@@ -363,7 +399,8 @@ pub fn scan(
             let m = module_of(addr(i)).unwrap();
             let mut offsets = Vec::new();
             graph.walk(k, pointers.get(i).0, &mut Vec::new(), &mut offsets, PER_START);
-            found.extend(offsets.into_iter().map(|offsets| PtrPath { module: m.name.clone(), base: addr(i) - m.start, offsets }));
+            let base = if m.stack { m.end - addr(i) } else { addr(i) - m.start };
+            found.extend(offsets.into_iter().map(|offsets| PtrPath { module: m.name.clone(), base, offsets }));
         }
         // Only paths that still work now (memory moved on while the scan ran).
         found.retain(|p| p.follow(mem, &mods, width) == Some(target));
@@ -478,5 +515,20 @@ impl Graph<'_> {
             self.walk(level - 1, self.pointers.get(j as usize).0, offsets, found, PER_BRANCH.min(cap - used));
             offsets.pop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_read_back() {
+        for text in ["Forager.exe+177a64c,44,2c,0", "[stack]-1a8,10,468", "+3a1b2c,66c", "lib%20x-1.so+20,8"] {
+            assert_eq!(PtrPath::parse(text).unwrap().text(), text);
+        }
+        let p = PtrPath::parse("[stack]-1a8,10").unwrap();
+        assert_eq!((p.module.as_str(), p.base), (STACK, 0x1a8));
+        assert!(PtrPath::parse("[stack]+1a8,10").is_none());
     }
 }
