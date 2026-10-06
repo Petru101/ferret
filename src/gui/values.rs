@@ -73,7 +73,7 @@ pub fn ask_remove(worker: &Worker, name: &str, parent: &impl IsA<gtk::Widget>) {
     let (worker, name) = (worker.clone(), name.to_owned());
     dialog.connect_response(Some("remove"), move |_, _| {
         let name = name.clone();
-        worker.run(move |core| Event::Done(core.remove(&name).map(|_| format!("Removed {name}"))));
+        worker.run_now(move |core| Event::Done(core.remove(&name).map(|_| format!("Removed {name}"))));
         worker.run(|core| Event::Values(core.values()));
     });
     dialog.present(Some(parent));
@@ -213,7 +213,7 @@ impl ValuesView {
                 let Some(n) = core::parse_number(&entry.text()) else { return };
                 entry.set_text("");
                 let name = name.clone();
-                worker.run(move |core| Event::Done(core.set(&name, n).map(|_| format!("{name} set to {n}"))));
+                worker.run_now(move |core| Event::Done(core.set(&name, n).map(|_| format!("{name} set to {n}"))));
             }
         };
         {
@@ -304,7 +304,7 @@ impl ValuesView {
                 }
                 max.remove_css_class("error");
                 let name = name.clone();
-                worker.run(move |core| {
+                worker.run_now(move |core| {
                     Event::Done(core.limit(&name, min_v, max_v).map(|_| match (min_v, max_v) {
                         (None, None) => format!("{name} is no longer limited"),
                         _ => format!("{name} is kept {}", core::limit_text(min_v, max_v)),

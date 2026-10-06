@@ -970,6 +970,10 @@ pub struct Core {
     pub on_phase: Option<Box<dyn FnMut(Phase) + Send>>,
     /// The value types new scans look for (empty: all of them).
     pub scan_kinds: Vec<Kind>,
+    /// Jobs the interface needs done while a search runs (a limit, a value set, the limits
+    /// hotkey): run between its reads. Before, they waited for the search to end, and a limit
+    /// turned off during one kept holding the value (Lumencraft's stamina).
+    pub side_jobs: Option<std::sync::mpsc::Receiver<SideJob>>,
     /// The memory around the game's values found so far: new scans try places shaped like them
     /// first.
     shapes: Vec<Shape>,
@@ -984,6 +988,9 @@ pub struct Core {
     bar_last: Option<(f64, f64)>,
     log_name: &'static str,
 }
+
+/// A job from the interface run in the middle of a long one (see `Core::side_jobs`).
+pub type SideJob = Box<dyn FnOnce(&mut Core) + Send>;
 
 fn cancelled_now(c: &AtomicBool) -> bool {
     c.load(Ordering::Relaxed)
@@ -1028,6 +1035,7 @@ impl Core {
             shapes: Vec::new(),
             shaped: false,
             unshaped: false,
+            side_jobs: None,
             bar: None,
             bar_last: None,
         })
@@ -1038,6 +1046,15 @@ impl Core {
         if let Some(f) = self.on_status.as_mut() {
             f(msg);
         }
+    }
+
+    /// Runs the interface's jobs that came in meanwhile (`side_jobs`).
+    pub fn run_side_jobs(&mut self) {
+        let Some(rx) = self.side_jobs.take() else { return };
+        while let Ok(job) = rx.try_recv() {
+            job(self);
+        }
+        self.side_jobs = Some(rx);
     }
 
     pub fn say(&mut self, msg: &str) {
@@ -3051,6 +3068,7 @@ impl Core {
         let mut last = None;
         let mut seen = Vec::new();
         while start.elapsed() < WAIT && !self.cancel.load(Ordering::Relaxed) {
+            self.run_side_jobs();
             // Memory: the one the game changed, starting from its test value.
             let now = self.peek(&locs);
             if let Some((&k, v)) = watched.iter().zip(&now).find(|(&k, v)| v.is_some_and(|v| v != tests[k].test && (v - tests[k].test).abs() <= PROBE_NEAR)) {
@@ -3212,6 +3230,7 @@ impl Core {
         let mut unfit = None;
         while (count > 1 || confirm) && start.elapsed() < limit && !cancelled(&self.cancel) {
             std::thread::sleep(Duration::from_millis(300));
+            self.run_side_jobs();
             // Values that change while the screen is read may show either end of that change.
             self.helper.call("mark");
             let Some(now) = self.read_stable()? else { continue };
@@ -3398,6 +3417,7 @@ impl Core {
         let mut unfit: Option<f64> = None;
         while count != 1 && start.elapsed() < limit && !cancelled(&self.cancel) {
             std::thread::sleep(Duration::from_millis(300));
+            self.run_side_jobs();
             let Some(now) = self.read_bar_stable()? else { continue };
             let again = self.scan_now.swap(false, Ordering::Relaxed);
             let near = |a: f64| (a - now.0).abs() <= now.1;

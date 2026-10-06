@@ -92,10 +92,26 @@ type Job = Box<dyn FnOnce(&mut Core) -> Event + Send>;
 #[derive(Clone)]
 pub struct Worker {
     jobs: mpsc::Sender<Job>,
+    /// Jobs a running search takes between its reads (`run_now`).
+    side: mpsc::Sender<crate::core::SideJob>,
+    events: async_channel::Sender<Event>,
     pending: Rc<Cell<usize>>,
 }
 
 impl Worker {
+    /// A job the player expects done now (a limit, a value set, the limits hotkey): a running
+    /// search does it between its reads instead of after it ends. The queue gets a job that
+    /// does it too, in case the search ends before taking it.
+    pub fn run_now(&self, job: impl FnOnce(&mut Core) -> Event + Send + 'static) {
+        let events = self.events.clone();
+        self.pending.set(self.pending.get() + 1);
+        self.side.send(Box::new(move |core| drop(events.send_blocking(job(core))))).ok();
+        self.run(|core| {
+            core.run_side_jobs();
+            Event::Idle
+        });
+    }
+
     pub fn run(&self, job: impl FnOnce(&mut Core) -> Event + Send + 'static) {
         self.pending.set(self.pending.get() + 1);
         self.jobs.send(Box::new(job)).ok();
@@ -108,7 +124,9 @@ impl Worker {
 
 fn start_worker(cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> (Worker, async_channel::Receiver<Event>) {
     let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
+    let (side_tx, side_rx) = mpsc::channel::<crate::core::SideJob>();
     let (events_tx, events_rx) = async_channel::unbounded();
+    let events = events_tx.clone();
     std::thread::spawn(move || {
         let log = events_tx.clone();
         let log = Box::new(move |msg: &str| {
@@ -123,6 +141,7 @@ fn start_worker(cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> (Worker, 
         };
         core.cancel = cancel;
         core.scan_now = scan_now;
+        core.side_jobs = Some(side_rx);
         let status = events_tx.clone();
         core.on_status = Some(Box::new(move |msg: &str| {
             status.send_blocking(Event::Status(msg.to_owned())).ok();
@@ -168,7 +187,7 @@ fn start_worker(cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> (Worker, 
             }
         }
     });
-    (Worker { jobs: jobs_tx, pending: Rc::new(Cell::new(0)) }, events_rx)
+    (Worker { jobs: jobs_tx, side: side_tx, events, pending: Rc::new(Cell::new(0)) }, events_rx)
 }
 
 struct Ui {
@@ -323,7 +342,7 @@ impl Ui {
     fn hotkey(&self, id: &str) {
         let refused = match id {
             "limits" => {
-                self.worker.run(|core| Event::Switched(core.switch_limits()));
+                self.worker.run_now(|core| Event::Switched(core.switch_limits()));
                 None
             }
             "search" if self.attached.get().is_none() => Some(("Can't search yet", "Open the game in Ferret first.")),
