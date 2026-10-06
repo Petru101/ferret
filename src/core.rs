@@ -981,7 +981,7 @@ pub struct Core {
     bar: Option<Bar>,
     /// How full the bar was when the matches' values were taken (None: the search has a copy
     /// of the game's memory to compare with, or none at all).
-    bar_last: Option<f64>,
+    bar_last: Option<(f64, f64)>,
     log_name: &'static str,
 }
 
@@ -3280,8 +3280,8 @@ impl Core {
         Ok(AutoResult::Several(count))
     }
 
-    /// How full the bar is in a fresh frame.
-    fn read_bar(&mut self) -> Result<f64, String> {
+    /// How full the bar is in a fresh frame, and how far off that may be (shares of the whole).
+    fn read_bar(&mut self) -> Result<(f64, f64), String> {
         let frame = self.frame()?;
         if let Some(f) = self.on_frame.as_mut() {
             f(&frame, self.area);
@@ -3290,32 +3290,57 @@ impl Core {
         Ok(self.bar.as_ref().ok_or("no bar picked")?.fill(&img))
     }
 
-    /// How full the bar is, when two reads in a row agree (it isn't sliding or flashing).
-    fn read_bar_stable(&mut self) -> Result<Option<f64>, String> {
-        let err = self.bar.as_ref().ok_or("no bar picked")?.error();
+    /// `read_bar`, when two reads in a row agree (the bar isn't sliding or flashing) and it isn't
+    /// empty: an empty bar is no share of anything, and a menu over the bar reads as one.
+    fn read_bar_stable(&mut self) -> Result<Option<(f64, f64)>, String> {
         let (a, b) = (self.read_bar()?, self.read_bar()?);
-        Ok(((a - b).abs() <= err).then_some(b))
+        Ok(((a.0 - b.0).abs() <= a.1.max(b.1) && b.0 > b.1).then_some(b))
+    }
+
+    /// Takes a new copy of the game's memory, the bar `now` full: a bar's search starts there.
+    fn bar_copy(&mut self, now: (f64, f64)) -> Result<(), String> {
+        let mut cmd = format!("snap {}", cache_dir().join("memory.copy").display());
+        let kinds: Vec<&str> = self.scan_kinds.iter().map(|k| k.name()).collect();
+        if !kinds.is_empty() {
+            cmd += &format!(" {}", kinds.join(","));
+        }
+        let on_phase = &mut self.on_phase;
+        let mut tell = |done| {
+            if let Some(f) = on_phase.as_mut() {
+                f(Phase::Copying(done));
+            }
+        };
+        tell(0.0);
+        let reply = self.helper.call_with(&cmd, &mut tell);
+        self.say(&format!("bar {:.0}% full: {}", now.0 * 100.0, reply.join(" ")));
+        if let Some(e) = first_error(&reply) {
+            return Err(e);
+        }
+        self.search = None;
+        self.bar_last = Some(now);
+        self.phase(Phase::BarReady);
+        Ok(())
     }
 
     /// One step of a bar's search: keeps the places whose value moved as the bar did since the
     /// last step (`bar_last`; first, since the copy of memory). The places left, or None when
-    /// none moved so (kept as they were: a misread or something over the bar). Some(0) while
-    /// the copy waits for the bar to move.
-    fn bar_step(&mut self, f: f64) -> Option<usize> {
-        let err = self.bar.as_ref()?.error();
+    /// none moved so (kept as they were: a misread, something over the bar, or the value was
+    /// lost). Some(0) while the copy waits for the bar to move more.
+    fn bar_step(&mut self, now: (f64, f64)) -> Option<usize> {
         let last = match self.bar_last {
             Some(last) => last,
             // Matches from typed numbers: their values now go with the bar now.
             None if self.search.is_some() => {
                 self.helper.call("mark");
-                self.bar_last = Some(f);
+                self.bar_last = Some(now);
                 return self.search.map(|(n, _)| n);
             }
             None => return None,
         };
-        let reply = self.helper.call(&format!("next bar {last} {f} {err}"));
+        let err = last.1.max(now.1);
+        let reply = self.helper.call(&format!("next bar {} {} {err}", last.0, now.0));
         let pct = |v: f64| format!("{:.0}%", v * 100.0);
-        self.say(&format!("bar {} -> {}: {}", pct(last), pct(f), reply.join(" ")));
+        self.say(&format!("bar {} -> {} (±{}): {}", pct(last.0), pct(now.0), pct(err), reply.join(" ")));
         if let Some(e) = first_error(&reply) {
             self.say(&e);
             return Some(0).filter(|_| self.search.is_none());
@@ -3324,7 +3349,7 @@ impl Core {
         if count == 0 {
             return Some(0).filter(|_| self.search.is_none());
         }
-        self.bar_last = Some(f);
+        self.bar_last = Some(now);
         self.search = Some((count, 0));
         Some(count)
     }
@@ -3340,7 +3365,7 @@ impl Core {
                 break f;
             }
             if start.elapsed() > limit || cancelled(&self.cancel) {
-                return Err("The bar kept moving.".into());
+                return Err("The bar is empty, hidden or keeps moving.".into());
             }
         };
         let mut count = 0;
@@ -3348,55 +3373,48 @@ impl Core {
             (Some((n, _)), _) => {
                 self.bar_step(first);
                 count = n;
-                self.say(&format!("bar {:.0}% full, continuing from {n} matches", first * 100.0));
+                self.say(&format!("bar {:.0}% full, continuing from {n} matches", first.0 * 100.0));
                 self.ready(count);
             }
             // The copy is there from an earlier Start: it still waits for the bar to move.
             (None, Some(_)) => self.phase(Phase::BarReady),
-            (None, None) => {
-                let mut cmd = format!("snap {}", cache_dir().join("memory.copy").display());
-                let kinds: Vec<&str> = self.scan_kinds.iter().map(|k| k.name()).collect();
-                if !kinds.is_empty() {
-                    cmd += &format!(" {}", kinds.join(","));
-                }
-                let on_phase = &mut self.on_phase;
-                let mut tell = |done| {
-                    if let Some(f) = on_phase.as_mut() {
-                        f(Phase::Copying(done));
-                    }
-                };
-                tell(0.0);
-                let reply = self.helper.call_with(&cmd, &mut tell);
-                self.say(&format!("bar {:.0}% full: {}", first * 100.0, reply.join(" ")));
-                if let Some(e) = first_error(&reply) {
-                    return Err(e);
-                }
-                self.bar_last = Some(first);
-                self.phase(Phase::BarReady);
-            }
+            (None, None) => self.bar_copy(first)?,
         }
         let mut last = first;
         let mut unchanged_rounds = 0;
-        let err = self.bar.as_ref().map_or(0.01, |b| b.error());
-        while (count != 1) && start.elapsed() < limit && !cancelled(&self.cancel) {
+        // A share nothing fits: a misread or something over the bar, unless it's read again
+        // after the bar moved off it and back.
+        let mut unfit: Option<f64> = None;
+        while count != 1 && start.elapsed() < limit && !cancelled(&self.cancel) {
             std::thread::sleep(Duration::from_millis(300));
-            let Some(f) = self.read_bar_stable()? else { continue };
+            let Some(now) = self.read_bar_stable()? else { continue };
             let again = self.scan_now.swap(false, Ordering::Relaxed);
-            if (f - last).abs() <= err && !again {
+            let near = |a: f64| (a - now.0).abs() <= now.1;
+            if (near(last.0) || unfit.is_some_and(near)) && !again {
                 continue;
             }
-            // An empty bar is no share of anything, and a menu over the bar reads as one.
-            if f <= err {
-                continue;
-            }
-            let Some(new_count) = self.bar_step(f) else {
-                self.say("nothing moved like the bar (a misread?), keeping the matches");
+            let Some(new_count) = self.bar_step(now) else {
+                match unfit {
+                    // Twice: the value was lost (or never kept). Start again from here.
+                    Some(_) => {
+                        self.say("nothing moved like the bar twice: lost it, copying the game's memory again");
+                        self.bar_copy(now)?;
+                        count = 0;
+                        unfit = None;
+                        last = now;
+                    }
+                    None => {
+                        self.say("nothing moved like the bar (a misread?), keeping the matches");
+                        unfit = Some(now.0);
+                    }
+                }
                 continue;
             };
             // The copy still waits for a bigger move.
             if new_count == 0 {
                 continue;
             }
+            unfit = None;
             unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
             self.tell_matches(new_count);
             match count {
@@ -3405,7 +3423,7 @@ impl Core {
                 _ => self.phase(Phase::Watching(new_count)),
             }
             count = new_count;
-            last = f;
+            last = now;
             if unchanged_rounds >= 3 || (count <= 20 && unchanged_rounds >= 1) {
                 self.say(&format!("{count} addresses keep following the bar (likely the value plus copies of it)"));
                 break;
@@ -3419,9 +3437,9 @@ impl Core {
         self.bar_end(count, last)
     }
 
-    /// How a bar's search ends with `count` places left and the bar `f` full: one or a few are
+    /// How a bar's search ends with `count` places left and the bar `now` full: up to 20 are
     /// checked by writing half their value (undone after), which halves the bar on screen.
-    fn bar_end(&mut self, count: usize, f: f64) -> Result<AutoResult, String> {
+    fn bar_end(&mut self, count: usize, now: (f64, f64)) -> Result<AutoResult, String> {
         self.searched_decimals = 0;
         if count == 0 {
             return Err("Stopped before the bar moved. Press Start again and let the bar change in the game.".into());
@@ -3433,10 +3451,10 @@ impl Core {
             return Ok(AutoResult::Several(count));
         }
         let cands: Vec<Loc> = self.candidates().into_iter().map(|(l, _)| l).collect();
-        let mut held = Vec::new();
+        let mut held = 0;
         for (i, &loc) in cands.iter().enumerate() {
             self.phase(Phase::Checking(cands.len(), i as f64 / cands.len() as f64));
-            match self.bar_moves(loc, f) {
+            match self.bar_moves(loc, now) {
                 Some(true) => {
                     self.search = None;
                     self.bar_last = None;
@@ -3444,30 +3462,27 @@ impl Core {
                     self.learn_shape(loc);
                     return Ok(AutoResult::Found(loc));
                 }
-                Some(false) => held.push(loc),
+                Some(false) => held += 1,
                 None => {}
             }
         }
-        match (count, held.as_slice()) {
-            (1, [loc]) => {
-                // Kept its test value, but the bar didn't show it (some games only redraw when
-                // they change a value themselves).
-                self.search = None;
-                self.bar_last = None;
-                self.say(&format!("stored as {} (the bar didn't show the test value)", loc.kind.with_article()));
-                self.learn_shape(*loc);
-                Ok(AutoResult::Found(*loc))
-            }
+        match (count, held) {
+            // Kept its test value but the bar didn't show it: maybe a game that redraws only on
+            // its own changes, maybe something else that moved alike (SPD: a junk number of a
+            // billion passed every step). The player tries it.
+            (1, 1) => Ok(AutoResult::Unsure(
+                "The one place left kept a test value of half its number, but the bar didn't show it.".into(),
+            )),
             (1, _) => Ok(AutoResult::Unsure(COPY_ONLY.into())),
             _ => Ok(AutoResult::Several(count)),
         }
     }
 
-    /// Whether `loc` is the bar's value: half of it as a test value halves the bar (`f` full
-    /// now). Some(true) = the bar showed it, Some(false) = it kept the test value but the bar
-    /// didn't show it, None = the game put the value back (a copy) or it can't be halved.
-    fn bar_moves(&mut self, loc: Loc, f: f64) -> Option<bool> {
-        let err = self.bar.as_ref()?.error();
+    /// Whether `loc` is the bar's value: half of it as a test value halves the bar (`now` full).
+    /// Some(true) = the bar showed it, Some(false) = it kept the test value (or what the game
+    /// made of it, no further from it than half the value) but the bar didn't show it, None =
+    /// the game put something else there (a copy) or it can't be halved.
+    fn bar_moves(&mut self, loc: Loc, now: (f64, f64)) -> Option<bool> {
         let v = self.peek_exact(&[loc])[0].filter(|v| *v > 0.0)?;
         let test = if loc.kind.whole() { (v / 2.0).floor() } else { v / 2.0 };
         if test <= 0.0 {
@@ -3475,27 +3490,25 @@ impl Core {
         }
         self.helper.call(&format!("write {loc} {test} test"));
         std::thread::sleep(Duration::from_millis(1500));
-        let now = self.read_bar_stable().ok().flatten();
+        let shown = self.read_bar_stable().ok().flatten();
         let after = self.peek_exact(&[loc])[0];
+        let kept = after.filter(|a| (a - test).abs() < (a - v).abs() && (a - test).abs() <= v - test);
         // Put back what the test took, keeping a change the game made meanwhile.
-        match after {
-            Some(a) if (a - test).abs() < (a - v).abs() => self.helper.call(&format!("write {loc} {}", a + (v - test))),
-            _ => self.helper.call(&format!("write {loc} {v}")),
+        match kept {
+            Some(a) => self.helper.call(&format!("write {loc} {}", a + (v - test))),
+            None => self.helper.call(&format!("write {loc} {v}")),
         };
         // The bar shows the value it holds then, the game's own change during the test included.
-        let expect = f * after.unwrap_or(test) / v;
-        let moved = now.is_some_and(|g| (g - expect).abs() <= 2.0 * err + 0.02);
+        let expect = now.0 * kept.unwrap_or(test) / v;
+        let moved = shown.is_some_and(|g| (g.0 - expect).abs() <= 2.0 * now.1.max(g.1) + 0.02);
         self.say(&format!(
             "0x{:x}: wrote {test} (half of {v}) as a test, it held {}; the bar showed {} ({:.0}% expected)",
             loc.addr,
             after.map_or("??".into(), |a| a.to_string()),
-            now.map_or("nothing steady".into(), |g| format!("{:.0}%", g * 100.0)),
+            shown.map_or("nothing steady".into(), |g| format!("{:.0}%", g.0 * 100.0)),
             expect * 100.0
         ));
-        match after {
-            Some(a) if (a - test).abs() < (a - v).abs() => Some(moved),
-            _ => None,
-        }
+        kept.map(|_| moved)
     }
 
     /// The same search driven by numbers the player types, for when the screen can't be read:
@@ -3534,7 +3547,7 @@ impl Core {
             return Err("No number picked: type the number the game shows instead.".into());
         }
         if self.bar.is_some() {
-            let Some(f) = self.read_bar_stable()?.filter(|f| *f > self.bar.as_ref().map_or(0.0, |b| b.error())) else {
+            let Some(f) = self.read_bar_stable()? else {
                 return Err("The bar is empty, hidden or moving: try again while it shows and stays still.".into());
             };
             let count = self.bar_step(f).ok_or("Nothing in the game's memory moved like the bar did. Press Start Over and search again.")?;

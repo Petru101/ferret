@@ -1542,8 +1542,12 @@ fn cmd_snap(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
 /// Whether a value that went from `v0` to `v1` can be a bar that went from `f0` to `f1` full
 /// (shares of the whole, measured within `err` either way): the value is the bar's share of
 /// some unknown most, so `f0 * v1 / v0` must land on `f1` for some `f0` in its error.
+/// Bars show health, shields, ammo: no game's is in the billions, but junk that moved alike is
+/// (Shattered Pixel Dungeon: 1208065520 passed every step and was taken for the health).
+const BAR_MOST_VALUE: f64 = 1e7;
+
 fn bar_fits(v0: f64, v1: f64, f0: f64, f1: f64, err: f64) -> bool {
-    if !(v0 > 0.0 && v1 >= 0.0 && v1.is_finite() && v0.is_finite()) {
+    if !(v0 > 0.0 && v1 >= 0.0 && v0 <= BAR_MOST_VALUE && v1 <= BAR_MOST_VALUE) {
         return false;
     }
     let r = v1 / v0;

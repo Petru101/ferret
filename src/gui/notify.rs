@@ -31,6 +31,15 @@ pub struct Notifier {
     signals: RefCell<Vec<gio::SignalSubscription>>,
 }
 
+/// Notifications and focus changes go to the log file too, to see afterwards what reached the
+/// player (the core's log is on its worker thread).
+fn log(line: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::core::cache_dir().join("ferret.log")) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 impl Notifier {
     pub fn new() -> Rc<Self> {
         let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
@@ -54,6 +63,7 @@ impl Notifier {
     pub fn set_window(self: &Rc<Self>, window: &impl IsA<gtk::Window>) {
         let n = Rc::downgrade(self);
         window.connect_is_active_notify(move |w| {
+            log(if w.is_active() { "Ferret's window is in front" } else { "Ferret's window left the front" });
             if let (true, Some(n)) = (w.is_active(), n.upgrade()) {
                 n.withdraw();
             }
@@ -123,6 +133,7 @@ impl Notifier {
         if !away {
             return;
         }
+        log(&format!("notification: {title}"));
         let sent = self.sent.get() + 1;
         self.sent.set(sent);
         self.waiting.set(secs.is_none());
@@ -149,7 +160,7 @@ impl Notifier {
             let id = match r.map(|v| v.get::<(u32,)>()) {
                 Ok(Some((id,))) => id,
                 Ok(None) => return,
-                Err(e) => return eprintln!("notifications: {e}"),
+                Err(e) => return log(&format!("notification failed: {e}")),
             };
             // Withdrawn or replaced while the server answered.
             if n.sent.get() != sent {
