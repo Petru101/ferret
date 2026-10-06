@@ -34,6 +34,8 @@ pub struct PhaseCard {
     /// What the card asks of the player now (title, text, button, seconds): sent again when they
     /// switch to the game (`remind`); "Ready" usually comes while Ferret is still in front.
     away: RefCell<Option<(String, String, Option<&'static str>, Option<u32>)>>,
+    /// The search follows a bar, not a number: the texts say so.
+    pub follows_bar: Cell<bool>,
 }
 
 const LOOKS: [&str; 5] = ["busy", "ready", "turn", "watching", "done"];
@@ -67,7 +69,7 @@ impl PhaseCard {
         root.append(&bar);
         root.append(&hint);
         root.append(&give_up);
-        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0), notify, away: RefCell::default() })
+        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0), notify, away: RefCell::default(), follows_bar: Cell::new(false) })
     }
 
     /// Shows the card in one of `LOOKS`; `bar` = how far, when there's something to measure.
@@ -127,11 +129,35 @@ impl PhaseCard {
         self.show("busy", &format!("Scanning the game's memory for {n}…"), Some(done), "Don't change the number in the game yet.");
     }
 
+    /// A bar's search copies the game's memory first (no number to look for).
+    pub fn copying(&self, done: f64) {
+        self.show("busy", "Copying the game's memory…", Some(done), "Don't let the bar change yet.");
+    }
+
+    /// The copy is taken: the bar has to move before anything narrows down.
+    pub fn bar_ready(self: &Rc<Self>) {
+        let shown = self.show("ready", "Ready!", None, "Now let the bar change in the game: take a hit, or use some.");
+        self.tell("Ready: let the bar change in the game", "Take a hit or use some. Every change narrows it down.", None, Some(6), true);
+        let card = self.clone();
+        glib::timeout_add_local_once(Duration::from_secs(4), move || {
+            if card.shown.get() == shown {
+                card.show("watching", "Searching: let the bar change in the game", None, "Waiting for the bar to move.");
+                card.tell("Searching: let the bar change in the game", "Waiting for the bar to move.", None, Some(6), false);
+            }
+        });
+    }
+
     /// Start can follow the number: "Ready!" for a few seconds, then the strip.
     pub fn ready(self: &Rc<Self>, n: usize) {
         self.count.set(n);
-        let shown = self.show("ready", "Ready!", None, &format!("{}. Change the number in the game now.", places(n)));
-        self.tell("Ready: change the number in the game", &format!("{}. Every change narrows it down.", places(n)), None, Some(6), true);
+        let shown = match self.follows_bar.get() {
+            true => self.show("ready", "Ready!", None, &format!("{}. Keep the bar changing in the game.", places(n))),
+            false => self.show("ready", "Ready!", None, &format!("{}. Change the number in the game now.", places(n))),
+        };
+        match self.follows_bar.get() {
+            true => self.tell("Ready: keep the bar changing in the game", &format!("{}. Every change narrows it down.", places(n)), None, Some(6), true),
+            false => self.tell("Ready: change the number in the game", &format!("{}. Every change narrows it down.", places(n)), None, Some(6), true),
+        }
         let card = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(4), move || {
             if card.shown.get() == shown {
@@ -144,11 +170,18 @@ impl PhaseCard {
         self.count.set(n);
         // "Ready!" stays up its few seconds, with the new count; then the strip.
         if self.root.has_css_class("ready") && self.root.is_visible() {
-            self.hint.set_label(&format!("{}. Change the number in the game now.", places(n)));
+            match self.follows_bar.get() {
+                true => self.hint.set_label(&format!("{}. Keep the bar changing in the game.", places(n))),
+                false => self.hint.set_label(&format!("{}. Change the number in the game now.", places(n))),
+            }
             return;
         }
-        self.show("watching", "Searching: keep changing the number in the game", None, &places(n));
-        self.tell("Searching: keep changing the number in the game", &format!("{}.", places(n)), None, Some(6), false);
+        let title = match self.follows_bar.get() {
+            true => "Searching: keep the bar changing in the game",
+            false => "Searching: keep changing the number in the game",
+        };
+        self.show("watching", title, None, &places(n));
+        self.tell(title, &format!("{}.", places(n)), None, Some(6), false);
     }
 
     /// Scan Again while Start runs: how it went for a few seconds, then the strip again.

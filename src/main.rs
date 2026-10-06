@@ -1,3 +1,4 @@
+mod bar;
 mod capture;
 mod cli;
 mod core;

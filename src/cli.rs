@@ -62,6 +62,14 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                 None => println!("no number read there yet (crop: {})", core::cache_dir().join("area.png").display()),
             }
         }
+        "bar" => {
+            let nums: Vec<u32> = arg.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+            let [x, y, w, h] = nums[..] else { return Err("usage: bar <x> <y> <w> <h> (around a full bar)".into()) };
+            core.set_area(Rect { x, y, w, h });
+            core.read_picked()?;
+            core.pick_bar()?;
+            println!("watching a bar at {x},{y} {w}x{h}");
+        }
         "read" => println!("{:?}", core.read()?),
         "auto" => match core.auto(Duration::from_secs(arg.parse().unwrap_or(600)))? {
             AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),

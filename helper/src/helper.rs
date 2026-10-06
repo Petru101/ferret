@@ -914,6 +914,9 @@ struct Session {
     /// Test values the frontend hasn't put back yet (place, type, value before, test value):
     /// put back when it goes away mid-test (`put_back_tests`).
     tests: Vec<(u64, Kind, f64, f64)>,
+    /// A copy of the game's memory for a search with no number to look for (a bar): the first
+    /// `next bar` compares memory with it.
+    snap: Option<Snap>,
 }
 
 /// How far back `undo` goes, and how many matches it keeps in all (16 bytes each).
@@ -926,6 +929,7 @@ impl Session {
     fn replace(&mut self, step: &str, new: Vec<Candidate>) {
         let same = new.len() == self.candidates.len() && new.iter().zip(&self.candidates).all(|(a, b)| a.tagged == b.tagged);
         let old = std::mem::replace(&mut self.candidates, new);
+        self.snap = None;
         if same {
             return;
         }
@@ -1267,35 +1271,12 @@ impl MemScan<'_> {
             .filter(|r| scannable(r))
             .flat_map(|r| (r.start..r.end).step_by(CHUNK).map(move |a| (a, ((r.end - a) as usize).min(CHUNK))))
             .collect();
-        let total: u64 = chunks.iter().map(|c| c.1 as u64).sum();
-        // Half the cores at most, so the game itself keeps running smoothly.
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 6);
-        let (next, done) = (AtomicUsize::new(0), AtomicU64::new(0));
-        let _ = writeln!(out, "progress 0 {total}");
-        let mut parts: Vec<(usize, MemScanned)> = std::thread::scope(|s| {
-            let workers: Vec<_> = (0..threads)
-                .map(|_| {
-                    s.spawn(|| {
-                        let mut buf = vec![0u8; CHUNK];
-                        let mut mine = Vec::new();
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(&(addr, len)) = chunks.get(i) else { return mine };
-                            mine.push((i, self.chunk(kinds, &mut buf[..len], addr)));
-                            done.fetch_add(len as u64, Ordering::Relaxed);
-                        }
-                    })
-                })
-                .collect();
-            while !workers.iter().all(|w| w.is_finished()) {
-                std::thread::sleep(Duration::from_millis(100));
-                let _ = writeln!(out, "progress {} {total}", done.load(Ordering::Relaxed));
-            }
-            workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
+        let parts = parallel(chunks.len(), |i| chunks[i].1 as u64, CHUNK, out, |i, buf| {
+            let (addr, len) = chunks[i];
+            self.chunk(kinds, &mut buf[..len], addr)
         });
-        parts.sort_by_key(|p| p.0);
         let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0 };
-        for (_, p) in parts {
+        for p in parts {
             r.found.extend(p.found);
             r.shaped.extend(p.shaped);
             r.bytes += p.bytes;
@@ -1384,6 +1365,9 @@ fn kinds_text(c: &[Candidate]) -> String {
 }
 
 fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    if let Some(bar) = arg.strip_prefix("bar ") {
+        return cmd_next_bar(out, s, bar);
+    }
     let keep: Box<dyn Fn(Kind, f64, f64) -> bool> = match arg {
         "+" => Box::new(|_, old, new| new > old),
         "-" => Box::new(|_, old, new| new < old),
@@ -1418,6 +1402,260 @@ fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     }
     s.replace(&format!("next {arg}"), next);
     writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))
+}
+
+/// A copy of the game's writable memory on disk (gigabytes: Cheat Engine keeps its "unknown
+/// initial value" scans so too), for a search with no number to start from. Blocks that are
+/// all zeros aren't kept: a value that was 0 can't be a bar's share of anything.
+struct Snap {
+    path: PathBuf,
+    /// (address, offset in the file, length), sorted by address; `SNAP_BLOCK` bytes but a
+    /// region's last one.
+    blocks: Vec<(u64, u64, usize)>,
+    kinds: Vec<Kind>,
+}
+
+const SNAP_BLOCK: usize = 64 << 10;
+
+impl Drop for Snap {
+    fn drop(&mut self) {
+        fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Runs `work(i, buf)` for every job on up to 6 threads (half the cores, so the game keeps running
+/// smoothly), each with its own buffer of `buf_len` bytes; `size(i)` is a job's share of the
+/// "progress <done> <in all>" lines written as it goes. The results come back in job order.
+fn parallel<T: Send>(
+    jobs: usize,
+    size: impl Fn(usize) -> u64 + Sync,
+    buf_len: usize,
+    out: &mut impl Write,
+    work: impl Fn(usize, &mut [u8]) -> T + Sync,
+) -> Vec<T> {
+    let total: u64 = (0..jobs).map(&size).sum();
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 6);
+    let (next, done) = (AtomicUsize::new(0), AtomicU64::new(0));
+    let _ = writeln!(out, "progress 0 {total}");
+    let mut parts: Vec<(usize, T)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut buf = vec![0u8; buf_len];
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= jobs {
+                            return mine;
+                        }
+                        mine.push((i, work(i, &mut buf)));
+                        done.fetch_add(size(i), Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+        while !workers.iter().all(|w| w.is_finished()) {
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = writeln!(out, "progress {} {total}", done.load(Ordering::Relaxed));
+        }
+        workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
+    });
+    parts.sort_by_key(|p| p.0);
+    parts.into_iter().map(|p| p.1).collect()
+}
+
+/// snap <file> [types]: copies the game's writable memory into the file, for a search with no
+/// number to look for; the matches so far are let go. Types: i32, f32 and f64 unless given.
+fn cmd_snap(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let (path, kinds) = match arg.rsplit_once(' ').map(|(p, k)| (p, k.split(',').map(Kind::parse).collect::<Option<Vec<_>>>())) {
+        Some((p, Some(k))) => (p.trim(), k),
+        _ => (arg, vec![Kind::I32, Kind::F32, Kind::F64]),
+    };
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    if path.is_empty() {
+        return writeln!(out, "error: usage: snap <file> [i32,f32,f64,xor,u16]");
+    }
+    let kinds: Vec<Kind> = kinds.into_iter().filter(|k| !s.doubles_only || *k == Kind::F64).collect();
+    let t = Instant::now();
+    s.snap = None;
+    let file = File::create(path)?;
+    let regions = maps(s.pid)?;
+    let blocks: Vec<(u64, usize)> = regions
+        .iter()
+        .filter(|r| scannable(r))
+        .flat_map(|r| (r.start..r.end).step_by(SNAP_BLOCK).map(move |a| (a, ((r.end - a) as usize).min(SNAP_BLOCK))))
+        .collect();
+    // 64 blocks (4 MB) per job.
+    const PER_JOB: usize = 64;
+    let jobs = blocks.len().div_ceil(PER_JOB);
+    let (at, failed) = (AtomicU64::new(0), Mutex::new(None));
+    let parts = parallel(
+        jobs,
+        |i| blocks[i * PER_JOB..((i + 1) * PER_JOB).min(blocks.len())].iter().map(|b| b.1 as u64).sum(),
+        SNAP_BLOCK,
+        out,
+        |i, buf| {
+            let (mut kept, mut zeros, mut unreadable) = (Vec::new(), 0u64, 0u64);
+            for &(addr, len) in &blocks[i * PER_JOB..((i + 1) * PER_JOB).min(blocks.len())] {
+                let buf = &mut buf[..len];
+                if mem.read_exact_at(buf, addr).is_err() {
+                    unreadable += len as u64;
+                } else if buf.iter().all(|&b| b == 0) {
+                    zeros += len as u64;
+                } else {
+                    let off = at.fetch_add(len as u64, Ordering::Relaxed);
+                    if let Err(e) = file.write_all_at(buf, off) {
+                        *failed.lock().unwrap() = Some(e);
+                        break;
+                    }
+                    kept.push((addr, off, len));
+                }
+            }
+            (kept, zeros, unreadable)
+        },
+    );
+    let path = PathBuf::from(path);
+    if let Some(e) = failed.into_inner().unwrap() {
+        fs::remove_file(&path).ok();
+        return writeln!(out, "error: can't keep a copy of the game's memory: {e}");
+    }
+    let (mut kept, mut zeros, mut unreadable) = (Vec::new(), 0, 0);
+    for (k, z, u) in parts {
+        kept.extend(k);
+        zeros += z;
+        unreadable += u;
+    }
+    s.replace("snap", Vec::new());
+    let mib = kept.iter().map(|b| b.2).sum::<usize>() >> 20;
+    s.snap = Some(Snap { path, blocks: kept, kinds });
+    writeln!(
+        out,
+        "copied {mib} MiB ({} MiB zeros, {} MiB unreadable) in {} ms",
+        zeros >> 20,
+        unreadable >> 20,
+        t.elapsed().as_millis()
+    )
+}
+
+/// Whether a value that went from `v0` to `v1` can be a bar that went from `f0` to `f1` full
+/// (shares of the whole, measured within `err` either way): the value is the bar's share of
+/// some unknown most, so `f0 * v1 / v0` must land on `f1` for some `f0` in its error.
+fn bar_fits(v0: f64, v1: f64, f0: f64, f1: f64, err: f64) -> bool {
+    if !(v0 > 0.0 && v1 >= 0.0 && v1.is_finite() && v0.is_finite()) {
+        return false;
+    }
+    let r = v1 / v0;
+    (f0 - err).max(0.0) * r <= f1 + err && (f0 + err) * r >= f1 - err
+}
+
+/// The most matches the first bar step keeps (16 bytes each).
+const BAR_MOST: usize = 64 << 20;
+
+/// next bar <full before> <full now> <error>: keeps the places whose value moved as the bar did
+/// (shares of 1: 1 -> 0.73), against their value at the last step or, first, the memory copy.
+fn cmd_next_bar(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let f: Vec<f64> = arg.split_whitespace().filter_map(|w| w.parse().ok()).filter(|v: &f64| v.is_finite()).collect();
+    let &[f0, f1, err] = f.as_slice() else {
+        return writeln!(out, "error: usage: next bar <full before> <full now> <error> (shares of 1)");
+    };
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let before = s.candidates.len();
+    let Some(snap) = s.snap.as_ref() else {
+        let next: Vec<Candidate> = s
+            .candidates
+            .iter()
+            .zip(s.read_all())
+            .filter_map(|(c, new)| Some(new?).filter(|&v| bar_fits(c.value, v, f0, f1, err)).map(|v| Candidate { value: v, ..*c }))
+            .collect();
+        if next.is_empty() {
+            return writeln!(out, "{before} -> 0 matches (kept the {before} from before)");
+        }
+        s.replace(&format!("next bar {arg}"), next);
+        return writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates));
+    };
+    // A bar that hasn't moved keeps everything that stayed the same: wait for it to move.
+    if bar_fits(1.0, 1.0, f0, f1, err) {
+        return writeln!(out, "0 matches (the bar hasn't moved enough yet, kept the copy)");
+    }
+    let t = Instant::now();
+    let file = File::open(&snap.path)?;
+    const PER_JOB: usize = 64;
+    let jobs = snap.blocks.len().div_ceil(PER_JOB);
+    let count = AtomicUsize::new(0);
+    let parts = parallel(
+        jobs,
+        |i| snap.blocks[i * PER_JOB..((i + 1) * PER_JOB).min(snap.blocks.len())].iter().map(|b| b.2 as u64).sum(),
+        2 * SNAP_BLOCK,
+        out,
+        |i, buf| {
+            let (old_buf, new_buf) = buf.split_at_mut(SNAP_BLOCK);
+            let mut found = Vec::new();
+            for &(addr, off, len) in &snap.blocks[i * PER_JOB..((i + 1) * PER_JOB).min(snap.blocks.len())] {
+                let (old, new) = (&mut old_buf[..len], &mut new_buf[..len]);
+                if count.load(Ordering::Relaxed) > BAR_MOST {
+                    break;
+                }
+                if file.read_exact_at(old, off).is_err() || mem.read_exact_at(new, addr).is_err() {
+                    continue;
+                }
+                // Most memory stays the same: skip unchanged 8-byte words at once.
+                for w in (0..len & !7).step_by(8) {
+                    if old[w..w + 8] == new[w..w + 8] {
+                        continue;
+                    }
+                    for &kind in &snap.kinds {
+                        let step = match kind {
+                            Kind::U16 => 2,
+                            Kind::I32 | Kind::F32 | Kind::Xor => 4,
+                            Kind::F64 => 8,
+                        };
+                        for o in (w..w + 8).step_by(step) {
+                            let size = kind.size();
+                            if o + size > len || old[o..o + size] == new[o..o + size] {
+                                continue;
+                            }
+                            let (v0, v1) = (kind.decode(&old[o..]), kind.decode(&new[o..]));
+                            // Integers and pointers read as floats come out next to nothing.
+                            if matches!(kind, Kind::F32 | Kind::F64) && !(v0.abs() >= 1e-3) {
+                                continue;
+                            }
+                            // The key stays; a real one is never 0.
+                            if kind == Kind::Xor && (old[o + 4..o + 8] != new[o + 4..o + 8] || old[o + 4..o + 8] == [0; 4]) {
+                                continue;
+                            }
+                            if bar_fits(v0, v1, f0, f1, err) {
+                                found.push(Candidate::new(addr + o as u64, kind, v1));
+                            }
+                        }
+                    }
+                }
+            }
+            count.fetch_add(found.len(), Ordering::Relaxed);
+            found.sort_by_key(|c| (c.addr(), c.kind() as u8));
+            found
+        },
+    );
+    if count.into_inner() > BAR_MOST {
+        return writeln!(out, "error: too many places changed like the bar, kept the copy: let it move more first");
+    }
+    let next: Vec<Candidate> = parts.into_iter().flatten().collect();
+    let read = snap.blocks.iter().map(|b| b.2).sum::<usize>() >> 20;
+    // The copy is gone after this step: there is nothing before it to go back to.
+    s.replace(&format!("next bar {arg}"), next);
+    s.history.clear();
+    s.history_cut = true;
+    s.undone.clear();
+    writeln!(
+        out,
+        "0 -> {} matches ({}) from the copy of {read} MiB in {} ms",
+        s.candidates.len(),
+        kinds_text(&s.candidates),
+        t.elapsed().as_millis()
+    )
 }
 
 /// undo: the matches as they were before the last step that changed them ("<before> -> <n>
@@ -2514,6 +2752,7 @@ pub fn run() {
             "scan" => cmd_scan(&mut out, &mut session, arg),
             "next" => cmd_next(&mut out, &mut session, arg),
             "mark" => cmd_mark(&mut out, &mut session),
+            "snap" => cmd_snap(&mut out, &mut session, arg),
             "undo" => cmd_undo(&mut out, &mut session),
             "redo" => cmd_redo(&mut out, &mut session),
             "list" => cmd_list(&mut out, &session, arg),
@@ -2544,7 +2783,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all], mark, snap <file> [types], next <n>|+|-|=|!|bar <full before> <full now> <error>, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

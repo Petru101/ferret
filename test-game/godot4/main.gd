@@ -6,7 +6,8 @@ extends Control
 #   StringName keys, kind 3), wave (keeps a snapshot of the player), hurt N (health of the
 #   player node, entities/player.gd), despawn / spawn / respawn (frees the player node and
 #   makes a new one, as Brotato does every wave), hit N (health of the enemy named Boss; two
-#   unnamed enemies run the same script), show, quit N.
+#   unnamed enemies run the same script), show, quit N. The player's health is also drawn as a
+#   bar (300x24 at 24,220, redrawn every frame), for bar searches.
 # Run: <binary> -- <cmd file> <log file>
 
 var cmd_path := ""
@@ -42,7 +43,17 @@ func despawn() -> void:
 		player = null
 
 
+func _draw() -> void:
+	var full := 0.0
+	if player != null:
+		full = clampf(float(player.current_stats.health) / player.current_stats.max_health, 0.0, 1.0)
+	draw_rect(Rect2(22, 218, 304, 28), Color.BLACK)
+	draw_rect(Rect2(24, 220, 300, 24), Color(0.25, 0.05, 0.05))
+	draw_rect(Rect2(24, 220, 300 * full, 24), Color(0.85, 0.15, 0.15))
+
+
 func _process(delta: float) -> void:
+	queue_redraw()
 	since += delta
 	if since < 0.1 or cmd_path == "" or not FileAccess.file_exists(cmd_path):
 		return

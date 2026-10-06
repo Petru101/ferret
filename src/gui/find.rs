@@ -765,14 +765,17 @@ impl FindView {
         self.area.queue_draw();
         self.busy(true);
         self.status.set_label("Reading…");
+        self.phase.follows_bar.set(false);
         self.worker.run(move |core| {
             let kept = core.set_area(area);
             let read = core.read_picked();
-            Event::Read(read, core.watched(), kept)
+            // No number there: maybe a bar.
+            let bar = matches!(read, Ok(None)).then(|| core.pick_bar());
+            Event::Read(read, core.watched(), kept, bar)
         });
     }
 
-    pub fn read(self: &Rc<Self>, r: Result<Option<(Shown, bool)>, String>, area: Option<Rect>, kept: Option<usize>) {
+    pub fn read(self: &Rc<Self>, r: Result<Option<(Shown, bool)>, String>, area: Option<Rect>, kept: Option<usize>, bar: Option<Result<(), String>>) {
         self.busy(false);
         // Show where Ferret now watches: the box snaps to the number it found.
         if area.is_some() {
@@ -806,6 +809,12 @@ impl FindView {
                 self.status.set_label(&format!("{picked}Reads {n}? Answer the question first."));
                 self.start.set_sensitive(false);
                 self.ask_read(n);
+            }
+            Ok(None) if matches!(bar, Some(Ok(()))) => {
+                self.phase.follows_bar.set(true);
+                self.status.set_label("That's a bar: Ferret goes by how full it is. Press Start, then play until it goes down or up a couple of times (take a hit, use some).");
+                self.start.set_sensitive(true);
+                self.nudge(Some(&self.start));
             }
             Ok(None) => {
                 self.status.set_label("Can't read a number there. Type the number the game shows below; Ferret learns the game's digits from it. Or try a tighter box.");
@@ -1029,6 +1038,18 @@ impl FindView {
             core::Phase::YourTurn(n, secs) => self.phase.your_turn(n, secs),
             core::Phase::SaveTurn => self.phase.save_turn(),
             core::Phase::Restoring(..) => {}
+            core::Phase::Copying(done) => {
+                let status = "Copying the game's memory. Don't let the bar change in the game until it's done.";
+                if self.status.label() != status {
+                    self.status.set_label(status);
+                }
+                self.phase.copying(done);
+            }
+            core::Phase::BarReady if start_runs => {
+                self.phase.bar_ready();
+                self.announce("Ready. Now let the bar change in the game: take a hit, or use some. Every change narrows it down.", false);
+            }
+            core::Phase::BarReady => self.phase.hide(),
             core::Phase::BoxChanging => self.phase.done(
                 false,
                 "The box keeps changing",

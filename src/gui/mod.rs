@@ -41,7 +41,9 @@ pub enum Event {
     Numbers(Result<(PathBuf, Vec<Word>), String>),
     /// The read, the watched area afterwards (it snaps to the number found), and the matches
     /// kept when a different number was picked during a search.
-    Read(Result<Option<(crate::ocr::Shown, bool)>, String>, Option<crate::ocr::Rect>, Option<usize>),
+    /// The pick's read, where Ferret watches, the matches kept, and whether the box is a bar
+    /// (asked only when it holds no number).
+    Read(Result<Option<(crate::ocr::Shown, bool)>, String>, Option<crate::ocr::Rect>, Option<usize>, Option<Result<(), String>>),
     Auto(Result<AutoResult, String>),
     Typed(Result<AutoResult, String>),
     /// Scan Again (the number on screen now, changed or not) while Start wasn't running.
@@ -523,7 +525,7 @@ impl Ui {
             }
             Event::Values(Err(_)) => {}
             Event::Numbers(r) => self.find.numbers(r),
-            Event::Read(r, area, kept) => self.find.read(r, area, kept),
+            Event::Read(r, area, kept, bar) => self.find.read(r, area, kept, bar),
             Event::Frame(t, area) => self.find.show_frame(t, area),
             Event::Seen(n) => self.find.seen(n),
             Event::Matches(Ok(list)) => self.find.show_matches(list),
