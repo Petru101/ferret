@@ -86,6 +86,26 @@ pub fn exe_name(pid: u32) -> String {
     first.rsplit(['/', '\\']).next().unwrap_or_default().to_owned()
 }
 
+/// The name a game goes by (the games list, its profile): the program's, except for players
+/// that run many games, named after the game file they were started with. Ruffle runs every
+/// Flash game: all of them shared one name and one profile (Age of War's saved values were
+/// restored into The Binding of Isaac). Started without a file (opened from its menu), it stays
+/// "ruffle".
+pub fn game_name(pid: u32) -> String {
+    let exe = exe_name(pid);
+    let lower = exe.to_ascii_lowercase();
+    if lower != "ruffle" && lower != "ruffle.exe" {
+        return exe;
+    }
+    let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    let swf = raw.split(|b| *b == 0).skip(1).map(String::from_utf8_lossy).find_map(|a| {
+        // A path or a URL; a URL's query left out.
+        let file = a.split(['?', '#']).next().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_owned();
+        file.to_ascii_lowercase().ends_with(".swf").then_some(file)
+    });
+    swf.unwrap_or(exe)
+}
+
 /// GameMaker games keep every number as a double; they ship their assets as data.win (or
 /// game.unx on Linux) next to the program.
 fn is_gamemaker(pid: u32, exe: &str) -> bool {
@@ -1096,6 +1116,7 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
     for pid in pids {
         let exe = exe_name(pid);
         let lower = exe.to_ascii_lowercase();
+        let name_now = game_name(pid);
         let env = environ(pid);
         let app_id = steam_id(&env);
         let windows = lower.ends_with(".exe");
@@ -1115,7 +1136,7 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let id = dash(app_id.map(String::as_str));
         let ac = dash(anti_cheat(pid).as_deref());
         let program = maps(pid).ok().and_then(|m| program_path(pid, &m));
-        rows.push((program, format!("{pid}\t{exe}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(play))));
+        rows.push((program, format!("{pid}\t{name_now}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(play))));
     }
     // An Unreal stub holds none of the game's values (Astro Colony: two entries, a search in
     // the stub found nothing).
@@ -1154,7 +1175,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             // Only the program: launchers pass login tokens as arguments (Heroic's Epic games get
             // -AUTH_PASSWORD=<code>), and the log is kept.
             writeln!(out, "attached to {pid}: {}", argv0(pid))?;
-            writeln!(out, "exe: {exe}")?;
+            writeln!(out, "exe: {}", game_name(pid))?;
             writeln!(out, "{} mappings, {} MiB writable, {}-bit", regions.len(), rw >> 20, width * 8)?;
             if doubles_only {
                 writeln!(out, "GameMaker game: it keeps numbers as doubles, searching only those")?;
