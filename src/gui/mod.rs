@@ -471,6 +471,7 @@ impl Ui {
                 self.waiting_for.replace(None);
                 if self.attached.replace(Some(pid)) != Some(pid) {
                     self.find.new_game();
+                    self.tips.show(tips::Tip::SaveFirst);
                 }
                 self.game_page.set_title(&exe);
                 if !self.on_game_page() {

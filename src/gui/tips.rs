@@ -10,6 +10,8 @@ use gtk::glib;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tip {
+    /// On opening a game.
+    SaveFirst,
     /// After saving a value.
     Slots,
 }
@@ -17,12 +19,17 @@ pub enum Tip {
 impl Tip {
     fn id(self) -> &'static str {
         match self {
+            Tip::SaveFirst => "save-first",
             Tip::Slots => "slots",
         }
     }
 
     fn text(self) -> &'static str {
         match self {
+            Tip::SaveFirst => {
+                "Tip: Save your game before changing values. Finding a value briefly changes it, and a wrong \
+                 change the game saves can't be undone by loading."
+            }
             Tip::Slots => {
                 "Tip: In many games, inventory values are stored per slot, not per item. If you rearrange, sort, \
                  use up, or pick up items, the address you found may now point to a different item. Re-scan if \
