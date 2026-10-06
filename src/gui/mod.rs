@@ -854,6 +854,14 @@ fn build(app: &adw::Application) {
         .content(&toasts)
         .build();
     notify.set_window(&window);
+    {
+        let phase = phase.clone();
+        window.connect_is_active_notify(move |w| {
+            if !w.is_active() && w.is_visible() {
+                phase.remind();
+            }
+        });
+    }
 
     let ui = Rc::new(Ui {
         window,

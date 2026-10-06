@@ -778,6 +778,10 @@ pub enum AutoResult {
     Found(Loc),
     /// Several addresses still follow the value and none could be confirmed.
     Several(usize),
+    /// One address left that may not be the value, and why: kept for the player to try (it
+    /// doesn't hold the number on screen, or the game put a test value back). The player knows
+    /// better than a misread or a guess (MEA's ammo: "1/116" on screen, the place held 166).
+    Unsure(String),
 }
 
 struct Game {
@@ -885,9 +889,9 @@ const STEADY_LOOKS: u32 = 60;
 /// what it shows).
 const STEADY_SHARE: f64 = 0.95;
 
-/// A search that could only end on a display copy.
-const COPY_ONLY: &str = "only found a copy the game redraws its display from: it keeps the value itself in a form \
-    Ferret can't search for yet (for example a 2-byte number or an encoded one)";
+/// A search that ended on what looks like a display copy.
+const COPY_ONLY: &str = "The one place left put a test value back at once, like a copy the game redraws its display \
+    from; the game may keep the value in a form Ferret can't search for yet (a 2-byte number or an encoded one).";
 
 /// Most pointer paths kept from a scan. The real one can rank far down (Forager's gems: 590th
 /// of 81235), and only a later run tells which it is.
@@ -3051,18 +3055,20 @@ impl Core {
         false
     }
 
-    /// Whether the one match left holds what the screen shows (`n`); a match reached through
-    /// misreads can be anything.
-    fn holds(&mut self, loc: Loc, n: &Shown) -> bool {
+    /// Why the one match left may not be the value: it doesn't hold what the screen shows (`n`;
+    /// a match reached through misreads can be anything), or a test write doesn't stick (a
+    /// display copy). The match stays for the player to try either way.
+    fn doubt(&mut self, loc: Loc, n: &Shown) -> Option<String> {
         let v = self.peek(&[loc])[0];
-        let ok = v.is_some_and(|v| shows(v, n));
-        if !ok {
-            self.say(&format!(
-                "the last match holds {} but the screen shows {n}: not it, starting over",
-                v.map_or("nothing".into(), |v| v.to_string())
-            ));
+        if !v.is_some_and(|v| shows(v, n)) {
+            let held = v.map_or("nothing readable".into(), |v| v.to_string());
+            self.say(&format!("the last match holds {held} but the screen shows {n}: kept for the player to try"));
+            return Some(format!("The one place left holds {held}, not the {n} on screen."));
         }
-        ok
+        if !self.sticks(loc) {
+            return Some(COPY_ONLY.into());
+        }
+        None
     }
 
     /// The automated scan loop: read the number off the window, scan for it, and
@@ -3170,18 +3176,12 @@ impl Core {
             self.search = None;
         }
         if count == 1 {
-            self.search = None;
             let loc = self.candidates()[0].0;
-            if !self.holds(loc, &last) {
+            if let Some(why) = self.doubt(loc, &last) {
                 self.lost_shape();
-                self.helper.call("track");
-                return Err("the only match left doesn't hold the number on screen (misreads?); press Start to search again".into());
+                return Ok(AutoResult::Unsure(why));
             }
-            if !self.sticks(loc) {
-                self.lost_shape();
-                self.helper.call("track");
-                return Err(COPY_ONLY.into());
-            }
+            self.search = None;
             self.say(&format!("stored as {}", loc.kind.with_article()));
             self.learn_from_memory(loc, &last);
             self.learn_shape(loc);
@@ -3282,17 +3282,9 @@ impl Core {
             }
             1 => {
                 let loc = self.candidates()[0].0;
-                if !self.holds(loc, &n) {
+                if let Some(why) = self.doubt(loc, &n) {
                     self.lost_shape();
-                    self.search = None;
-                    self.helper.call("track");
-                    return Err(format!("the only match left doesn't hold {n}; type the number again to start over"));
-                }
-                if !self.sticks(loc) {
-                    self.lost_shape();
-                    self.search = None;
-                    self.helper.call("track");
-                    return Err(COPY_ONLY.into());
+                    return Ok(AutoResult::Unsure(why));
                 }
                 Some(loc)
             }

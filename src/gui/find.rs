@@ -937,6 +937,7 @@ impl FindView {
         self.searching(false);
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
+            Ok(AutoResult::Unsure(why)) => self.unsure(&why),
             Ok(AutoResult::Several(n)) => {
                 let next = if n <= 20 {
                     "Try them below, or press Start and let the number change again."
@@ -955,6 +956,16 @@ impl FindView {
             }
             Err(e) => self.stopped(&e),
         }
+    }
+
+    /// One place left that Ferret doubts (`why`): listed with Try and Use This One, since the
+    /// player may know it's the value (the screen showed it another way).
+    fn unsure(&self, why: &str) {
+        self.last_count.set(Some(1));
+        let next = "Try it below to see if the game changes, or Use This One if you think it's the value.";
+        self.announce(&format!("{why} {next}"), false);
+        self.phase.done_away(false, "One place left, but Ferret isn't sure", why, &format!("{why} Switch to Ferret to try it."));
+        self.list_matches(1);
     }
 
     /// A search that ended without an answer: why, in the status line and on the card.
@@ -1113,6 +1124,10 @@ impl FindView {
         self.again.set_sensitive(true);
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
+            Ok(AutoResult::Unsure(why)) => {
+                self.unsure(&why);
+                self.again.set_visible(true);
+            }
             Ok(AutoResult::Several(n)) => {
                 let text = self.count_text(n);
                 self.announce(&format!("{text}. {next}"), false);

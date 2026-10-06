@@ -1,5 +1,6 @@
 #!/bin/sh
-# Tests that a search ending on a display copy is rejected: food is a 16-bit short (not
+# Tests that a search ending on a display copy isn't taken as found (it stays listed for the
+# player to try, with the reason): food is a 16-bit short (not
 # searched) with a float copy for the HUD that the game refreshes every tick, so typed numbers
 # for food end on the copy, which a test write can't change. Gold (a plain int) must still be
 # found, and the test write on it undone. Run on the host.
@@ -30,7 +31,7 @@ type_n() {
     out="$here/run/$FERRET_SESSION/out"
     before=$(wc -l < "$out")
     "$live" type "$1" >/dev/null
-    until tail -n +"$((before + 1))" "$out" | grep -q "^found it\|^error\|candidates left"; do sleep 0.3; done
+    until tail -n +"$((before + 1))" "$out" | grep -q "^found it\|^error\|candidates\? left"; do sleep 0.3; done
     tail -n +"$((before + 1))" "$out"
 }
 rm -f "$d/cmd"
@@ -44,7 +45,7 @@ echo "--- food: only its display copy can be found"
 # Wait for each outcome: food changed during a test write looks like the player eating.
 food=500
 type_n 500 | tee "$d/out"
-if ! grep -q "^error: only found a copy" "$d/out"; then
+if ! grep -q "put a test value back.*Kept: 1 candidate left" "$d/out"; then
     game "eat 7"
     type_n 507
     keep_heap
@@ -52,7 +53,7 @@ if ! grep -q "^error: only found a copy" "$d/out"; then
     food=510
     type_n 510 | tee "$d/out"
 fi
-grep -q "^error: only found a copy" "$d/out" || fail "the copy was accepted"
+grep -q "put a test value back.*Kept: 1 candidate left" "$d/out" || fail "the copy was accepted"
 game "show"
 tail -n1 "$d/log" | grep -q "food=$food " || fail "food changed"
 echo "--- gold: a real value is still found"
