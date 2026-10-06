@@ -1101,16 +1101,16 @@ impl FindView {
             self.status.set_label("Scanning again with the number on screen…");
             return;
         }
-        // Nothing to read: the player says what the game shows (the same number, most likely).
+        // Nothing to read: the number stayed the same, so search the last one typed again.
         if self.selection.borrow().is_none() {
-            self.typed.set_text(&self.last_typed.borrow());
-            self.typed.grab_focus();
-            self.typed.select_region(0, -1);
-            self.nudge(Some(&self.typed_go));
-            self.announce(
-                "No number picked, so Ferret can't read it. If the game still shows the number below, press Search; else type the one it shows now.",
-                false,
-            );
+            let last = self.last_typed.borrow().clone();
+            if last.is_empty() {
+                self.typed.grab_focus();
+                self.nudge(Some(&self.typed_go));
+                self.announce("No number picked, so Ferret can't read it. Type the number the game shows.", false);
+            } else {
+                self.type_number(&last);
+            }
             return;
         }
         self.result.set_visible(false);
@@ -1232,8 +1232,8 @@ impl FindView {
 
     /// The Scan Again hotkey; why not when the button isn't there.
     pub fn hotkey_again(&self) -> Option<&'static str> {
-        if !self.again.is_visible() || !self.again.is_sensitive() || self.selection.borrow().is_none() {
-            return Some("Scan Again works once a search has places to check and a number is picked.");
+        if !self.again.is_visible() || !self.again.is_sensitive() || (self.selection.borrow().is_none() && self.last_typed.borrow().is_empty()) {
+            return Some("Scan Again works once a search has places to check and a number is picked or typed.");
         }
         self.scan_again();
         None
