@@ -360,6 +360,12 @@ struct Limit {
     guard: [u8; 4],
     fixes: u64,
     restores: u64,
+    /// Found through pointer paths: whether the game has changed the value at the place they
+    /// lead to since they first led there, and the value seen there until it does. Before the
+    /// value exists (a game's menu) paths may agree on another place (Age of War's title menu:
+    /// 154 of 247 on a place holding 0); the game changing it shows it's the value.
+    changed: bool,
+    unchanged: Option<f64>,
     paused: Option<&'static str>,
     retry_at: Instant,
     /// When its code patterns last found it (the object may be replaced while the old one stays
@@ -527,6 +533,9 @@ fn limiter_loop(shared: SharedLimiter) {
                         if v.addr != l.addr || l.paused.is_some() {
                             l.restores += 1;
                         }
+                        if v.addr != l.addr {
+                            (l.changed, l.unchanged) = (false, None);
+                        }
                         l.addr = v.addr;
                         l.paused = None;
                     }
@@ -597,6 +606,15 @@ fn limiter_loop(shared: SharedLimiter) {
                     l.retry_at = Instant::now();
                     continue;
                 };
+                if !l.changed {
+                    match l.unchanged {
+                        Some(first) if first != v => l.changed = true,
+                        _ => {
+                            l.unchanged = Some(v);
+                            continue;
+                        }
+                    }
+                }
                 let target = match (l.min, l.max) {
                     (_, Some(max)) if v > max => max,
                     (Some(min), _) if v < min => min,
@@ -725,6 +743,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         None => return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}"),
     };
     l.limits.retain(|l| l.name != *name);
+    let changed = paths.is_empty();
     l.limits.push(Limit {
         name: name.to_string(),
         addr,
@@ -738,6 +757,8 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         guard,
         fixes: 0,
         restores: 0,
+        changed,
+        unchanged: None,
         paused: waiting.then_some("not found yet (the game hasn't run the code that uses it), waiting"),
         retry_at: Instant::now(),
         checked_at: Instant::now(),
@@ -764,7 +785,7 @@ fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
             show(l.max),
             l.fixes,
             l.restores,
-            l.paused.unwrap_or("active")
+            l.paused.unwrap_or(if l.changed { "active" } else { "waiting for the game to change it once before writing" })
         )?;
     }
     Ok(())
