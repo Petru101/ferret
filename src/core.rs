@@ -2575,15 +2575,37 @@ impl Core {
     /// Writes `value` to one of the places still matching, so the player can see whether the
     /// game shows it (when Ferret couldn't tell from the screen); the places a second later
     /// (a copy the game keeps rewriting is back to the old value by then).
-    pub fn try_match(&mut self, loc: Loc, value: &str) -> Result<Vec<Match>, String> {
+    pub fn try_match(&mut self, loc: Loc, value: &str) -> Result<(Vec<Match>, String), String> {
         let v = Shown::parse(value).map(|s| s.value()).ok_or(format!("not a number: {value}"))?;
+        let before = self.peek_exact(&[loc])[0];
         let reply = self.helper.call(&format!("write {loc} {v}"));
         if let Some(e) = first_error(&reply) {
             return Err(e);
         }
         self.say(&format!("wrote {v} to 0x{:x} ({}): does the game show it?", loc.addr, loc.kind.describe()));
-        std::thread::sleep(Duration::from_secs(1));
-        Ok(self.matches())
+        // As long as `sticks` waits: the stand-in refreshes its display copy about once a second.
+        std::thread::sleep(Duration::from_millis(1500));
+        // Ferret sees whether the write stayed: a place the game puts back at once (a copy it
+        // refreshes from the real value) can't be set, so it isn't the one to save. A change
+        // nearer the written value than the old one is the game carrying on from it.
+        let now = self.peek_exact(&[loc])[0];
+        let shown = |x: f64| number_text(x, None);
+        if let (Some(before), Some(now)) = (before, now) {
+            if (now - v).abs() > 1e-3 && (now - before).abs() <= (now - v).abs() {
+                self.say(&format!("the game put {} back at once: ruling 0x{:x} out", shown(now), loc.addr));
+                let left = self.drop_match(loc)?;
+                let mut msg = format!("The game put {} back at once, so that place isn't where it keeps the value: removed it.", shown(now));
+                if left.is_empty() {
+                    msg.push_str(" No places are left: press Start Over and search again.");
+                }
+                return Ok((left, msg));
+            }
+        }
+        let msg = format!(
+            "It kept {}. If the game shows it too, press Use This One (some games only redraw a number when they change it themselves).",
+            shown(now.unwrap_or(v))
+        );
+        Ok((self.matches(), msg))
     }
 
     fn phase(&mut self, p: Phase) {

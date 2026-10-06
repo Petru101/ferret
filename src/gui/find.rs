@@ -1345,7 +1345,7 @@ impl FindView {
                     let v = entry.text().to_string();
                     if !v.trim().is_empty() {
                         interrupt(&cancel, &stop);
-                        worker.run(move |core| Event::Matches(core.try_match(loc, &v)));
+                        worker.run(move |core| Event::Tried(core.try_match(loc, &v)));
                     }
                 }
             };
@@ -1385,6 +1385,12 @@ impl FindView {
         }
     }
 
+    /// Try ended: the places left (one the game put back is ruled out) and what happened.
+    pub fn tried(&self, list: Vec<core::Match>, msg: &str) {
+        self.show_matches(list);
+        self.announce(msg, false);
+    }
+
     /// After a search that failed: the places listed may be gone (it started over) or not.
     fn refresh_matches(&self) {
         if self.matches.is_visible() {
@@ -1395,7 +1401,7 @@ impl FindView {
     /// Debug actions: Try / Use This One on the listed place at `i`.
     pub fn try_listed(&self, i: usize, value: String) {
         if let Some(&loc) = self.listed.borrow().get(i) {
-            self.worker.run(move |core| Event::Matches(core.try_match(loc, &value)));
+            self.worker.run(move |core| Event::Tried(core.try_match(loc, &value)));
         }
     }
 

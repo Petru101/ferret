@@ -78,6 +78,8 @@ pub enum Event {
     /// The window was closed: the saved values kept in range (Ferret stays in the background
     /// for them; none: it quits).
     Closing(Vec<String>),
+    /// Try on a listed place: the places left and how it went.
+    Tried(Result<(Vec<crate::core::Match>, String), String>),
     /// The limits hotkey: whether limits are on now, and their names.
     Switched(Result<(bool, Vec<String>), String>),
 }
@@ -525,6 +527,8 @@ impl Ui {
             Event::Frame(t, area) => self.find.show_frame(t, area),
             Event::Seen(n) => self.find.seen(n),
             Event::Matches(Ok(list)) => self.find.show_matches(list),
+            Event::Tried(Ok((list, msg))) => self.find.tried(list, &msg),
+            Event::Tried(Err(e)) => self.toast(&e),
             Event::Chosen(Ok(loc)) => self.find.chosen(loc),
             Event::Matches(Err(e)) | Event::Chosen(Err(e)) => self.toast(&e),
             Event::Auto(r) => self.find.auto_done(r),

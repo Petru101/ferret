@@ -73,6 +73,12 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             AutoResult::Several(n) => println!("{n} candidates left"),
             AutoResult::Unsure(why) => println!("{why} Kept: 1 candidate left"),
         },
+        "try" => {
+            let (loc, v) = arg.split_once(' ').ok_or("usage: try <hex addr[:type]> <n>")?;
+            let loc = core::parse_loc(loc).ok_or("usage: try <hex addr[:type]> <n>")?;
+            let (left, msg) = core.try_match(loc, v.trim())?;
+            println!("{msg} ({} left)", left.len());
+        }
         "matches" => {
             for m in core.matches() {
                 println!("0x{:x} = {}{}", m.loc.addr, m.value, m.about.map_or(String::new(), |a| format!("  ({a})")));
