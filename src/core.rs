@@ -323,10 +323,12 @@ pub enum Kind {
     F64,
     /// XOR-encoded 4-byte integer (the next word is the key).
     Xor,
+    /// 2-byte unsigned integer (Frostbite's ammo).
+    U16,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor];
+    pub const ALL: [Kind; 5] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor, Kind::U16];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -334,6 +336,7 @@ impl Kind {
             Kind::F32 => "f32",
             Kind::F64 => "f64",
             Kind::Xor => "xor",
+            Kind::U16 => "u16",
         }
     }
 
@@ -348,7 +351,7 @@ impl Kind {
 
     /// Whole numbers in memory (a game may still show them with decimals: 12 as "1.2").
     pub fn whole(self) -> bool {
-        matches!(self, Kind::I32 | Kind::Xor)
+        matches!(self, Kind::I32 | Kind::Xor | Kind::U16)
     }
 
     pub fn describe(self) -> &'static str {
@@ -357,6 +360,7 @@ impl Kind {
             Kind::F32 => "float",
             Kind::F64 => "double",
             Kind::Xor => "encoded whole number",
+            Kind::U16 => "2-byte whole number",
         }
     }
 }

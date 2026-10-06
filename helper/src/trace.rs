@@ -13,6 +13,7 @@ pub use libc::user_regs_struct as Regs;
 const DEBUGREG: usize = 848;
 
 pub const DR7_ACCESS_4: u64 = 1 | (3 << 16) | (3 << 18);
+pub const DR7_ACCESS_2: u64 = 1 | (3 << 16) | (1 << 18);
 pub const DR7_EXECUTE: u64 = 1;
 
 pub struct Hit {

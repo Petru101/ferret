@@ -144,8 +144,9 @@ fn draw_shape(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: i32, h: i32,
 }
 
 /// The value types a search can be narrowed to, as Cheat Engine offers them (none: all).
-const TYPE_CHOICES: [(&str, &[Kind]); 5] = [
+const TYPE_CHOICES: [(&str, &[Kind]); 6] = [
     ("All Types", &[]),
+    ("2 Bytes", &[Kind::U16]),
     ("4 Bytes", &[Kind::I32]),
     ("Float", &[Kind::F32]),
     ("Double", &[Kind::F64]),

@@ -221,10 +221,13 @@ pub(crate) enum Kind {
     /// A 4-byte integer hidden from cheat tools: the word at the address XOR the next word
     /// (the key). The game re-encodes it with the same key on every change.
     Xor,
+    /// A 2-byte whole number, unsigned: Frostbite keeps ammo so (Andromeda: loaded and reserve
+    /// side by side, read with movzx); read as 4 bytes, the two together never match.
+    U16,
 }
 
 impl Kind {
-    const ALL: [Kind; 4] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor];
+    const ALL: [Kind; 5] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor, Kind::U16];
 
     fn name(self) -> &'static str {
         match self {
@@ -232,6 +235,7 @@ impl Kind {
             Kind::F32 => "f32",
             Kind::F64 => "f64",
             Kind::Xor => "xor",
+            Kind::U16 => "u16",
         }
     }
 
@@ -241,6 +245,7 @@ impl Kind {
 
     fn size(self) -> usize {
         match self {
+            Kind::U16 => 2,
             Kind::I32 | Kind::F32 => 4,
             Kind::F64 | Kind::Xor => 8,
         }
@@ -251,6 +256,7 @@ impl Kind {
             Kind::I32 => i32::from_le_bytes(b[..4].try_into().unwrap()) as f64,
             Kind::F32 => f32::from_le_bytes(b[..4].try_into().unwrap()) as f64,
             Kind::F64 => f64::from_le_bytes(b[..8].try_into().unwrap()),
+            Kind::U16 => u16::from_le_bytes(b[..2].try_into().unwrap()) as f64,
             Kind::Xor => {
                 (i32::from_le_bytes(b[..4].try_into().unwrap()) ^ i32::from_le_bytes(b[4..8].try_into().unwrap())) as f64
             }
@@ -264,7 +270,7 @@ impl Kind {
     fn fits(self, lo: f64, hi: f64, n: Shown) -> bool {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
-            Kind::I32 | Kind::Xor => lo <= n.scaled && n.scaled <= hi,
+            Kind::I32 | Kind::Xor | Kind::U16 => lo <= n.scaled && n.scaled <= hi,
             Kind::F32 | Kind::F64 => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
@@ -310,6 +316,7 @@ fn write_value(mem: &File, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
         Kind::I32 => mem.write_all_at(&(v.round() as i32).to_le_bytes(), addr),
         Kind::F32 => mem.write_all_at(&(v as f32).to_le_bytes(), addr),
         Kind::F64 => mem.write_all_at(&v.to_le_bytes(), addr),
+        Kind::U16 => mem.write_all_at(&(v.round().clamp(0.0, 65535.0) as u16).to_le_bytes(), addr),
         Kind::Xor => {
             let mut key = [0u8; 4];
             mem.read_exact_at(&mut key, addr + 4)?;
@@ -830,7 +837,7 @@ fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
     Ok(())
 }
 
-/// A scan can keep millions of these: address and type share one word (addresses fit in 62
+/// A scan can keep millions of these: address and type share one word (addresses fit in 61
 /// bits), next to the value at the last scan, mark or next.
 #[derive(Clone, Copy)]
 struct Candidate {
@@ -840,15 +847,15 @@ struct Candidate {
 
 impl Candidate {
     fn new(addr: u64, kind: Kind, value: f64) -> Self {
-        Candidate { tagged: addr | (kind as u64) << 62, value }
+        Candidate { tagged: addr | (kind as u64) << 61, value }
     }
 
     fn addr(&self) -> u64 {
-        self.tagged & ((1 << 62) - 1)
+        self.tagged & ((1 << 61) - 1)
     }
 
     fn kind(&self) -> Kind {
-        Kind::ALL[(self.tagged >> 62) as usize]
+        Kind::ALL[(self.tagged >> 61) as usize]
     }
 }
 
@@ -1182,7 +1189,7 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
         }
     }
     let (Some(n), Some(picked)) = (n, picked) else {
-        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5> [i32,f32,f64,xor] [all]");
+        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5> [i32,f32,f64,xor,u16] [all]");
     };
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -1304,10 +1311,29 @@ impl MemScan<'_> {
         match mem.read_at(buf, addr) {
             Ok(len) if len > 0 => {
                 r.bytes += len as u64;
-                for off in (0..len.saturating_sub(3)).step_by(4) {
-                    // Doubles are 8-aligned. Integers and pointers read as floats come out
-                    // as zero or next to nothing (1e-40, 1e-300), never a number on screen.
+                let with_i32 = kinds.contains(&Kind::I32);
+                // The 2-byte number's bytes (none: the number can't be one).
+                let short = (n.scaled.fract() == 0.0 && (0.0..65536.0).contains(&n.scaled)).then(|| (n.scaled as u16).to_le_bytes());
+                for off in (0..len.saturating_sub(1)).step_by(4) {
+                    // Doubles are 8-aligned, 2-byte numbers 2-aligned, the rest 4-aligned.
+                    // Integers and pointers read as floats come out as zero or next to nothing
+                    // (1e-40, 1e-300), never a number on screen.
                     for &kind in kinds {
+                        if kind == Kind::U16 {
+                            let Some(short) = short else { continue };
+                            for o in [off, off + 2] {
+                                if buf[..len].get(o..o + 2) != Some(&short[..]) {
+                                    continue;
+                                }
+                                // Followed by two zero bytes it's the 4-byte one's match (`next`
+                                // turns that into a 2-byte one if the bytes after it change).
+                                if with_i32 && o == off && buf[..len].get(off + 2..off + 4) == Some(&[0, 0]) {
+                                    continue;
+                                }
+                                self.hit(&mut r, buf, len, addr, o, kind, n.scaled);
+                            }
+                            continue;
+                        }
                         let b = &buf[off..(off + kind.size()).min(len)];
                         if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
                             continue;
@@ -1324,19 +1350,11 @@ impl MemScan<'_> {
                         // The scan runs after the screen was read: allow for a fraction
                         // that has moved on by up to 1 since.
                         let hit = match kind {
-                            Kind::I32 | Kind::Xor => value == n.scaled,
+                            Kind::I32 | Kind::Xor | Kind::U16 => value == n.scaled,
                             Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
                         };
                         if hit {
-                            let at = addr + off as u64;
-                            let c = Candidate::new(at, kind, value);
-                            let around = |o: i64, n: usize| {
-                                le_at(&buf[..len], off as i64 + o, n).or_else(|| read_le(mem, at.wrapping_add_signed(o), n))
-                            };
-                            if self.shapes.iter().any(|sh| sh.kind == kind && sh.fits(around, self.mapped, self.width)) {
-                                r.shaped.push(c);
-                            }
-                            r.found.push(c);
+                            self.hit(&mut r, buf, len, addr, off, kind, value);
                         }
                     }
                 }
@@ -1344,6 +1362,18 @@ impl MemScan<'_> {
             _ => r.unreadable += buf.len() as u64,
         }
         r
+    }
+
+    /// Keeps a match found in `buf` (read from `addr`, `len` bytes) at `off`.
+    #[allow(clippy::too_many_arguments)]
+    fn hit(&self, r: &mut MemScanned, buf: &[u8], len: usize, addr: u64, off: usize, kind: Kind, value: f64) {
+        let at = addr + off as u64;
+        let c = Candidate::new(at, kind, value);
+        let around = |o: i64, n: usize| le_at(&buf[..len], off as i64 + o, n).or_else(|| read_le(self.mem, at.wrapping_add_signed(o), n));
+        if self.shapes.iter().any(|sh| sh.kind == kind && sh.fits(around, self.mapped, self.width)) {
+            r.shaped.push(c);
+        }
+        r.found.push(c);
     }
 }
 
@@ -1371,7 +1401,14 @@ fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
         .zip(s.read_all())
         .filter_map(|(c, new)| {
             let new = new?;
-            keep(c.kind(), c.value, new).then_some(Candidate { value: new, ..*c })
+            if keep(c.kind(), c.value, new) {
+                return Some(Candidate { value: new, ..*c });
+            }
+            // A 4-byte match whose upper two bytes changed may be a 2-byte number with a
+            // neighbour that was 0 at the scan (Andromeda's loaded ammo next to the reserve).
+            let low = |v: f64| (v as i64 & 0xFFFF) as f64;
+            (c.kind() == Kind::I32 && keep(Kind::U16, low(c.value), low(new)))
+                .then(|| Candidate::new(c.addr(), Kind::U16, low(new)))
         })
         .collect();
     // Nothing fitting is usually a misread (or something covering the number): keep the matches,
@@ -1821,7 +1858,7 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         return writeln!(out, "error: {JAVA}");
     }
     let mut it = arg.split_whitespace();
-    let (Some((target, _)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
+    let (Some((target, kind)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
         return writeln!(out, "error: usage: sites <hex addr[:type]> [seconds] [wait] (after attach)");
     };
     let secs = it.next().and_then(|v| v.parse().ok()).unwrap_or(5);
@@ -1836,7 +1873,7 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
             Ok(t) => t,
             Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
         };
-        let threads = tracer.arm(target, trace::DR7_ACCESS_4);
+        let threads = tracer.arm(target, if kind == Kind::U16 { trace::DR7_ACCESS_2 } else { trace::DR7_ACCESS_4 });
         if wait {
             writeln!(out, "watching 0x{target:x} on {threads} threads until the game touches it")?;
         } else {
@@ -1943,9 +1980,13 @@ fn cmd_first(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         return writeln!(out, "error: usage: first <hex addr[:type]>... [seconds]");
     }
     let before: Vec<Option<f64>> = locs.iter().map(|&(a, k)| s.read(a, k)).collect();
-    // Write-only (RW 01), 4 bytes (LEN 11) or 8 for doubles (LEN 10, 8-aligned).
+    // Write-only (RW 01), 4 bytes (LEN 11), 8 for doubles (LEN 10, 8-aligned), 2 (LEN 01).
     let dr7 = locs.iter().enumerate().fold(0u64, |dr7, (n, &(_, k))| {
-        let len: u64 = if k == Kind::F64 { 2 } else { 3 };
+        let len: u64 = match k {
+            Kind::F64 => 2,
+            Kind::U16 => 1,
+            _ => 3,
+        };
         dr7 | 1 << (2 * n) | 1 << (16 + 4 * n) | len << (18 + 4 * n)
     });
     let addrs: Vec<u64> = locs.iter().map(|&(a, _)| a).collect();
@@ -2503,7 +2544,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing
