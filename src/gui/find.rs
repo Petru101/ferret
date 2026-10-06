@@ -1400,7 +1400,19 @@ impl FindView {
         self.result.set_sensitive(false);
         self.busy(true);
         self.status.set_label("Saving: finding how the game gets to it (takes about 10 seconds)…");
-        self.worker.run(move |core| Event::Saved(core.save(&name).map(|confirmed| (name, confirmed))));
+        self.worker.run(move |core| {
+            let saved = core.save(&name);
+            Event::Saved(saved.map(|confirmed| {
+                let msg = if core.java() {
+                    format!("Saved {name} for this run. Java game: Ferret only shows it, and can't find it again after a restart yet.")
+                } else if confirmed {
+                    format!("Saved {name}. Ferret finds it again every time you attach.")
+                } else {
+                    format!("Saved {name}. If it's wrong after restarting the game, find it again and save it as {name}.")
+                };
+                (name, msg)
+            }))
+        });
     }
 
     pub fn saved(&self) {

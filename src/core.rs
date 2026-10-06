@@ -766,7 +766,12 @@ pub struct ValueRow {
     /// Saved through pointer paths in an earlier run that this run hasn't confirmed: the player
     /// can confirm them by saying the game shows `value` (`Core::confirm_paths`).
     pub confirmable: bool,
+    /// Shown only, never written (Java games: see `JAVA_WRITE`).
+    pub read_only: bool,
 }
+
+/// Why saved values of Java games are only shown.
+pub const JAVA_WRITE: &str = "Java game: Ferret only shows saved values. Java moves its objects around, so a later write could land in another object and crash the game. Change it from the Find tab while you search instead.";
 
 pub enum AutoResult {
     /// One address left: the value.
@@ -1082,7 +1087,10 @@ impl Core {
             self.say(&format!("knows how {exe} keeps {kinds}: searches look there first"));
         }
         if !read_profile(&exe).is_empty() && self.game()?.java {
-            self.say(&format!("saved values for {exe} are left alone: Java games can't be found again safely yet"));
+            // Listed, not looked for: nothing finds them again in Java yet.
+            let names: Vec<(String, Loc)> = read_profile(&exe).into_iter().map(|e| (e.name, Loc { addr: 0, kind: e.kind })).collect();
+            self.say(&format!("saved values for {exe} aren't looked for: Java games can't be found again yet (find them again and save them with the same name)"));
+            self.game.as_mut().ok_or("no game")?.entries = names;
         } else if !read_profile(&exe).is_empty() {
             self.say(&format!("found saved values for {exe}, restoring:"));
             self.restore()?;
@@ -1114,13 +1122,13 @@ impl Core {
         if name.is_empty() {
             return Err("the value needs a name".into());
         }
-        if self.game()?.java {
-            return Err("Java games can't be saved yet: Java moves its objects around in memory and shares its code between values, so Ferret can't find this value again safely. Changing it now still works.".into());
-        }
         let listed = self.helper.call("list");
         let [(loc, _)] = parse_values(&listed)[..] else {
             return Err("narrow down to exactly one address first".into());
         };
+        if self.game()?.java {
+            return self.save_java(name, loc);
+        }
         // Unreal and Unity games name their objects' classes and fields: a name holds up
         // across restarts and updates (code patterns break when the game replaces objects), and
         // needs no tracing. Unity's are slow to search for: their code patterns are kept too.
@@ -1236,6 +1244,46 @@ impl Core {
         }
         self.say(&format!("saved {name} ({how}) to {}", path.display()));
         Ok(confirmed)
+    }
+
+    /// Whether the attached game runs on Java (saved values are only shown).
+    pub fn java(&self) -> bool {
+        self.game.as_ref().is_some_and(|g| g.java)
+    }
+
+    /// Java games: kept for this run only, and only shown. Nothing finds the value again (its
+    /// code is shared by every object, references are compressed), and Java moves its objects:
+    /// a write to the old address lands in another one (a limit's write crashed Shattered Pixel
+    /// Dungeon).
+    fn save_java(&mut self, name: &str, loc: Loc) -> Result<bool, String> {
+        let decimals = if loc.kind.whole() { self.searched_decimals } else { 0 };
+        let last = self.peek_exact(&[loc]).pop().flatten();
+        let game = self.game()?;
+        let (pid, build) = (game.pid, game.build.clone());
+        let mut entries = read_profile(&game.exe);
+        entries.retain(|e| e.name != name);
+        entries.push(Entry {
+            name: name.to_owned(),
+            kind: loc.kind,
+            sites: Vec::new(),
+            paths: Vec::new(),
+            candidates: Vec::new(),
+            run: Some(pid),
+            named: Vec::new(),
+            limit: None,
+            decimals,
+            last,
+            build,
+            untraced: None,
+            other: Vec::new(),
+        });
+        let path = write_profile(&game.exe, &entries)?;
+        self.helper.call(&format!("unlimit {name}"));
+        let game = self.game.as_mut().ok_or("no game")?;
+        game.entries.retain(|(n, _)| n != name);
+        game.entries.push((name.to_owned(), loc));
+        self.say(&format!("saved {name} to {} (Java game: shown only, for this run)", path.display()));
+        Ok(true)
     }
 
     /// Pointer paths from the game's static memory to the value (see helper/src/pointers.rs),
@@ -1541,6 +1589,9 @@ impl Core {
     pub fn limit(&mut self, name: &str, min: Option<f64>, max: Option<f64>) -> Result<(), String> {
         let name = one_word(name);
         let name = name.as_str();
+        if self.game()?.java && (min.is_some() || max.is_some()) {
+            return Err(JAVA_WRITE.into());
+        }
         if let (Some(lo), Some(hi)) = (min, max) {
             if hi < lo {
                 return Err(format!(
@@ -2035,7 +2086,7 @@ impl Core {
         let values = self.peek_exact(&addrs);
         let limits = self.limits();
         let saved = read_profile(&exe);
-        let pid = self.game()?.pid;
+        let (pid, java) = (self.game()?.pid, self.game()?.java);
         self.remember_last(&entries, &values, &saved);
         Ok(entries
             .into_iter()
@@ -2052,12 +2103,17 @@ impl Core {
                     .and_then(|(_, _, rest)| rest.split_once(" fixed ").map(|(_, s)| format!("fixed {s}")));
                 let unconfirmed = saved.iter().any(|e| e.name == name && e.unconfirmed());
                 let doubtful = self.doubtful(&name, &saved);
-                let places = named.iter().find(|(n, _, _)| *n == name).map_or(1, |(_, _, p)| p.len());
+                let places = match named.iter().find(|(n, _, _)| *n == name) {
+                    Some((_, _, p)) => p.len(),
+                    // A Java value saved in an earlier run: not looked for.
+                    None if loc.addr == 0 => 0,
+                    None => 1,
+                };
                 // A named value that leads nowhere now (no stack of the item): the last address
                 // holds something else by now (iron showed 1118760170, a float of another object).
                 let value = value.filter(|_| places > 0);
                 let confirmable = value.is_some() && saved.iter().any(|e| e.name == name && e.unconfirmed() && e.run != Some(pid));
-                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, decimals, limit_state, unconfirmed, doubtful, places, confirmable }
+                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, decimals, limit_state, unconfirmed, doubtful, places, confirmable, read_only: java }
             })
             .collect())
     }
@@ -2066,6 +2122,9 @@ impl Core {
     pub fn set(&mut self, name: &str, value: f64) -> Result<(), String> {
         let name = one_word(name);
         let name = name.as_str();
+        if self.game()?.java {
+            return Err(JAVA_WRITE.into());
+        }
         let exe = self.game()?.exe.clone();
         let saved = read_profile(&exe);
         let value = match saved.iter().find(|e| e.name == name) {

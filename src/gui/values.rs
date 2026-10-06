@@ -19,6 +19,8 @@ struct ValueWidgets {
     /// "Does the game show 31?" on a value whose pointer paths a restart hasn't confirmed.
     confirm: adw::ActionRow,
     confirm_button: gtk::Button,
+    /// The Set field and button: off for values Ferret only shows.
+    set: gtk::Box,
 }
 
 /// Confirms a value's pointer paths: the player saw the game show the number Ferret reads.
@@ -122,6 +124,7 @@ impl ValuesView {
             }
             let w = &rows[&v.name];
             let mut about = match v.places {
+                0 if v.read_only => format!("Saved in an earlier run, {}. Find it again and save it with the same name to see it", v.kind.describe()),
                 0 => format!("Not in the game right now (none of it, or no save loaded), {}", v.kind.describe()),
                 _ => format!("At 0x{:x}, {}", v.addr, v.kind.describe()),
             };
@@ -141,6 +144,11 @@ impl ValuesView {
             if let Some(d) = &v.doubtful {
                 about.push_str(&format!(". Not written right now: {d}"));
             }
+            if v.read_only {
+                about.push_str(". Java game: only shown. Java moves its objects, so a write could land in another one and crash the game");
+            }
+            w.set.set_sensitive(!v.read_only);
+            w.limit.set_sensitive(!v.read_only);
             w.group.set_description(Some(&about));
             w.value.set_label(&v.value.map_or("?".into(), |n| core::number_text(n, v.decimals)));
             w.limit.set_subtitle(&limit_subtitle(v));
@@ -178,8 +186,10 @@ impl ValuesView {
         let set = gtk::Button::builder().label("Set").valign(gtk::Align::Center).build();
         let row = adw::ActionRow::builder().title("Value").build();
         row.add_suffix(&value);
-        row.add_suffix(&entry);
-        row.add_suffix(&set);
+        let set_box = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).build();
+        set_box.append(&entry);
+        set_box.append(&set);
+        row.add_suffix(&set_box);
         group.add(&row);
         let apply_set = {
             let (worker, entry, name) = (self.worker.clone(), entry.clone(), name.clone());
@@ -308,6 +318,6 @@ impl ValuesView {
                 })));
             });
         }
-        ValueWidgets { group, value, limit, confirm, confirm_button }
+        ValueWidgets { group, value, limit, confirm, confirm_button, set: set_box }
     }
 }

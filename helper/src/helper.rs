@@ -1721,7 +1721,7 @@ fn cmd_build(out: &mut impl Write, s: &Session) -> io::Result<()> {
     }
 }
 
-const JAVA: &str = "Java game: it moves its objects around and shares its code between values, so values can't be saved yet";
+const JAVA: &str = "Java game: it moves its objects around and shares its code between values, so saved values can't be found again yet";
 
 fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     if s.java {

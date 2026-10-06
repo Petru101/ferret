@@ -42,7 +42,8 @@ pub enum Event {
     /// Scan Again (the number on screen now, changed or not) while Start wasn't running.
     ScannedAgain(Result<AutoResult, String>),
     /// The name, and whether Ferret is sure to find it again after a restart.
-    Saved(Result<(String, bool), String>),
+    /// The name and what to tell the player.
+    Saved(Result<(String, String), String>),
     /// The search was cleared (the Find tab already shows it).
     Reset,
     /// A step of the search was taken back (Undo) or again (Redo): the places matching now and
@@ -360,12 +361,8 @@ impl Ui {
             Event::Typed(r) => self.find.typed_done(r),
             Event::ScannedAgain(r) => self.find.scanned_again(r),
             Event::Undone(r, done) => self.find.undone(r, done),
-            Event::Saved(Ok((name, confirmed))) => {
-                self.toast(&if confirmed {
-                    format!("Saved {name}. Ferret finds it again every time you attach.")
-                } else {
-                    format!("Saved {name}. If it's wrong after restarting the game, find it again and save it as {name}.")
-                });
+            Event::Saved(Ok((_, msg))) => {
+                self.toast(&msg);
                 self.find.saved();
                 self.tips.show(tips::Tip::Slots);
                 self.stack.set_visible_child_name("values");
