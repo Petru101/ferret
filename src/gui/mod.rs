@@ -43,7 +43,7 @@ pub enum Event {
     /// kept when a different number was picked during a search.
     /// The pick's read, where Ferret watches, the matches kept, and whether the box is a bar
     /// (asked only when it holds no number).
-    Read(Result<Option<(crate::ocr::Shown, bool)>, String>, Option<crate::ocr::Rect>, Option<usize>, Option<Result<(), String>>),
+    Read(Result<Option<(crate::ocr::Shown, bool)>, String>, Option<crate::ocr::Rect>, Option<usize>, Option<Result<crate::bar::Kind, String>>),
     Auto(Result<AutoResult, String>),
     Typed(Result<AutoResult, String>),
     /// Scan Again (the number on screen now, changed or not) while Start wasn't running.

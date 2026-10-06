@@ -15,6 +15,7 @@ use gtk::{gdk, gio, glib};
 
 use super::phase::PhaseCard;
 use super::{Event, Worker};
+use crate::bar::Kind as GaugeKind;
 use crate::core::{self, AutoResult, Kind};
 use crate::font::DigitShape;
 use crate::ocr::{self, Rect, Shown, Word};
@@ -754,7 +755,7 @@ impl FindView {
                 self.root.set_visible_child_name("pick");
                 // Nothing is picked for the player, even with one number on screen: they may want
                 // a bar there, and a pick they didn't make read like Ferret doing things on its own.
-                self.status.set_label("Click a number, or drag a box around it (or around a bar).");
+                self.status.set_label("Click a number, or drag a box around it (or around a bar, or a row of icons such as hearts).");
                 self.pick_hint.set_visible(self.selection.borrow().is_none());
                 self.area.queue_draw();
             }
@@ -774,17 +775,17 @@ impl FindView {
         self.area.queue_draw();
         self.busy(true);
         self.status.set_label("Reading…");
-        self.phase.follows_bar.set(false);
+        self.phase.follows.set(None);
         self.worker.run(move |core| {
             let kept = core.set_area(area);
             let read = core.read_picked();
-            // No number there: maybe a bar.
+            // No number there: maybe a bar or icons.
             let bar = matches!(read, Ok(None)).then(|| core.pick_bar());
             Event::Read(read, core.watched(), kept, bar)
         });
     }
 
-    pub fn read(self: &Rc<Self>, r: Result<Option<(Shown, bool)>, String>, area: Option<Rect>, kept: Option<usize>, bar: Option<Result<(), String>>) {
+    pub fn read(self: &Rc<Self>, r: Result<Option<(Shown, bool)>, String>, area: Option<Rect>, kept: Option<usize>, bar: Option<Result<GaugeKind, String>>) {
         self.busy(false);
         // Show where Ferret now watches: the box snaps to the number it found.
         if area.is_some() {
@@ -818,9 +819,13 @@ impl FindView {
                 self.start.set_sensitive(false);
                 self.ask_read(n);
             }
-            Ok(None) if matches!(bar, Some(Ok(()))) => {
-                self.phase.follows_bar.set(true);
-                self.status.set_label("That's a bar: Ferret goes by how full it is (full or not). Press Start, then play until it goes down or up a couple of times (take a hit, use some).");
+            Ok(None) if matches!(bar, Some(Ok(_))) => {
+                let kind = bar.and_then(Result::ok);
+                self.phase.follows.set(kind);
+                self.status.set_label(match kind {
+                    Some(GaugeKind::Icons) => "Those are icons: Ferret counts the full ones (halves too). Press Start, then play until the count goes down or up a couple of times (take a hit, use some).",
+                    _ => "That's a bar: Ferret goes by how full it is (full or not). Press Start, then play until it goes down or up a couple of times (take a hit, use some).",
+                });
                 self.start.set_sensitive(true);
                 self.nudge(Some(&self.start));
             }
@@ -1052,7 +1057,10 @@ impl FindView {
             core::Phase::SaveTurn => self.phase.save_turn(),
             core::Phase::Restoring(..) => {}
             core::Phase::Copying(done) => {
-                let status = "Copying the game's memory. Don't let the bar change in the game until it's done.";
+                let status = match self.phase.follows.get() {
+                    Some(GaugeKind::Icons) => "Copying the game's memory. Don't let the icons change in the game until it's done.",
+                    _ => "Copying the game's memory. Don't let the bar change in the game until it's done.",
+                };
                 if self.status.label() != status {
                     self.status.set_label(status);
                 }
@@ -1060,7 +1068,11 @@ impl FindView {
             }
             core::Phase::BarReady if start_runs => {
                 self.phase.bar_ready();
-                self.announce("Ready. Now let the bar change in the game: take a hit, or use some. Every change narrows it down.", false);
+                let ready = match self.phase.follows.get() {
+                    Some(GaugeKind::Icons) => "Ready. Now let the icons change in the game: take a hit, or use some. Every change narrows it down.",
+                    _ => "Ready. Now let the bar change in the game: take a hit, or use some. Every change narrows it down.",
+                };
+                self.announce(ready, false);
             }
             core::Phase::BarReady => self.phase.hide(),
             core::Phase::BoxChanging => self.phase.done(

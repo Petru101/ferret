@@ -3,6 +3,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::time::Duration;
 
+use crate::bar::Kind as GaugeKind;
 use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
@@ -64,11 +65,13 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         }
         "bar" => {
             let nums: Vec<u32> = arg.split_whitespace().filter_map(|n| n.parse().ok()).collect();
-            let [x, y, w, h] = nums[..] else { return Err("usage: bar <x> <y> <w> <h> (around a full bar)".into()) };
+            let [x, y, w, h] = nums[..] else { return Err("usage: bar <x> <y> <w> <h> (around a bar or a row of icons)".into()) };
             core.set_area(Rect { x, y, w, h });
             core.read_picked()?;
-            core.pick_bar()?;
-            println!("watching a bar at {x},{y} {w}x{h}");
+            match core.pick_bar()? {
+                GaugeKind::Bar => println!("watching a bar at {x},{y} {w}x{h}"),
+                GaugeKind::Icons => println!("watching a row of icons at {x},{y} {w}x{h}"),
+            }
         }
         "read" => println!("{:?}", core.read()?),
         "auto" => match core.auto(Duration::from_secs(arg.parse().unwrap_or(600)))? {

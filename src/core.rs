@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::bar::Bar;
+use crate::bar::{Gauge, Kind as GaugeKind};
 use crate::capture::WindowCapture;
 use crate::font::{self, Font};
 use crate::ocr::{self, Rect, Shown, Word};
@@ -981,8 +981,8 @@ pub struct Core {
     shaped: bool,
     /// The value wasn't in such a place: scans look everywhere until the next search.
     unshaped: bool,
-    /// The picked box is a bar, searched by how full it is.
-    bar: Option<Bar>,
+    /// The picked box is a bar or a row of icons, searched by how full it is.
+    bar: Option<Gauge>,
     /// How full the bar was when the matches' values were taken (None: the search has a copy
     /// of the game's memory to compare with, or none at all).
     bar_last: Option<(f64, f64)>,
@@ -2401,19 +2401,28 @@ impl Core {
         kept
     }
 
-    /// Takes the box just picked (`read_picked`, which read no number in it) as a bar, picked
-    /// while full: how full it is from now on is what the search goes by.
-    pub fn pick_bar(&mut self) -> Result<(), String> {
+    /// Takes the box just picked (`read_picked`, which read no number in it) as a bar or a row
+    /// of icons: how full it is (how many are full) from now on is what the search goes by.
+    pub fn pick_bar(&mut self) -> Result<GaugeKind, String> {
         let area = self.area.ok_or("no area picked yet")?;
         let img = image::open(cache_dir().join("picked.png")).map_err(|e| e.to_string())?.to_rgb8();
-        let bar = Bar::pick(&img, area)?;
-        let r = bar.rect;
-        self.say(&format!("a bar at {},{} {}x{} (measured within {:.1}%)", r.x, r.y, r.w, r.h, bar.error() * 100.0));
-        self.bar = Some(bar);
+        let gauge = Gauge::pick(&img, area)?;
+        let (kind, shown) = (gauge.kind(), gauge.shown(gauge.fill(&img).0));
+        self.say(&format!("{}; {shown} now", gauge.describe()));
+        self.bar = Some(gauge);
         if self.search.is_some() {
             self.bar_last = None;
         }
-        Ok(())
+        Ok(kind)
+    }
+
+    /// The picked bar's or icons' share of the whole as the player sees it, for the log.
+    fn shown(&self, share: f64) -> String {
+        self.bar.as_ref().map_or(String::new(), |g| g.shown(share))
+    }
+
+    fn icons(&self) -> bool {
+        self.bar.as_ref().is_some_and(|g| g.kind() == GaugeKind::Icons)
     }
 
 
@@ -3357,7 +3366,7 @@ impl Core {
         };
         tell(0.0);
         let reply = self.helper.call_with(&cmd, &mut tell);
-        self.say(&format!("bar {:.0}% full: {}", now.0 * 100.0, reply.join(" ")));
+        self.say(&format!("{} full: {}", self.shown(now.0), reply.join(" ")));
         if let Some(e) = first_error(&reply) {
             return Err(e);
         }
@@ -3384,8 +3393,7 @@ impl Core {
         };
         let err = last.1.max(now.1);
         let reply = self.helper.call(&format!("next bar {} {} {err}", last.0, now.0));
-        let pct = |v: f64| format!("{:.0}%", v * 100.0);
-        self.say(&format!("bar {} -> {} (±{}): {}", pct(last.0), pct(now.0), pct(err), reply.join(" ")));
+        self.say(&format!("{} -> {} (±{:.1}%): {}", self.shown(last.0), self.shown(now.0), err * 100.0, reply.join(" ")));
         if let Some(e) = first_error(&reply) {
             self.say(&e);
             return Some(0).filter(|_| self.search.is_none());
@@ -3410,7 +3418,10 @@ impl Core {
                 break f;
             }
             if start.elapsed() > limit || cancelled(&self.cancel) {
-                return Err("The bar is empty, hidden or keeps moving.".into());
+                return Err(match self.icons() {
+                    true => "The icons are all empty, hidden or keep changing.".into(),
+                    false => "The bar is empty, hidden or keeps moving.".into(),
+                });
             }
         };
         let mut count = 0;
@@ -3418,7 +3429,7 @@ impl Core {
             (Some((n, _)), _) => {
                 self.bar_step(first);
                 count = n;
-                self.say(&format!("bar {:.0}% full, continuing from {n} matches", first.0 * 100.0));
+                self.say(&format!("{} full, continuing from {n} matches", self.shown(first.0)));
                 self.ready(count);
             }
             // The copy is there from an earlier Start: it still waits for the bar to move.
@@ -3443,14 +3454,14 @@ impl Core {
                 match unfit {
                     // Twice: the value was lost (or never kept). Start again from here.
                     Some(_) => {
-                        self.say("nothing moved like the bar twice: lost it, copying the game's memory again");
+                        self.say("nothing moved like the screen twice: lost it, copying the game's memory again");
                         self.bar_copy(now)?;
                         count = 0;
                         unfit = None;
                         last = now;
                     }
                     None => {
-                        self.say("nothing moved like the bar (a misread?), keeping the matches");
+                        self.say("nothing moved like the screen (a misread?), keeping the matches");
                         unfit = Some(now.0);
                     }
                 }
@@ -3471,14 +3482,14 @@ impl Core {
             count = new_count;
             last = now;
             if unchanged_rounds >= 3 || (count <= 20 && unchanged_rounds >= 1) {
-                self.say(&format!("{count} addresses keep following the bar (likely the value plus copies of it)"));
+                self.say(&format!("{count} addresses keep following the screen (likely the value plus copies of it)"));
                 break;
             }
         }
         if cancelled(&self.cancel) {
             self.say("stopped");
         } else if count != 1 && start.elapsed() >= limit {
-            self.say("time limit reached; the bar never moved enough to narrow down to one address");
+            self.say("time limit reached; the screen never changed enough to narrow down to one address");
         }
         self.bar_end(count, last)
     }
@@ -3488,7 +3499,10 @@ impl Core {
     fn bar_end(&mut self, count: usize, now: (f64, f64)) -> Result<AutoResult, String> {
         self.searched_decimals = 0;
         if count == 0 {
-            return Err("Stopped before the bar moved. Press Start again and let the bar change in the game.".into());
+            return Err(match self.icons() {
+                true => "Stopped before the icons changed. Press Start again and let them change in the game.".into(),
+                false => "Stopped before the bar moved. Press Start again and let the bar change in the game.".into(),
+            });
         }
         for l in self.helper.call("list") {
             self.say(&l);
@@ -3518,9 +3532,10 @@ impl Core {
             // Kept its test value but the bar didn't show it: maybe a game that redraws only on
             // its own changes, maybe something else that moved alike (SPD: a junk number of a
             // billion passed every step). The player tries it.
-            (1, 1) => Ok(AutoResult::Unsure(
-                "The one place left kept a test value of half its number, but the bar didn't show it.".into(),
-            )),
+            (1, 1) => Ok(AutoResult::Unsure(match self.icons() {
+                true => "The one place left kept a test value of half its number, but the icons didn't show it.".into(),
+                false => "The one place left kept a test value of half its number, but the bar didn't show it.".into(),
+            })),
             (1, _) => Ok(AutoResult::Unsure(COPY_ONLY.into())),
             _ => Ok(AutoResult::Several(count)),
         }
@@ -3550,11 +3565,11 @@ impl Core {
         let expect = now.0 * kept.unwrap_or(test) / v;
         let moved = shown.is_some_and(|g| (g.0 - expect).abs() <= 2.0 * now.1.max(g.1) + 0.02);
         self.say(&format!(
-            "0x{:x}: wrote {test} (half of {v}) as a test, it held {}; the bar showed {} ({:.0}% expected)",
+            "0x{:x}: wrote {test} (half of {v}) as a test, it held {}; the screen showed {} ({} expected)",
             loc.addr,
             after.map_or("??".into(), |a| a.to_string()),
-            shown.map_or("nothing steady".into(), |g| format!("{:.0}%", g.0 * 100.0)),
-            expect * 100.0
+            shown.map_or("nothing steady".into(), |g| self.shown(g.0)),
+            self.shown(expect)
         ));
         kept.map(|_| moved)
     }
@@ -3596,9 +3611,16 @@ impl Core {
         }
         if self.bar.is_some() {
             let Some(f) = self.read_bar_stable()? else {
-                return Err("The bar is empty, hidden or moving: try again while it shows and stays still.".into());
+                return Err(match self.icons() {
+                    true => "The icons are all empty, hidden or changing: try again while they show and stay still.".into(),
+                    false => "The bar is empty, hidden or moving: try again while it shows and stays still.".into(),
+                });
             };
-            let count = self.bar_step(f).ok_or("Nothing in the game's memory moved like the bar did. Press Start Over and search again.")?;
+            let missed = match self.icons() {
+                true => "Nothing in the game's memory changed like the icons did. Press Start Over and search again.",
+                false => "Nothing in the game's memory moved like the bar did. Press Start Over and search again.",
+            };
+            let count = self.bar_step(f).ok_or(missed)?;
             return self.bar_end(count, f);
         }
         match self.read_stable()? {

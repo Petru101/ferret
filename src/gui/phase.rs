@@ -16,6 +16,7 @@ use gtk::glib;
 
 use super::find::grouped;
 use super::notify::Notifier;
+use crate::bar::Kind as GaugeKind;
 
 pub struct PhaseCard {
     pub root: gtk::Box,
@@ -37,8 +38,8 @@ pub struct PhaseCard {
     /// `away` went out already: once is enough (the player switching back and forth got the
     /// same one every time, until Plasma refused them as too many).
     reminded: Cell<bool>,
-    /// The search follows a bar, not a number: the texts say so.
-    pub follows_bar: Cell<bool>,
+    /// The search follows a bar or a row of icons, not a number: the texts say so.
+    pub follows: Cell<Option<GaugeKind>>,
 }
 
 const LOOKS: [&str; 5] = ["busy", "ready", "turn", "watching", "done"];
@@ -72,7 +73,7 @@ impl PhaseCard {
         root.append(&bar);
         root.append(&hint);
         root.append(&give_up);
-        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0), notify, away: RefCell::default(), reminded: Cell::new(false), follows_bar: Cell::new(false) })
+        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0), notify, away: RefCell::default(), reminded: Cell::new(false), follows: Cell::new(None) })
     }
 
     /// Shows the card in one of `LOOKS`; `bar` = how far, when there's something to measure.
@@ -135,33 +136,60 @@ impl PhaseCard {
 
     /// A bar's search copies the game's memory first (no number to look for).
     pub fn copying(&self, done: f64) {
-        self.show("busy", "Copying the game's memory…", Some(done), "Don't let the bar change yet.");
+        let hint = match self.follows.get() {
+            Some(GaugeKind::Icons) => "Don't let the icons change yet.",
+            _ => "Don't let the bar change yet.",
+        };
+        self.show("busy", "Copying the game's memory…", Some(done), hint);
     }
 
     /// The copy is taken: the bar has to move before anything narrows down.
     pub fn bar_ready(self: &Rc<Self>) {
-        let shown = self.show("ready", "Ready!", None, "Now let the bar change in the game: take a hit, or use some.");
-        self.tell("Ready: let the bar change in the game", "Take a hit or use some. Every change narrows it down.", None, Some(6), true);
+        let icons = self.follows.get() == Some(GaugeKind::Icons);
+        let (hint, title, searching, waiting) = match icons {
+            true => (
+                "Now let the icons change in the game: take a hit, or use some.",
+                "Ready: let the icons change in the game",
+                "Searching: let the icons change in the game",
+                "Waiting for the icons to change.",
+            ),
+            false => (
+                "Now let the bar change in the game: take a hit, or use some.",
+                "Ready: let the bar change in the game",
+                "Searching: let the bar change in the game",
+                "Waiting for the bar to move.",
+            ),
+        };
+        let shown = self.show("ready", "Ready!", None, hint);
+        self.tell(title, "Take a hit or use some. Every change narrows it down.", None, Some(6), true);
         let card = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(4), move || {
             if card.shown.get() == shown {
-                card.show("watching", "Searching: let the bar change in the game", None, "Waiting for the bar to move.");
-                card.tell("Searching: let the bar change in the game", "Waiting for the bar to move.", None, Some(6), false);
+                card.show("watching", searching, None, waiting);
+                card.tell(searching, waiting, None, Some(6), false);
             }
         });
+    }
+
+    /// What Start follows changing: "Keep the bar changing" and the like, with the count.
+    fn keep_changing(&self, n: usize) -> String {
+        match self.follows.get() {
+            Some(GaugeKind::Bar) => format!("{}. Keep the bar changing in the game.", places(n)),
+            Some(GaugeKind::Icons) => format!("{}. Keep the icons changing in the game.", places(n)),
+            None => format!("{}. Change the number in the game now.", places(n)),
+        }
     }
 
     /// Start can follow the number: "Ready!" for a few seconds, then the strip.
     pub fn ready(self: &Rc<Self>, n: usize) {
         self.count.set(n);
-        let shown = match self.follows_bar.get() {
-            true => self.show("ready", "Ready!", None, &format!("{}. Keep the bar changing in the game.", places(n))),
-            false => self.show("ready", "Ready!", None, &format!("{}. Change the number in the game now.", places(n))),
+        let shown = self.show("ready", "Ready!", None, &self.keep_changing(n));
+        let title = match self.follows.get() {
+            Some(GaugeKind::Bar) => "Ready: keep the bar changing in the game",
+            Some(GaugeKind::Icons) => "Ready: keep the icons changing in the game",
+            None => "Ready: change the number in the game",
         };
-        match self.follows_bar.get() {
-            true => self.tell("Ready: keep the bar changing in the game", &format!("{}. Every change narrows it down.", places(n)), None, Some(6), true),
-            false => self.tell("Ready: change the number in the game", &format!("{}. Every change narrows it down.", places(n)), None, Some(6), true),
-        }
+        self.tell(title, &format!("{}. Every change narrows it down.", places(n)), None, Some(6), true);
         let card = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(4), move || {
             if card.shown.get() == shown {
@@ -174,15 +202,13 @@ impl PhaseCard {
         self.count.set(n);
         // "Ready!" stays up its few seconds, with the new count; then the strip.
         if self.root.has_css_class("ready") && self.root.is_visible() {
-            match self.follows_bar.get() {
-                true => self.hint.set_label(&format!("{}. Keep the bar changing in the game.", places(n))),
-                false => self.hint.set_label(&format!("{}. Change the number in the game now.", places(n))),
-            }
+            self.hint.set_label(&self.keep_changing(n));
             return;
         }
-        let title = match self.follows_bar.get() {
-            true => "Searching: keep the bar changing in the game",
-            false => "Searching: keep changing the number in the game",
+        let title = match self.follows.get() {
+            Some(GaugeKind::Bar) => "Searching: keep the bar changing in the game",
+            Some(GaugeKind::Icons) => "Searching: keep the icons changing in the game",
+            None => "Searching: keep changing the number in the game",
         };
         self.show("watching", title, None, &places(n));
         self.tell(title, &format!("{}.", places(n)), None, Some(6), false);
