@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
-const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
+const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
 restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, remove <name>";
 
 fn bound(v: &str) -> Result<Option<f64>, String> {
@@ -71,6 +71,11 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
             AutoResult::Several(n) => println!("{n} candidates left"),
         },
+        "matches" => {
+            for m in core.matches() {
+                println!("0x{:x} = {}{}", m.loc.addr, m.value, m.about.map_or(String::new(), |a| format!("  ({a})")));
+            }
+        }
         "reset" => core.reset(),
         "undo" => {
             let (n, what) = core.undo()?;

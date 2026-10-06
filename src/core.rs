@@ -2419,6 +2419,20 @@ impl Core {
                 m.about = Some(text.to_owned());
             }
         }
+        // A place already saved: the player knows whether that value works (Brotato: the
+        // saved live health and a run-data copy kept following each other).
+        if let Some(game) = self.game.as_ref() {
+            for m in &mut list {
+                let mut names: Vec<&str> = game.entries.iter().filter(|(_, l)| l.addr == m.loc.addr).map(|(n, _)| n.as_str()).collect();
+                names.extend(game.named.iter().filter(|(_, _, p)| p.iter().any(|l| l.addr == m.loc.addr)).map(|(n, _, _)| n.as_str()));
+                names.sort_unstable();
+                names.dedup();
+                if !names.is_empty() {
+                    let saved = format!("saved as {}", names.join(", "));
+                    m.about = Some(m.about.take().map_or(saved.clone(), |a| format!("{saved}: {a}")));
+                }
+            }
+        }
         list
     }
 
