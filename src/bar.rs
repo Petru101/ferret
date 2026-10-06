@@ -361,6 +361,60 @@ fn same_colour(p: [u8; 3], full: [u8; 3]) -> bool {
     off <= 0.12
 }
 
+/// Icons apart from each other: shapes within a quarter of their median width, at least two,
+/// evenly spaced (every step from one to the next a whole number of steps: a missing empty one
+/// makes a double step). The icons, their width and the step.
+fn apart(shapes: &[(u32, u32)]) -> Option<(Vec<(u32, u32)>, u32, u32)> {
+    let mut widths: Vec<u32> = shapes.iter().map(|(a, b)| b - a).filter(|&w| w >= 4).collect();
+    if widths.len() < 2 {
+        return None;
+    }
+    widths.sort();
+    let size = widths[widths.len() / 2];
+    let icons: Vec<(u32, u32)> = shapes.iter().copied().filter(|(a, b)| (b - a).abs_diff(size) <= size / 4 + 1).collect();
+    if icons.len() < 2 {
+        return None;
+    }
+    let period = icons.windows(2).map(|w| w[1].0 - w[0].0).min().unwrap();
+    let even = icons.windows(2).all(|w| {
+        let d = w[1].0 - w[0].0;
+        let k = (d as f64 / period as f64).round() as u32;
+        d.abs_diff(k * period) <= period / 7 + 1
+    });
+    (period >= size && even).then_some((icons, size, period))
+}
+
+/// Icons that touch (Zelda's hearts share their outline, so nothing splits them): the widest
+/// shape repeating itself, every `step` pixels along it the same picture, at least twice. A bar
+/// is the same at every step, so half a step on it must look different (the halves of an icon
+/// aren't alike), and the best step is the smallest one about as good.
+fn touching(shapes: &[(u32, u32)], short: u32, at: impl Fn(u32, u32) -> [u8; 3]) -> Option<(Vec<(u32, u32)>, u32, u32)> {
+    let &(a, b) = shapes.iter().max_by_key(|(a, b)| b - a)?;
+    let len = b - a;
+    if len < 12 {
+        return None;
+    }
+    // How unlike the picture is to itself `step` pixels further on: the average difference.
+    let unlike = |step: u32| -> f64 {
+        let (mut sum, mut n) = (0u64, 0u64);
+        for i in a..b - step {
+            for j in 0..short {
+                sum += diff(at(i, j), at(i + step, j)) as u64;
+                n += 1;
+            }
+        }
+        sum as f64 / n.max(1) as f64
+    };
+    let scores: Vec<(u32, f64)> = (6..=len / 2).map(|step| (step, unlike(step))).collect();
+    let best = scores.iter().map(|s| s.1).fold(f64::MAX, f64::min);
+    let &(step, score) = scores.iter().find(|s| s.1 <= best * 1.2 + 2.0)?;
+    if score > (SAME / 3) as f64 || unlike(step / 2) < 2.0 * score + 10.0 {
+        return None;
+    }
+    let icons: Vec<(u32, u32)> = (0..).map(|k| (a + k * step, a + (k + 1) * step)).take_while(|&(_, end)| end <= b + step / 4).collect();
+    (icons.len() >= 2).then_some((icons, step, step))
+}
+
 impl Icons {
     /// The icons in `area` of the frame: None when it holds no row of them (fewer than two
     /// shapes alike, or not evenly spaced), an error when it does but none looks full.
@@ -400,27 +454,9 @@ impl Icons {
                 _ => {}
             }
         }
-        let mut widths: Vec<u32> = shapes.iter().map(|(a, b)| b - a).filter(|&w| w >= 4).collect();
-        if widths.len() < 2 {
+        let Some((icons, size, period)) = apart(&shapes).or_else(|| touching(&shapes, short, |i, j| at(i, j))) else {
             return Ok(None);
-        }
-        widths.sort();
-        let size = widths[widths.len() / 2];
-        let icons: Vec<(u32, u32)> = shapes.into_iter().filter(|(a, b)| (b - a).abs_diff(size) <= size / 4 + 1).collect();
-        if icons.len() < 2 {
-            return Ok(None);
-        }
-        // Evenly spaced: every step from one to the next a whole number of steps (a missing
-        // empty one makes a double step).
-        let period = icons.windows(2).map(|w| w[1].0 - w[0].0).min().unwrap();
-        let even = icons.windows(2).all(|w| {
-            let d = w[1].0 - w[0].0;
-            let k = (d as f64 / period as f64).round() as u32;
-            d.abs_diff(k * period) <= period / 7 + 1
-        });
-        if period < size || !even {
-            return Ok(None);
-        }
+        };
         let inside_icons = || icons.iter().flat_map(|&(a, b)| a..b);
         // Across the row: only where the icons are drawn.
         let rows: Vec<u32> = (0..short).filter(|&j| inside_icons().any(|i| drawn(i, j))).collect();
@@ -626,6 +662,46 @@ mod tests {
             }
             let (n, err) = count(&icons, &img);
             assert!((n - halves as f64 / 2.0).abs() <= err.max(0.01), "{halves}: {n} ± {err}");
+        }
+    }
+
+    /// Zelda-like (filled in halves, left to right): 3 full hearts that share their outline (a white frame around each, the
+    /// next one's frame starting where this one's ends, a bridge between them), then 2 empty ones.
+    fn joined(quarters: u32) -> RgbImage {
+        let mut img = RgbImage::from_pixel(180, 30, Rgb([88, 72, 72]));
+        for k in 0..5u32 {
+            let x0 = 10 + k * 27;
+            for y in 5..25 {
+                for x in x0..x0 + 27 {
+                    let (dx, dy) = (x - x0, y - 5);
+                    // A heart-ish shape: narrower towards the bottom.
+                    let half = 13i32 - (dy as i32 - 8).max(0);
+                    let inside = (dx as i32 - 13).abs() <= half;
+                    if !inside {
+                        continue;
+                    }
+                    let edge = (dx as i32 - 13).abs() >= half - 2 || dy < 2;
+                    let filled = k * 4 + (dx * 4 / 27) < quarters;
+                    let p = if edge { [248, 240, 232] } else if filled { [240, 56, 56] } else { [120, 64, 48] };
+                    img.put_pixel(x, y, Rgb(p));
+                }
+            }
+            for y in 12..16 {
+                img.put_pixel(x0 + 26, y, Rgb([248, 240, 232]));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn counts_hearts_that_touch() {
+        let gauge = Gauge::pick(&joined(12), Rect { x: 4, y: 2, w: 172, h: 26 }).unwrap();
+        assert_eq!(gauge.kind(), Kind::Icons, "{}", gauge.describe());
+        let Gauge::Icons(i) = &gauge else { unreachable!() };
+        assert_eq!(i.period, 27);
+        for q in [12, 10, 6, 2] {
+            let (n, err) = count(&gauge, &joined(q));
+            assert!((n - q as f64 / 4.0).abs() <= err.max(0.01), "{q}: {n} ± {err}");
         }
     }
 

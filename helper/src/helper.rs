@@ -89,21 +89,23 @@ pub fn exe_name(pid: u32) -> String {
 /// The name a game goes by (the games list, its profile): the program's, except for players
 /// that run many games, named after the game file they were started with. Ruffle runs every
 /// Flash game: all of them shared one name and one profile (Age of War's saved values were
-/// restored into The Binding of Isaac). Started without a file (opened from its menu), it stays
-/// "ruffle".
+/// restored into The Binding of Isaac); Solarus's `solarus-run` every Solarus quest. Started
+/// without a file (opened from its menu), it keeps the player's name.
 pub fn game_name(pid: u32) -> String {
     let exe = exe_name(pid);
     let lower = exe.to_ascii_lowercase();
-    if lower != "ruffle" && lower != "ruffle.exe" {
-        return exe;
-    }
+    let ending = match lower.as_str() {
+        "ruffle" | "ruffle.exe" => ".swf",
+        "solarus-run" | "solarus-run.exe" => ".solarus",
+        _ => return exe,
+    };
     let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    let swf = raw.split(|b| *b == 0).skip(1).map(String::from_utf8_lossy).find_map(|a| {
+    let file = raw.split(|b| *b == 0).skip(1).map(String::from_utf8_lossy).find_map(|a| {
         // A path or a URL; a URL's query left out.
         let file = a.split(['?', '#']).next().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_owned();
-        file.to_ascii_lowercase().ends_with(".swf").then_some(file)
+        file.to_ascii_lowercase().ends_with(ending).then_some(file)
     });
-    swf.unwrap_or(exe)
+    file.unwrap_or(exe)
 }
 
 /// GameMaker games keep every number as a double; they ship their assets as data.win (or
