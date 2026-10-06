@@ -11,6 +11,8 @@ finish-args:
   - --share=ipc
   - --device=dri
   - --talk-name=org.freedesktop.Flatpak
+  # Notifications over a fullscreen game need critical urgency, which the portal can't send.
+  - --talk-name=org.freedesktop.Notifications
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 cleanup:

@@ -943,9 +943,13 @@ impl FindView {
                 } else {
                     "Press Start to continue and let the number change a few more times."
                 };
+                let away = match n <= 20 {
+                    true => "Switch to Ferret to try them, or press Start there and let the number change again.",
+                    false => "Press Start in Ferret to continue and let the number change a few more times.",
+                };
                 let text = self.count_text(n);
                 self.announce(&format!("{text}. {next}"), false);
-                self.phase.done(false, &text, next);
+                self.phase.done_away(false, &text, next, away);
                 self.list_matches(n);
                 self.nudge(Some(&self.start));
             }
@@ -1024,7 +1028,7 @@ impl FindView {
         let at = format!("0x{:x} ({})", loc.addr, loc.kind.describe());
         self.last_count.set(None);
         self.announce(&format!("Found it! It's at {at}. Give it a name below to keep it."), true);
-        self.phase.done(true, "Found it!", "Give it a name below to keep it.");
+        self.phase.done_away(true, "Found it!", "Give it a name below to keep it.", "Switch to Ferret to give it a name and keep it.");
         self.log_found(&format!("Found it: {at}"));
         self.result.set_visible(true);
         self.name.grab_focus();
@@ -1113,7 +1117,7 @@ impl FindView {
                 let text = self.count_text(n);
                 self.announce(&format!("{text}. {next}"), false);
                 if change {
-                    self.phase.change_now(&format!("{text}. Then type the new number here."));
+                    self.phase.change_now(&text);
                 } else {
                     self.phase.done(false, &text, next);
                 }

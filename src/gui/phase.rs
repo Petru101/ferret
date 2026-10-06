@@ -4,7 +4,8 @@
 // search waits, none while a save waits for the code that changes it), and
 // opening a game (finding its saved values). While Start follows the number it shrinks to a
 // strip at the bottom. The player watches the game and is tired: a small spinner and a status
-// line were taken for "done" more than once.
+// line were taken for "done" more than once. What the player has to know while the game is in
+// front also goes out as a notification (`notify.rs`).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -14,6 +15,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use super::find::grouped;
+use super::notify::Notifier;
 
 pub struct PhaseCard {
     pub root: gtk::Box,
@@ -28,6 +30,7 @@ pub struct PhaseCard {
     shown: Rc<Cell<u32>>,
     /// The places matching, for the strip that follows "Ready!".
     count: Cell<usize>,
+    notify: Rc<Notifier>,
 }
 
 const LOOKS: [&str; 5] = ["busy", "ready", "turn", "watching", "done"];
@@ -37,7 +40,7 @@ fn places(n: usize) -> String {
 }
 
 impl PhaseCard {
-    pub fn new() -> Rc<Self> {
+    pub fn new(notify: Rc<Notifier>) -> Rc<Self> {
         let title = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).build();
         let bar = gtk::ProgressBar::builder().show_text(true).width_request(360).build();
         let hint = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).build();
@@ -61,13 +64,14 @@ impl PhaseCard {
         root.append(&bar);
         root.append(&hint);
         root.append(&give_up);
-        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0) })
+        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0), notify })
     }
 
     /// Shows the card in one of `LOOKS`; `bar` = how far, when there's something to measure.
     fn show(&self, look: &str, title: &str, bar: Option<f64>, hint: &str) -> u32 {
         let shown = self.shown.get() + 1;
         self.shown.set(shown);
+        self.notify.withdraw_waiting();
         for l in LOOKS.iter().chain(&["flash"]) {
             self.root.remove_css_class(l);
         }
@@ -91,6 +95,7 @@ impl PhaseCard {
 
     pub fn hide(&self) {
         self.shown.set(self.shown.get() + 1);
+        self.notify.withdraw_waiting();
         self.root.set_visible(false);
     }
 
@@ -102,6 +107,7 @@ impl PhaseCard {
     pub fn ready(self: &Rc<Self>, n: usize) {
         self.count.set(n);
         let shown = self.show("ready", "Ready!", None, &format!("{}. Change the number in the game now.", places(n)));
+        self.notify.send("Ready: change the number in the game", &format!("{}. Every change narrows it down.", places(n)), None, Some(6));
         let card = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(4), move || {
             if card.shown.get() == shown {
@@ -155,6 +161,12 @@ impl PhaseCard {
         };
         let shown = self.show("turn", "Your turn: change the number in the game!", Some(1.0), &hint(secs));
         self.offer_button("Stop Waiting", "Undo the test values and list the places, to try them one by one");
+        self.notify.send(
+            "Your turn: change the number in the game",
+            &format!("Pick some up or use some. Ferret watches which of the {places} places the game carries on from."),
+            Some("Stop Waiting"),
+            None,
+        );
         let (card, start) = (self.clone(), Instant::now());
         glib::timeout_add_local(Duration::from_millis(600), move || {
             if card.shown.get() != shown {
@@ -183,6 +195,12 @@ impl PhaseCard {
              the surest way to find it again after a restart.",
         );
         self.offer_button("Cancel", "Stop waiting and save it another way, which may not last a restart");
+        self.notify.send(
+            "Your turn: change the number in the game",
+            "Use some or pick some up, once. Ferret watches which of the game's code changes it.",
+            Some("Cancel"),
+            None,
+        );
         let card = self.clone();
         glib::timeout_add_local(Duration::from_millis(600), move || {
             if card.shown.get() != shown {
@@ -205,10 +223,11 @@ impl PhaseCard {
         self.root.set_can_target(true);
     }
 
-    /// A typed number narrowed the search: the player changes the number in the game next.
-    /// Blinks for a few seconds.
-    pub fn change_now(self: &Rc<Self>, hint: &str) {
-        let shown = self.show("turn", "Now change the number in the game", None, hint);
+    /// A typed number narrowed the search to `text` ("7 places match"): the player changes the
+    /// number in the game next. Blinks for a few seconds.
+    pub fn change_now(self: &Rc<Self>, text: &str) {
+        let shown = self.show("turn", "Now change the number in the game", None, &format!("{text}. Then type the new number here."));
+        self.notify.send("Now change the number in the game", &format!("{text}. Then type the new number in Ferret."), None, Some(6));
         let (card, start) = (self.clone(), Instant::now());
         glib::timeout_add_local(Duration::from_millis(600), move || {
             if card.shown.get() != shown {
@@ -229,7 +248,13 @@ impl PhaseCard {
 
     /// How a search, or a step of it, ended: for a few seconds (the status line keeps it).
     pub fn done(self: &Rc<Self>, found: bool, title: &str, hint: &str) {
+        self.done_away(found, title, hint, hint);
+    }
+
+    /// `done`, with `away` for the notification when the hint points at the window ("below").
+    pub fn done_away(self: &Rc<Self>, found: bool, title: &str, hint: &str, away: &str) {
         let shown = self.show(if found { "ready" } else { "done" }, title, None, hint);
+        self.notify.send(title, away, None, Some(if found { 10 } else { 6 }));
         let card = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(5), move || {
             if card.shown.get() == shown {

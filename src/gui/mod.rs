@@ -3,6 +3,7 @@
 // interface sends it jobs and gets events back.
 
 mod find;
+mod notify;
 mod phase;
 mod tips;
 mod values;
@@ -177,6 +178,7 @@ struct Ui {
     find: Rc<find::FindView>,
     phase: Rc<phase::PhaseCard>,
     tips: Rc<tips::Tips>,
+    notify: Rc<notify::Notifier>,
     worker: Worker,
     /// The game Ferret is attached to.
     attached: Rc<Cell<Option<u32>>>,
@@ -489,6 +491,7 @@ impl Ui {
                 }
                 let name = self.game_names.borrow().get(&exe).cloned().unwrap_or_else(|| exe.clone());
                 self.toast(&format!("{name} closed. Ferret opens it again when it starts."));
+                self.notify.send(&format!("{name} closed"), "Ferret opens it again when it starts.", None, Some(6));
                 self.waiting_for.replace(Some(exe));
             }
             Event::Values(Ok(values)) => {
@@ -509,6 +512,7 @@ impl Ui {
             Event::Undone(r, done) => self.find.undone(r, done),
             Event::Saved(Ok((_, msg))) => {
                 self.toast(&msg);
+                self.notify.send("Saved", &msg, None, Some(6));
                 self.find.saved();
                 self.tips.show(tips::Tip::Slots);
                 self.stack.set_visible_child_name("values");
@@ -685,7 +689,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
             "restore" => ui.phase.restoring("Lumencraft", "lumen", 2, 5),
             "found" => ui.phase.done(true, "Found it!", "Give it a name below to keep it."),
             "several" => ui.phase.done(false, "7 places match", "Change the number in the game, then type the new one."),
-            "change" => ui.phase.change_now("7 places match. Then type the new number here."),
+            "change" => ui.phase.change_now("7 places match"),
             _ => ui.phase.hide(),
         }),
     );
@@ -751,11 +755,14 @@ fn build(app: &adw::Application) {
         let stack = stack.clone();
         values::ValuesView::new(worker.clone(), move || stack.set_visible_child_name("find"))
     };
-    let phase = phase::PhaseCard::new();
+    let notify = notify::Notifier::new();
+    let phase = phase::PhaseCard::new(notify.clone());
     let find = find::FindView::new(worker.clone(), cancel, scan_now, phase.clone());
     {
         let find = find.clone();
         phase.give_up.connect_clicked(move |_| find.stop());
+        let give_up = phase.give_up.clone();
+        notify.on_button(move || give_up.emit_clicked());
     }
     stack.add_titled_with_icon(&values.root, Some("values"), "Values", "view-list-symbolic");
     stack.add_titled_with_icon(&find.root, Some("find"), "Find Value", "edit-find-symbolic");
@@ -808,6 +815,7 @@ fn build(app: &adw::Application) {
         .default_height(720)
         .content(&toasts)
         .build();
+    notify.set_window(&window);
 
     let ui = Rc::new(Ui {
         window,
@@ -823,6 +831,7 @@ fn build(app: &adw::Application) {
         find,
         phase,
         tips,
+        notify,
         worker,
         attached: Rc::default(),
         attaching: Rc::default(),
