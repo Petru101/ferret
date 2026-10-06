@@ -1,7 +1,8 @@
 // Global hotkeys through the GlobalShortcuts portal (KDE, GNOME 48+): turning limits off and on,
 // starting or stopping the search and Scan Again without leaving the game (Prey pauses while
-// it isn't in front). The desktop asks the player to accept them once (Set Up Hotkeys), and
-// keeps them for later runs; a portal session binds its shortcuts only once, so the set is
+// it isn't in front). On by default (the user's call): Ferret binds them at start, the desktop
+// asks the player to accept them the first time and keeps them for later runs (Set Up Hotkeys
+// asks again after a refusal); a portal session binds its shortcuts only once, so the set is
 // fixed. What a hotkey did is told by a notification (`notify.rs`).
 
 use std::cell::{Cell, RefCell};
@@ -118,7 +119,7 @@ impl Hotkeys {
         let (note, setup) = match (error, self.active.get()) {
             (Some(_), _) => ("This desktop doesn't offer hotkeys to apps.", None),
             (None, true) => ("They work while the game is in front. A notification says what they did.", Some("Change Hotkeys…")),
-            (None, false) => ("Turn limits off or on, and search, without leaving the game. Your desktop asks you to accept them once.", Some("Set Up Hotkeys…")),
+            (None, false) => ("Turn limits off or on, and search, without leaving the game. They aren't set up: your desktop asks you to accept them.", Some("Set Up Hotkeys…")),
         };
         if let Some(e) = error {
             eprintln!("hotkeys: {e}");
@@ -186,7 +187,7 @@ impl Hotkeys {
         glib::variant::ObjectPath::try_from(s).ok().map(|p| p.to_variant())
     }
 
-    /// A session, and the hotkeys accepted in an earlier run (bound again without asking).
+    /// A session, then the hotkeys (accepted in an earlier run: bound again without asking).
     fn start(self: &Rc<Self>) {
         self.request(
             "CreateSession",
@@ -214,9 +215,9 @@ impl Hotkeys {
                         eprintln!("hotkeys: session ready, accepted earlier: {earlier:?}");
                         if !earlier.is_empty() {
                             h.bound.replace(earlier);
-                            h.bind();
                         }
                         h.show_state(None);
+                        h.bind();
                     },
                 );
             },
