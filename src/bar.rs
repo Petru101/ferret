@@ -22,6 +22,8 @@ pub struct Bar {
     holes: Vec<bool>,
 }
 
+const OUTSIDE: &str = "The box is outside the game picture (the window got smaller?): capture again and pick it again.";
+
 const NOT_A_BAR: &str = "The box doesn't look like a bar (one colour from one end, maybe another after it): draw it close around the bar.";
 
 /// The first and last of `lines` (average colours) in the paint most of them share, when
@@ -89,6 +91,9 @@ impl Bar {
         let x0 = area.x.min(img.width());
         let y0 = area.y.min(img.height());
         let rect = Rect { x: x0, y: y0, w: area.w.min(img.width() - x0), h: area.h.min(img.height() - y0) };
+        if rect.w == 0 || rect.h == 0 {
+            return Err(OUTSIDE.into());
+        }
         let vertical = rect.h > rect.w;
         let (long, short) = if vertical { (rect.h, rect.w) } else { (rect.w, rect.h) };
         if long < 12 || long < 3 * short {

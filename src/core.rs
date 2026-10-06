@@ -2540,6 +2540,12 @@ impl Core {
     pub fn read_picked(&mut self) -> Result<Option<(Shown, bool)>, String> {
         let area = self.area.ok_or("no area picked yet")?;
         let frame = self.frame()?;
+        // The window got smaller since the capture the box was drawn on (or the game moved).
+        if let Ok((w, h)) = image::image_dimensions(&frame) {
+            if area.x >= w || area.y >= h {
+                return Err("The box is outside the game picture now (the window got smaller?): capture again and pick it again.".into());
+            }
+        }
         self.picked_look = ocr::Look::of(&frame, area).ok();
         self.hidden = false;
         self.hides = 0;

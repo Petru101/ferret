@@ -30,7 +30,6 @@ pub struct FindView {
     /// pick the only number on screen and wondered why nothing read it).
     pick_hint: gtk::Label,
     /// The selection was made by Ferret (the only number found), not the player.
-    auto_picked: Cell<bool>,
     /// What the last read of the box saw, drawn next to it (None inside: no number there).
     seen: RefCell<Option<Option<String>>>,
     /// A read the player hasn't confirmed yet (PaddleOCR's, not the learned digits'), and the
@@ -427,7 +426,6 @@ impl FindView {
             words: RefCell::default(),
             selection: RefCell::default(),
             pick_hint,
-            auto_picked: Cell::default(),
             seen: RefCell::default(),
             unconfirmed: RefCell::default(),
             question: RefCell::default(),
@@ -752,17 +750,13 @@ impl FindView {
                 self.picture.set_paintable(Some(&texture));
                 *self.texture.borrow_mut() = Some(texture);
                 self.log(&format!("{} numbers found on screen", words.len()));
-                let only = (words.len() == 1 && self.selection.borrow().is_none()).then(|| ocr::watch_area(words[0].rect));
                 *self.words.borrow_mut() = words;
                 self.root.set_visible_child_name("pick");
-                self.status.set_label("Click a number, or drag a box around it.");
+                // Nothing is picked for the player, even with one number on screen: they may want
+                // a bar there, and a pick they didn't make read like Ferret doing things on its own.
+                self.status.set_label("Click a number, or drag a box around it (or around a bar).");
                 self.pick_hint.set_visible(self.selection.borrow().is_none());
                 self.area.queue_draw();
-                // One number on screen: most likely the one, and the player can still pick another.
-                if let Some(area) = only {
-                    self.select(area);
-                    self.auto_picked.set(true);
-                }
             }
             Err(e) => {
                 self.status.set_label(&format!("Could not capture the window: {e}"));
@@ -774,7 +768,6 @@ impl FindView {
     pub fn select(&self, area: Rect) {
         *self.selection.borrow_mut() = Some(area);
         self.unpick.set_visible(true);
-        self.auto_picked.set(false);
         self.pick_hint.set_visible(false);
         self.seen.replace(None);
         self.nudge(None);
@@ -808,25 +801,20 @@ impl FindView {
             self.area.queue_draw();
         }
         self.unconfirmed.replace(None);
-        let picked = if self.auto_picked.take() {
-            "Picked the only number on screen (not the one? Click or drag a box around the right one). "
-        } else {
-            ""
-        };
         let refused = match &bar {
             Some(Err(e)) if !e.contains("long and thin") => Some(e.clone()),
             _ => None,
         };
         match r {
             Ok(Some((n, true))) => {
-                self.status.set_label(&format!("{picked}Reads {n}. Press Start, then play until the number changes a couple of times."));
+                self.status.set_label(&format!("Reads {n}. Press Start, then play until the number changes a couple of times."));
                 self.start.set_sensitive(true);
                 self.nudge(Some(&self.start));
             }
             // PaddleOCR's read: ask, and learn the game's digits from the answer. Not on Start: a
             // player who wanted to start confirmed a misread (YAW's heart icon learned as a 0).
             Ok(Some((n, false))) => {
-                self.status.set_label(&format!("{picked}Reads {n}? Answer the question first."));
+                self.status.set_label(&format!("Reads {n}? Answer the question first."));
                 self.start.set_sensitive(false);
                 self.ask_read(n);
             }
@@ -1091,6 +1079,9 @@ impl FindView {
     pub fn bug(&self, msg: &str) {
         self.typed_searching(false);
         self.auto_done(Err(msg.to_owned()));
+        // Not "The search stopped": it may not have been a search (a pick crashed once, and the
+        // player thought Ferret had started one on its own).
+        self.phase.done(false, "Ferret hit a bug", msg);
     }
 
     fn found(&self, loc: core::Loc) {
