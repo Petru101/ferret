@@ -3444,6 +3444,10 @@ impl Core {
         while count != 1 && start.elapsed() < limit && !cancelled(&self.cancel) {
             std::thread::sleep(Duration::from_millis(300));
             self.run_side_jobs();
+            // Values that change again while the screen is read fit what it showed then.
+            if self.search.is_some() {
+                self.helper.call("mark bar");
+            }
             let Some(now) = self.read_bar_stable()? else { continue };
             let again = self.scan_now.swap(false, Ordering::Relaxed);
             let near = |a: f64| (a - now.0).abs() <= now.1;
@@ -3491,11 +3495,22 @@ impl Core {
         } else if count != 1 && start.elapsed() >= limit {
             self.say("time limit reached; the screen never changed enough to narrow down to one address");
         }
-        self.bar_end(count, last)
+        let end = self.bar_end(count, last);
+        // Only a copy the game redraws the screen from was left: the value itself was lost on the
+        // way (Isaac's hearts). Start again rather than stop with nothing.
+        if matches!(&end, Ok(AutoResult::Unsure(why)) if why == COPY_ONLY) && !cancelled(&self.cancel) && start.elapsed() < limit {
+            self.say("the one place left is a copy the game redraws the screen from: lost the value, copying the game's memory again");
+            self.helper.call("track");
+            self.search = None;
+            self.bar_last = None;
+            return self.auto_bar(limit - start.elapsed());
+        }
+        end
     }
 
     /// How a bar's search ends with `count` places left and the bar `now` full: up to 20 are
-    /// checked by writing half their value (undone after), which halves the bar on screen.
+    /// checked by writing half their value, or twice it when the bar is half full or less
+    /// (undone after), which the bar on screen shows.
     fn bar_end(&mut self, count: usize, now: (f64, f64)) -> Result<AutoResult, String> {
         self.searched_decimals = 0;
         if count == 0 {
@@ -3533,21 +3548,28 @@ impl Core {
             // its own changes, maybe something else that moved alike (SPD: a junk number of a
             // billion passed every step). The player tries it.
             (1, 1) => Ok(AutoResult::Unsure(match self.icons() {
-                true => "The one place left kept a test value of half its number, but the icons didn't show it.".into(),
-                false => "The one place left kept a test value of half its number, but the bar didn't show it.".into(),
+                true => "The one place left kept a test value, but the icons didn't show it.".into(),
+                false => "The one place left kept a test value, but the bar didn't show it.".into(),
             })),
             (1, _) => Ok(AutoResult::Unsure(COPY_ONLY.into())),
             _ => Ok(AutoResult::Several(count)),
         }
     }
 
-    /// Whether `loc` is the bar's value: half of it as a test value halves the bar (`now` full).
-    /// Some(true) = the bar showed it, Some(false) = it kept the test value (or what the game
-    /// made of it, no further from it than half the value) but the bar didn't show it, None =
-    /// the game put something else there (a copy) or it can't be halved.
+    /// Whether `loc` is the bar's value: half of it as a test value halves the bar (`now` full),
+    /// twice it doubles a bar half full or less. Halving there could kill: Isaac with one heart
+    /// left had half of one for the test's 1.5 s, and a fly took it. Some(true) = the bar showed
+    /// it, Some(false) = it kept the test value (or what the game made of it, no further from it
+    /// than the test moved it) but the bar didn't show it, None = the game put something else
+    /// there (a copy) or it can't be halved.
     fn bar_moves(&mut self, loc: Loc, now: (f64, f64)) -> Option<bool> {
         let v = self.peek_exact(&[loc])[0].filter(|v| *v > 0.0)?;
-        let test = if loc.kind.whole() { (v / 2.0).floor() } else { v / 2.0 };
+        let low = now.0 <= 0.5;
+        let test = match (low, loc.kind.whole()) {
+            (true, _) => v * 2.0,
+            (false, true) => (v / 2.0).floor(),
+            (false, false) => v / 2.0,
+        };
         if test <= 0.0 {
             return None;
         }
@@ -3555,7 +3577,7 @@ impl Core {
         std::thread::sleep(Duration::from_millis(1500));
         let shown = self.read_bar_stable().ok().flatten();
         let after = self.peek_exact(&[loc])[0];
-        let kept = after.filter(|a| (a - test).abs() < (a - v).abs() && (a - test).abs() <= v - test);
+        let kept = after.filter(|a| (a - test).abs() < (a - v).abs() && (a - test).abs() <= (v - test).abs());
         // Put back what the test took, keeping a change the game made meanwhile.
         match kept {
             Some(a) => self.helper.call(&format!("write {loc} {}", a + (v - test))),
@@ -3565,8 +3587,9 @@ impl Core {
         let expect = now.0 * kept.unwrap_or(test) / v;
         let moved = shown.is_some_and(|g| (g.0 - expect).abs() <= 2.0 * now.1.max(g.1) + 0.02);
         self.say(&format!(
-            "0x{:x}: wrote {test} (half of {v}) as a test, it held {}; the screen showed {} ({} expected)",
+            "0x{:x}: wrote {test} ({} {v}) as a test, it held {}; the screen showed {} ({} expected)",
             loc.addr,
+            if low { "twice" } else { "half of" },
             after.map_or("??".into(), |a| a.to_string()),
             shown.map_or("nothing steady".into(), |g| self.shown(g.0)),
             self.shown(expect)
@@ -3610,6 +3633,9 @@ impl Core {
             return Err("No number picked: type the number the game shows instead.".into());
         }
         if self.bar.is_some() {
+            if self.search.is_some() {
+                self.helper.call("mark bar");
+            }
             let Some(f) = self.read_bar_stable()? else {
                 return Err(match self.icons() {
                     true => "The icons are all empty, hidden or changing: try again while they show and stay still.".into(),

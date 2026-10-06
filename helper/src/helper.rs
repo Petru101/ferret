@@ -937,6 +937,11 @@ struct Session {
     /// A copy of the game's memory for a search with no number to look for (a bar): the first
     /// `next bar` compares memory with it.
     snap: Option<Snap>,
+    /// The matches' values right before the screen was read (`mark bar`), for the next `next
+    /// bar`: a value that changes again while the screen is read fits the bar then, not later
+    /// (Isaac: a heart picked up and a hit right after; the real value was dropped and only a
+    /// copy the game redraws the hearts from, a frame behind, was left).
+    bar_marks: Option<Vec<f64>>,
 }
 
 /// How far back `undo` goes, and how many matches it keeps in all (16 bytes each).
@@ -950,6 +955,7 @@ impl Session {
         let same = new.len() == self.candidates.len() && new.iter().zip(&self.candidates).all(|(a, b)| a.tagged == b.tagged);
         let old = std::mem::replace(&mut self.candidates, new);
         self.snap = None;
+        self.bar_marks = None;
         if same {
             return;
         }
@@ -1590,11 +1596,18 @@ fn cmd_next_bar(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<
     };
     let before = s.candidates.len();
     let Some(snap) = s.snap.as_ref() else {
+        let marks = s.bar_marks.take().filter(|m| m.len() == before);
+        // Kept with the value that fits the bar now: right before the screen was read, if
+        // only then.
         let next: Vec<Candidate> = s
             .candidates
             .iter()
             .zip(s.read_all())
-            .filter_map(|(c, new)| Some(new?).filter(|&v| bar_fits(c.value, v, f0, f1, err)).map(|v| Candidate { value: v, ..*c }))
+            .enumerate()
+            .filter_map(|(i, (c, new))| {
+                let marked = marks.as_ref().map(|m| m[i]);
+                [new, marked].into_iter().flatten().find(|&v| bar_fits(c.value, v, f0, f1, err)).map(|v| Candidate { value: v, ..*c })
+            })
             .collect();
         if next.is_empty() {
             return writeln!(out, "{before} -> 0 matches (kept the {before} from before)");
@@ -1721,7 +1734,12 @@ fn cmd_redo(out: &mut impl Write, s: &mut Session) -> io::Result<()> {
 
 /// Remembers every candidate's current value, right before the screen is read: `next` then
 /// accepts values that showed the number at any point in between (the screen lags memory).
-fn cmd_mark(out: &mut impl Write, s: &mut Session) -> io::Result<()> {
+fn cmd_mark(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    // A bar's step compares with the value at the step before: keep that, note these aside.
+    if arg.trim() == "bar" {
+        s.bar_marks = Some(s.candidates.iter().zip(s.read_all()).map(|(c, v)| v.unwrap_or(c.value)).collect());
+        return writeln!(out, "marked {} matches", s.candidates.len());
+    }
     let marked: Vec<Candidate> =
         s.candidates.iter().zip(s.read_all()).map(|(c, v)| Candidate { value: v.unwrap_or(c.value), ..*c }).collect();
     s.candidates = marked;
@@ -2776,7 +2794,7 @@ pub fn run() {
             "attach" => cmd_attach(&mut out, &mut session, &limiter, arg),
             "scan" => cmd_scan(&mut out, &mut session, arg),
             "next" => cmd_next(&mut out, &mut session, arg),
-            "mark" => cmd_mark(&mut out, &mut session),
+            "mark" => cmd_mark(&mut out, &mut session, arg),
             "snap" => cmd_snap(&mut out, &mut session, arg),
             "undo" => cmd_undo(&mut out, &mut session),
             "redo" => cmd_redo(&mut out, &mut session),
