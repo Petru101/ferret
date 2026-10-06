@@ -789,6 +789,8 @@ struct Game {
     paths: Vec<(String, Vec<String>)>,
     /// How those paths agreed when last followed.
     votes: Vec<(String, Votes)>,
+    /// How often each value's confirmed paths led to it this run (see `Steady`).
+    steady: Vec<(String, Steady)>,
     /// Values found through code patterns whose object the game reads from a static pointer:
     /// that pointer as a path (good for this run only), for the helper to follow.
     via: Vec<(String, String)>,
@@ -857,6 +859,31 @@ impl Votes {
         }
     }
 }
+
+/// How often a value's confirmed pointer paths led to it during a run. Paths starting in deep
+/// stack frames lead there only some of the time (Age of War: 65-94 of 247 on a clear vote,
+/// once 28 elsewhere), so they are dropped once the value has been followed long enough: only
+/// paths that led to it every time (`STEADY_SHARE`) are kept. Counted only while the paths
+/// agree clearly on a place where the game has changed the value (before it exists, at a
+/// menu, they may agree on another place).
+#[derive(Default)]
+struct Steady {
+    /// The place they agree on, and the value first seen there until the game changes it.
+    place: u64,
+    first: Option<f64>,
+    changed: bool,
+    /// Looks since then, and how many of them each path led there.
+    looks: u32,
+    led: Vec<u32>,
+    /// Already pruned (or found nothing to prune) this run.
+    done: bool,
+}
+
+/// Looks at a value (the Values tab: one a second) before its unsteady paths are dropped.
+const STEADY_LOOKS: u32 = 60;
+/// Share of those looks a kept path led to the value (a few misses while the game changes
+/// what it shows).
+const STEADY_SHARE: f64 = 0.95;
 
 /// A search that could only end on a display copy.
 const COPY_ONLY: &str = "only found a copy the game redraws its display from: it keeps the value itself in a form \
@@ -1063,6 +1090,7 @@ impl Core {
             entries: Vec::new(),
             paths: Vec::new(),
             votes: Vec::new(),
+            steady: Vec::new(),
             via: Vec::new(),
             named: Vec::new(),
             named_doubt: Vec::new(),
@@ -1496,12 +1524,73 @@ impl Core {
             let Some(kind) = self.game.as_ref().and_then(|g| g.entries.iter().find(|(n, _)| *n == name)).map(|(_, l)| l.kind) else {
                 continue;
             };
-            let (_, best, votes) = self.follow_votes(kind, &paths);
+            let (ends, best, votes) = self.follow_votes(kind, &paths);
+            let clear = votes.as_ref().is_some_and(|v| v.clear);
             self.set_votes(&name, votes);
             if let Some(e) = self.game.as_mut().and_then(|g| g.entries.iter_mut().find(|(n, _)| *n == name)) {
                 e.1.addr = best.map_or(0, |(loc, _)| loc.addr);
             }
+            if let (true, Some((loc, _))) = (clear, best) {
+                self.count_steady(&name, loc, &paths, &ends);
+            }
         }
+    }
+
+    /// Counts which of a value's confirmed paths led to it (see `Steady`), and after
+    /// `STEADY_LOOKS` drops the others from the profile and from this run's following.
+    fn count_steady(&mut self, name: &str, loc: Loc, paths: &[String], ends: &[Option<u64>]) {
+        let Some(game) = self.game.as_ref() else { return };
+        let exe = game.exe.clone();
+        if game.steady.iter().any(|(n, s)| n == name && s.done) {
+            return;
+        }
+        let value = self.peek_exact(&[loc])[0];
+        let Some(game) = self.game.as_mut() else { return };
+        if !game.steady.iter().any(|(n, _)| n == name) {
+            game.steady.push((name.to_owned(), Steady::default()));
+        }
+        let s = &mut game.steady.iter_mut().find(|(n, _)| n == name).unwrap().1;
+        if s.place != loc.addr || s.led.len() != paths.len() {
+            *s = Steady { place: loc.addr, led: vec![0; paths.len()], ..Steady::default() };
+        }
+        if !s.changed {
+            match (s.first, value) {
+                (Some(first), Some(v)) if first != v => s.changed = true,
+                (_, v) => {
+                    s.first = s.first.or(v);
+                    return;
+                }
+            }
+        }
+        s.looks += 1;
+        for (n, end) in s.led.iter_mut().zip(ends) {
+            *n += (*end == Some(loc.addr)) as u32;
+        }
+        if s.looks < STEADY_LOOKS {
+            return;
+        }
+        s.done = true;
+        let need = (s.looks as f64 * STEADY_SHARE).ceil() as u32;
+        let keep: Vec<String> = paths.iter().zip(&s.led).filter(|(_, n)| **n >= need).map(|(p, _)| p.clone()).collect();
+        // Only confirmed paths, and only when enough are left to vote.
+        let mut entries = read_profile(&exe);
+        let Some(e) = entries.iter_mut().find(|e| e.name == name) else { return };
+        let confirmed: Vec<String> = e.paths.iter().map(|p| path_arg(p)).collect();
+        if confirmed != paths || keep.len() < 2 || keep.len() == paths.len() {
+            return;
+        }
+        e.paths.retain(|p| keep.contains(&path_arg(p)));
+        if write_profile(&exe, &entries).is_err() {
+            return;
+        }
+        if let Some(f) = game.paths.iter_mut().find(|(n, _)| n == name) {
+            f.1 = keep.clone();
+        }
+        self.say(&format!(
+            "{name}: kept the {} of {} pointer paths that always led to it; the others lead elsewhere at times",
+            keep.len(),
+            paths.len()
+        ));
     }
 
     /// Hands a saved value to the helper, which keeps it in its limit (if it has one) in the
