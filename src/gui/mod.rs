@@ -674,6 +674,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("capture", Box::new(|ui, _| ui.find.capture()));
+    action("repick", Box::new(|ui, _| ui.find.repick()));
     action(
         "select",
         Box::new(|ui, rect| {

@@ -119,6 +119,11 @@ impl WindowCapture {
         Ok(Self { conn, session, node: *node, direct: false })
     }
 
+    /// Forgets the window picked last: the next capture asks the desktop which window again.
+    pub fn forget_window() {
+        fs::remove_file(token_file()).ok();
+    }
+
     /// Saves the window's current frame as a PNG.
     pub fn grab(&self, out: &Path) -> Result<(), String> {
         // Each GStreamer run needs its own PipeWire connection.

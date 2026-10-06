@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 
 use super::phase::PhaseCard;
 use super::{Event, Worker};
@@ -212,7 +212,15 @@ impl FindView {
         overlay.add_overlay(&pick_hint);
         let scroll = gtk::ScrolledWindow::builder().child(&overlay).vexpand(true).build();
 
-        let capture = gtk::Button::builder().icon_name("camera-photo-symbolic").tooltip_text("Capture again").build();
+        // The menu: the window picked by mistake (the choice is remembered across restarts).
+        let window_menu = gio::Menu::new();
+        window_menu.append(Some("Pick Another Window…"), Some("app.repick"));
+        let capture = adw::SplitButton::builder()
+            .icon_name("camera-photo-symbolic")
+            .tooltip_text("Capture again")
+            .dropdown_tooltip("Watch another window")
+            .menu_model(&window_menu)
+            .build();
         let zoom = gtk::ToggleButton::builder().icon_name("zoom-original-symbolic").tooltip_text("Actual size").build();
         let status = gtk::Label::builder()
             .label("Click a number, or drag a box around it.")
@@ -457,9 +465,13 @@ impl FindView {
             again,
         });
 
-        for b in [&begin, &capture] {
+        {
             let view = view.clone();
-            b.connect_clicked(move |_| view.capture());
+            begin.connect_clicked(move |_| view.capture());
+        }
+        {
+            let view = view.clone();
+            capture.connect_clicked(move |_| view.capture());
         }
         {
             let view_ = view.clone();
@@ -1317,6 +1329,22 @@ impl FindView {
     }
 
     /// Attached to another game: nothing picked or found in the last one applies.
+    /// Forgets the window Ferret watches and asks the desktop again (the wrong one was picked).
+    pub fn repick(&self) {
+        if self.stop.is_visible() {
+            self.stop();
+        }
+        *self.selection.borrow_mut() = None;
+        self.unpick.set_visible(false);
+        self.crop.set_paintable(None::<&gdk::Paintable>);
+        self.start.set_sensitive(false);
+        self.nudge(None);
+        self.root.set_visible_child_name("pick");
+        self.busy(true);
+        self.status.set_label("Pick the game window in your desktop's window picker…");
+        self.worker.run(|core| Event::Numbers(core.change_window()));
+    }
+
     /// Forgets the picked box; the matches stay. Typed numbers go on without screen reads.
     pub fn unpick(&self) {
         if self.stop.is_visible() {

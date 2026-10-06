@@ -2326,6 +2326,17 @@ impl Core {
         Ok(())
     }
 
+    /// The player picked the wrong window: forget it (and the box picked in it) and ask the
+    /// desktop again, then find the numbers in the new one. Closing Ferret didn't help: the
+    /// choice is kept with a restore token so the picker only shows up once.
+    pub fn change_window(&mut self) -> Result<(PathBuf, Vec<Word>), String> {
+        self.capture = None;
+        WindowCapture::forget_window();
+        self.clear_area();
+        self.say("forgot the window picked before: the desktop asks which window to watch");
+        self.numbers()
+    }
+
     pub fn frame(&mut self) -> Result<PathBuf, String> {
         self.start_capture()?;
         let out = cache_dir().join("frame.png");
