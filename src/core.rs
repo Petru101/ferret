@@ -2343,6 +2343,16 @@ impl Core {
         kept
     }
 
+    /// Forgets the picked box: searches go on with typed numbers only (a total the game never
+    /// shows, such as loaded + reserve ammo), and checks don't read the screen.
+    pub fn clear_area(&mut self) {
+        self.area = None;
+        self.picked_look = None;
+        self.hidden = false;
+        self.hides = 0;
+        self.say("no box picked now: type the numbers the game holds");
+    }
+
     /// Forgets the search in progress, so the next number starts from scratch.
     pub fn reset(&mut self) {
         // Clearing a search that kept only places shaped like earlier finds: they weren't it, and

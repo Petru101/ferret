@@ -697,6 +697,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("types", Box::new(|ui, i| ui.find.pick_types(i.trim().parse().unwrap_or(0))));
     action("stop", Box::new(|ui, _| ui.find.stop()));
     action("reset", Box::new(|ui, _| ui.find.start_over()));
+    action("unpick", Box::new(|ui, _| ui.find.unpick()));
     action("undo", Box::new(|ui, _| ui.find.undo()));
     action("redo", Box::new(|ui, _| ui.find.redo()));
     action("name", Box::new(|ui, name| ui.find.type_name(&name)));

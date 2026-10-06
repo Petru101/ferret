@@ -41,6 +41,8 @@ pub struct FindView {
     drag: RefCell<Option<(f64, f64, f64, f64)>>,
     status: gtk::Label,
     crop: gtk::Picture,
+    /// Forgets the picked box (`unpick`).
+    unpick: gtk::Button,
     start: gtk::Button,
     stop: gtk::Button,
     start_over: gtk::Button,
@@ -237,6 +239,13 @@ impl FindView {
             .valign(gtk::Align::Center)
             .child(&adw::Clamp::builder().maximum_size(160).child(&crop).build())
             .build();
+        let unpick = gtk::Button::builder()
+            .icon_name("edit-clear-symbolic")
+            .tooltip_text("Forget the picked box, to search for a number the game doesn't show by typing it")
+            .css_classes(["flat"])
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
         let spinner = gtk::Spinner::new();
         let stop = gtk::Button::builder().label("Stop").css_classes(["destructive-action"]).visible(false).build();
         let start = gtk::Button::builder().label("Start").css_classes(["suggested-action"]).sensitive(false).build();
@@ -264,7 +273,7 @@ impl FindView {
             .build();
         let top = frame_box();
         top.set_margin_top(12);
-        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), undo.upcast_ref(), redo.upcast_ref(), again.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
+        for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), status.upcast_ref(), crop_box.upcast_ref(), unpick.upcast_ref(), spinner.upcast_ref(), types.upcast_ref(), undo.upcast_ref(), redo.upcast_ref(), again.upcast_ref(), start_over.upcast_ref(), stop.upcast_ref(), start.upcast_ref()] {
             top.append(w);
         }
 
@@ -412,6 +421,7 @@ impl FindView {
             drag: RefCell::default(),
             status,
             crop,
+            unpick,
             start,
             stop,
             start_over,
@@ -490,6 +500,8 @@ impl FindView {
             view.stop.connect_clicked(move |_| view_.stop());
             let view_ = view.clone();
             view.start_over.connect_clicked(move |_| view_.start_over());
+            let view_ = view.clone();
+            view.unpick.connect_clicked(move |_| view_.unpick());
             let view_ = view.clone();
             view.undo.connect_clicked(move |_| view_.undo());
             let view_ = view.clone();
@@ -744,6 +756,7 @@ impl FindView {
 
     pub fn select(&self, area: Rect) {
         *self.selection.borrow_mut() = Some(area);
+        self.unpick.set_visible(true);
         self.auto_picked.set(false);
         self.pick_hint.set_visible(false);
         self.seen.replace(None);
@@ -1282,6 +1295,25 @@ impl FindView {
     }
 
     /// Attached to another game: nothing picked or found in the last one applies.
+    /// Forgets the picked box; the matches stay. Typed numbers go on without screen reads.
+    pub fn unpick(&self) {
+        if self.stop.is_visible() {
+            self.stop();
+        }
+        *self.selection.borrow_mut() = None;
+        self.unpick.set_visible(false);
+        self.crop.set_paintable(None::<&gdk::Paintable>);
+        self.start.set_sensitive(false);
+        self.nudge(None);
+        self.pick_hint.set_visible(true);
+        self.area.queue_draw();
+        self.status.set_label("No box picked: type the number the game holds below, or click one in the picture.");
+        self.worker.run(|core| {
+            core.clear_area();
+            Event::Idle
+        });
+    }
+
     pub fn new_game(&self) {
         self.hide_scan();
         self.last_count.set(None);
@@ -1292,6 +1324,7 @@ impl FindView {
         *self.texture.borrow_mut() = None;
         self.words.borrow_mut().clear();
         *self.selection.borrow_mut() = None;
+        self.unpick.set_visible(false);
         self.pick_hint.set_visible(true);
         self.seen.replace(None);
         self.nudge(None);
