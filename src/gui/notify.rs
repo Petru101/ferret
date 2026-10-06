@@ -125,12 +125,16 @@ impl Notifier {
         self.sent.set(self.sent.get() + 1);
     }
 
+    /// Ferret's window isn't in front (the player is in the game).
+    pub fn away(&self) -> bool {
+        self.window.borrow().as_ref().is_some_and(|w| !w.is_active())
+    }
+
     /// Tells the player, unless Ferret's window is in front. `button`: a button that does
     /// `on_button`. `secs`: how long it stays; none = until it's replaced or withdrawn.
     pub fn send(self: &Rc<Self>, title: &str, body: &str, button: Option<&str>, secs: Option<u32>) {
         let Some(bus) = &self.bus else { return };
-        let away = self.window.borrow().as_ref().is_some_and(|w| !w.is_active());
-        if !away {
+        if !self.away() {
             return;
         }
         log(&format!("notification: {title}"));

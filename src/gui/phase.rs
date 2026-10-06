@@ -34,6 +34,9 @@ pub struct PhaseCard {
     /// What the card asks of the player now (title, text, button, seconds): sent again when they
     /// switch to the game (`remind`); "Ready" usually comes while Ferret is still in front.
     away: RefCell<Option<(String, String, Option<&'static str>, Option<u32>)>>,
+    /// `away` went out already: once is enough (the player switching back and forth got the
+    /// same one every time, until Plasma refused them as too many).
+    reminded: Cell<bool>,
     /// The search follows a bar, not a number: the texts say so.
     pub follows_bar: Cell<bool>,
 }
@@ -69,7 +72,7 @@ impl PhaseCard {
         root.append(&bar);
         root.append(&hint);
         root.append(&give_up);
-        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0), notify, away: RefCell::default(), follows_bar: Cell::new(false) })
+        Rc::new(Self { root, title, bar, hint, give_up, shown: Rc::default(), count: Cell::new(0), notify, away: RefCell::default(), reminded: Cell::new(false), follows_bar: Cell::new(false) })
     }
 
     /// Shows the card in one of `LOOKS`; `bar` = how far, when there's something to measure.
@@ -112,12 +115,13 @@ impl PhaseCard {
         if send {
             self.notify.send(title, text, button, secs);
         }
+        self.reminded.set(send && self.notify.away());
         self.away.replace(Some((title.to_owned(), text.to_owned(), button, secs)));
     }
 
     /// Ferret's window lost the front: what the card asks of the player, as a notification.
     pub fn remind(&self) {
-        if !self.root.is_visible() {
+        if !self.root.is_visible() || self.reminded.replace(true) {
             return;
         }
         if let Some((title, text, button, secs)) = self.away.borrow().clone() {
@@ -161,7 +165,7 @@ impl PhaseCard {
         let card = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(4), move || {
             if card.shown.get() == shown {
-                card.watching(card.count.get());
+                card.strip(card.count.get());
             }
         });
     }
@@ -184,6 +188,14 @@ impl PhaseCard {
         self.tell(title, &format!("{}.", places(n)), None, Some(6), false);
     }
 
+    /// The Searching strip, after "Ready!" or "Scanned again" had their few seconds. `watching`
+    /// leaves "Ready!" up: called from Ready's own timer, the strip never came and every switch
+    /// to the game sent "Ready" again (Plasma refused them after a few).
+    fn strip(&self, n: usize) {
+        self.root.remove_css_class("ready");
+        self.watching(n);
+    }
+
     /// Scan Again while Start runs: how it went for a few seconds, then the strip again.
     pub fn scanned_again(self: &Rc<Self>, before: usize, after: usize) {
         self.count.set(after);
@@ -196,7 +208,7 @@ impl PhaseCard {
         let card = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(3), move || {
             if card.shown.get() == shown {
-                card.watching(card.count.get());
+                card.strip(card.count.get());
             }
         });
     }
