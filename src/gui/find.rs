@@ -230,6 +230,7 @@ impl FindView {
             .xalign(0.0)
             .hexpand(true)
             .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
             .build();
         // Highlighted only while it says how a search ended: any new message clears it.
         status.connect_label_notify(|l| {
@@ -1426,7 +1427,8 @@ impl FindView {
         *self.listed.borrow_mut() = locs;
         for m in list {
             let loc = m.loc;
-            let row = adw::ActionRow::builder().title(&m.value).subtitle(subtitle(&m)).build();
+            // One line: a huge value cut short instead of stretching the window.
+            let row = adw::ActionRow::builder().title(&m.value).title_lines(1).subtitle(subtitle(&m)).build();
             self.match_rows.borrow_mut().push(row.clone());
             let entry = gtk::Entry::builder().placeholder_text("New value").width_chars(8).valign(gtk::Align::Center).build();
             let try_it = gtk::Button::builder().label("Try").valign(gtk::Align::Center).build();
@@ -1617,7 +1619,13 @@ impl FindView {
         let grid = gtk::Grid::builder().column_spacing(24).row_spacing(4).build();
         for (i, (name, value, limit)) in rows.iter().enumerate() {
             for (col, text) in [name, value, limit].into_iter().enumerate() {
-                let label = gtk::Label::builder().label(text.as_str()).xalign(0.0).build();
+                let label = gtk::Label::builder()
+                    .label(text.as_str())
+                    .xalign(0.0)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .max_width_chars(24)
+                    .tooltip_text(text.as_str())
+                    .build();
                 if col == 0 {
                     label.add_css_class("heading");
                 } else {

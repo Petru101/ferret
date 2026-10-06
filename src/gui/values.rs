@@ -166,7 +166,9 @@ impl ValuesView {
             w.current.set(v.value);
             w.keep.set_sensitive(v.value.is_some_and(|n| n > 0.0));
             w.group.set_description(Some(&about));
-            w.value.set_label(&v.value.map_or("?".into(), |n| core::number_text(n, v.decimals)));
+            let shown = v.value.map_or("?".into(), |n| core::number_text(n, v.decimals));
+            w.value.set_tooltip_text(Some(&shown));
+            w.value.set_label(&shown);
             w.limit.set_subtitle(&limit_subtitle(v));
             w.confirm.set_visible(v.confirmable);
             if let (true, Some(n)) = (v.confirmable, v.value) {
@@ -192,7 +194,13 @@ impl ValuesView {
         }
         group.set_header_suffix(Some(&remove));
 
-        let value = gtk::Label::builder().css_classes(["title-3", "numeric"]).build();
+        // A huge number (Age of War's coins at 5555554545654 and up) cut short, whole in the
+        // tooltip: it stretched the window before.
+        let value = gtk::Label::builder()
+            .css_classes(["title-3", "numeric"])
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .max_width_chars(16)
+            .build();
         let entry = gtk::Entry::builder()
             .placeholder_text("New value")
             .width_chars(10)
@@ -224,6 +232,7 @@ impl ValuesView {
 
         let confirm_button = gtk::Button::builder().valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
         let confirm = adw::ActionRow::builder()
+            .title_lines(1)
             .subtitle("Then Ferret finds it this way from now on, and keeps it in range. If it shows another number, find it again instead.")
             .visible(false)
             .build();
@@ -236,6 +245,7 @@ impl ValuesView {
 
         let limit = adw::ExpanderRow::builder()
             .title("Keep in Range")
+            .subtitle_lines(2)
             .show_enable_switch(true)
             .enable_expansion(v.min.is_some() || v.max.is_some())
             .expanded(false)
