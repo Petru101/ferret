@@ -812,6 +812,10 @@ impl FindView {
         } else {
             ""
         };
+        let refused = match &bar {
+            Some(Err(e)) if !e.contains("long and thin") => Some(e.clone()),
+            _ => None,
+        };
         match r {
             Ok(Some((n, true))) => {
                 self.status.set_label(&format!("{picked}Reads {n}. Press Start, then play until the number changes a couple of times."));
@@ -827,9 +831,14 @@ impl FindView {
             }
             Ok(None) if matches!(bar, Some(Ok(()))) => {
                 self.phase.follows_bar.set(true);
-                self.status.set_label("That's a bar: Ferret goes by how full it is. Press Start, then play until it goes down or up a couple of times (take a hit, use some).");
+                self.status.set_label("That's a bar: Ferret goes by how full it is (full or not). Press Start, then play until it goes down or up a couple of times (take a hit, use some).");
                 self.start.set_sensitive(true);
                 self.nudge(Some(&self.start));
+            }
+            // Long and thin like a bar, but Ferret can't measure it: say why.
+            Ok(None) if refused.is_some() => {
+                self.status.set_label(&format!("Can't read a number there, and can't measure it as a bar: {}", refused.unwrap_or_default()));
+                self.start.set_sensitive(false);
             }
             Ok(None) => {
                 self.status.set_label("Can't read a number there. Type the number the game shows below; Ferret learns the game's digits from it. Or try a tighter box.");

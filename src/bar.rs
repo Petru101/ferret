@@ -14,15 +14,15 @@ pub struct Bar {
     pub rect: Rect,
     /// Fills along its height (a box taller than wide).
     vertical: bool,
-    /// The bar as picked (full), row by row.
+    /// The colour of the full part at each place across the bar (a gradient across it is fine).
     full: Vec<[u8; 3]>,
-    /// Lines across the bar not in its paint when picked (digits on a patch of their own:
-    /// Shattered Pixel Dungeon's "20/20" in the middle of its health bar): they change with the
-    /// value, so they are judged by the lines beside them.
+    /// Lines across the bar in neither the full nor the empty paint when picked (digits on a
+    /// patch of their own: Shattered Pixel Dungeon's "20/20" in the middle of its health bar):
+    /// they change with the value, so they are judged by the lines beside them.
     holes: Vec<bool>,
 }
 
-const NOT_FULL: &str = "The box isn't one colour along its length: pick the bar while it's full, with a box close around it.";
+const NOT_A_BAR: &str = "The box doesn't look like a bar (one colour from one end, maybe another after it): draw it close around the bar.";
 
 /// The first and last of `lines` (average colours) in the paint most of them share, when
 /// nearly all of those between them are in it too.
@@ -48,6 +48,11 @@ fn diff(a: [u8; 3], b: [u8; 3]) -> u32 {
     a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y) as u32).sum()
 }
 
+/// How colourful: empty parts of bars are dark or grey.
+fn vivid(p: [u8; 3]) -> u32 {
+    (*p.iter().max().unwrap() - *p.iter().min().unwrap()) as u32
+}
+
 fn mean(px: impl Iterator<Item = [u8; 3]>) -> [u8; 3] {
     let (mut sum, mut n) = ([0u64; 3], 0u64);
     for p in px {
@@ -57,10 +62,29 @@ fn mean(px: impl Iterator<Item = [u8; 3]>) -> [u8; 3] {
     sum.map(|s| (s / n.max(1)) as u8)
 }
 
+/// Stretches of one paint along `slices`: (first, past the last, average colour). A sharp
+/// step from one line to the next starts a new one (a black outline beside a dark empty part
+/// is near it in colour, but not a smooth change); a gradient doesn't.
+fn runs(slices: &[[u8; 3]]) -> Vec<(usize, usize, [u8; 3])> {
+    let mut runs: Vec<(usize, usize, [u8; 3])> = Vec::new();
+    for (i, &p) in slices.iter().enumerate() {
+        match runs.last_mut() {
+            Some(r) if diff(slices[i - 1], p) <= SAME / 2 => r.1 = i + 1,
+            _ => runs.push((i, i + 1, p)),
+        }
+    }
+    for r in &mut runs {
+        r.2 = mean(slices[r.0..r.1].iter().copied());
+    }
+    runs
+}
+
 impl Bar {
-    /// The bar in `area` of the frame, picked while full: it has to be long, thin and mostly
-    /// one paint along its length. Lines of other colours at its ends (an outline, the box
-    /// taking in a little background) are left out.
+    /// The bar in `area` of the frame, full or not: long and thin, one paint from one end (the
+    /// full part) and maybe another after it (the empty part: the duller one, or the top or
+    /// right one when both are as colourful). Age of War's base can't be refilled to pick it
+    /// full. Lines of other colours at its ends (an outline, the box taking in a little
+    /// background) are left out.
     pub fn pick(img: &RgbImage, area: Rect) -> Result<Bar, String> {
         let x0 = area.x.min(img.width());
         let y0 = area.y.min(img.height());
@@ -75,34 +99,92 @@ impl Bar {
             img.get_pixel(x, y).0
         };
         // Along the bar through the middle of the box (an outline or background above and below
-        // would blur the bar's colours together), then across it (the outline's top and bottom).
+        // would blur the bar's colours together).
         let middle = short / 3..(short - short / 3).max(short / 3 + 1);
         let slices: Vec<[u8; 3]> = (0..long).map(|i| mean(middle.clone().map(|j| at(i, j)))).collect();
-        let (first, last) = paint(&slices).ok_or(NOT_FULL)?;
+        let runs = runs(&slices);
+        let big = (long as usize / 50).max(3);
+        let ends = (runs.iter().find(|r| r.1 - r.0 >= big), runs.iter().rev().find(|r| r.1 - r.0 >= big));
+        let (Some(a), Some(b)) = ends else { return Err(NOT_A_BAR.into()) };
+        let (first, last) = (a.0 as u32, b.1 as u32 - 1);
         if (first + (long - 1 - last)) as f64 > (0.1 * long as f64).max(4.0) {
-            return Err(NOT_FULL.into());
+            return Err(NOT_A_BAR.into());
         }
-        let lines: Vec<[u8; 3]> = (0..short).map(|j| mean((first..=last).map(|i| at(i, j)))).collect();
-        let (top, bottom) = paint(&lines).unwrap_or((0, short - 1));
+        let (fill, empty) = match diff(a.2, b.2) <= SAME {
+            true => (a.2, None),
+            false if vivid(a.2) > vivid(b.2) + 40 => (a.2, Some(b.2)),
+            false if vivid(b.2) > vivid(a.2) + 40 => (b.2, Some(a.2)),
+            // As colourful: bars fill from the bottom or the left.
+            false if vertical => (b.2, Some(a.2)),
+            false => (a.2, Some(b.2)),
+        };
+        // Lines in neither paint (digits) are few, and the full part is at one end.
+        let kind: Vec<u8> = slices[first as usize..=last as usize]
+            .iter()
+            .map(|&p| if diff(p, fill) <= SAME { 1 } else if empty.is_some_and(|e| diff(p, e) <= SAME) { 2 } else { 0 })
+            .collect();
+        let n = kind.len();
+        if kind.iter().filter(|&&k| k == 0).count() * 5 > n {
+            return Err(NOT_A_BAR.into());
+        }
+        // Where the full part ends: the split with the fewest lines on the wrong side (dark
+        // digits on the full part look like the empty one), from either end.
+        let (mut edge, mut fill_first, mut wrong) = (n, true, usize::MAX);
+        if empty.is_some() {
+            let empties_before: Vec<usize> = std::iter::once(0).chain(kind.iter().scan(0, |c, &k| { *c += (k == 2) as usize; Some(*c) })).collect();
+            let fills_before: Vec<usize> = std::iter::once(0).chain(kind.iter().scan(0, |c, &k| { *c += (k == 1) as usize; Some(*c) })).collect();
+            for p in 0..=n {
+                let a = empties_before[p] + fills_before[n] - fills_before[p];
+                let b = fills_before[p] + empties_before[n] - empties_before[p];
+                if a < wrong {
+                    (edge, fill_first, wrong) = (p, true, a);
+                }
+                if b < wrong {
+                    (edge, fill_first, wrong) = (p, false, b);
+                }
+            }
+            if wrong * 10 > n {
+                return Err(NOT_A_BAR.into());
+            }
+        }
+        let full_side = |i: usize| (i < edge) == fill_first;
+        // Across it: the outline's sides, from the full part.
+        let full_lines: Vec<u32> = (0..n as u32).filter(|&i| kind[i as usize] == 1 && full_side(i as usize)).map(|i| first + i).collect();
+        let across: Vec<[u8; 3]> = (0..short).map(|j| mean(full_lines.iter().map(|&i| at(i, j)))).collect();
+        let (top, bottom) = paint(&across).unwrap_or((0, short - 1));
         let rect = match vertical {
             true => Rect { x: rect.x + top, w: bottom - top + 1, y: rect.y + first, h: last - first + 1 },
             false => Rect { x: rect.x + first, w: last - first + 1, y: rect.y + top, h: bottom - top + 1 },
         };
-        let full = (0..rect.h).flat_map(|y| (0..rect.w).map(move |x| (x, y))).map(|(x, y)| img.get_pixel(rect.x + x, rect.y + y).0).collect();
-        let (long, short) = if vertical { (rect.h, rect.w) } else { (rect.w, rect.h) };
         let at = |i: u32, j: u32| -> [u8; 3] {
             let (x, y) = if vertical { (rect.x + j, rect.y + i) } else { (rect.x + i, rect.y + j) };
             img.get_pixel(x, y).0
         };
-        let lines: Vec<[u8; 3]> = (0..long).map(|i| mean((0..short).map(|j| at(i, j)))).collect();
-        let median = median(&lines);
-        let holes = lines.iter().map(|p| diff(*p, median) > SAME).collect();
+        let short = bottom - top + 1;
+        let profile = |lines: &[u32]| -> Vec<[u8; 3]> {
+            (0..short).map(|j| median(&lines.iter().map(|&i| at(i - first, j)).collect::<Vec<_>>())).collect()
+        };
+        let full = profile(&full_lines);
+        let empty_lines: Vec<u32> = (0..n as u32).filter(|&i| kind[i as usize] == 2 && !full_side(i as usize)).map(|i| first + i).collect();
+        let empty = (!empty_lines.is_empty()).then(|| profile(&empty_lines));
+        let mostly = |i: u32, paint: &[[u8; 3]]| (0..short).filter(|&j| diff(at(i, j), paint[j as usize]) <= SAME).count() * 2 >= short as usize;
+        // Lines not in their side's paint: digits, judged by the lines beside them. Widened a
+        // little: other digits draw a wider patch (SPD's "20/20" against "15/20" made the lines
+        // beside it read as empty, and the patch with them).
+        let off: Vec<bool> = (0..n as u32)
+            .map(|i| match (full_side(i as usize), &empty) {
+                (true, _) | (false, None) => !mostly(i, &full),
+                (false, Some(e)) => !mostly(i, e),
+            })
+            .collect();
+        let margin = (n / 33).max(3);
+        let holes = (0..n).map(|i| off[i.saturating_sub(margin)..(i + margin + 1).min(n)].iter().any(|&o| o)).collect();
         Ok(Bar { rect, vertical, full, holes })
     }
 
     /// How full the bar is in `img`, and how far off that may be either way (shares of the
-    /// whole): the share of its length that still looks as when picked, each line across it
-    /// counted when most of its pixels do (a gradient is fine). Lines in a hole take the state
+    /// whole): the share of its length in the full part's paint, each line across it counted
+    /// when most of its pixels are. Lines in a hole take the state
     /// of the lines on both sides; when those differ, the edge is somewhere in the hole: half of
     /// it counts, and the error grows to half of it.
     pub fn fill(&self, img: &RgbImage) -> (f64, f64) {
@@ -119,7 +201,7 @@ impl Bar {
                 let same = (0..short)
                     .filter(|&j| {
                         let (x, y) = if self.vertical { (j, i) } else { (i, j) };
-                        diff(img.get_pixel(r.x + x, r.y + y).0, self.full[(y * r.w + x) as usize]) <= SAME
+                        diff(img.get_pixel(r.x + x, r.y + y).0, self.full[j as usize]) <= SAME
                     })
                     .count();
                 Some(same * 2 >= short as usize)
@@ -211,8 +293,17 @@ mod tests {
     #[test]
     fn refuses_a_box_that_is_not_a_bar() {
         assert!(Bar::pick(&frame(100), Rect { x: 18, y: 8, w: 20, h: 16 }).is_err());
-        // Half full: two colours along it.
-        assert!(Bar::pick(&frame(50), Rect { x: 18, y: 8, w: 108, h: 16 }).is_err());
+    }
+
+    #[test]
+    fn measures_a_bar_picked_half_full() {
+        let bar = Bar::pick(&frame(50), Rect { x: 18, y: 8, w: 108, h: 16 }).unwrap();
+        assert_eq!((bar.rect.x, bar.rect.w), (22, 100));
+        for hp in [50, 25, 80, 100] {
+            let (f, err) = bar.fill(&frame(hp));
+            assert!((f - hp as f64 / 100.0).abs() <= err, "{hp}: {f} ± {err}");
+        }
     }
 }
+
 
