@@ -89,6 +89,13 @@ pub fn modules(pid: u32, mem: &File) -> Vec<Module> {
             wine = true;
         }
     }
+    // Only programs and libraries have statics: data files mapped in (Ruffle maps its fonts)
+    // were followed by heap memory taken for theirs, and paths from "DejaVuSans.ttf+9c018"
+    // led nowhere after a restart.
+    mods.retain(|(_, m)| {
+        let mut magic = [0u8; 4];
+        mem.read_exact_at(&mut magic, m.start).is_ok() && (magic == *b"\x7fELF" || magic[..2] == *b"MZ")
+    });
     let mut mods: Vec<Module> = mods.into_iter().map(|(_, m)| m).collect();
     // Under Wine the game's threads run on stacks of Wine's own, not this one.
     if let (false, Some(top)) = (wine, stack_start(pid)) {
