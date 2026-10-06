@@ -385,30 +385,31 @@ fn apart(shapes: &[(u32, u32)]) -> Option<(Vec<(u32, u32)>, u32, u32)> {
 }
 
 /// Icons that touch (Zelda's hearts share their outline, so nothing splits them): the widest
-/// shape repeating itself, every `step` pixels along it the same picture, at least twice. A bar
-/// is the same at every step, so half a step on it must look different (the halves of an icon
-/// aren't alike), and the best step is the smallest one about as good.
+/// shape repeating itself, every `step` pixels along it nearly the same picture, at least twice.
+/// Judged by the share of pixels that match one step on, so the map showing between icons drawn
+/// over it (Zelda outdoors: a roof and a fence behind the hearts) costs only its few pixels. A
+/// bar matches itself at every step, so half a step on must match much less (the halves of an
+/// icon aren't alike), and the step is the smallest one about as good as the best.
 fn touching(shapes: &[(u32, u32)], short: u32, at: impl Fn(u32, u32) -> [u8; 3]) -> Option<(Vec<(u32, u32)>, u32, u32)> {
     let &(a, b) = shapes.iter().max_by_key(|(a, b)| b - a)?;
     let len = b - a;
     if len < 12 {
         return None;
     }
-    // How unlike the picture is to itself `step` pixels further on: the average difference.
-    let unlike = |step: u32| -> f64 {
-        let (mut sum, mut n) = (0u64, 0u64);
+    let alike = |step: u32| -> f64 {
+        let (mut same, mut n) = (0u32, 0u32);
         for i in a..b - step {
             for j in 0..short {
-                sum += diff(at(i, j), at(i + step, j)) as u64;
+                same += (diff(at(i, j), at(i + step, j)) <= SAME / 3) as u32;
                 n += 1;
             }
         }
-        sum as f64 / n.max(1) as f64
+        same as f64 / n.max(1) as f64
     };
-    let scores: Vec<(u32, f64)> = (6..=len / 2).map(|step| (step, unlike(step))).collect();
-    let best = scores.iter().map(|s| s.1).fold(f64::MAX, f64::min);
-    let &(step, score) = scores.iter().find(|s| s.1 <= best * 1.2 + 2.0)?;
-    if score > (SAME / 3) as f64 || unlike(step / 2) < 2.0 * score + 10.0 {
+    let scores: Vec<(u32, f64)> = (6..=len / 2).map(|step| (step, alike(step))).collect();
+    let best = scores.iter().map(|s| s.1).fold(0.0, f64::max);
+    let &(step, score) = scores.iter().find(|s| s.1 >= best - 0.05)?;
+    if score < 0.6 || alike(step / 2) > score - 0.25 {
         return None;
     }
     let icons: Vec<(u32, u32)> = (0..).map(|k| (a + k * step, a + (k + 1) * step)).take_while(|&(_, end)| end <= b + step / 4).collect();
