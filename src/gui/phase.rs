@@ -112,11 +112,28 @@ impl PhaseCard {
 
     pub fn watching(&self, n: usize) {
         self.count.set(n);
-        // "Ready!" stays up its few seconds; the strip that follows shows the new count.
+        // "Ready!" stays up its few seconds, with the new count; then the strip.
         if self.root.has_css_class("ready") && self.root.is_visible() {
+            self.hint.set_label(&format!("{}. Change the number in the game now.", places(n)));
             return;
         }
         self.show("watching", "Searching: keep changing the number in the game", None, &places(n));
+    }
+
+    /// Scan Again while Start runs: how it went for a few seconds, then the strip again.
+    pub fn scanned_again(self: &Rc<Self>, before: usize, after: usize) {
+        self.count.set(after);
+        let hint = match before == after {
+            true => format!("Still {}", places(after)),
+            false => format!("{} \u{2192} {}", grouped(before), places(after)),
+        };
+        let shown = self.show("done", "Scanned again", None, &hint);
+        let card = self.clone();
+        glib::timeout_add_local_once(Duration::from_secs(3), move || {
+            if card.shown.get() == shown {
+                card.watching(card.count.get());
+            }
+        });
     }
 
     pub fn checking(&self, places: usize, done: f64) {

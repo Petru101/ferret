@@ -984,7 +984,18 @@ impl FindView {
                 );
             }
             core::Phase::Watching(n) if start_runs => self.phase.watching(n),
-            core::Phase::Ready(_) | core::Phase::Watching(_) => self.phase.hide(),
+            core::Phase::ScannedAgain(before, after) if start_runs => {
+                self.phase.scanned_again(before, after);
+                self.last_count.set(Some(before));
+                self.announce(
+                    &format!(
+                        "Scanned again: {}. Keep changing the number in the game, or press Scan Again while it stays the same.",
+                        self.count_text(after)
+                    ),
+                    false,
+                );
+            }
+            core::Phase::Ready(_) | core::Phase::Watching(_) | core::Phase::ScannedAgain(..) => self.phase.hide(),
             core::Phase::Checking(n, done) => self.phase.checking(n, done),
             core::Phase::YourTurn(n, secs) => self.phase.your_turn(n, secs),
             core::Phase::SaveTurn => self.phase.save_turn(),

@@ -290,6 +290,8 @@ pub enum Phase {
     Ready(usize),
     /// A change on screen narrowed the search down to this many places.
     Watching(usize),
+    /// Scan Again while Start runs: the places before and after.
+    ScannedAgain(usize, usize),
     /// Testing which of this many places is the value: how far. Nothing to do.
     Checking(usize, f64),
     /// The player has to change the number in the game: this many places left, seconds to do it.
@@ -890,6 +892,9 @@ pub struct Core {
     picked_look: Option<ocr::Look>,
     hidden: bool,
     hides: u32,
+    /// The last read of the box found a number: the first frame after it that reads none is
+    /// kept as `unread.png`, to replay misses.
+    was_read: bool,
     game: Option<Game>,
     /// The attached game's digits, as learned so far.
     font: Font,
@@ -952,6 +957,7 @@ impl Core {
             picked_look: None,
             hidden: false,
             hides: 0,
+            was_read: false,
             game: None,
             font: Font::default(),
             search: None,
@@ -2216,11 +2222,17 @@ impl Core {
         if let Some(f) = self.on_frame.as_mut() {
             f(frame, self.area);
         }
-        let read = if self.shows_picked(frame) {
+        let shows = self.shows_picked(frame);
+        let read = if shows {
             ocr::read_number_at(frame, area, &cache_dir().join("area.png"), Some(&self.font))?
         } else {
             None
         };
+        if shows && read.is_none() && self.was_read {
+            fs::copy(frame, cache_dir().join("unread.png")).ok();
+            self.say(&format!("no number read in the box now ({},{} {}x{}): frame kept as unread.png", area.x, area.y, area.w, area.h));
+        }
+        self.was_read = read.is_some();
         if let Some(f) = self.on_read.as_mut() {
             f(read.as_ref().map(|(n, _)| n));
         }
@@ -2853,7 +2865,8 @@ impl Core {
             self.helper.call("mark");
             let Some(now) = self.read_stable()? else { continue };
             let still = now == last;
-            if still && !self.scan_now.swap(false, Ordering::Relaxed) {
+            let again = self.scan_now.swap(false, Ordering::Relaxed);
+            if still && !again {
                 continue;
             }
             let reply = self.helper.call(&format!("next {}", now.search()));
@@ -2876,7 +2889,7 @@ impl Core {
                 unchanged_rounds = if new_count == count { unchanged_rounds + 1 } else { 0 };
                 // Every change: the listed values follow the game.
                 self.tell_matches(new_count);
-                self.phase(Phase::Watching(new_count));
+                self.phase(if again { Phase::ScannedAgain(count, new_count) } else { Phase::Watching(new_count) });
                 count = new_count;
                 confirm = false;
             }

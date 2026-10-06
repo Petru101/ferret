@@ -222,6 +222,17 @@ impl ValuesView {
         max.set_digits(digits);
         max.set_title("At Most");
         max.set_value(v.max.or(v.value).unwrap_or(0.0));
+        // Only a minimum: the game can raise it as far as it likes.
+        let endless = gtk::ToggleButton::builder()
+            .label("\u{221e}")
+            .tooltip_text("No maximum: only At Least is kept")
+            .valign(gtk::Align::Center)
+            .active(v.min.is_some() && v.max.is_none())
+            .build();
+        max.add_suffix(&endless);
+        if endless.is_active() {
+            max.set_subtitle("No maximum");
+        }
         let min = adw::SpinRow::with_range(0.0, top, step);
         min.set_digits(digits);
         min.set_title("At Least");
@@ -233,7 +244,7 @@ impl ValuesView {
 
         // Writes only when the game goes past the range, see Core::limit.
         let apply_limit = {
-            let (worker, limit, max, min, name) = (self.worker.clone(), limit.clone(), max.clone(), min.clone(), name);
+            let (worker, limit, max, min, endless, name) = (self.worker.clone(), limit.clone(), max.clone(), min.clone(), endless.clone(), name);
             move || {
                 // What the field shows, without float noise past its digits.
                 let shown = |s: &adw::SpinRow| {
@@ -242,13 +253,17 @@ impl ValuesView {
                 };
                 let (min_v, max_v) = if limit.enables_expansion() {
                     let m = shown(&min);
-                    ((m > 0.0).then_some(m), Some(shown(&max)))
+                    ((m > 0.0).then_some(m), (!endless.is_active()).then(|| shown(&max)))
                 } else {
                     (None, None)
                 };
                 // The saved range stays until the two numbers make sense again.
                 let backwards = matches!((min_v, max_v), (Some(lo), Some(hi)) if hi < lo);
-                max.set_subtitle(if backwards { "Lower than At Least: the range isn't changed" } else { "" });
+                max.set_subtitle(match () {
+                    _ if backwards => "Lower than At Least: the range isn't changed",
+                    _ if endless.is_active() => "No maximum",
+                    _ => "",
+                });
                 if backwards {
                     max.add_css_class("error");
                     return;
@@ -256,9 +271,9 @@ impl ValuesView {
                 max.remove_css_class("error");
                 let name = name.clone();
                 worker.run(move |core| {
-                    Event::Done(core.limit(&name, min_v, max_v).map(|_| match max_v {
-                        Some(_) => format!("{name} is kept {}", core::limit_text(min_v, max_v)),
-                        None => format!("{name} is no longer limited"),
+                    Event::Done(core.limit(&name, min_v, max_v).map(|_| match (min_v, max_v) {
+                        (None, None) => format!("{name} is no longer limited"),
+                        _ => format!("{name} is kept {}", core::limit_text(min_v, max_v)),
                     }))
                 });
             }
@@ -266,6 +281,14 @@ impl ValuesView {
         {
             let apply_limit = apply_limit.clone();
             limit.connect_enable_expansion_notify(move |_| apply_limit());
+        }
+        {
+            let (apply_limit, limit) = (apply_limit.clone(), limit.clone());
+            endless.connect_toggled(move |_| {
+                if limit.enables_expansion() {
+                    apply_limit();
+                }
+            });
         }
         // Changing a number re-applies the limit once typing has settled.
         let pending: Rc<Cell<Option<glib::SourceId>>> = Rc::default();
