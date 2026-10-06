@@ -214,7 +214,10 @@ impl FindView {
 
         // The menu: the window picked by mistake (the choice is remembered across restarts).
         let window_menu = gio::Menu::new();
-        window_menu.append(Some("Pick Another Window…"), Some("app.repick"));
+        // The app's actions all take a string (D-Bus test actions): without one the item is off.
+        let repick = gio::MenuItem::new(Some("Pick Another Window…"), None);
+        repick.set_action_and_target_value(Some("app.repick"), Some(&"".to_variant()));
+        window_menu.append_item(&repick);
         let capture = adw::SplitButton::builder()
             .icon_name("camera-photo-symbolic")
             .tooltip_text("Capture again")
