@@ -332,6 +332,17 @@ pub struct Icons {
     /// pixels are in it when full.
     full: [u8; 3],
     full_px: usize,
+    /// Around the icons when picked: a pixel counts as full only when nearer the full paint
+    /// than this.
+    background: [u8; 3],
+}
+
+/// In the full paint: near it, and nearer it than the background. A dark full paint (picked
+/// while something dimmed the screen, or a dark red) is within `SAME` of the background too:
+/// Isaac's near-black around the hearts counted as full, and the counts went up and down.
+fn full_paint(p: [u8; 3], full: [u8; 3], background: [u8; 3]) -> bool {
+    let d = diff(p, full);
+    d <= SAME && d < diff(p, background)
 }
 
 impl Icons {
@@ -399,17 +410,20 @@ impl Icons {
         let rows: Vec<u32> = (0..short).filter(|&j| inside_icons().any(|i| drawn(i, j))).collect();
         let (top, bottom) = (rows[0], *rows.last().unwrap());
         let pixels: Vec<[u8; 3]> = inside_icons().flat_map(|i| (top..=bottom).filter(move |&j| drawn(i, j)).map(move |j| at(i, j))).collect();
-        // The full paint: the colourful part (empty ones are dark or grey), else the brightest.
-        let colourful: Vec<[u8; 3]> = pixels.iter().copied().filter(|&p| vivid(p) > 60).collect();
+        // The full paint: the colourful part (empty ones are dark or grey), its more colourful
+        // half (the edges blend into the outline: in a small window they are most of an icon),
+        // else the brightest.
+        let mut colourful: Vec<[u8; 3]> = pixels.iter().copied().filter(|&p| vivid(p) > 60).collect();
+        colourful.sort_by_key(|&p| std::cmp::Reverse(vivid(p)));
         let full = match colourful.len() >= 8 {
-            true => median(&colourful),
+            true => median(&colourful[..colourful.len() / 2]),
             false => {
                 let mut bright = pixels.clone();
                 bright.sort_by_key(|p| p.iter().map(|&c| c as u32).sum::<u32>());
                 median(&bright[bright.len() * 3 / 4..])
             }
         };
-        let full_in = |a: u32| (a..(a + size).min(long)).flat_map(|i| (top..=bottom).map(move |j| (i, j))).filter(|&(i, j)| diff(at(i, j), full) <= SAME).count();
+        let full_in = |a: u32| (a..(a + size).min(long)).flat_map(|i| (top..=bottom).map(move |j| (i, j))).filter(|&(i, j)| full_paint(at(i, j), full, background)).count();
         let full_px = icons.iter().map(|&(a, _)| full_in(a)).max().unwrap();
         if full_px < 6 {
             return Err("Those look like icons, but none of them looks full: pick them while at least one is full.".into());
@@ -420,7 +434,7 @@ impl Icons {
             true => Rect { x: rect.x + top, w: bottom - top + 1, ..rect },
             false => Rect { y: rect.y + top, h: bottom - top + 1, ..rect },
         };
-        Ok(Some(Icons { rect, vertical, slots, size, period, full, full_px }))
+        Ok(Some(Icons { rect, vertical, slots, size, period, full, full_px, background }))
     }
 
     /// How many icons are full in `img`, as a share of all the places for one, and how far off
@@ -437,7 +451,7 @@ impl Icons {
                 .flat_map(|i| (0..short).map(move |j| (i, j)))
                 .filter(|&(i, j)| {
                     let (x, y) = if self.vertical { (j, i) } else { (i, j) };
-                    diff(img.get_pixel(r.x + x, r.y + y).0, self.full) <= SAME
+                    full_paint(img.get_pixel(r.x + x, r.y + y).0, self.full, self.background)
                 })
                 .count();
             let share = full as f64 / self.full_px as f64;
@@ -572,6 +586,17 @@ mod tests {
     }
 
     #[test]
+    fn counts_hearts_picked_while_the_screen_was_dimmed() {
+        let mut dim = hearts(6, false);
+        dim.pixels_mut().for_each(|p| p.0 = p.0.map(|c| (c as u32 * 65 / 100) as u8));
+        let icons = Gauge::pick(&dim, Rect { x: 10, y: 6, w: 140, h: 28 }).unwrap();
+        for halves in [6, 5, 3, 1] {
+            let (n, err) = count(&icons, &hearts(halves, false));
+            assert!((n - halves as f64 / 2.0).abs() <= err.max(0.01), "{halves}: {n} ± {err}");
+        }
+    }
+
+    #[test]
     fn a_bar_is_not_icons() {
         let gauge = Gauge::pick(&frame(60), Rect { x: 18, y: 8, w: 108, h: 16 }).unwrap();
         assert_eq!(gauge.kind(), Kind::Bar);
@@ -587,5 +612,3 @@ mod tests {
         }
     }
 }
-
-
