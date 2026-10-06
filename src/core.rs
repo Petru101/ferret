@@ -3487,6 +3487,8 @@ impl Core {
             self.phase(Phase::Checking(cands.len(), i as f64 / cands.len() as f64));
             match self.bar_moves(loc, now) {
                 Some(true) => {
+                    // The others aren't it: Save takes the one place left.
+                    self.helper.call(&format!("keep {loc}"));
                     self.search = None;
                     self.bar_last = None;
                     self.say(&format!("stored as {}", loc.kind.with_article()));
