@@ -23,6 +23,9 @@
  * stacks into a new "Inventory" (the player object points at it) and keeps the old, emptied one
  * (garbage). A label object also
  * holds a string "Inventory" (a root that leads nowhere).
+ * "hurt N" works like Brotato's health: hp is capped at 100 first, then N comes off, and a copy in
+ * the run's data (another block) is written right after, so both change at once and the real one
+ * doesn't carry on from a test value.
  * Usage: target <command file> <log file>. Built for Linux and Windows. */
 #include <stdint.h>
 #include <stdio.h>
@@ -319,6 +322,7 @@ int main(int argc, char **argv)
     double *coins = malloc(sizeof *coins);
     double *wood = malloc(sizeof *wood);
     volatile float *hud_food = malloc(sizeof *hud_food);
+    volatile int *run_hp = calloc(16, sizeof *run_hp);
     struct player *old;
     struct inventory *inv, *chest;
     struct label *label;
@@ -371,6 +375,7 @@ int main(int argc, char **argv)
     chest->width = 5;
     chest->height = 2;
     add_stack(chest, logs_info, 50);
+    run_hp[3] = p->hp;
     report(argv[2], p, coins, wood, inv, chest);
     for (;;) {
         sleep_ms(100);
@@ -402,6 +407,11 @@ int main(int argc, char **argv)
             p->gold -= n;
         else if (sscanf(line, "hit %d", &n) == 1)
             p->hp -= n;
+        else if (sscanf(line, "hurt %d", &n) == 1) {
+            p->hp = (p->hp > 100 ? 100 : p->hp) - n;
+            __asm__ volatile("" ::: "memory");
+            run_hp[3] = p->hp;
+        }
         else if (sscanf(line, "gain %f", &x) == 1)
             p->energy += x;
         else if (sscanf(line, "shield %f", &x) == 1)

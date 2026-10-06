@@ -1827,6 +1827,67 @@ const SITE_TARGETS_MAX: usize = 8;
 
 /// Whether the frontend sent a line (or went away) while a command runs: the line stays unread
 /// for the main loop. Commands come one at a time, so nothing sits in stdin's buffer meanwhile.
+/// `first <addr:type>... [seconds]`: write watchpoints on up to 4 places (the probe's
+/// candidates, holding test values); replies `first <addr:type> <value>` for the first one the
+/// game changes (a write leaving it as it was doesn't count), or `none` when time runs out or
+/// the frontend sends a line. The real value changes before the copies made from it, even
+/// within one frame (Brotato's health and its run-data copy, both rewritten on a hit).
+fn cmd_first(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    if s.java {
+        return writeln!(out, "error: {JAVA}");
+    }
+    let mut locs = Vec::new();
+    let mut secs = 180;
+    for w in arg.split_whitespace() {
+        match (parse_loc(w), w.parse()) {
+            (_, Ok(n)) if !w.contains(':') && w.len() < 6 => secs = n,
+            (Some(l), _) => locs.push(l),
+            _ => return writeln!(out, "error: usage: first <hex addr[:type]>... [seconds]"),
+        }
+    }
+    locs.truncate(4);
+    if locs.is_empty() {
+        return writeln!(out, "error: usage: first <hex addr[:type]>... [seconds]");
+    }
+    let before: Vec<Option<f64>> = locs.iter().map(|&(a, k)| s.read(a, k)).collect();
+    // Write-only (RW 01), 4 bytes (LEN 11) or 8 for doubles (LEN 10, 8-aligned).
+    let dr7 = locs.iter().enumerate().fold(0u64, |dr7, (n, &(_, k))| {
+        let len: u64 = if k == Kind::F64 { 2 } else { 3 };
+        dr7 | 1 << (2 * n) | 1 << (16 + 4 * n) | len << (18 + 4 * n)
+    });
+    let addrs: Vec<u64> = locs.iter().map(|&(a, _)| a).collect();
+    let mut changed = None;
+    {
+        let _tracing = TRACING.lock().unwrap();
+        let mut tracer = match trace::Tracer::attach(s.pid) {
+            Ok(t) => t,
+            Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
+        };
+        let threads = tracer.arm_slots(&addrs, dr7);
+        writeln!(out, "watching {} places on {threads} threads until the game changes one", locs.len())?;
+        out.flush()?;
+        let start = Instant::now();
+        tracer.watch_until(
+            || start.elapsed() >= Duration::from_secs(secs) || frontend_spoke(),
+            |hit| {
+                let Some(&(addr, kind)) = locs.get(hit.slot) else { return true };
+                let now = s.read(addr, kind);
+                if now != before[hit.slot] {
+                    changed = Some((addr, kind, now));
+                    return false;
+                }
+                true
+            },
+        );
+    }
+    match changed {
+        Some((addr, kind, now)) => {
+            writeln!(out, "first 0x{addr:x}:{} {}", kind.name(), now.map_or("??".into(), |v| v.to_string()))
+        }
+        None => writeln!(out, "none"),
+    }
+}
+
 fn frontend_spoke() -> bool {
     let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
     unsafe { libc::poll(&mut fd, 1, 0) > 0 }
@@ -2329,6 +2390,7 @@ pub fn run() {
             "shapes" => cmd_shapes(&mut out, &mut session, arg),
             "track" => cmd_track(&mut out, &mut session, arg),
             "sites" => cmd_sites(&mut out, &session, arg),
+            "first" => cmd_first(&mut out, &session, arg),
             "build" => cmd_build(&mut out, &session),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
             "resolve-all" => cmd_resolve_all(&mut out, &mut session, arg),

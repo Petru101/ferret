@@ -2671,8 +2671,16 @@ impl Core {
                     _ => {}
                 }
             }
-            real = self.probe_in_game(&tests, &kept);
+            let found = self.probe_in_game(&tests, &kept);
             self.undo_probes(&tests);
+            self.tell_matches(tests.len());
+            match found {
+                Ok(found) => real = found,
+                Err(why) => {
+                    self.say(&format!("no candidate behaved like the real value: {why}"));
+                    return Ok(None);
+                }
+            }
         }
         if let Some((k, how)) = real {
             let loc = tests[k].loc;
@@ -2788,7 +2796,8 @@ impl Core {
     /// The player changes the number in the game while every candidate that kept its test
     /// value still holds it: the game's own value carries on from its test value (in memory,
     /// and on screen once redrawn), copies don't. The index of the real one, and how it showed.
-    fn probe_in_game(&mut self, tests: &[Probe], kept: &[bool]) -> Option<(usize, String)> {
+    /// Err: the game changed them all at once, so none can be told apart this way.
+    fn probe_in_game(&mut self, tests: &[Probe], kept: &[bool]) -> Result<Option<(usize, String)>, String> {
         // The player has to go to the game and gather or use some (Astro Colony's copper: 45 s
         // ran out first); Stop gives up sooner.
         const WAIT: Duration = Duration::from_secs(180);
@@ -2804,29 +2813,80 @@ impl Core {
              of the {} places the game carries on from. Stop Waiting lists them to try instead.",
             watched.len()
         ));
+        self.tell_matches(tests.len());
+        // Watchpoints: the first one the game writes is the real value, even when it changes the
+        // copies in the same frame. Polling below when the game can't be traced.
+        let arg: Vec<String> = locs.iter().map(|l| l.to_string()).collect();
+        let cancel = self.cancel.clone();
+        let reply = self.helper.call_cancellable(&format!("first {} {}", arg.join(" "), WAIT.as_secs()), &cancel);
+        if let Some((loc, v)) = reply.iter().find_map(|l| l.strip_prefix("first ")).and_then(|l| {
+            let (a, v) = l.split_once(' ')?;
+            Some((parse_loc(a)?, v.parse::<f64>().ok()?))
+        }) {
+            let Some(&i) = watched.iter().find(|&&k| tests[k].loc.addr == loc.addr) else { return Ok(None) };
+            let v = v.round() as i64;
+            // It took another's test value: that one is the source.
+            if let Some(&k) = watched.iter().find(|&&k| k != i && tests[k].test == v) {
+                return Ok(Some((k, format!("held {} and 0x{:012x} took it from there", tests[k].test, loc.addr))));
+            }
+            return Ok(Some((i, format!("the game changed it first, from {} to {v}", tests[i].test))));
+        }
+        if reply.iter().any(|l| l == "none") {
+            return Ok(None);
+        }
         let start = Instant::now();
         let mut last = None;
+        let mut seen = Vec::new();
         while start.elapsed() < WAIT && !self.cancel.load(Ordering::Relaxed) {
             // Memory: the one the game changed, starting from its test value.
             let now = self.peek(&locs);
             if let Some((&k, v)) = watched.iter().zip(&now).find(|(&k, v)| v.is_some_and(|v| v != tests[k].test && (v - tests[k].test).abs() <= PROBE_NEAR)) {
-                return Some((k, format!("went from {} to {}", tests[k].test, v.unwrap())));
+                return Ok(Some((k, format!("went from {} to {}", tests[k].test, v.unwrap()))));
+            }
+            // A game may not carry on from the test value (Brotato's health: capped at the most
+            // first, 230 -> 18). The real one changes first and copies follow it: one changed
+            // while the others still hold their test values is the real one, unless it took
+            // another's test value (then that one is).
+            let moved: Vec<usize> = (0..watched.len()).filter(|&i| now[i].is_some_and(|v| v != tests[watched[i]].test)).collect();
+            if watched.len() > 1 {
+                if let [i] = moved[..] {
+                    let v = now[i].unwrap_or_default();
+                    let k = watched.iter().copied().find(|&k| k != watched[i] && tests[k].test == v).unwrap_or(watched[i]);
+                    let how = match k == watched[i] {
+                        true => format!("the game changed it from {} to {v} first", tests[k].test),
+                        false => format!("held {} and another place took it", tests[k].test),
+                    };
+                    return Ok(Some((k, how)));
+                }
+                if moved.len() == watched.len() {
+                    let values: Vec<String> = now.iter().map(|v| v.map_or("?".into(), |v| v.to_string())).collect();
+                    return Err(format!(
+                        "the game changed all {} at once (to {}): copies of one value, too quick to tell which came first",
+                        watched.len(),
+                        values.join(", ")
+                    ));
+                }
+            }
+            // The matches list shows what the places hold (the worker can't re-list it meanwhile).
+            if now != seen {
+                self.tell_matches(tests.len());
+                seen = now;
             }
             if self.area.is_none() {
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
             // Screen: a game that does redraw shows the test value (or what followed it).
             let Ok(Some(s)) = self.read() else { continue };
             if let Some(&k) = watched.iter().find(|&&k| [s.value() as i64, s.scaled()].iter().any(|v| (v - tests[k].test).abs() <= PROBE_NEAR)) {
-                return Some((k, format!("held {} and the screen showed {s}", tests[k].test)));
+                return Ok(Some((k, format!("held {} and the screen showed {s}", tests[k].test))));
             }
             if last.as_ref() != Some(&s) {
                 self.say(&format!("screen shows {s}"));
                 last = Some(s);
             }
         }
-        None
+        Ok(None)
     }
 
     /// Two reads in a row that agree.

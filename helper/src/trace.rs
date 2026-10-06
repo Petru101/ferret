@@ -100,7 +100,9 @@ impl Tracer {
         self.arm_slots(instrs, dr7)
     }
 
-    fn arm_slots(&mut self, addrs: &[u64], dr7: u64) -> usize {
+    /// Breakpoints on up to 4 addresses with a DR7 of the caller's (data watchpoints of mixed
+    /// sizes).
+    pub fn arm_slots(&mut self, addrs: &[u64], dr7: u64) -> usize {
         let tids = std::mem::take(&mut self.tids);
         for tid in tids {
             let set = |tid| addrs.iter().take(4).enumerate().all(|(n, &a)| set_debugreg(tid, n, a));
