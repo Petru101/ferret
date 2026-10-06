@@ -21,6 +21,11 @@ struct ValueWidgets {
     confirm_button: gtk::Button,
     /// The Set field and button: off for values Ferret only shows.
     set: gtk::Box,
+    /// "Keep It": never below the number now.
+    keep: gtk::Button,
+    /// The number now, as the game shows it.
+    current: Rc<Cell<Option<f64>>>,
+    keep_it: Rc<dyn Fn()>,
 }
 
 /// Confirms a value's pointer paths: the player saw the game show the number Ferret reads.
@@ -107,6 +112,14 @@ impl ValuesView {
         Rc::new(Self { root, list, rows: RefCell::default(), worker })
     }
 
+    /// Keep It on a value by name (the D-Bus `keep` action).
+    pub fn keep(&self, name: &str) {
+        let keep_it = self.rows.borrow().get(name).map(|w| w.keep_it.clone());
+        if let Some(keep_it) = keep_it {
+            keep_it();
+        }
+    }
+
     pub fn update(&self, values: Vec<ValueRow>) {
         self.root.set_visible_child_name(if values.is_empty() { "empty" } else { "list" });
         let mut rows = self.rows.borrow_mut();
@@ -150,6 +163,8 @@ impl ValuesView {
             }
             w.set.set_sensitive(!v.read_only);
             w.limit.set_sensitive(!v.read_only);
+            w.current.set(v.value);
+            w.keep.set_sensitive(v.value.is_some_and(|n| n > 0.0));
             w.group.set_description(Some(&about));
             w.value.set_label(&v.value.map_or("?".into(), |n| core::number_text(n, v.decimals)));
             w.limit.set_subtitle(&limit_subtitle(v));
@@ -251,7 +266,15 @@ impl ValuesView {
         min.set_value(v.min.unwrap_or(0.0));
         limit.add_row(&max);
         limit.add_row(&min);
+        let keep = gtk::Button::builder()
+            .label("Keep It")
+            .tooltip_text("Never let it drop below the number it is now")
+            .valign(gtk::Align::Center)
+            .build();
+        limit.add_suffix(&keep);
         group.add(&limit);
+        // Keep It fills the fields in one go and applies the range once.
+        let filling = Rc::new(Cell::new(false));
 
         // Writes only when the game goes past the range, see Core::limit.
         let apply_limit = {
@@ -291,12 +314,17 @@ impl ValuesView {
         };
         {
             let apply_limit = apply_limit.clone();
-            limit.connect_enable_expansion_notify(move |_| apply_limit());
+            let filling = filling.clone();
+            limit.connect_enable_expansion_notify(move |_| {
+                if !filling.get() {
+                    apply_limit();
+                }
+            });
         }
         {
-            let (apply_limit, limit) = (apply_limit.clone(), limit.clone());
+            let (apply_limit, limit, filling) = (apply_limit.clone(), limit.clone(), filling.clone());
             endless.connect_toggled(move |_| {
-                if limit.enables_expansion() {
+                if limit.enables_expansion() && !filling.get() {
                     apply_limit();
                 }
             });
@@ -304,9 +332,9 @@ impl ValuesView {
         // Changing a number re-applies the limit once typing has settled.
         let pending: Rc<Cell<Option<glib::SourceId>>> = Rc::default();
         for spin in [&max, &min] {
-            let (apply_limit, pending, limit) = (apply_limit.clone(), pending.clone(), limit.clone());
+            let (apply_limit, pending, limit, filling) = (apply_limit.clone(), pending.clone(), limit.clone(), filling.clone());
             spin.connect_value_notify(move |_| {
-                if !limit.enables_expansion() {
+                if !limit.enables_expansion() || filling.get() {
                     return;
                 }
                 if let Some(id) = pending.take() {
@@ -319,6 +347,25 @@ impl ValuesView {
                 })));
             });
         }
-        ValueWidgets { group, value, limit, confirm, confirm_button, set: set_box }
+        let current: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(v.value));
+        let keep_it: Rc<dyn Fn()> = {
+            let (current, limit, min, endless) = (current.clone(), limit.clone(), min.clone(), endless.clone());
+            Rc::new(move || {
+                let Some(n) = current.get().filter(|&n| n > 0.0) else { return };
+                // Rounded down to the field's digits: never above what the game has now.
+                let f = 10f64.powi(min.digits() as i32);
+                filling.set(true);
+                endless.set_active(true);
+                min.set_value((n * f).floor() / f);
+                limit.set_enable_expansion(true);
+                filling.set(false);
+                apply_limit();
+            })
+        };
+        {
+            let keep_it = keep_it.clone();
+            keep.connect_clicked(move |_| keep_it());
+        }
+        ValueWidgets { group, value, limit, confirm, confirm_button, set: set_box, keep, current, keep_it }
     }
 }

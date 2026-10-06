@@ -702,6 +702,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("redo", Box::new(|ui, _| ui.find.redo()));
     action("name", Box::new(|ui, name| ui.find.type_name(&name)));
     action("confirm-value", Box::new(|ui, name| values::confirm_value(&ui.worker, &name)));
+    action("keep", Box::new(|ui, name| ui.values.keep(name.trim())));
     action("forget-shapes", Box::new(|ui, _| find::forget_shapes(&ui.worker)));
     action("again", Box::new(|ui, _| ui.find.scan_again()));
     action(
