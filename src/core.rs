@@ -1141,6 +1141,8 @@ impl Core {
             java: reply.iter().any(|l| l.starts_with("Java game: ")),
         });
         self.search = None;
+        // A bar's copy of memory was the old process's.
+        self.bar_last = None;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
             self.say(&format!("knows how {exe} draws the digits {}", self.font.known()));
@@ -2410,9 +2412,9 @@ impl Core {
         let (kind, shown) = (gauge.kind(), gauge.shown(gauge.fill(&img).0));
         self.say(&format!("{}; {shown} now", gauge.describe()));
         self.bar = Some(gauge);
-        if self.search.is_some() {
-            self.bar_last = None;
-        }
+        // Matches go on from the new box's reading (`bar_step` marks them); a copy of memory
+        // was taken against the old box.
+        self.bar_last = None;
         Ok(kind)
     }
 
@@ -3393,11 +3395,15 @@ impl Core {
         };
         let err = last.1.max(now.1);
         let reply = self.helper.call(&format!("next bar {} {} {err}", last.0, now.0));
-        self.say(&format!("{} -> {} (±{:.1}%): {}", self.shown(last.0), self.shown(now.0), err * 100.0, reply.join(" ")));
         if let Some(e) = first_error(&reply) {
             self.say(&e);
-            return Some(0).filter(|_| self.search.is_none());
+            // Nothing to compare with (the copy went with a restart of the game): lost.
+            return match e.contains("no copy") {
+                true => None,
+                false => Some(0).filter(|_| self.search.is_none()),
+            };
         }
+        self.say(&format!("{} -> {}: {}", self.shown(last.0), self.shown(now.0), reply.join(" ")));
         let count = match_count(&reply).unwrap_or(0);
         if count == 0 {
             return Some(0).filter(|_| self.search.is_none());

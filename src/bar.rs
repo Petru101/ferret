@@ -337,12 +337,28 @@ pub struct Icons {
     background: [u8; 3],
 }
 
-/// In the full paint: near it, and nearer it than the background. A dark full paint (picked
-/// while something dimmed the screen, or a dark red) is within `SAME` of the background too:
-/// Isaac's near-black around the hearts counted as full, and the counts went up and down.
+/// In the full paint. A colourful one goes by its colour, not how bright it is: Isaac dims the
+/// screen while its window isn't in front, which it never is while the player picks the box in
+/// Ferret (the hearts' red was picked as rgb(109, 24, 24), 65% of 170, 38, 38, and the bright
+/// ones barely matched it once the game was in front again: quarters everywhere). Other paints:
+/// near it, and nearer it than the background (a dark one is within `SAME` of near black too).
 fn full_paint(p: [u8; 3], full: [u8; 3], background: [u8; 3]) -> bool {
+    if vivid(full) > 60 {
+        return same_colour(p, full) && vivid(p) > 30;
+    }
     let d = diff(p, full);
     d <= SAME && d < diff(p, background)
+}
+
+/// The same colour, as bright or up to 2.5x brighter or darker: the channels' shares of their
+/// sum within 0.12 of each other, added up.
+fn same_colour(p: [u8; 3], full: [u8; 3]) -> bool {
+    let (sp, sf) = (p.iter().map(|&c| c as u32).sum::<u32>(), full.iter().map(|&c| c as u32).sum::<u32>());
+    if sp == 0 || sp * 5 < sf * 2 || sp * 2 > sf * 5 {
+        return false;
+    }
+    let off: f64 = (0..3).map(|c| (p[c] as f64 / sp as f64 - full[c] as f64 / sf as f64).abs()).sum();
+    off <= 0.12
 }
 
 impl Icons {
@@ -589,9 +605,26 @@ mod tests {
     fn counts_hearts_picked_while_the_screen_was_dimmed() {
         let mut dim = hearts(6, false);
         dim.pixels_mut().for_each(|p| p.0 = p.0.map(|c| (c as u32 * 65 / 100) as u8));
+        // Edges between the red and the outline, half way, as a scaled-down picture has them.
+        let blend = |img: &mut RgbImage| {
+            for k in 0..3 {
+                for y in 14..26 {
+                    img.put_pixel(20 + k * 26 + 2, y, Rgb([85, 19, 19]));
+                }
+            }
+        };
+        blend(&mut dim);
         let icons = Gauge::pick(&dim, Rect { x: 10, y: 6, w: 140, h: 28 }).unwrap();
         for halves in [6, 5, 3, 1] {
-            let (n, err) = count(&icons, &hearts(halves, false));
+            let mut img = hearts(halves, false);
+            for k in 0..3 {
+                for y in 14..26 {
+                    if 2 * k + 1 <= halves {
+                        img.put_pixel(20 + k * 26 + 2, y, Rgb([130, 29, 29]));
+                    }
+                }
+            }
+            let (n, err) = count(&icons, &img);
             assert!((n - halves as f64 / 2.0).abs() <= err.max(0.01), "{halves}: {n} ± {err}");
         }
     }

@@ -42,6 +42,10 @@ pub struct PhaseCard {
     pub follows: Cell<Option<GaugeKind>>,
 }
 
+/// How high the strip sits above the window's bottom: over the Find tab's log (110 px and its
+/// margins).
+const STRIP_ABOVE: i32 = 150;
+
 const LOOKS: [&str; 5] = ["busy", "ready", "turn", "watching", "done"];
 
 fn places(n: usize) -> String {
@@ -86,9 +90,11 @@ impl PhaseCard {
             self.root.remove_css_class(l);
         }
         self.root.add_css_class(look);
-        // The strip sits low, out of the way of the game picture and the buttons.
+        // The strip sits low, out of the way of the game picture and the buttons, above the Find
+        // tab's log (it covered the log's last lines).
         let strip = look == "watching";
         self.root.set_valign(if strip { gtk::Align::End } else { gtk::Align::Center });
+        self.root.set_margin_bottom(if strip { STRIP_ABOVE } else { 24 });
         self.title.set_css_classes(&[if strip { "title-4" } else { "title-1" }]);
         self.hint.set_css_classes(&[if strip { "heading" } else { "title-3" }]);
         self.title.set_label(title);

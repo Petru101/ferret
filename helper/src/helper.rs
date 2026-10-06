@@ -1595,6 +1595,9 @@ fn cmd_next_bar(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<
         return writeln!(out, "error: not attached");
     };
     let before = s.candidates.len();
+    if s.snap.is_none() && before == 0 {
+        return writeln!(out, "error: no copy of the game's memory and no matches to compare with");
+    }
     let Some(snap) = s.snap.as_ref() else {
         let marks = s.bar_marks.take().filter(|m| m.len() == before);
         // Kept with the value that fits the bar now: right before the screen was read, if

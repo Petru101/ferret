@@ -54,6 +54,8 @@ pub struct FindView {
     /// The big card saying what a search is doing and when it's the player's turn.
     phase: Rc<PhaseCard>,
     log: gtk::TextView,
+    /// The last log line and how many times in a row it came: repeats update that line.
+    last_log: RefCell<(String, usize)>,
     result: gtk::Box,
     name: gtk::Entry,
     /// Under the save row: what's saved for this game already, so a name isn't reused by
@@ -443,6 +445,7 @@ impl FindView {
             spinner,
             phase,
             log,
+            last_log: RefCell::default(),
             result,
             name,
             saved_box,
@@ -678,6 +681,7 @@ impl FindView {
 
     /// A log line in bold green, for finds.
     fn log_found(&self, msg: &str) {
+        self.last_log.take();
         let buffer = self.log.buffer();
         if buffer.tag_table().lookup("found").is_none() {
             buffer.tag_table().add(&gtk::TextTag::builder().name("found").foreground("#2ec27e").weight(700).build());
@@ -690,7 +694,23 @@ impl FindView {
 
     pub fn log(&self, msg: &str) {
         let buffer = self.log.buffer();
-        buffer.insert(&mut buffer.end_iter(), &format!("{}\n", group_counts(msg)));
+        let line = group_counts(msg);
+        // The same line again (a search waiting on the same reading): count it on that line
+        // instead of filling the log with it.
+        let mut last = self.last_log.borrow_mut();
+        if last.0 == line {
+            last.1 += 1;
+            let mut start = buffer.end_iter();
+            start.backward_line();
+            if !start.starts_line() {
+                start.set_line_offset(0);
+            }
+            buffer.delete(&mut start, &mut buffer.end_iter());
+            buffer.insert(&mut buffer.end_iter(), &format!("{line} (×{})\n", last.1));
+        } else {
+            *last = (line.clone(), 1);
+            buffer.insert(&mut buffer.end_iter(), &format!("{line}\n"));
+        }
         let mark = buffer.create_mark(None, &buffer.end_iter(), false);
         self.log.scroll_mark_onscreen(&mark);
         buffer.delete_mark(&mark);
