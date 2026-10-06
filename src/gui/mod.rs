@@ -20,6 +20,9 @@ use crate::core::{AutoResult, Core, GameProcess, ValueRow};
 use crate::ocr::Word;
 
 pub const APP_ID: &str = "io.github.Petru101.Ferret";
+/// How long a closed window waits for the core to say whether limits run (a search stopping
+/// first, a restore finishing) before Ferret quits anyway.
+const CLOSE_WAIT: u32 = 30;
 
 pub enum Event {
     Log(String),
@@ -70,6 +73,9 @@ pub enum Event {
     Seen(Option<String>),
     /// A job panicked (a bug): what it said. The core lives on for the next job.
     Bug(String),
+    /// The window was closed: the saved values kept in range (Ferret stays in the background
+    /// for them; none: it quits).
+    Closing(Vec<String>),
 }
 
 type Job = Box<dyn FnOnce(&mut Core) -> Event + Send>;
@@ -180,9 +186,146 @@ struct Ui {
     waiting_for: Rc<RefCell<Option<String>>>,
     /// The names games go by (Steam's), by program, from the games list.
     game_names: RefCell<std::collections::HashMap<String, String>>,
+    /// The window was closed while limits ran: Ferret runs on without it until the game quits.
+    background: Rc<Cell<bool>>,
+    /// How many times the window was closed (a wait for the core belongs to one close).
+    closes: Rc<Cell<u32>>,
+    /// The Background portal's answer, while Ferret waits for it.
+    portal_answer: RefCell<Option<gio::SignalSubscription>>,
 }
 
 impl Ui {
+    fn app(&self) -> Option<gtk::Application> {
+        self.window.application()
+    }
+
+    /// Closing hides the window at once; the core then says whether limits run.
+    fn close(&self) {
+        self.window.set_visible(false);
+        self.find.stop();
+        self.closes.set(self.closes.get() + 1);
+        let close = self.closes.get();
+        self.worker.run(|core| Event::Closing(core.limited()));
+        // A job that doesn't end (a stuck helper) doesn't keep a hidden Ferret around.
+        let (window, app, closes, background) = (self.window.clone(), self.app(), self.closes.clone(), self.background.clone());
+        glib::timeout_add_seconds_local_once(CLOSE_WAIT, move || {
+            if closes.get() == close && !window.is_visible() && !background.get() {
+                app.inspect(|a| a.quit());
+            }
+        });
+    }
+
+    /// Runs on without a window so the limits hold while the player plays: asks the desktop
+    /// (the Background portal; the first time it asks the player), and a notification says so,
+    /// with a way to quit.
+    fn keep_running(self: &Rc<Self>, names: &[String]) {
+        let list = match names {
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+            [] => return,
+        };
+        self.background.set(true);
+        let Some(app) = self.app() else { return };
+        let notify = {
+            let (app, list) = (app.clone(), list.clone());
+            move || {
+                let n = gio::Notification::new("Ferret Is Still Running");
+                n.set_body(Some(&format!("It keeps {list} in range while you play, and quits when the game does.")));
+                n.set_default_action("app.show");
+                n.add_button("Quit Ferret", "app.quit");
+                app.send_notification(Some("background"), &n);
+            }
+        };
+        let Some(conn) = app.dbus_connection() else { return notify() };
+        let token = format!("ferret{}", self.closes.get());
+        let sender = conn.unique_name().map(|n| n.trim_start_matches(':').replace('.', "_")).unwrap_or_default();
+        let path = format!("/org/freedesktop/portal/desktop/request/{sender}/{token}");
+        {
+            let (ui, notify) = (Rc::downgrade(self), notify.clone());
+            let answer = conn.subscribe_to_signal(
+                Some("org.freedesktop.portal.Desktop"),
+                Some("org.freedesktop.portal.Request"),
+                Some("Response"),
+                Some(&path),
+                None,
+                gio::DBusSignalFlags::NONE,
+                move |signal| {
+                    let Some(ui) = ui.upgrade() else { return };
+                    ui.portal_answer.take();
+                    let (code, results) = signal.parameters.get::<(u32, glib::VariantDict)>().unwrap_or((2, glib::VariantDict::new(None)));
+                    let allowed = code == 0 && results.lookup::<bool>("background").ok().flatten().unwrap_or(false);
+                    eprintln!("background portal: response {code}, allowed {allowed}");
+                    match allowed {
+                        true if ui.background.get() => notify(),
+                        true => {}
+                        // The desktop would end it anyway (GNOME does).
+                        false if ui.background.get() => ui.quit(),
+                        false => {}
+                    }
+                },
+            );
+            self.portal_answer.replace(Some(answer));
+        }
+        let options = glib::VariantDict::new(None);
+        options.insert("handle_token", &token);
+        options.insert("reason", format!("To keep {list} in range while you play"));
+        options.insert("autostart", false);
+        options.insert("dbus-activatable", false);
+        let ui = Rc::downgrade(self);
+        conn.call(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Background",
+            "RequestBackground",
+            Some(&glib::Variant::tuple_from_iter(["".to_variant(), options.end()])),
+            None,
+            gio::DBusCallFlags::NONE,
+            -1,
+            gio::Cancellable::NONE,
+            move |r| {
+                // No portal: nothing ends a windowless Ferret.
+                if let Err(e) = r {
+                    eprintln!("background portal: {e}");
+                    if let Some(ui) = ui.upgrade() {
+                        ui.portal_answer.take();
+                        notify();
+                    }
+                }
+            },
+        );
+        // What desktops listing background apps show for it (GNOME); older portals lack it.
+        let status = glib::VariantDict::new(None);
+        status.insert("message", format!("Keeping {list} in range"));
+        conn.call(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Background",
+            "SetStatus",
+            Some(&glib::Variant::tuple_from_iter([status.end()])),
+            None,
+            gio::DBusCallFlags::NONE,
+            -1,
+            gio::Cancellable::NONE,
+            |_| {},
+        );
+    }
+
+    /// The window is back: Ferret is an ordinary window again.
+    fn shown(&self) {
+        if self.background.replace(false) {
+            self.app().inspect(|a| a.withdraw_notification("background"));
+        }
+    }
+
+    fn quit(&self) {
+        if let Some(app) = self.app() {
+            if self.background.get() {
+                app.withdraw_notification("background");
+            }
+            app.quit();
+        }
+    }
+
     fn toast(&self, msg: &str) {
         self.toasts.add_toast(adw::Toast::new(msg));
     }
@@ -335,6 +478,8 @@ impl Ui {
                 }
                 self.worker.run(|core| Event::Values(core.values()));
             }
+            // Nothing left to keep in range.
+            Event::Quit(_) if self.background.get() => self.quit(),
             Event::Quit(exe) => {
                 self.attached.set(None);
                 self.find.stop();
@@ -368,6 +513,10 @@ impl Ui {
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));
             }
+            // Opened again meanwhile.
+            Event::Closing(_) if self.window.is_visible() => {}
+            Event::Closing(names) if names.is_empty() => self.quit(),
+            Event::Closing(names) => self.keep_running(&names),
             Event::Reset | Event::Idle => {}
             Event::Digits(shapes) => self.find.show_digits(shapes),
             Event::Shapes(n) => self.find.show_shapes(n),
@@ -521,6 +670,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     );
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
     action("tip", Box::new(|ui, how| ui.tips.close(how == "never")));
+    action("close", Box::new(|ui, _| ui.window.close()));
     // Shows the status card in one state, for looking at it (`turn` can't be set up easily).
     action(
         "phase",
@@ -677,6 +827,9 @@ fn build(app: &adw::Application) {
         attaching: Rc::default(),
         waiting_for: Rc::default(),
         game_names: RefCell::default(),
+        background: Rc::default(),
+        closes: Rc::default(),
+        portal_answer: RefCell::default(),
     });
 
     {
@@ -734,6 +887,34 @@ fn build(app: &adw::Application) {
             glib::ControlFlow::Continue
         });
     }
+    // Closing the window while limits run keeps Ferret running without it.
+    {
+        let ui = ui.clone();
+        ui.window.clone().connect_close_request(move |_| {
+            ui.close();
+            glib::Propagation::Stop
+        });
+    }
+    {
+        let ui = ui.clone();
+        ui.window.clone().connect_visible_notify(move |w| {
+            if w.is_visible() {
+                ui.shown();
+            }
+        });
+    }
+    let show = gio::SimpleAction::new("show", None);
+    {
+        let window = ui.window.clone();
+        show.connect_activate(move |_, _| window.present());
+    }
+    app.add_action(&show);
+    let quit = gio::SimpleAction::new("quit", None);
+    {
+        let app = app.clone();
+        quit.connect_activate(move |_, _| app.quit());
+    }
+    app.add_action(&quit);
     ui.worker.run(|core| Event::Games(core.games()));
     add_debug_actions(app, &ui);
     ui.window.present();

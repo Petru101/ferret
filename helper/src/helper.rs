@@ -865,6 +865,9 @@ struct Session {
     /// The memory around values found earlier in this game: scans keep the matches in places
     /// shaped like one of them, when there are any.
     shapes: Vec<Shape>,
+    /// Test values the frontend hasn't put back yet (place, type, value before, test value):
+    /// put back when it goes away mid-test (`put_back_tests`).
+    tests: Vec<(u64, Kind, f64, f64)>,
 }
 
 /// How far back `undo` goes, and how many matches it keeps in all (16 bytes each).
@@ -1091,6 +1094,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             let exe = exe_name(pid);
             let modules = pointers::modules(pid, &f);
             let width = pointers::pointer_width(pid, &f, &modules, &exe);
+            put_back_tests(s);
             *limiter.lock().unwrap() = Limiter { pid, mem: f.try_clone().ok(), width, modules, limits: Vec::new() };
             let doubles_only = is_gamemaker(pid, &exe);
             let java = is_java(pid);
@@ -1397,16 +1401,45 @@ fn cmd_list(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn cmd_write(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+fn cmd_write(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
     let loc = it.next().and_then(parse_loc);
     let value = it.next().and_then(|v| v.parse::<f64>().ok());
+    let test = it.next() == Some("test");
     let (Some((addr, kind)), Some(value), Some(mem)) = (loc, value, s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: write <hex addr[:type]> <n> (after attach)");
+        return writeln!(out, "error: usage: write <hex addr[:type]> <n> [test] (after attach)");
     };
+    let before = s.read(addr, kind);
     match write_value(mem, addr, kind, value) {
-        Ok(()) => writeln!(out, "wrote {value}, reads back {}", s.describe(addr, kind)),
+        Ok(()) => {
+            // A test value is kept with the value before it; any other write there undoes it.
+            let earlier = s.tests.iter().position(|t| t.0 == addr);
+            match (test, earlier, before, s.read(addr, kind)) {
+                (true, Some(i), _, Some(now)) => s.tests[i].3 = now,
+                (true, None, Some(before), Some(now)) => s.tests.push((addr, kind, before, now)),
+                (false, Some(i), _, _) => drop(s.tests.remove(i)),
+                _ => {}
+            }
+            writeln!(out, "wrote {value}, reads back {}", s.describe(addr, kind))
+        }
         Err(e) => writeln!(out, "error: write failed: {e}"),
+    }
+}
+
+/// Puts back the test values the frontend left (it went away mid-test, as when Ferret closes
+/// during the in-game check): the value before where the test value is still there, only the
+/// test's step off where the game changed it since (nearer the test value than the value
+/// before), nothing where the game rewrote it.
+fn put_back_tests(s: &mut Session) {
+    let Some(mem) = s.mem.as_ref() else { return };
+    for (addr, kind, before, test) in std::mem::take(&mut s.tests) {
+        let step = test - before;
+        let back = match read_value(mem, addr, kind) {
+            Some(now) if now == test => before,
+            Some(now) if (now - test).abs() * 2.0 < step.abs() => (now - step).max(before.min(0.0)),
+            _ => continue,
+        };
+        write_value(mem, addr, kind, back).ok();
     }
 }
 
@@ -2373,6 +2406,9 @@ fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<(
 }
 
 pub fn run() {
+    // Losing Ferret (it closed or crashed) ends stdin: test values are put back then. The
+    // SIGINT flatpak-spawn's --watch-bus sends at the same time would end the helper first.
+    unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
     let stdin = io::stdin();
     let mut out = io::stdout().lock();
     let mut session = Session::default();
@@ -2401,7 +2437,7 @@ pub fn run() {
             "undo" => cmd_undo(&mut out, &mut session),
             "redo" => cmd_redo(&mut out, &mut session),
             "list" => cmd_list(&mut out, &session, arg),
-            "write" => cmd_write(&mut out, &session, arg),
+            "write" => cmd_write(&mut out, &mut session, arg),
             "set" => cmd_set(&mut out, &session, arg),
             "peek" => cmd_peek(&mut out, &session, arg),
             "keep" => cmd_keep(&mut out, &mut session, arg),
@@ -2427,7 +2463,7 @@ pub fn run() {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n>, set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor] [all], mark, next <n>|+|-|=|!, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing
@@ -2440,4 +2476,5 @@ pub fn run() {
             break;
         }
     }
+    put_back_tests(&mut session);
 }

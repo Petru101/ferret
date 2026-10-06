@@ -1623,6 +1623,15 @@ impl Core {
         first_error(&reply).map_or(Ok(()), Err)
     }
 
+    /// The saved values kept in range in the attached game (none when no game is attached).
+    pub fn limited(&mut self) -> Vec<String> {
+        if self.game().is_err() {
+            return Vec::new();
+        }
+        // Not the values registered with no bounds ("- -") so their address stays current.
+        self.limits().into_iter().filter(|(_, _, rest)| !rest.starts_with("- - ")).map(|(name, _, _)| name).collect()
+    }
+
     /// Limits the helper enforces: name, current address, and the rest of its line.
     fn limits(&mut self) -> Vec<(String, u64, String)> {
         self.helper
@@ -2710,7 +2719,7 @@ impl Core {
         }
         self.phase(Phase::Checking(tests.len(), 0.0));
         for t in &tests {
-            self.helper.call(&format!("write {} {}", t.loc, t.test));
+            self.helper.call(&format!("write {} {} test", t.loc, t.test));
         }
         std::thread::sleep(Duration::from_millis(1500));
         let locs: Vec<Loc> = tests.iter().map(|t| t.loc).collect();
@@ -2755,7 +2764,7 @@ impl Core {
                 match now[k] {
                     Some(v) if kept[k] => {
                         t.test = v + t.step;
-                        self.helper.call(&format!("write {} {}", t.loc, t.test));
+                        self.helper.call(&format!("write {} {} test", t.loc, t.test));
                     }
                     _ => {}
                 }
@@ -2819,7 +2828,7 @@ impl Core {
             let Some(orig) = listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()) else { continue };
             let Some(Some(shown)) = self.peek(&[loc]).first().copied() else { continue };
             let test = shown + 10;
-            self.helper.call(&format!("write {loc} {test}"));
+            self.helper.call(&format!("write {loc} {test} test"));
             std::thread::sleep(Duration::from_millis(1500));
             let after = self.peek(&locs);
             let stuck = after[k] == Some(test);
@@ -2998,7 +3007,7 @@ impl Core {
         };
         let test = shown + 10;
         self.phase(Phase::Checking(1, 0.0));
-        self.helper.call(&format!("write {loc} {test}"));
+        self.helper.call(&format!("write {loc} {test} test"));
         std::thread::sleep(Duration::from_millis(1500));
         let now = self.peek(&[loc])[0];
         if now == Some(test) {
