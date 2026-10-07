@@ -5,6 +5,8 @@ sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: ferret
+# Every language ships inside the app (a Locale extension would only install the system's).
+separate-locales: false
 finish-args:
   - --socket=wayland
   - --socket=fallback-x11
