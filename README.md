@@ -1,5 +1,10 @@
 # Ferret
 
+![Ferret following SuperTux's coin count: 21 → 2 places match, the player's turn to change it](data/screenshots/find-supertux.png)
+
+<sub>The game in the screenshot is [SuperTux](https://www.supertux.org/), free and open source;
+its artwork is under its own free licenses.</sub>
+
 Find and change values in your games. Proof of concept for a single-player game cheat tool for
 Linux, packaged as a flatpak.
 

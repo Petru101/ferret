@@ -84,5 +84,6 @@ modules:
           - bench
           - images
           - images 2
+          - data/screenshots
           - stub
           - .flatpak-builder
