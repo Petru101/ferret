@@ -2775,8 +2775,26 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     // A field of a Unity (Mono or IL2CPP) class's only live object: by the class's name, past the
     // objects the game replaces (a checkpoint's new player).
     if let Some((p, leads)) = mono::discover(&heap, target) {
+        // A List's slot (Valheim's `m_inventory._items[21]`, an item with no id field) leads to
+        // another item once an earlier one is gone: a Unity-style path picking the element by
+        // its name (`="$item_wood"`, every stack of it) goes first when there is one; Mono's
+        // fields tell which of those read the element itself.
+        let mut found = Vec::new();
+        if p.picks_list_slot() {
+            let collected = pointers::collect_pointers(s.pid, mem, s.width)?;
+            found = names::discover_where(&heap, &collected.0, target, |np| {
+                let chain = match np.steps.last() {
+                    Some(names::Step::Named(chain, _)) => &chain[..],
+                    _ => &[],
+                };
+                mono::own_fields_along(&heap, target, np.value, chain) != Some(false)
+            });
+            for (p, leads) in &found {
+                writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            }
+        }
         writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
-        return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        return writeln!(out, "{} named paths in {} ms", found.len() + 1, t.elapsed().as_millis());
     }
     if only_unreal {
         return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());

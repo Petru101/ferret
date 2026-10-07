@@ -441,6 +441,11 @@ const REFERRERS_PER_OBJECT: usize = 16;
 /// Named paths that lead to `target` now, best first (fewest places they lead to, then fewest
 /// steps), with where each leads.
 pub fn discover(heap: &Heap, pointers: &Pointers, target: u64) -> Vec<(NamedPath, Vec<u64>)> {
+    discover_where(heap, pointers, target, |_| true)
+}
+
+/// The same, only paths `keep` accepts.
+pub fn discover_where(heap: &Heap, pointers: &Pointers, target: u64, keep: impl Fn(&NamedPath) -> bool) -> Vec<(NamedPath, Vec<u64>)> {
     let w = heap.w();
     // The value's object: the nearest address before it that something points to.
     let mut bases: Vec<u64> = pointers.to(target.saturating_sub(MAX_FIELD), target.saturating_sub(4)).iter().map(|(p, _)| *p).collect();
@@ -494,7 +499,7 @@ pub fn discover(heap: &Heap, pointers: &Pointers, target: u64) -> Vec<(NamedPath
         let roots: Vec<u64> =
             strings[i].iter().flat_map(|&s| pointers.to(s, s)).filter_map(|(_, at)| at.checked_sub(path.root_field)).take(4096).collect();
         let leads = heap.walk(&roots, &path);
-        if leads.contains(&target) && !good.iter().any(|(p, _)| *p == path) {
+        if leads.contains(&target) && !good.iter().any(|(p, _)| *p == path) && keep(&path) {
             good.push((path, leads));
         }
     }

@@ -153,6 +153,13 @@ impl MonoPath {
     pub fn describe(&self) -> String {
         format!("{} of {}", self.field, self.from())
     }
+
+    /// Whether a step picks an element of a List<T> (its `_items` array) by its slot: the slot
+    /// moves when the game removes an earlier element (Valheim: a stack used up), unlike a
+    /// fixed array's (Terraria's `player[0]`).
+    pub fn picks_list_slot(&self) -> bool {
+        self.via.iter().any(|s| s.field == "_items" && matches!(s.pick, Some(Pick::At(_))))
+    }
 }
 
 /// Where a class keeps its name (namespace right after), parent, fields and a pointer to
@@ -613,6 +620,26 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(MonoPath, Vec<u64>)> {
         (Runtime::Mono, true) => by_class().or_else(|| static_discover(heap, &m, obj, &field, target)),
         (Runtime::Mono, false) => static_discover(heap, &m, obj, &field, target).or_else(by_class),
     }
+}
+
+/// Whether the end of a Unity-style path reads fields of the objects themselves, not of objects
+/// allocated right after them: the value at `value` into its object, and the `chain` naming
+/// that object (from it). Valheim's ItemData objects sit 0xe0 apart, and `f0.10="$item_wood"`
+/// read the next stack's m_shared (it led to the 2 wood stacks whose neighbour was wood too).
+/// None when the memory isn't Mono's.
+pub fn own_fields_along(heap: &Heap, target: u64, value: u64, chain: &[u64]) -> Option<bool> {
+    let lay = layout_near(heap, target)?;
+    let m = Mono { mem: heap.file(), lay };
+    let own = |obj: u64, off: u64| m.holder(obj + off).is_some_and(|(o, _, _)| o == obj);
+    let mut obj = target.checked_sub(value)?;
+    if !own(obj, value) {
+        return Some(false);
+    }
+    for &off in chain {
+        let Some(next) = m.word(obj + off).filter(|_| own(obj, off)) else { return Some(false) };
+        obj = next;
+    }
+    Some(true)
 }
 
 /// Every vtable (sorted), from the domain each one points to (their third word): one pass.
