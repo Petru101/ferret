@@ -3323,15 +3323,43 @@ impl Core {
         let locs: Vec<Loc> = tests.iter().map(|t| t.loc).collect();
         let after = self.peek(&locs);
         let screen = if self.area.is_some() { self.read().ok().flatten() } else { None };
-        // Each place kept its test value (or carried on from it), took another's on, or went back.
-        let kept: Vec<bool> = tests.iter().zip(&after).map(|(t, v)| v.is_some_and(|v| (v - t.test).abs() <= PROBE_NEAR)).collect();
+        // A display that slides toward the value is still on its way (SuperTux's coin counter
+        // counts to the real number: from its test value 305 toward the real one's 205, it read
+        // 270 and passed as kept, with the screen showing it). A second look tells it from a
+        // place the game changed once: it moved on toward another place's test value, which
+        // that place still holds.
+        std::thread::sleep(Duration::from_millis(500));
+        let later = self.peek(&locs);
+        let chases: Vec<Option<usize>> = (0..tests.len())
+            .map(|k| {
+                let (Some(a), Some(b), t) = (after[k], later[k], tests[k].test) else { return None };
+                (0..tests.len()).filter(|&j| j != k && later[j] == Some(tests[j].test)).find(|&j| {
+                    let goal = tests[j].test;
+                    let toward = |v: i64| (v - goal).abs() < (t - goal).abs() && (v - t).signum() == (goal - t).signum();
+                    toward(a) && toward(b) && (b - goal).abs() < (a - goal).abs()
+                })
+            })
+            .collect();
+        // Each place kept its test value (or carried on from it), took another's on, slides
+        // toward another's, or went back.
+        let kept: Vec<bool> = (0..tests.len())
+            .map(|k| chases[k].is_none() && after[k].is_some_and(|v| (v - tests[k].test).abs() <= PROBE_NEAR))
+            .collect();
         let source = |v: Option<i64>, k: usize| tests.iter().enumerate().position(|(j, t)| j != k && v == Some(t.test));
-        let followers: Vec<usize> = (0..tests.len()).map(|j| (0..tests.len()).filter(|&k| source(after[k], k) == Some(j)).count()).collect();
+        let followers: Vec<usize> = (0..tests.len())
+            .map(|j| (0..tests.len()).filter(|&k| source(after[k], k) == Some(j) || chases[k] == Some(j)).count())
+            .collect();
         for (k, (t, v)) in tests.iter().zip(&after).enumerate() {
-            let what = match (kept[k], source(*v, k)) {
-                (true, _) => "kept".to_owned(),
-                (false, Some(j)) => format!("took 0x{:012x}'s test value", tests[j].loc.addr),
-                (false, None) => format!("the game put back {}", v.map_or("something else".into(), |v| v.to_string())),
+            let what = match (kept[k], source(*v, k), chases[k]) {
+                (true, _, _) => "kept".to_owned(),
+                (false, Some(j), _) => format!("took 0x{:012x}'s test value", tests[j].loc.addr),
+                (false, None, Some(j)) => format!(
+                    "slides toward 0x{:012x}'s test value ({} -> {}): a display counting to it",
+                    tests[j].loc.addr,
+                    v.unwrap_or_default(),
+                    later[k].unwrap_or_default()
+                ),
+                (false, None, None) => format!("the game put back {}", v.map_or("something else".into(), |v| v.to_string())),
             };
             self.say(&format!("0x{:012x}: wrote {}: {what}", t.loc.addr, t.test));
         }
@@ -3756,7 +3784,12 @@ impl Core {
         if count == 1 {
             let loc = self.candidates()[0].0;
             if let Some(why) = self.doubt(loc, &last) {
-                self.lost_shape();
+                // Only places shaped like earlier finds were searched: the value is elsewhere.
+                if self.shaped && !cancelled(&self.cancel) && start.elapsed() < limit {
+                    self.lost_shape();
+                    self.search = None;
+                    return self.auto(limit - start.elapsed());
+                }
                 return Ok(AutoResult::Unsure(why));
             }
             self.search = None;
@@ -4160,7 +4193,12 @@ impl Core {
             1 => {
                 let loc = self.candidates()[0].0;
                 if let Some(why) = self.doubt(loc, &n) {
-                    self.lost_shape();
+                    // Only places shaped like earlier finds were searched: the value is elsewhere.
+                    if self.shaped {
+                        self.lost_shape();
+                        self.search = None;
+                        return self.typed_search(n);
+                    }
                     return Ok(AutoResult::Unsure(why));
                 }
                 Some(loc)

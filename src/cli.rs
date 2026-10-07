@@ -88,6 +88,13 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             }
         }
         "read" => println!("{:?}", core.read()?),
+        // The value types new searches look for, as the window's More menu sets them: `types
+        // i32,f32,f64,xor`, or `types` for all.
+        "types" => {
+            let kinds: Option<Vec<core::Kind>> = arg.split(',').filter(|k| !k.trim().is_empty()).map(|k| core::Kind::parse(k.trim())).collect();
+            core.scan_kinds = kinds.ok_or("usage: types [i32,f32,f64,xor,u16]")?;
+            println!("searching {}", if core.scan_kinds.is_empty() { "all types".to_owned() } else { arg.to_owned() });
+        }
         "auto" => match core.auto(Duration::from_secs(arg.parse().unwrap_or(600)))? {
             AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
             AutoResult::Several(n) => println!("{n} candidates left"),

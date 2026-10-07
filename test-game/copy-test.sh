@@ -1,7 +1,7 @@
 #!/bin/sh
 # Tests that a search ending on a display copy isn't taken as found (it stays listed for the
-# player to try, with the reason): food is a 16-bit short (not
-# searched) with a float copy for the HUD that the game refreshes every tick, so typed numbers
+# player to try, with the reason): food is a 16-bit short (left out of the search here with
+# `types`) with a float copy for the HUD that the game refreshes every tick, so typed numbers
 # for food end on the copy, which a test write can't change. Gold (a plain int) must still be
 # found, and the test write on it undone. Run on the host.
 set -eu
@@ -41,6 +41,7 @@ until [ -s "$d/log" ]; do sleep 0.2; done
 "$live" start >/dev/null
 sleep 2
 "$live" attach "$pid" >/dev/null
+"$live" types i32,f32,f64,xor >/dev/null
 echo "--- food: only its display copy can be found"
 # Wait for each outcome: food changed during a test write looks like the player eating.
 food=500

@@ -23,6 +23,9 @@
  * stacks into a new "Inventory" (the player object points at it) and keeps the old, emptied one
  * (garbage). A label object also
  * holds a string "Inventory" (a root that leads nowhere).
+ * "tokens N" adds tokens (an int), and a HUD counter (another block) slides toward them 3 a
+ * tick, like SuperTux's coin display: a test value written to the counter is still on its way
+ * back when Ferret looks, and passed for the real one.
  * "hurt N" works like Brotato's health: hp is capped at 100 first, then N comes off, and a copy in
  * the run's data (another block) is written right after, so both change at once and the real one
  * doesn't carry on from a test value.
@@ -82,6 +85,16 @@ struct base {
 };
 
 static struct base *base;
+
+/* The tokens (a block of their own) and the HUD's counter of them, in a HUD object. */
+struct hud {
+    const char *type;
+    int icon;
+    int shown;
+    float fade;
+};
+
+static volatile int *tokens, *shown_tokens;
 
 static struct base *new_base(int crystals)
 {
@@ -310,7 +323,7 @@ static void report(const char *log, const struct player *p, const double *coins,
         print_stacks(f, "logs", inv, logs_info);
         print_stacks(f, "stone", inv, stone_info);
         print_stacks(f, "chestlogs", chest, logs_info);
-        fprintf(f, "\n");
+        fprintf(f, " tokens=%d shown=%d\n", *tokens, *shown_tokens);
         fclose(f);
     }
 }
@@ -345,6 +358,16 @@ int main(int argc, char **argv)
     padding[0] = 1;
     *coins = 30;
     *wood = 12;
+    tokens = malloc(4 * sizeof *tokens);
+    {
+        struct hud *h = calloc(1, sizeof *h);
+
+        h->type = "hud";
+        h->icon = 7;
+        h->fade = 0.5f;
+        shown_tokens = &h->shown;
+    }
+    *tokens = *shown_tokens = 140;
     world = malloc(sizeof *world);
     world->type = "world";
     world->room = new_room(77, 40);
@@ -380,6 +403,9 @@ int main(int argc, char **argv)
     for (;;) {
         sleep_ms(100);
         *hud_food = needs.food;
+        if (*shown_tokens != *tokens)
+            *shown_tokens += *tokens > *shown_tokens ? (*tokens - *shown_tokens < 3 ? *tokens - *shown_tokens : 3)
+                                                     : (*shown_tokens - *tokens < 3 ? *tokens - *shown_tokens : -3);
         if (p->gold > richest)
             richest = p->gold;
         if (p->energy > most_energy)
@@ -420,6 +446,8 @@ int main(int argc, char **argv)
             add_scrap(p, n);
         else if (sscanf(line, "coins %d", &n) == 1)
             *coins += n;
+        else if (sscanf(line, "tokens %d", &n) == 1)
+            *tokens += n;
         else if (sscanf(line, "wood %d", &n) == 1)
             *wood += n;
         else if (sscanf(line, "eat %d", &n) == 1)
