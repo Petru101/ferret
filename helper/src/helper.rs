@@ -1042,7 +1042,7 @@ const NOT_GAMES: &[&str] = &[
     "steamwebhelper.exe", "mscorsvw.exe", "ngen.exe", "reaper", "pressure-vessel-wrap", "pv-adverb", "python3",
     "srt-bwrap", "bwrap", "wineserver", "sh",
     "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep", "umu.exe", "xalia.exe",
-    "xwayland", "gamescope", "gamescope-wl", "gpu-screen-recorder", "mpv", "ffplay",
+    "xwayland", "gamescope", "gamescope-wl", "gamescopereaper", "gpu-screen-recorder", "mpv", "ffplay",
 ];
 
 /// Native games outside Steam: a GPU driver is loaded (the program draws with OpenGL or Vulkan;
