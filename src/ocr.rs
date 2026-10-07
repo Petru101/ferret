@@ -803,10 +803,40 @@ pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font
 /// Jackrabbit 2's "0000100"), all about the same height. `trusted`: `n` comes from memory, not
 /// from the player. Returns what it did.
 pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool) -> Result<String, String> {
+    let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
+    let text = n.digits();
+    let (glyphs, extra) = learnable(&img, area, n, font, trusted)?;
+    // Leading zeros are a guess. Glyphs that read as other digits aren't zeros; ones the font
+    // can't read are taken as zeros only while no 0 is known (once it is, something that
+    // doesn't read as 0 is an icon or a symbol: Creeper World got a junk "0" from the shape left
+    // of a typed 40), and only when they ring a hole, as a 0 does (OpenTTD's "£" before a typed
+    // 97518 was learned as a 0). Found in memory as well as typed: Fallout 2's HP counter
+    // always shows 3 digits ("044"), so its first find could never learn them.
+    let zeros = match font.read(&glyphs[..extra], SCALE) {
+        Some(r) => r.n == 0 && r.glyphs == extra,
+        None => font.shapes(0).is_empty() && glyphs[..extra].iter().all(|g| g.has_hole(SCALE)),
+    };
+    // Ones that can't be a 0 are a sign before the number ("£", the "x" of "x53"): left out.
+    let sign = extra > 0 && !zeros && glyphs[..extra].iter().all(|g| !g.has_hole(SCALE));
+    if extra > 0 && !zeros && !sign {
+        return Err(format!("{extra} glyph(s) left of {n} that may not be zeros; not learning from it"));
+    }
+    let (glyphs, extra) = if sign { (glyphs[extra..].to_vec(), 0) } else { (glyphs, extra) };
+    let label = format!("{}{text}", "0".repeat(extra));
+    let mut added = font.learn(&glyphs, SCALE, &label, trusted);
+    if let Some(seen) = finder_glyphs(&img, font, area, &glyphs) {
+        added += font.learn_shapes(&seen, 1, &label, trusted);
+    }
+    let shown = if extra > 0 { label } else { n.to_string() };
+    Ok(format!("learned the digits of {shown}: {added} new shapes (knows {})", font.known()))
+}
+
+/// The glyphs in `area` that show `n` (the number's digits, leading zeros or a sign first) and
+/// how many come before its digits.
+fn learnable(img: &RgbImage, area: Rect, n: &Shown, font: &Font, trusted: bool) -> Result<(Vec<Glyph>, usize), String> {
     if n.value() < 0.0 {
         return Err("only learns from numbers of 0 or more".into());
     }
-    let img = image::open(frame).map_err(|e| e.to_string())?.to_rgb8();
     let text = n.digits();
     // Glyphs the crop's edge cuts off are something else. "13/40" is two numbers: the part
     // the learned digits don't contradict, the current value (before the slash) first.
@@ -873,28 +903,20 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
             return Err(format!("the learned digits read {} there, not {n}; not learning from it", r.n));
         }
     }
-    // Leading zeros are a guess. Glyphs that read as other digits aren't zeros; ones the font
-    // can't read are taken as zeros only when the player typed the number and no 0 is known
-    // yet (once it is, something that doesn't read as 0 is an icon or a symbol: Creeper World
-    // got a junk "0" from the shape left of a typed 40), and only when they ring a hole, as a
-    // 0 does (OpenTTD's "£" before a typed 97518 was learned as a 0).
-    let zeros = match font.read(&glyphs[..extra], SCALE) {
-        Some(r) => r.n == 0 && r.glyphs == extra,
-        None => !trusted && font.shapes(0).is_empty() && glyphs[..extra].iter().all(|g| g.has_hole(SCALE)),
+    Ok((glyphs, extra))
+}
+
+/// Whether the glyphs that show `n` on frame `b` looked different on frame `a`, taken a moment
+/// before: a display that lags memory (Fallout 2's rolling HP counter, SuperTux's counting
+/// coins) shows something in between until it settles, and those shapes aren't the number's
+/// digits. False when `b` has no such glyphs (learning says why).
+pub fn changed(a: &Path, b: &Path, area: Rect, n: &Shown, font: &Font) -> bool {
+    let glyphs = |p: &Path| {
+        let img = image::open(p).ok()?.to_rgb8();
+        learnable(&img, area, n, font, true).ok().map(|(g, _)| g)
     };
-    // Ones that can't be a 0 are a sign before the number ("£", the "x" of "x53"): left out.
-    let sign = extra > 0 && !zeros && glyphs[..extra].iter().all(|g| !g.has_hole(SCALE));
-    if extra > 0 && !zeros && !sign {
-        return Err(format!("{extra} glyph(s) left of {n} that may not be zeros; not learning from it"));
-    }
-    let (glyphs, extra) = if sign { (glyphs[extra..].to_vec(), 0) } else { (glyphs, extra) };
-    let label = format!("{}{text}", "0".repeat(extra));
-    let mut added = font.learn(&glyphs, SCALE, &label, trusted);
-    if let Some(seen) = finder_glyphs(&img, font, area, &glyphs) {
-        added += font.learn_shapes(&seen, 1, &label, trusted);
-    }
-    let shown = if extra > 0 { label } else { n.to_string() };
-    Ok(format!("learned the digits of {shown}: {added} new shapes (knows {})", font.known()))
+    let Some(b) = glyphs(b) else { return false };
+    glyphs(a).is_none_or(|a| a.len() != b.len() || !a.iter().zip(&b).all(|(a, b)| a.x.abs_diff(b.x) <= SCALE && crate::font::alike(a, b, SCALE)))
 }
 
 /// The digit a character OCR may read in its place, if any.

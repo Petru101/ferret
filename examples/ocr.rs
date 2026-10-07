@@ -82,16 +82,23 @@ fn main() {
             let list: Vec<String> = words.iter().map(|w| format!("{}@{},{}", w.text, w.rect.x, w.rect.y)).collect();
             println!("{}", list.join(" "));
         }
-        Some("learn") if args.len() == 8 => {
+        Some("changed") if args.len() == 8 => {
+            let (Some(x), Some(y), Some(w), Some(h), Some(v)) = (n(3), n(4), n(5), n(6), ocr::Shown::parse(&args[7])) else {
+                return eprintln!("x y w h n must be numbers");
+            };
+            let f = font::Font::default();
+            println!("{}", ocr::changed(Path::new(&args[1]), Path::new(&args[2]), ocr::Rect { x, y, w, h }, &v, &f));
+        }
+        Some("learn") if args.len() == 8 || args.len() == 9 => {
             let (Some(x), Some(y), Some(w), Some(h), Some(v)) = (n(2), n(3), n(4), n(5), ocr::Shown::parse(&args[6])) else {
                 return eprintln!("x y w h n must be numbers");
             };
             let path = Path::new(&args[7]);
             let mut f = font::Font::load(path);
-            let r = ocr::learn(Path::new(&args[1]), ocr::Rect { x, y, w, h }, &v, &mut f, false);
+            let r = ocr::learn(Path::new(&args[1]), ocr::Rect { x, y, w, h }, &v, &mut f, args.get(8).is_some_and(|a| a == "trusted"));
             println!("{r:?}");
             f.save(path).unwrap_or_else(|e| panic!("{e}"));
         }
-        _ => eprintln!("usage: ocr numbers <frame.png> [digits] | ocr read <frame.png> <x> <y> <w> <h> <crop.png> [digits] | ocr learn <frame.png> <x> <y> <w> <h> <n> <digits>"),
+        _ => eprintln!("usage: ocr numbers <frame.png> [digits] | ocr read <frame.png> <x> <y> <w> <h> <crop.png> [digits] | ocr learn <frame.png> <x> <y> <w> <h> <n> <digits> [trusted] | ocr changed <earlier.png> <frame.png> <x> <y> <w> <h> <n>"),
     }
 }

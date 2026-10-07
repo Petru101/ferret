@@ -3039,12 +3039,24 @@ impl Core {
             return;
         }
         let before = self.peek(&[loc])[0];
-        let Ok(frame) = self.frame() else { return };
-        // A value that changed while the frame was taken could show either.
-        match (before, self.peek(&[loc])[0]) {
-            (Some(a), Some(b)) if a == b => self.learn(&frame, &Shown::whole(a), true),
-            _ => {}
+        let Ok(first) = self.frame() else { return };
+        let earlier = cache_dir().join("learn-frame.png");
+        if std::fs::copy(&first, &earlier).is_err() {
+            return;
         }
+        std::thread::sleep(Duration::from_millis(300));
+        let Ok(frame) = self.frame() else { return };
+        // A value that changed while the frames were taken could show either.
+        let n = match (before, self.peek(&[loc])[0]) {
+            (Some(a), Some(b)) if a == b => Shown::whole(a),
+            _ => return,
+        };
+        // The screen can lag memory (a counter that rolls or counts to the value).
+        if self.area.is_some_and(|area| ocr::changed(&earlier, &frame, area, &n, &self.font)) {
+            self.say(&format!("digits not learned: the box wasn't showing {n} steadily yet"));
+            return;
+        }
+        self.learn(&frame, &n, true);
     }
 
     /// The places still matching when there are 20 or fewer (none otherwise), with their values
