@@ -88,11 +88,13 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         "auto" => match core.auto(Duration::from_secs(arg.parse().unwrap_or(600)))? {
             AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
             AutoResult::Several(n) => println!("{n} candidates left"),
+            AutoResult::PutBack(n) => println!("{n} candidates left; the game put every test value back"),
             AutoResult::Unsure(why) => println!("{why} Kept: 1 candidate left"),
         },
         "type" => match core.typed(crate::ocr::Shown::parse(arg).ok_or("usage: type <n> (1250, 1.5, 3:17)")?)? {
             AutoResult::Found(loc) => println!("found it at 0x{:x} ({})", loc.addr, loc.kind.describe()),
             AutoResult::Several(n) => println!("{n} candidates left"),
+            AutoResult::PutBack(n) => println!("{n} candidates left; the game put every test value back"),
             AutoResult::Unsure(why) => println!("{why} Kept: 1 candidate left"),
         },
         "try" => {

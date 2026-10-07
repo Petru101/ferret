@@ -867,6 +867,20 @@ pub enum AutoResult {
     /// doesn't hold the number on screen, or the game put a test value back). The player knows
     /// better than a misread or a guess (MEA's ammo: "1/116" on screen, the place held 166).
     Unsure(String),
+    /// Several addresses follow the value, and the game put back the test value Ferret wrote
+    /// to each of them at once: a number the game works out from others (Creeper World 3's
+    /// energy per second, `stats_energyProductionVal`), copies of a value kept in a form Ferret
+    /// can't search for, or a value at its cap (only higher test values are written).
+    PutBack(usize),
+}
+
+/// How `probe` ended.
+pub enum Probed {
+    Found(Loc),
+    /// Every candidate put its test value back at once.
+    PutBack,
+    /// Nothing told them apart.
+    Unclear,
 }
 
 struct Game {
@@ -3167,7 +3181,7 @@ impl Core {
     /// game changed meanwhile. Only places holding `n` (the number on screen) get one: a place
     /// that only swept past it between reads can be anything (a stand-in's malloc chunk header
     /// went 0 -> 69 -> 117 across 74 and 85; its test value crashed the game).
-    pub fn probe(&mut self, n: &Shown) -> Result<Option<Loc>, String> {
+    pub fn probe(&mut self, n: &Shown) -> Result<Probed, String> {
         let listed = self.helper.call("list");
         if listed.iter().any(|l| l.starts_with("...")) {
             return Err("too many candidates to probe; narrow down first".into());
@@ -3193,7 +3207,7 @@ impl Core {
         }
         if tests.is_empty() {
             self.say(&format!("none of them holds {n} now"));
-            return Ok(None);
+            return Ok(Probed::Unclear);
         }
         self.phase(Phase::Checking(tests.len(), 0.0));
         for t in &tests {
@@ -3254,7 +3268,7 @@ impl Core {
                 Ok(found) => real = found,
                 Err(why) => {
                     self.say(&format!("no candidate behaved like the real value: {why}"));
-                    return Ok(None);
+                    return Ok(Probed::Unclear);
                 }
             }
         }
@@ -3262,7 +3276,7 @@ impl Core {
             let loc = tests[k].loc;
             self.helper.call(&format!("keep {:x}", loc.addr));
             self.say(&format!("0x{:012x} {how}: the real value (test writes undone)", loc.addr));
-            return Ok(Some(loc));
+            return Ok(Probed::Found(loc));
         }
         let why = match (kept.iter().any(|&k| k), self.cancel.load(Ordering::Relaxed)) {
             (false, _) => "the game put every test value back",
@@ -3270,7 +3284,7 @@ impl Core {
             (true, false) => "the number didn't change in the game while Ferret waited (is the game paused?)",
         };
         self.say(&format!("no candidate behaved like the real value: {why}"));
-        Ok(None)
+        Ok(if kept.iter().any(|&k| k) { Probed::Unclear } else { Probed::PutBack })
     }
 
     /// Puts back what the test writes changed: the exact original where the test value is still
@@ -3645,12 +3659,16 @@ impl Core {
         }
         if (2..=20).contains(&count) && !cancelled(&self.cancel) {
             self.say("checking which one is the real value:");
-            if let Some(loc) = self.probe(&last)? {
-                self.search = None;
-                self.say(&format!("stored as {}", loc.kind.with_article()));
-                self.learn_from_memory(loc, &last);
-                self.learn_shape(loc);
-                return Ok(AutoResult::Found(loc));
+            match self.probe(&last)? {
+                Probed::Found(loc) => {
+                    self.search = None;
+                    self.say(&format!("stored as {}", loc.kind.with_article()));
+                    self.learn_from_memory(loc, &last);
+                    self.learn_shape(loc);
+                    return Ok(AutoResult::Found(loc));
+                }
+                Probed::PutBack => return Ok(AutoResult::PutBack(count)),
+                Probed::Unclear => {}
             }
         }
         Ok(AutoResult::Several(count))
@@ -4042,7 +4060,11 @@ impl Core {
             // The same few keep following the value: copies of it. Find the real one.
             2..=20 if unchanged >= 1 => {
                 self.say("checking which one is the real value:");
-                self.probe(&n)?
+                match self.probe(&n)? {
+                    Probed::Found(loc) => Some(loc),
+                    Probed::PutBack => return Ok(AutoResult::PutBack(count)),
+                    Probed::Unclear => None,
+                }
             }
             _ => None,
         };

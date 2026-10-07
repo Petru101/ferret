@@ -1241,6 +1241,7 @@ impl FindView {
         match r {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Unsure(why)) => self.unsure(&why),
+            Ok(AutoResult::PutBack(n)) => self.all_put_back(n),
             Ok(AutoResult::Several(n)) => {
                 let text = self.count_text(n);
                 match n <= 20 {
@@ -1282,6 +1283,28 @@ impl FindView {
         );
         self.offer_places(true);
         self.list_matches(1);
+    }
+
+    /// Several places follow the number and the game put every test value back at once: most
+    /// likely a number it works out from others (Creeper World 3's energy per second), where a
+    /// change never lasts. Said plainly: a line in the log went unseen and the player saved
+    /// the rate. The places stay to try (a value at its cap also puts higher numbers back).
+    fn all_put_back(&self, n: usize) {
+        self.last_count.set(Some(n));
+        let hint = "Ferret changed every place that follows it, and the game changed each one back at once. \
+                    It probably works this number out from other things (like a rate per second), so changing it won't last. \
+                    Pick a number the game keeps instead, like a stored amount. If this number is at its highest, \
+                    use some up and try these places.";
+        self.guide.ended(
+            Look::Call,
+            guide::CHECK,
+            "The game puts this number back",
+            hint,
+            "Changing this number probably won't last. Switch to Ferret to see why.",
+        );
+        self.offer_places(true);
+        self.list_matches(n);
+        self.nudge(Some(&self.start));
     }
 
     /// A search that ended without an answer: why, in the status line and on the card.
@@ -1441,6 +1464,10 @@ impl FindView {
             Ok(AutoResult::Found(loc)) => self.found(loc),
             Ok(AutoResult::Unsure(why)) => {
                 self.unsure(&why);
+                self.again.set_visible(true);
+            }
+            Ok(AutoResult::PutBack(n)) => {
+                self.all_put_back(n);
                 self.again.set_visible(true);
             }
             Ok(AutoResult::Several(n)) => {
