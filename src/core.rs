@@ -1893,7 +1893,12 @@ impl Core {
         let (mut values, mut left_out) = (Vec::new(), Vec::new());
         for e in read_profile(&exe) {
             if e.imported {
-                left_out.push(format!("{}: imported and not checked yet", e.name));
+                // Says what to do: the player re-imported their own export and couldn't tell
+                // why it stayed out (Particle Fleet's omni).
+                left_out.push(format!(
+                    "{}: imported and not checked yet. On its card in the Values tab, click \"Yes, It Shows…\" if the game shows that number",
+                    e.name
+                ));
                 continue;
             }
             let paths: Vec<String> = e.paths.iter().filter(|p| share::shareable_path(p)).cloned().collect();
