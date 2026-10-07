@@ -37,7 +37,13 @@ showed you before uploading (the values' names and how to find them in the game)
 program name and Steam id, Ferret's version and the install's random id (so you can delete
 your uploads). Anyone using Ferret can download it. When you confirm a downloaded value (or
 remove one you never confirmed), Ferret tells the server it worked (or didn't) for that upload,
-with the same random id, so each install counts once.
+with the same random id, so each install counts once. The server notes which installs
+downloaded an upload (only they can say whether it worked), and keeps reports players send
+about an upload (rude names, junk) for the developer to look at.
+
+Against floods and fake votes, the library counts uploads, votes and reports per network too.
+For that it keeps a code made from your IP address and the day: it changes every day and can't
+be turned back into the address. The address itself is never stored.
 `;
 
 function reply(status, body) {

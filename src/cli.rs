@@ -186,6 +186,11 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             let text = crate::library::download(&id)?;
             imported(core.import(&text, Some(&id))?);
         }
+        "report" => {
+            let id = crate::online::parse_id(arg).ok_or("usage: report <upload id>")?;
+            crate::library::report(&id)?;
+            println!("reported {id}");
+        }
         "unshare" => {
             let id = crate::online::parse_id(arg).ok_or("usage: unshare <upload id>")?;
             crate::library::delete(&id)?;

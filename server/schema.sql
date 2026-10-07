@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS packs (
   -- Its id as players see it ("K7Q2-9XMB").
   ref TEXT NOT NULL,
   install TEXT NOT NULL,
+  -- The network it came from, as library.js's daily-salted hash (never the address).
+  net TEXT,
   -- The game's program, lowercase, and its Steam app id when Ferret knew it.
   game TEXT NOT NULL,
   steam TEXT,
@@ -36,18 +38,39 @@ CREATE TABLE IF NOT EXISTS packs (
   version TEXT NOT NULL,
   uploaded TEXT NOT NULL DEFAULT (datetime('now')),
   worked INTEGER NOT NULL DEFAULT 0,
-  failed INTEGER NOT NULL DEFAULT 0
+  failed INTEGER NOT NULL DEFAULT 0,
+  -- Players (one per network) who reported it; at 3 it leaves the list until looked at.
+  reports INTEGER NOT NULL DEFAULT 0,
+  -- 1: the developer looked at it and kept it (reports no longer hide it).
+  reviewed INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS packs_ref ON packs (ref);
 CREATE UNIQUE INDEX IF NOT EXISTS packs_hash ON packs (game, hash);
 CREATE INDEX IF NOT EXISTS packs_install ON packs (install, uploaded);
+CREATE INDEX IF NOT EXISTS packs_net ON packs (net, uploaded);
 -- Whether an upload worked for an install, once each.
 CREATE TABLE IF NOT EXISTS votes (
   pack INTEGER NOT NULL,
   install TEXT NOT NULL,
+  net TEXT,
   worked INTEGER NOT NULL,
   PRIMARY KEY (pack, install)
 );
+CREATE INDEX IF NOT EXISTS votes_net ON votes (net);
+-- Installs that downloaded an upload: only they can vote on it.
+CREATE TABLE IF NOT EXISTS downloads (
+  pack INTEGER NOT NULL,
+  install TEXT NOT NULL,
+  PRIMARY KEY (pack, install)
+);
+-- Reports on uploads (rude names, junk), once per install.
+CREATE TABLE IF NOT EXISTS pack_reports (
+  pack INTEGER NOT NULL,
+  install TEXT NOT NULL,
+  net TEXT NOT NULL,
+  PRIMARY KEY (pack, install)
+);
+CREATE INDEX IF NOT EXISTS pack_reports_net ON pack_reports (net);
 -- Games whose values can't be shared (online play, anti-cheat): a program name, lowercase, or
 -- "steam:<app id>", and why.
 CREATE TABLE IF NOT EXISTS blocked (

@@ -572,6 +572,9 @@ struct Entry {
 
 /// Names are one lowercase word everywhere (helper commands, CLI): "Max HP" is saved as
 /// "max_hp", so saving over a value doesn't depend on remembering how it was capitalised.
+/// The longest name a value can have (the shared library's limit too: names show in its list).
+pub const MAX_NAME: usize = 32;
+
 pub fn one_word(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join("_").to_lowercase()
 }
@@ -1373,7 +1376,7 @@ impl Core {
     /// value and saves it under `name`, so the value can be found again next time.
     /// Returns false when that still needs confirming in a later run (unconfirmed pointer paths).
     pub fn save(&mut self, name: &str) -> Result<bool, String> {
-        let name = one_word(name);
+        let name: String = one_word(name).chars().take(MAX_NAME).collect();
         let name = name.as_str();
         if name.is_empty() {
             return Err(tr!("the value needs a name"));
@@ -2001,6 +2004,11 @@ impl Core {
                     "{name}: imported and not checked yet. On its card in the Values tab, click “Yes, It Shows…” if the game shows that number",
                     name = e.name
                 ));
+                continue;
+            }
+            // Names longer than the library takes (saved before the limit).
+            if e.name.chars().count() > MAX_NAME {
+                left_out.push(tr!("{name}: its name is longer than 32 letters (save it again with a shorter one)", name = e.name));
                 continue;
             }
             let paths: Vec<String> = e.paths.iter().filter(|p| share::shareable_path(p)).cloned().collect();

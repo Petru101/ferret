@@ -117,7 +117,7 @@ fn hex(s: &str) -> bool {
 
 /// Names are one word everywhere (helper commands split on spaces, `resolve-all` on " | ").
 fn good_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().count() <= 64 && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    !name.is_empty() && name.chars().count() <= crate::core::MAX_NAME && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
 /// "<pattern> <instr offset> <base reg> <disp>", the pattern in hex bytes and `??`.
@@ -195,7 +195,7 @@ pub fn read(text: &str) -> Result<File, String> {
             ("value", _) => {
                 finish(&mut file, current.take());
                 let name = crate::core::one_word(rest);
-                let bad = (!good_name(&name)).then(|| tr!("a name Ferret can't use (letters, digits, _ and - only)"));
+                let bad = (!good_name(&name)).then(|| tr!("a name Ferret can't use (letters, digits, _ and -, 32 at most)"));
                 let shared = Shared {
                     name: if name.is_empty() { "(no name)".into() } else { name },
                     kind: Kind::I32,

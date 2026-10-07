@@ -3,7 +3,9 @@
 # spam, a wrong upload), and refuses games whose values mustn't be shared (online play).
 #   library.sh                     the 30 newest uploads
 #   library.sh <id>                one upload's text
-#   library.sh delete <id>         removes it and its votes
+#   library.sh reported            uploads players reported (3 reports take one off the list)
+#   library.sh keep <id>           looked at, it's fine: listed again, later reports don't hide it
+#   library.sh delete <id>         removes it, its votes and reports
 #   library.sh block <game> <why>  refuses uploads for a program (any case) or steam:<app id>
 #   library.sh blocked             the refused games
 set -eu
@@ -17,16 +19,31 @@ ref() {
 sql_text() { printf '%s' "$1" | sed "s/'/''/g"; }
 case ${1:-} in
 "")
-    q "SELECT ref, uploaded, game, steam, worked, failed, names FROM packs ORDER BY id DESC LIMIT 30" |
+    q "SELECT ref, uploaded, game, steam, worked, failed, reports, reviewed, names FROM packs ORDER BY id DESC LIMIT 30" |
         python3 -c 'import json,sys
 rows = json.load(sys.stdin)[0]["results"]
 print("no uploads yet" if not rows else "")
 for r in rows:
-    print(f"{r["ref"]}  {r["uploaded"]}  {r["game"]}{" (steam " + r["steam"] + ")" if r["steam"] else ""}  worked {r["worked"]} failed {r["failed"]}\n    {r["names"]}")'
+    hidden = " [hidden: reported]" if r["reports"] >= 3 and not r["reviewed"] else ""
+    hidden += " [hidden: didn'"'"'t work]" if r["failed"] >= 2 and r["failed"] > r["worked"] else ""
+    print(f"{r["ref"]}  {r["uploaded"]}  {r["game"]}{" (steam " + r["steam"] + ")" if r["steam"] else ""}  worked {r["worked"]} failed {r["failed"]} reports {r["reports"]}{hidden}\n    {r["names"]}")'
+    ;;
+reported)
+    q "SELECT ref, uploaded, game, reports, reviewed, names FROM packs WHERE reports > 0 ORDER BY reports DESC, id DESC" | python3 -c 'import json,sys
+rows = json.load(sys.stdin)[0]["results"]
+print("nothing reported" if not rows else "")
+for r in rows:
+    state = "kept" if r["reviewed"] else ("hidden until you look" if r["reports"] >= 3 else "listed")
+    print(f"{r["ref"]}  {r["uploaded"]}  {r["game"]}  reports {r["reports"]} ({state})\n    {r["names"]}")'
+    ;;
+keep)
+    r=$(ref "${2:-}")
+    n=$(q "UPDATE packs SET reviewed = 1 WHERE ref = '$r'" | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["meta"]["changes"])')
+    [ "$n" = 1 ] && echo "kept $r: listed again" || echo "no upload $r"
     ;;
 delete)
     r=$(ref "${2:-}")
-    n=$(q "DELETE FROM votes WHERE pack IN (SELECT id FROM packs WHERE ref = '$r'); DELETE FROM packs WHERE ref = '$r'" |
+    n=$(q "DELETE FROM votes WHERE pack IN (SELECT id FROM packs WHERE ref = '$r'); DELETE FROM downloads WHERE pack IN (SELECT id FROM packs WHERE ref = '$r'); DELETE FROM pack_reports WHERE pack IN (SELECT id FROM packs WHERE ref = '$r'); DELETE FROM packs WHERE ref = '$r'" |
         python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["meta"]["changes"])')
     [ "$n" = 1 ] && echo "deleted $r" || echo "no upload $r"
     ;;

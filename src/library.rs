@@ -98,6 +98,15 @@ pub fn delete(id: &str) -> Result<(), String> {
     }
 }
 
+/// Reports another player's upload (rude names, junk): once per install.
+pub fn report(id: &str) -> Result<(), String> {
+    let reply = online::post(&format!("/v1/packs/{id}/report"), "{}")?;
+    match reply.status {
+        200 => Ok(()),
+        _ => Err(online::server_error(&reply)),
+    }
+}
+
 /// Tells the server whether a downloaded value worked: counted once per install and upload.
 pub fn vote(id: &str, worked: bool) -> Result<(), String> {
     let reply = online::post(&format!("/v1/packs/{id}/vote"), &format!("{{\"worked\":{worked}}}"))?;

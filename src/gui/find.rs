@@ -346,7 +346,7 @@ impl FindView {
         );
         log_box.append(&gtk::ScrolledWindow::builder().child(&log).vexpand(true).build());
 
-        let name = gtk::Entry::builder().placeholder_text(tr!("Name it, for example gems")).width_chars(24).build();
+        let name = gtk::Entry::builder().placeholder_text(tr!("Name it, for example gems")).width_chars(24).max_length(core::MAX_NAME as i32).build();
         let save = gtk::Button::builder().label(tr!("Save")).css_classes(["suggested-action", "guide-button"]).build();
         let result = gtk::Box::builder().spacing(8).visible(false).build();
         result.append(&name);

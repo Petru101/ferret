@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-07 20:03+0100\n"
+"POT-Creation-Date: 2026-10-07 22:24+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Russian\n"
 "Language: ru\n"
@@ -97,7 +97,7 @@ msgstr ""
 msgid "To allow it, run this in a terminal and restart:"
 msgstr "Чтобы разрешить это, выполните в терминале и перезагрузитесь:"
 
-#: src/core.rs:904
+#: src/core.rs:907
 msgid ""
 "Java game: Ferret only shows saved values. Java moves its objects around, so "
 "a later write could land in another object and crash the game. Change it "
@@ -107,7 +107,7 @@ msgstr ""
 "свои объекты, поэтому последующая запись может попасть в другой объект и "
 "вызвать сбой игры. Меняйте его во вкладке «Найти значение» во время поиска."
 
-#: src/core.rs:1011
+#: src/core.rs:1014
 #, rust-format
 msgid ""
 "its pointer paths disagree ({agree} of {total} lead to one place, "
@@ -116,7 +116,7 @@ msgstr ""
 "его пути указателей расходятся ({agree} из {total} ведут в одно место, "
 "{elsewhere} — в другое)"
 
-#: src/core.rs:1018
+#: src/core.rs:1021
 #, rust-format
 msgid "only {agree} of its {n} pointer path leads anywhere"
 msgid_plural "only {agree} of its {n} pointer paths leads anywhere"
@@ -124,7 +124,7 @@ msgstr[0] "только {agree} из его {n} пути указателей к
 msgstr[1] "только {agree} из его {n} путей указателей куда-то ведут"
 msgstr[2] "только {agree} из его {n} путей указателей куда-то ведут"
 
-#: src/core.rs:1055
+#: src/core.rs:1058
 msgid ""
 "The one place left put a test value back at once, like a copy the game "
 "redraws its display from; the game may keep the value in a form Ferret can't "
@@ -134,47 +134,47 @@ msgstr ""
 "рисует свой экран; возможно, игра хранит значение в виде, который Ferret "
 "пока не умеет искать (2-байтовое или закодированное число)."
 
-#: src/core.rs:1233
+#: src/core.rs:1236
 msgid "attach to a game first"
 msgstr "сначала подключитесь к игре"
 
-#: src/core.rs:1379
+#: src/core.rs:1382
 msgid "the value needs a name"
 msgstr "значению нужно имя"
 
-#: src/core.rs:1383
+#: src/core.rs:1386
 msgid "narrow down to exactly one address first"
 msgstr "сначала сузьте до одного адреса"
 
-#: src/core.rs:1428
+#: src/core.rs:1431
 #, rust-format
 msgid "Ferret can't find it again by code or by name, and {why}"
 msgstr "Ferret не может найти его снова ни по коду, ни по имени, а {why}"
 
-#: src/core.rs:1557
+#: src/core.rs:1560
 #, rust-format
 msgid "the pointer scan failed: {e}"
 msgstr "поиск указателей не удался: {e}"
 
-#: src/core.rs:1564
+#: src/core.rs:1567
 msgid "no pointer from the game's own memory leads to it"
 msgstr "ни один указатель из собственной памяти игры не ведёт к нему"
 
-#: src/core.rs:1571
+#: src/core.rs:1574
 msgid "every pointer path to it changed within seconds"
 msgstr "все пути указателей к нему изменились за несколько секунд"
 
-#: src/core.rs:1652 src/core.rs:1716
+#: src/core.rs:1655 src/core.rs:1719
 #, rust-format
 msgid "{name} isn't saved"
 msgstr "{name} не сохранено"
 
-#: src/core.rs:1657
+#: src/core.rs:1660
 #, rust-format
 msgid "{name} is confirmed already"
 msgstr "{name} уже подтверждено"
 
-#: src/core.rs:1661
+#: src/core.rs:1664
 #, rust-format
 msgid ""
 "{name} was saved in this run of the game, where all its pointer paths lead "
@@ -183,32 +183,32 @@ msgstr ""
 "{name} сохранено в этом запуске игры, где все его пути указателей ведут к "
 "нему: это пока ничего не доказывает. Подтвердите его после перезапуска игры"
 
-#: src/core.rs:1676
+#: src/core.rs:1679
 #, rust-format
 msgid "none of {name}'s pointer paths lead anywhere now"
 msgstr "ни один из путей указателей {name} сейчас никуда не ведёт"
 
-#: src/core.rs:1679 src/core.rs:1714
+#: src/core.rs:1682 src/core.rs:1717
 #, rust-format
 msgid "{name} can't be confirmed: {why}"
 msgstr "{name} нельзя подтвердить: {why}"
 
-#: src/core.rs:1699
+#: src/core.rs:1702
 #, rust-format
 msgid "{name} confirmed: Ferret finds it this way from now on"
 msgstr "{name} подтверждено: теперь Ferret находит его так"
 
-#: src/core.rs:1708
+#: src/core.rs:1711
 #, rust-format
 msgid "{name} isn't in the game right now: load a save, then check it again"
 msgstr "{name} сейчас нет в игре: загрузите сохранение, затем проверьте снова"
 
-#: src/core.rs:1711
+#: src/core.rs:1714
 #, rust-format
 msgid "{name} can't be confirmed: its name doesn't lead to one value ({why})"
 msgstr "{name} нельзя подтвердить: его имя не ведёт к одному значению ({why})"
 
-#: src/core.rs:1779
+#: src/core.rs:1782
 msgid ""
 "it was imported and isn't checked yet. If the game shows the number Ferret "
 "reads, say so in the Values tab"
@@ -216,18 +216,18 @@ msgstr ""
 "оно импортировано и ещё не проверено. Если игра показывает число, которое "
 "читает Ferret, скажите об этом во вкладке «Значения»"
 
-#: src/core.rs:1782
+#: src/core.rs:1785
 #, rust-format
 msgid "its name doesn't lead to one value ({why})"
 msgstr "его имя не ведёт к одному значению ({why})"
 
-#: src/core.rs:1786
+#: src/core.rs:1789
 msgid ""
 "its pointer paths are guesses until a later run of the game confirms them"
 msgstr ""
 "его пути указателей — догадки, пока следующий запуск игры их не подтвердит"
 
-#: src/core.rs:1881
+#: src/core.rs:1884
 #, rust-format
 msgid ""
 "{name}: it was imported and isn't checked yet. If the game shows the number "
@@ -236,7 +236,7 @@ msgstr ""
 "{name}: оно импортировано и ещё не проверено. Если игра показывает число, "
 "которое читает Ferret, скажите об этом во вкладке «Значения»"
 
-#: src/core.rs:1887
+#: src/core.rs:1890
 #, rust-format
 msgid ""
 "its pointer paths aren't confirmed yet: confirm it in the Values tab if the "
@@ -246,16 +246,16 @@ msgstr ""
 "«Значения», если игра показывает его число, или найдите его снова и "
 "сохраните как {name}"
 
-#: src/core.rs:1925
+#: src/core.rs:1928
 msgid "Nothing is kept in range in this game"
 msgstr "В этой игре ничего не удерживается в диапазоне"
 
-#: src/core.rs:1976 src/core.rs:2137 src/core.rs:2733
+#: src/core.rs:1979 src/core.rs:2145 src/core.rs:2741
 #, rust-format
 msgid "no saved value called {name}"
 msgstr "нет сохранённого значения с именем {name}"
 
-#: src/core.rs:2001
+#: src/core.rs:2004
 #, rust-format
 msgid ""
 "{name}: imported and not checked yet. On its card in the Values tab, click "
@@ -264,7 +264,12 @@ msgstr ""
 "{name}: импортировано и ещё не проверено. На его карточке во вкладке "
 "«Значения» нажмите «Да, показывает…», если игра показывает это число"
 
-#: src/core.rs:2010
+#: src/core.rs:2011
+#, rust-format
+msgid "{name}: its name is longer than 32 letters (save it again with a shorter one)"
+msgstr "{name}: имя длиннее 32 символов (сохраните его снова с более коротким именем)"
+
+#: src/core.rs:2018
 #, rust-format
 msgid ""
 "{name}: its pointer paths start in files that differ between computers "
@@ -273,7 +278,7 @@ msgstr ""
 "{name}: его пути указателей начинаются в файлах, которые отличаются на "
 "разных компьютерах (графический драйвер, Wine, Steam)"
 
-#: src/core.rs:2014
+#: src/core.rs:2022
 #, rust-format
 msgid ""
 "{name}: its pointer paths aren't confirmed yet (restart the game and check "
@@ -282,27 +287,27 @@ msgstr ""
 "{name}: его пути указателей ещё не подтверждены (перезапустите игру и "
 "проверьте его)"
 
-#: src/core.rs:2016
+#: src/core.rs:2024
 #, rust-format
 msgid "{name}: Ferret has no way to find it that works on other computers"
 msgstr ""
 "{name}: у Ferret нет способа найти его, который работает на других "
 "компьютерах"
 
-#: src/core.rs:2033
+#: src/core.rs:2041
 msgid "Nothing is saved for this game yet"
 msgstr "Для этой игры пока ничего не сохранено"
 
-#: src/core.rs:2034
+#: src/core.rs:2042
 msgid "Nothing to export."
 msgstr "Нечего экспортировать."
 
-#: src/core.rs:2063
+#: src/core.rs:2071
 #, rust-format
 msgid "These values are for {theirs}, not {exe}"
 msgstr "Эти значения для {theirs}, а не для {exe}"
 
-#: src/core.rs:2068
+#: src/core.rs:2076
 #, rust-format
 msgid ""
 "These values are for another game with a program called {exe} (Steam app "
@@ -311,7 +316,7 @@ msgstr ""
 "Эти значения для другой игры с программой {exe} (приложение Steam {theirs}, "
 "а у этой {ours})"
 
-#: src/core.rs:2079
+#: src/core.rs:2087
 #, rust-format
 msgid ""
 "{name}: you have a value with this name already (remove yours to import it)"
@@ -319,17 +324,17 @@ msgstr ""
 "{name}: у вас уже есть значение с таким именем (удалите своё, чтобы "
 "импортировать)"
 
-#: src/core.rs:2106
+#: src/core.rs:2114
 msgid "Nothing imported."
 msgstr "Ничего не импортировано."
 
-#: src/core.rs:2129
+#: src/core.rs:2137
 #, rust-format
 msgid "At most ({max}) is lower than at least ({min}): nothing changed"
 msgstr ""
 "«Не больше» ({max}) меньше, чем «не меньше» ({min}): ничего не изменено"
 
-#: src/core.rs:2692
+#: src/core.rs:2700
 #, rust-format
 msgid ""
 "{name} not written: it was imported and isn't checked yet. If the game shows "
@@ -339,12 +344,12 @@ msgstr ""
 "показывает число, которое читает Ferret, скажите об этом во вкладке "
 "«Значения»"
 
-#: src/core.rs:2714
+#: src/core.rs:2722
 #, rust-format
 msgid "{name} isn't in the game right now (is a save loaded?)"
 msgstr "{name} сейчас нет в игре (сохранение загружено?)"
 
-#: src/core.rs:2717
+#: src/core.rs:2725
 #, rust-format
 msgid ""
 "{name} not written: its name doesn't lead to one value ({why}). Find it "
@@ -353,12 +358,12 @@ msgstr ""
 "{name} не записано: его имя не ведёт к одному значению ({why}). Найдите его "
 "снова и сохраните как {name}."
 
-#: src/core.rs:2735
+#: src/core.rs:2743
 #, rust-format
 msgid "{name} can't be found right now (is a save loaded?)"
 msgstr "{name} сейчас не найти (сохранение загружено?)"
 
-#: src/core.rs:2739
+#: src/core.rs:2747
 #, rust-format
 msgid ""
 "not written: {why}, so it could land in the wrong place. Find it again and "
@@ -367,38 +372,38 @@ msgstr ""
 "не записано: {why}, поэтому запись может попасть не туда. Найдите его снова "
 "и сохраните как {name}: это подтвердит правильный путь"
 
-#: src/core.rs:2882
+#: src/core.rs:2890
 msgid "a move of the bar"
 msgstr "движение полосы"
 
-#: src/core.rs:2883
+#: src/core.rs:2891
 msgid "copying the game's memory"
 msgstr "копирование памяти игры"
 
-#: src/core.rs:2884
+#: src/core.rs:2892
 #, rust-format
 msgid "the search for {n}"
 msgstr "поиск {n}"
 
-#: src/core.rs:2885
+#: src/core.rs:2893
 #, rust-format
 msgid "ruling out {place}"
 msgstr "исключение {place}"
 
-#: src/core.rs:2886
+#: src/core.rs:2894
 #, rust-format
 msgid "picking {place}"
 msgstr "выбор {place}"
 
-#: src/core.rs:2887
+#: src/core.rs:2895
 msgid "starting over"
 msgstr "начало заново"
 
-#: src/core.rs:2941
+#: src/core.rs:2949
 msgid "The number is back in the box."
 msgstr "Число снова в рамке."
 
-#: src/core.rs:2944
+#: src/core.rs:2952
 msgid ""
 "The box keeps changing: it may take in something that moves or blinks around "
 "the number. Pick the number again with a box around its digits only."
@@ -406,7 +411,7 @@ msgstr ""
 "Рамка постоянно меняется: возможно, в неё попадает что-то, что движется или "
 "мигает рядом с числом. Выберите число заново, обведя только его цифры."
 
-#: src/core.rs:2949
+#: src/core.rs:2957
 msgid ""
 "The box doesn't show the number now (it looks different from when you picked "
 "it: a menu or the inventory closed?). Ferret waits until it's back."
@@ -414,7 +419,7 @@ msgstr ""
 "Рамка сейчас не показывает число (она выглядит иначе, чем при выборе: "
 "закрылось меню или инвентарь?). Ferret ждёт, пока оно вернётся."
 
-#: src/core.rs:2975
+#: src/core.rs:2983
 msgid ""
 "The box is outside the game picture now (the window got smaller?): capture "
 "again and pick it again."
@@ -422,17 +427,17 @@ msgstr ""
 "Рамка теперь вне изображения игры (окно стало меньше?): захватите "
 "изображение снова и выберите её заново."
 
-#: src/core.rs:3073
+#: src/core.rs:3081
 #, rust-format
 msgid "saved as {names}"
 msgstr "сохранено как {names}"
 
-#: src/core.rs:3097
+#: src/core.rs:3105
 #, rust-format
 msgid "not a number: {value}"
 msgstr "не число: {value}"
 
-#: src/core.rs:3116
+#: src/core.rs:3124
 #, rust-format
 msgid ""
 "The game put {n} back at once, so that place isn't where it keeps the value: "
@@ -440,11 +445,11 @@ msgid ""
 msgstr ""
 "Игра сразу вернула {n}, значит, значение хранится не там: место убрано."
 
-#: src/core.rs:3121
+#: src/core.rs:3129
 msgid "No places are left: press Start Over and search again."
 msgstr "Мест не осталось: нажмите «Начать заново» и ищите снова."
 
-#: src/core.rs:3128
+#: src/core.rs:3136
 #, rust-format
 msgid ""
 "It kept {n}. If the game shows it too, press Use This One (some games only "
@@ -453,12 +458,12 @@ msgstr ""
 "Значение {n} осталось. Если игра тоже его показывает, нажмите «Использовать "
 "это» (некоторые игры перерисовывают число, только когда сами его меняют)."
 
-#: src/core.rs:3267
+#: src/core.rs:3275
 #, rust-format
 msgid "{place} isn't among the matches any more"
 msgstr "{place} больше нет среди совпадений"
 
-#: src/core.rs:3476
+#: src/core.rs:3512
 msgid ""
 "Now change the number in the game once (use some or pick some up): Ferret "
 "watches which of the game's code does it, the surest way to find it again. "
@@ -468,7 +473,7 @@ msgstr ""
 "Ferret смотрит, какой код игры это делает — самый надёжный способ найти его "
 "снова. «Отмена» сохраняет его иначе."
 
-#: src/core.rs:3508
+#: src/core.rs:3544
 #, rust-format
 msgid ""
 "Now change the number in the game once (pick some up or use some): Ferret "
@@ -491,24 +496,24 @@ msgstr[2] ""
 "Ferret ждёт и смотрит, с какого из {n} мест игра продолжает счёт. «Хватит "
 "ждать» вместо этого покажет их список, чтобы попробовать."
 
-#: src/core.rs:3640
+#: src/core.rs:3676
 #, rust-format
 msgid "The one place left holds {held}, not the {n} on screen."
 msgstr "В последнем месте {held}, а не {n}, как на экране."
 
-#: src/core.rs:3664
+#: src/core.rs:3700
 msgid "could not read the number"
 msgstr "не удалось прочитать число"
 
-#: src/core.rs:3874
+#: src/core.rs:3915
 msgid "The icons are all empty, hidden or keep changing."
 msgstr "Все значки пустые, скрыты или постоянно меняются."
 
-#: src/core.rs:3875
+#: src/core.rs:3916
 msgid "The bar is empty, hidden or keeps moving."
 msgstr "Полоса пустая, скрыта или постоянно движется."
 
-#: src/core.rs:3970
+#: src/core.rs:4011
 msgid ""
 "Stopped before the icons changed. Press Start again and let them change in "
 "the game."
@@ -516,7 +521,7 @@ msgstr ""
 "Остановлено до того, как значки изменились. Снова нажмите «Старт» и дайте им "
 "измениться в игре."
 
-#: src/core.rs:3971
+#: src/core.rs:4012
 msgid ""
 "Stopped before the bar moved. Press Start again and let the bar change in "
 "the game."
@@ -524,28 +529,28 @@ msgstr ""
 "Остановлено до того, как полоса сдвинулась. Снова нажмите «Старт» и дайте "
 "полосе измениться в игре."
 
-#: src/core.rs:4003
+#: src/core.rs:4044
 msgid "The one place left kept a test value, but the icons didn't show it."
 msgstr ""
 "Последнее место сохранило тестовое значение, но значки его не показали."
 
-#: src/core.rs:4004
+#: src/core.rs:4045
 msgid "The one place left kept a test value, but the bar didn't show it."
 msgstr ""
 "Последнее место сохранило тестовое значение, но полоса его не показала."
 
-#: src/core.rs:4083
+#: src/core.rs:4124
 msgid ""
 "Nothing to narrow down yet: press Start or type the number the game shows."
 msgstr ""
 "Пока нечего сужать: нажмите «Старт» или введите число, которое показывает "
 "игра."
 
-#: src/core.rs:4086
+#: src/core.rs:4127
 msgid "No number picked: type the number the game shows instead."
 msgstr "Число не выбрано: введите вместо этого число, которое показывает игра."
 
-#: src/core.rs:4094
+#: src/core.rs:4135
 msgid ""
 "The icons are all empty, hidden or changing: try again while they show and "
 "stay still."
@@ -553,14 +558,14 @@ msgstr ""
 "Все значки пустые, скрыты или меняются: попробуйте снова, когда они видны и "
 "не двигаются."
 
-#: src/core.rs:4095
+#: src/core.rs:4136
 msgid ""
 "The bar is empty, hidden or moving: try again while it shows and stays still."
 msgstr ""
 "Полоса пустая, скрыта или движется: попробуйте снова, когда она видна и не "
 "двигается."
 
-#: src/core.rs:4099
+#: src/core.rs:4140
 msgid ""
 "Nothing in the game's memory changed like the icons did. Press Start Over "
 "and search again."
@@ -568,7 +573,7 @@ msgstr ""
 "Ничто в памяти игры не изменилось так, как значки. Нажмите «Начать заново» и "
 "ищите снова."
 
-#: src/core.rs:4100
+#: src/core.rs:4141
 msgid ""
 "Nothing in the game's memory moved like the bar did. Press Start Over and "
 "search again."
@@ -576,11 +581,11 @@ msgstr ""
 "Ничто в памяти игры не сдвинулось так, как полоса. Нажмите «Начать заново» и "
 "ищите снова."
 
-#: src/core.rs:4115
+#: src/core.rs:4156
 msgid "Can't read the number now (is it on screen?). Type it below instead."
 msgstr "Сейчас не удаётся прочитать число (оно на экране?). Введите его ниже."
 
-#: src/core.rs:4153
+#: src/core.rs:4194
 #, rust-format
 msgid "{n} is nowhere in the game's memory"
 msgstr "{n} нигде нет в памяти игры"
@@ -643,7 +648,8 @@ msgstr "Отправить"
 
 #: src/gui/feedback.rs:69 src/gui/find.rs:224 src/gui/find.rs:2084
 #: src/gui/guide.rs:154 src/gui/guide.rs:532 src/gui/guide.rs:538
-#: src/gui/share.rs:249 src/gui/share.rs:431 src/gui/values.rs:107
+#: src/gui/share.rs:249 src/gui/share.rs:440 src/gui/share.rs:468
+#: src/gui/values.rs:107
 msgid "Cancel"
 msgstr "Отмена"
 
@@ -2556,7 +2562,7 @@ msgstr "Поделиться своими"
 msgid "Shared Values"
 msgstr "Общие значения"
 
-#: src/gui/share.rs:384 src/gui/share.rs:431
+#: src/gui/share.rs:384 src/gui/share.rs:468
 msgid "Delete"
 msgstr "Удалить"
 
@@ -2564,22 +2570,38 @@ msgstr "Удалить"
 msgid "Import"
 msgstr "Импортировать"
 
-#: src/gui/share.rs:428
+#: src/gui/share.rs:390 src/gui/share.rs:440
+msgid "Report"
+msgstr "Пожаловаться"
+
+#: src/gui/share.rs:435
+msgid "Report This Upload?"
+msgstr "Пожаловаться на эту публикацию?"
+
+#: src/gui/share.rs:437
+msgid "For rude names, or values that are clearly junk. Reports from three players take it off the list until Ferret's developer looks at it."
+msgstr "На грубые имена или явно бессмысленные значения. Жалобы трёх игроков убирают публикацию из списка, пока разработчик Ferret её не проверит."
+
+#: src/gui/share.rs:451
+msgid "Reported"
+msgstr "Жалоба отправлена"
+
+#: src/gui/share.rs:465
 msgid "Delete Your Upload?"
 msgstr "Удалить вашу публикацию?"
 
-#: src/gui/share.rs:429
+#: src/gui/share.rs:466
 msgid ""
 "Players who imported it keep what they have; nobody else can find it anymore."
 msgstr ""
 "У игроков, которые её импортировали, всё останется; больше никто не сможет "
 "её найти."
 
-#: src/gui/share.rs:444
+#: src/gui/share.rs:481
 msgid "Couldn't Delete It"
 msgstr "Не удалось удалить"
 
-#: src/gui/share.rs:445
+#: src/gui/share.rs:482
 msgid "OK"
 msgstr "ОК"
 
@@ -2835,7 +2857,7 @@ msgstr "Не больше"
 msgid "No maximum: only At Least is kept"
 msgstr "Без максимума: удерживается только «Не меньше»"
 
-#: src/gui/values.rs:330 src/gui/values.rs:368 src/gui/values.rs:447
+#: src/gui/values.rs:330 src/gui/values.rs:368 src/gui/values.rs:455
 msgid "No maximum"
 msgstr "Без максимума"
 
@@ -2931,8 +2953,8 @@ msgid "This file has a line too long to be a Ferret file."
 msgstr "В этом файле слишком длинная для файла Ferret строка."
 
 #: src/share.rs:198
-msgid "a name Ferret can't use (letters, digits, _ and - only)"
-msgstr "имя, которое Ferret не может использовать (только буквы, цифры, _ и -)"
+msgid "a name Ferret can't use (letters, digits, _ and -, 32 at most)"
+msgstr "имя, которое Ferret не может использовать (буквы, цифры, _ и -, не больше 32)"
 
 #: src/share.rs:223
 #, rust-format

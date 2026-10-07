@@ -385,6 +385,13 @@ pub fn browse(ui: &Rc<Ui>, key: Result<(String, Option<String>, Option<String>),
                             false => gtk::Button::with_label(&tr!("Import")),
                         };
                         button.set_valign(gtk::Align::Center);
+                        // Others' uploads can be reported (rude names, junk).
+                        if !p.mine {
+                            let report = gtk::Button::builder().label(tr!("Report")).valign(gtk::Align::Center).css_classes(["flat"]).build();
+                            row.add_suffix(&report);
+                            let (ui, dialog, id) = (ui.clone(), dialog.clone(), p.id.clone());
+                            report.connect_clicked(move |report| ask_report(&ui, &dialog, &id, report));
+                        }
                         row.add_suffix(&button);
                         let (ui, dialog, load, id) = (ui.clone(), dialog.clone(), load.clone(), p.id.clone());
                         button.connect_clicked(move |button| match p.mine {
@@ -420,6 +427,36 @@ pub fn browse(ui: &Rc<Ui>, key: Result<(String, Option<String>, Option<String>),
     };
     load.replace(Some(fill.clone()));
     fill();
+}
+
+/// Asks before reporting another player's upload, then sends it; the button says it's done.
+fn ask_report(ui: &Rc<Ui>, parent: &adw::Dialog, id: &str, button: &gtk::Button) {
+    let dialog = adw::AlertDialog::new(
+        Some(&tr!("Report This Upload?")),
+        Some(&tr!(
+            "For rude names, or values that are clearly junk. Reports from three players take it off the list until Ferret's developer looks at it."
+        )),
+    );
+    dialog.add_responses(&[("cancel", &tr!("Cancel")), ("report", &tr!("Report"))]);
+    dialog.set_response_appearance("report", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let (ui, id, button) = (ui.clone(), id.to_owned(), button.clone());
+    dialog.connect_response(Some("report"), move |_, _| {
+        button.set_sensitive(false);
+        let (ui, id, button) = (ui.clone(), id.clone(), button.clone());
+        in_background(
+            move || library::report(&id),
+            move |r| match r {
+                Ok(()) => button.set_label(&tr!("Reported")),
+                Err(e) => {
+                    button.set_sensitive(true);
+                    ui.toast(&e);
+                }
+            },
+        );
+    });
+    dialog.present(Some(parent));
 }
 
 /// Asks before deleting one of the player's uploads, then lists again.
