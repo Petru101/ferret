@@ -37,7 +37,18 @@ const MAX_VTABLE: u64 = 0x2000;
 const MAX_STATIC_DATA: u64 = 0x10000;
 /// How far into an array a slot holding the object is looked for.
 const MAX_SLOT: u64 = 4096;
-/// MonoTypeEnum: a single-dimension array.
+/// Elements of an array looked through for the one a path picks by a field.
+const MAX_ELEMENTS: u64 = 1 << 16;
+/// Up to how many steps from a static field to the value's object (Terraria's wood:
+/// `Main.player[0].inventory[type=9]`, two).
+const MAX_STEPS: usize = 3;
+/// Places followed up at each level of the search for a static path.
+const MAX_NODES: usize = 64;
+/// Whole-number fields that name what an array's element is, tried in turn to pick it.
+const NAMING_FIELDS: [&str; 6] = ["type", "id", "Id", "ID", "itemId", "netID"];
+/// MonoTypeEnum: a 4-byte int, a class, a single-dimension array.
+const TYPE_I4: u8 = 0x08;
+const TYPE_CLASS: u8 = 0x12;
 const TYPE_SZARRAY: u8 = 0x1d;
 
 /// How the game runs its C#: Mono's runtime, or IL2CPP's (compiled to native code in
@@ -62,30 +73,47 @@ pub struct MonoPath {
     pub runtime: Runtime,
     pub namespace: String,
     pub class: String,
-    /// A static field of the class leading to the object (and its slot, when it's an array):
-    /// `field` is then a field of that object.
-    pub via: Option<Static>,
+    /// Steps from a static field of the class down to the object (Mono only; none: the
+    /// class's own objects): `field` is then a field of that object.
+    pub via: Vec<Step>,
     pub field: String,
+}
+
+/// One step down to the value's object: a field, and when it holds an array, which element:
+/// the n-th, or the one whose whole-number field holds a number (an item by its type,
+/// wherever the player moves it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub field: String,
+    pub pick: Option<Pick>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Static {
-    pub field: String,
-    pub slot: Option<u64>,
+pub enum Pick {
+    At(u64),
+    Where(String, i64),
 }
 
-impl Static {
+impl Step {
     fn parse(text: &str) -> Option<Self> {
-        let (field, slot) = match text.strip_suffix(']').and_then(|t| t.split_once('[')) {
-            Some((f, n)) => (f, Some(n.parse().ok()?)),
+        let (field, pick) = match text.strip_suffix(']').and_then(|t| t.split_once('[')) {
+            Some((f, p)) => (
+                f,
+                Some(match p.split_once('=') {
+                    Some((k, v)) if ident(k) => Pick::Where(k.into(), v.parse().ok()?),
+                    Some(_) => return None,
+                    None => Pick::At(p.parse().ok()?),
+                }),
+            ),
             None => (text, None),
         };
-        ident(field).then(|| Static { field: field.into(), slot })
+        ident(field).then(|| Step { field: field.into(), pick })
     }
 
     fn text(&self) -> String {
-        match self.slot {
-            Some(n) => format!("{}[{n}]", self.field),
+        match &self.pick {
+            Some(Pick::At(n)) => format!("{}[{n}]", self.field),
+            Some(Pick::Where(f, v)) => format!("{}[{f}={v}]", self.field),
             None => self.field.clone(),
         }
     }
@@ -100,33 +128,30 @@ impl MonoPath {
         let runtime = [Runtime::Mono, Runtime::Il2cpp].into_iter().find(|r| text.starts_with(r.prefix()))?;
         let rest = &text[runtime.prefix().len()..];
         let (namespace, rest) = rest.rsplit_once("::").unwrap_or(("", rest));
-        let (class, rest) = rest.split_once('.')?;
-        let (via, field) = match rest.split_once('.') {
-            Some((s, f)) if runtime == Runtime::Mono => (Some(Static::parse(s)?), f),
-            Some(_) => return None,
-            None => (None, rest),
-        };
+        let parts: Vec<&str> = rest.split('.').collect();
+        let (&class, rest) = parts.split_first()?;
+        let (&field, steps) = rest.split_last()?;
+        let via = steps.iter().map(|s| Step::parse(s)).collect::<Option<Vec<_>>>()?;
         let ns_ok = namespace.is_empty() || namespace.split('.').all(ident);
-        (ns_ok && ident(class) && ident(field)).then(|| MonoPath { runtime, namespace: namespace.into(), class: class.into(), via, field: field.into() })
+        let runtime_ok = via.is_empty() || runtime == Runtime::Mono;
+        (ns_ok && runtime_ok && ident(class) && ident(field)).then(|| MonoPath { runtime, namespace: namespace.into(), class: class.into(), via, field: field.into() })
+    }
+
+    /// The class and the steps after it: "Main.player[0].inventory[type=9]".
+    fn from(&self) -> String {
+        std::iter::once(self.class.clone()).chain(self.via.iter().map(Step::text)).collect::<Vec<_>>().join(".")
     }
 
     pub fn text(&self) -> String {
         let pre = self.runtime.prefix();
-        let class = match &self.via {
-            Some(s) => format!("{}.{}", self.class, s.text()),
-            None => self.class.clone(),
-        };
         match self.namespace.as_str() {
-            "" => format!("{pre}{class}.{}", self.field),
-            ns => format!("{pre}{ns}::{class}.{}", self.field),
+            "" => format!("{pre}{}.{}", self.from(), self.field),
+            ns => format!("{pre}{ns}::{}.{}", self.from(), self.field),
         }
     }
 
     pub fn describe(&self) -> String {
-        match &self.via {
-            Some(s) => format!("{} of {}.{}", self.field, self.class, s.text()),
-            None => format!("{} of {}", self.field, self.class),
-        }
+        format!("{} of {}", self.field, self.from())
     }
 }
 
@@ -405,28 +430,86 @@ impl Mono<'_> {
         Some((elem, len))
     }
 
-    /// The object the class's static field leads to, from its static data `data`.
-    fn static_target(&self, pid: u32, k: u64, data: u64, via: &Static) -> Option<u64> {
+    /// The object a field holding `v` leads to, by the field's type `t`: `v` itself, or the
+    /// picked element of the array.
+    fn follow(&self, pid: u32, v: u64, t: u64, pick: Option<&Pick>) -> Option<u64> {
         let w = self.lay.w;
-        let (off, t) = self.field(pid, k, &via.field, true)?;
-        let v = self.word(data + off).filter(|&v| v >= 0x10000)?;
-        let (obj, of) = match via.slot {
-            None => (v, self.word(t)?),
-            Some(i) => {
-                if self.kind(t) != Some(TYPE_SZARRAY) {
-                    return None;
-                }
-                let (elem, _) = self.array(v).filter(|&(e, n)| Some(e) == self.word(t) && i < n)?;
-                (self.word(v + 4 * w + i * w).filter(|&o| o >= 0x10000)?, elem)
-            }
+        if v < 0x10000 {
+            return None;
+        }
+        let Some(pick) = pick else {
+            let k = self.class_of(v)?;
+            return match self.kind(t) {
+                Some(TYPE_CLASS) => self.chain(k).contains(&self.word(t)?).then_some(v),
+                _ => Some(v),
+            };
         };
-        self.class_of(obj).filter(|&c| self.chain(c).contains(&of)).map(|_| obj)
+        if self.kind(t) != Some(TYPE_SZARRAY) {
+            return None;
+        }
+        let (elem, len) = self.array(v).filter(|&(e, _)| Some(e) == self.word(t))?;
+        let at = |i: u64| self.word(v + 4 * w + i * w).filter(|&o| o >= 0x10000);
+        let obj = match pick {
+            Pick::At(i) => at(*i).filter(|_| *i < len)?,
+            Pick::Where(f, n) => (0..len.min(MAX_ELEMENTS)).filter_map(at).find(|&o| self.int_field(pid, o, f) == Some(*n))?,
+        };
+        self.class_of(obj).filter(|&c| self.chain(c).contains(&elem)).map(|_| obj)
     }
 
-    /// Where the field of the object a static path leads to is.
+    /// An object's whole-number (4-byte) field.
+    fn int_field(&self, pid: u32, obj: u64, f: &str) -> Option<i64> {
+        let (off, t) = self.field(pid, self.class_of(obj)?, f, false)?;
+        if self.kind(t) != Some(TYPE_I4) {
+            return None;
+        }
+        let mut b = [0u8; 4];
+        self.mem.read_exact_at(&mut b, obj + off).ok()?;
+        Some(i32::from_le_bytes(b) as i64)
+    }
+
+    /// The object a static path leads to (before its last field), from the static data `data`
+    /// of the class `k`.
+    fn static_object(&self, pid: u32, k: u64, data: u64, path: &MonoPath) -> Option<u64> {
+        let (first, rest) = path.via.split_first()?;
+        let (off, t) = self.field(pid, k, &first.field, true)?;
+        let mut obj = self.follow(pid, self.word(data + off)?, t, first.pick.as_ref())?;
+        for s in rest {
+            let (off, t) = self.field(pid, self.class_of(obj)?, &s.field, false)?;
+            obj = self.follow(pid, self.word(obj + off)?, t, s.pick.as_ref())?;
+        }
+        Some(obj)
+    }
+
+    /// The object the path's static field leads to (its first step): enough to tell the
+    /// class's static data, while the rest may not be there yet (no wood in the inventory
+    /// at the main menu).
+    fn static_start(&self, pid: u32, k: u64, data: u64, path: &MonoPath) -> Option<u64> {
+        let first = path.via.first()?;
+        let (off, t) = self.field(pid, k, &first.field, true)?;
+        self.follow(pid, self.word(data + off)?, t, first.pick.as_ref())
+    }
+
+    /// Where the value a static path leads to is.
     fn static_walk(&self, pid: u32, k: u64, data: u64, path: &MonoPath) -> Option<u64> {
-        let obj = self.static_target(pid, k, data, path.via.as_ref()?)?;
+        let obj = self.static_object(pid, k, data, path)?;
         Some(obj + self.field(pid, self.class_of(obj)?, &path.field, false)?.0)
+    }
+
+    /// How to pick the element at slot `i` of the array `a` again: by a whole-number field
+    /// naming what it is (its type or id) when no other element has that number, else by
+    /// the slot.
+    fn pick_for(&self, pid: u32, a: u64, i: u64) -> Pick {
+        let w = self.lay.w;
+        let Some((_, len)) = self.array(a) else { return Pick::At(i) };
+        let Some(obj) = self.word(a + 4 * w + i * w) else { return Pick::At(i) };
+        let elems: Vec<u64> = (0..len.min(MAX_ELEMENTS)).filter_map(|j| self.word(a + 4 * w + j * w).filter(|&o| o >= 0x10000)).collect();
+        for f in NAMING_FIELDS {
+            let Some(n) = self.int_field(pid, obj, f).filter(|&n| n != 0) else { continue };
+            if elems.iter().filter(|&&o| self.int_field(pid, o, f) == Some(n)).count() == 1 {
+                return Pick::Where(f.into(), n);
+            }
+        }
+        Pick::At(i)
     }
 
     /// The array slot holding the object at `x`, when it's in an array of `k`'s objects:
@@ -509,71 +592,150 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(MonoPath, Vec<u64>)> {
     if !m.live(obj, k) {
         return None;
     }
-    let found: Vec<(u64, u64, MonoPath)> = FOUND.lock().unwrap().iter().filter(|f| f.0 == heap.pid).map(|f| (f.1, f.2, f.3.clone())).collect();
+    let pid = heap.pid;
+    let found: Vec<(u64, u64, MonoPath)> = FOUND.lock().unwrap().iter().filter(|f| f.0 == pid).map(|f| (f.1, f.2, f.3.clone())).collect();
     for (k2, data, via) in found {
         let path = MonoPath { field: field.clone(), ..via };
-        if m.static_walk(heap.pid, k2, data, &path) == Some(target) {
+        if m.static_object(pid, k2, data, &path) == Some(obj) && m.static_walk(pid, k2, data, &path) == Some(target) {
             return Some((path, vec![target]));
         }
     }
-    let path = MonoPath { runtime: lay.runtime, namespace, class, via: None, field: field.clone() };
-    let leads = walk(heap, &find_roots(heap, &path), &path);
-    if leads.len() <= MAX_PLACES && leads.contains(&target) {
-        return Some((path, leads));
-    }
-    match lay.runtime {
-        Runtime::Mono => static_discover(heap, &m, obj, k, &field, target),
-        Runtime::Il2cpp => None,
+    let by_class = || {
+        let path = MonoPath { runtime: lay.runtime, namespace: namespace.clone(), class: class.clone(), via: Vec::new(), field: field.clone() };
+        let leads = walk(heap, &find_roots(heap, &path), &path);
+        (leads.len() <= MAX_PLACES && leads.contains(&target)).then_some((path, leads))
+    };
+    // A Unity object can be told live from a leftover, so its class's objects are few: by the
+    // class first. Other C# keeps many alike (Terraria: 256 Players, every item): by a static
+    // field first.
+    match (lay.runtime, m.native(obj, k).is_some()) {
+        (Runtime::Il2cpp, _) => by_class(),
+        (Runtime::Mono, true) => by_class().or_else(|| static_discover(heap, &m, obj, &field, target)),
+        (Runtime::Mono, false) => static_discover(heap, &m, obj, &field, target).or_else(by_class),
     }
 }
 
-/// The static field the object is kept in, itself or in a slot of an array, for a class with
-/// too many objects to tell by its name (Terraria: `Main.player[0]` of 256 Players). Three
-/// passes over memory: what points to the object, to the arrays holding it, and to the static
-/// data holding either (from a vtable).
-fn static_discover(heap: &Heap, m: &Mono, obj: u64, k: u64, field: &str, target: u64) -> Option<(MonoPath, Vec<u64>)> {
+/// Every vtable (sorted), from the domain each one points to (their third word): one pass.
+fn all_vtables(heap: &Heap, m: &Mono, obj: u64) -> Vec<(u64, u64)> {
     let w = m.lay.w;
-    let refs = heap.referrers(&[obj]);
-    let mut arrays: Vec<(u64, u64)> = refs.iter().filter_map(|&x| m.array_slot(x, k)).collect();
-    arrays.sort_unstable();
-    arrays.dedup();
-    // Words that may be a static field: holding the object, or an array holding it (and its slot).
-    let mut holders: Vec<(u64, Option<u64>)> = refs.iter().map(|&x| (x, None)).collect();
-    if !arrays.is_empty() {
-        for y in heap.referrers(&arrays.iter().map(|a| a.0).collect::<Vec<_>>()) {
-            if let Some(&(_, slot)) = m.word(y).and_then(|a| arrays.iter().find(|x| x.0 == a)) {
-                holders.push((y, Some(slot)));
+    let Some(domain) = m.word(obj).and_then(|vt| m.word(vt + 2 * w)).filter(|&d| d >= 0x10000) else { return Vec::new() };
+    let mut vts: Vec<(u64, u64)> = heap
+        .referrers(&[domain])
+        .into_iter()
+        .filter_map(|q| {
+            let vt = q.checked_sub(2 * w)?;
+            m.word(vt).filter(|&k| k != vt && m.is_class(k)).map(|k| (vt, k))
+        })
+        .collect();
+    vts.sort_unstable();
+    vts
+}
+
+/// Where classes' static data may start: every word of every vtable pointing into writable
+/// memory (one of them, after the methods, points to its class's static data), sorted, with
+/// the class.
+fn static_starts(heap: &Heap, m: &Mono, vts: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let w = m.lay.w as usize;
+    let mut starts = Vec::new();
+    let mut b = vec![0u8; MAX_VTABLE as usize];
+    for (i, &(vt, k)) in vts.iter().enumerate() {
+        let end = vts.get(i + 1).map_or(vt + MAX_VTABLE, |n| n.0.min(vt + MAX_VTABLE));
+        let n = heap.file().read_at(&mut b[..(end - vt) as usize], vt).unwrap_or(0);
+        for at in (3 * w..n - n % w).step_by(w) {
+            let mut x = [0u8; 8];
+            x[..w].copy_from_slice(&b[at..at + w]);
+            let v = u64::from_le_bytes(x);
+            if heap.is_pointer(v) {
+                starts.push((v, k));
             }
         }
     }
-    let starts: Vec<u64> =
-        holders.iter().flat_map(|&(y, _)| (0..MAX_STATIC_DATA).step_by(w as usize).filter_map(move |o| y.checked_sub(o))).collect();
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
+/// A place the search for a static path reached: an object, or an array (`pick`: its element
+/// leading on), and the steps from it down to the value's object.
+struct Node {
+    addr: u64,
+    pick: Option<Pick>,
+    steps: Vec<Step>,
+}
+
+/// The static field the object is reached from, through other objects and arrays, for a class
+/// with too many objects to tell by its name (Terraria: `Main.player[0]` of 256 Players, the
+/// wood at `Main.player[0].inventory[type=9]`). Level by level up from the object, one pass
+/// over memory each (what points to the places reached so far); a place in a class's static
+/// data ends it (every vtable listed first: one pass, and their static data pointers).
+fn static_discover(heap: &Heap, m: &Mono, obj: u64, field: &str, target: u64) -> Option<(MonoPath, Vec<u64>)> {
+    let pid = heap.pid;
+    let vts = all_vtables(heap, m, obj);
+    if vts.is_empty() {
+        return None;
+    }
+    let starts = static_starts(heap, m, &vts);
     let mut statics: Vec<(u64, Vec<(String, u64, u64)>)> = Vec::new();
-    for r in heap.referrers(&starts) {
-        let Some(data) = m.word(r) else { continue };
-        // The vtable pointing to the static data: the nearest class pointer before (its start).
-        let Some(k2) = (0..MAX_VTABLE).step_by(w as usize).find_map(|back| {
-            let vt = r.checked_sub(back)?;
-            m.word(vt).filter(|&c| c != vt && m.is_class(c))
-        }) else {
-            continue;
-        };
-        if !statics.iter().any(|s| s.0 == k2) {
-            statics.push((k2, m.static_fields(k2)));
-        }
-        let fields = &statics.iter().find(|s| s.0 == k2).unwrap().1;
-        for &(y, slot) in holders.iter().filter(|h| h.0 >= data && h.0 - data < MAX_STATIC_DATA) {
-            let Some(f) = fields.iter().find(|f| f.1 == y - data) else { continue };
-            let Some((namespace, class)) = m.name(k2) else { continue };
-            let path = MonoPath { runtime: Runtime::Mono, namespace, class, via: Some(Static { field: f.0.clone(), slot }), field: field.to_owned() };
-            if m.static_walk(heap.pid, k2, data, &path) == Some(target) {
-                keep_static(heap.pid, k2, data);
-                let mut found = FOUND.lock().unwrap();
-                found.retain(|f| f.0 == heap.pid);
-                found.push((heap.pid, k2, data, MonoPath { field: String::new(), ..path.clone() }));
-                return Some((path, vec![target]));
+    let mut nodes = vec![Node { addr: obj, pick: None, steps: Vec::new() }];
+    let mut seen = vec![obj];
+    // An array takes a level of its own.
+    for _ in 0..=2 * MAX_STEPS {
+        let mut next: Vec<Node> = Vec::new();
+        let mut paths: Vec<(MonoPath, u64, u64)> = Vec::new();
+        for x in heap.referrers(&nodes.iter().map(|n| n.addr).collect::<Vec<_>>()) {
+            let Some(held) = m.word(x) else { continue };
+            for node in nodes.iter().filter(|n| n.addr == held) {
+                // In a class's static data: the static data starting at most MAX_STATIC_DATA before.
+                let from = starts.partition_point(|s| s.0 + MAX_STATIC_DATA <= x);
+                for &(data, k) in starts[from..].iter().take_while(|s| s.0 <= x) {
+                    if !statics.iter().any(|s| s.0 == k) {
+                        statics.push((k, m.static_fields(k)));
+                    }
+                    let fields = &statics.iter().find(|s| s.0 == k).unwrap().1;
+                    let Some(f) = fields.iter().find(|f| f.1 == x - data) else { continue };
+                    let Some((namespace, class)) = m.name(k) else { continue };
+                    let via = [vec![Step { field: f.0.clone(), pick: node.pick.clone() }], node.steps.clone()].concat();
+                    let path = MonoPath { runtime: Runtime::Mono, namespace, class, via, field: field.to_owned() };
+                    if m.static_walk(pid, k, data, &path) == Some(target) {
+                        paths.push((path, k, data));
+                    }
+                }
+                if node.steps.len() >= MAX_STEPS {
+                    continue;
+                }
+                // A slot of an array of its class.
+                if node.pick.is_none() {
+                    if let Some((a, i)) = m.class_of(node.addr).and_then(|k| m.array_slot(x, k)) {
+                        next.push(Node { addr: a, pick: Some(m.pick_for(pid, a, i)), steps: node.steps.clone() });
+                        continue;
+                    }
+                }
+                // A field of another object.
+                if let Some((o, _, f)) = m.holder(x) {
+                    let steps = [vec![Step { field: f, pick: node.pick.clone() }], node.steps.clone()].concat();
+                    next.push(Node { addr: o, pick: None, steps });
+                }
             }
         }
+        // The game's own fields over private ones ("_player" of the keyboard lighting's
+        // ChromaPainter, next to Main.player[0] in Terraria): fewer `_` names, then fewer steps.
+        let private = |p: &MonoPath| p.via.iter().filter(|s| s.field.starts_with(['_', '<'])).count();
+        if let Some((path, k, data)) = paths.into_iter().min_by_key(|(p, _, _)| (private(p), p.via.len())) {
+            keep_static(pid, k, data);
+            let mut found = FOUND.lock().unwrap();
+            found.retain(|f| f.0 == pid);
+            found.push((pid, k, data, MonoPath { field: String::new(), ..path.clone() }));
+            return Some((path, vec![target]));
+        }
+        next.retain(|n| !seen.contains(&n.addr));
+        next.sort_by_key(|n| n.addr);
+        next.dedup_by_key(|n| n.addr);
+        next.truncate(MAX_NODES);
+        if next.is_empty() {
+            return None;
+        }
+        seen.extend(next.iter().map(|n| n.addr));
+        nodes = next;
     }
     None
 }
@@ -591,7 +753,7 @@ fn find_static(heap: &Heap, path: &MonoPath) -> Option<(u64, u64)> {
     if let Some(lay) = known_layout(pid) {
         let m = Mono { mem: heap.file(), lay };
         let known = STATICS.lock().unwrap().iter().filter(|s| s.0 == pid).map(|s| (s.1, s.2)).collect::<Vec<_>>();
-        if let Some(found) = known.into_iter().find(|&(k, d)| m.is(k, path) && m.static_walk(pid, k, d, path).is_some()) {
+        if let Some(found) = known.into_iter().find(|&(k, d)| m.is(k, path) && m.static_start(pid, k, d, path).is_some()) {
             return Some(found);
         }
     }
@@ -606,7 +768,7 @@ fn find_static(heap: &Heap, path: &MonoPath) -> Option<(u64, u64)> {
             let mut x = [0u8; 8];
             x[..w as usize].copy_from_slice(&b[at..at + w as usize]);
             let data = u64::from_le_bytes(x);
-            if data >= 0x10000 && m.static_walk(pid, k, data, path).is_some() {
+            if data >= 0x10000 && m.static_start(pid, k, data, path).is_some() {
                 keep_static(pid, k, data);
                 return Some((k, data));
             }
@@ -725,7 +887,7 @@ fn vtables(heap: &Heap, path: &MonoPath) -> Vec<u64> {
 
 /// The live objects of the path's class (a pass over memory, three on a new run).
 pub fn find_roots(heap: &Heap, path: &MonoPath) -> Vec<u64> {
-    if path.via.is_some() {
+    if !path.via.is_empty() {
         return find_static(heap, path).map(|(_, data)| vec![data]).unwrap_or_default();
     }
     let vts = vtables(heap, path);
@@ -745,7 +907,7 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &MonoPath) -> Vec<u64> {
     let Some(lay) = known_layout(heap.pid) else { return Vec::new() };
     let m = Mono { mem: heap.file(), lay };
     // A static path: its root is the class's static data.
-    if path.via.is_some() {
+    if !path.via.is_empty() {
         let pid = heap.pid;
         let class = roots.first().and_then(|&d| STATICS.lock().unwrap().iter().find(|s| s.0 == pid && s.2 == d).map(|s| (s.1, d)));
         return class.and_then(|(k, d)| m.static_walk(pid, k, d, path)).into_iter().collect();
@@ -780,9 +942,14 @@ mod tests {
         assert!(MonoPath::parse("gd:a.gd.x").is_none());
         let t = "mono:Terraria::Main.player[0].statLife";
         let p = MonoPath::parse(t).unwrap();
-        assert_eq!((p.class.as_str(), p.via.clone(), p.field.as_str()), ("Main", Some(Static { field: "player".into(), slot: Some(0) }), "statLife"));
+        assert_eq!((p.class.as_str(), p.via.clone(), p.field.as_str()), ("Main", vec![Step { field: "player".into(), pick: Some(Pick::At(0)) }], "statLife"));
         assert_eq!((p.text(), p.describe()), (t.to_owned(), "statLife of Main.player[0]".to_owned()));
+        let t = "mono:Terraria::Main.player[0].inventory[type=9].stack";
+        let p = MonoPath::parse(t).unwrap();
+        assert_eq!(p.via[1], Step { field: "inventory".into(), pick: Some(Pick::Where("type".into(), 9)) });
+        assert_eq!(p.text(), t);
         assert_eq!(MonoPath::parse("mono:Game.instance.gold").unwrap().text(), "mono:Game.instance.gold");
+        assert_eq!(MonoPath::parse("mono:A.b[id=-3].c").unwrap().text(), "mono:A.b[id=-3].c");
         assert!(MonoPath::parse("mono:Main.player[x].statLife").is_none());
         assert!(MonoPath::parse("il2cpp:Main.player[0].statLife").is_none());
         let p = MonoPath::parse("il2cpp:CommandBase._ammo").unwrap();
