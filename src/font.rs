@@ -28,6 +28,11 @@ pub fn could_be(d: u8, w: u32, h: u32) -> bool {
     d == 1 || w as f32 >= h as f32 * MIN_ASPECT
 }
 
+/// Whether two glyphs look like the same character. `scale`: mask pixels per frame pixel.
+pub fn alike(a: &Glyph, b: &Glyph, scale: u32) -> bool {
+    Shape::of(a, scale).distance(&Shape::of(b, scale)).is_some_and(|d| d <= SAME)
+}
+
 /// One glyph cut out of a mask: its box in the mask, which pixels of the box are ink, and
 /// whether the crop's left or right edge cuts it (then it may be part of something else).
 #[derive(Clone)]

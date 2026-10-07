@@ -798,8 +798,10 @@ pub fn read_number_at(frame: &Path, area: Rect, debug: &Path, font: Option<&Font
 }
 
 /// Learns the game's digits from `area` showing `n`. The glyphs must split into the number's
-/// digits, or a couple more on the left (numbers shown with leading zeros, like "09"), all about
-/// the same height. `trusted`: `n` comes from memory, not from the player. Returns what it did.
+/// digits, or a couple more on the left (numbers shown with leading zeros, like "09"), or more
+/// that all look alike and like the number's own zeros (a score padded to a width: Jazz
+/// Jackrabbit 2's "0000100"), all about the same height. `trusted`: `n` comes from memory, not
+/// from the player. Returns what it did.
 pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool) -> Result<String, String> {
     if n.value() < 0.0 {
         return Err("only learns from numbers of 0 or more".into());
@@ -820,13 +822,24 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
         let extra = glyphs.len().checked_sub(text.len())?;
         let digits = std::iter::repeat_n(b'0', extra).chain(text.bytes());
         let shaped = glyphs.iter().zip(digits).all(|(g, c)| crate::font::could_be(c - b'0', g.w, g.h));
-        (lo * 4 >= hi * 3 && extra <= 2 && shaped).then_some(extra)
+        let padded = || {
+            let own = glyphs[extra..].iter().zip(text.bytes()).filter(|(_, c)| *c == b'0').map(|(g, _)| g);
+            let zeros: Vec<&Glyph> = glyphs[..extra].iter().chain(own).collect();
+            zeros.iter().all(|g| crate::font::alike(g, zeros[0], SCALE))
+        };
+        (lo * 4 >= hi * 3 && (extra <= 2 || padded()) && shaped).then_some(extra)
     };
     let fit = |c: &Candidate| parts(c).into_iter().find_map(|p| Some((fits_part(&p)?, p)));
     let fits = |c: &Candidate| fit(c).map(|(extra, _)| extra);
     // Labels near the number ("AMMO") can be as big as it, or bigger: leave out glyphs PaddleOCR
     // reads as a word before picking the biggest text.
     let is_word = |t: &str| t.chars().filter(|c| c.is_alphabetic()).count() >= 2 && !t.chars().any(|c| c.is_ascii_digit());
+    // PaddleOCR reads round digits as letters: Jazz Jackrabbit 2's score "0000100" as "ooooloo".
+    // Text that spells the glyphs' digits in look-alikes is the number, not a label.
+    let spells = |t: &str, c: &Candidate| {
+        let as_digits: Option<String> = t.chars().filter(|ch| !ch.is_whitespace()).map(look_alike).collect();
+        fits(c).is_some_and(|extra| as_digits == Some(format!("{}{text}", "0".repeat(extra))))
+    };
     // The columns the glyphs that would be learned take up (glyph x is in crop pixels).
     let columns = |c: &Candidate| {
         let (_, p) = fit(c)?;
@@ -838,7 +851,7 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
     let cands: Vec<Candidate> = candidates(&img, area, false)
         .into_iter()
         .filter(|c| !cut_beside(c))
-        .filter(|c| columns(c).is_none_or(|r| !crate::reader::text(&img, r).is_ok_and(|t| is_word(&t))))
+        .filter(|c| columns(c).is_none_or(|r| !crate::reader::text(&img, r).is_ok_and(|t| is_word(&t) && !spells(&t, c))))
         .collect();
     // Only the biggest text that could be the number: other colour groups can hold a piece of
     // it (the slash of a 0), or something taller that isn't (Forager's item slot border).
@@ -878,6 +891,19 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
     }
     let shown = if extra > 0 { label } else { n.to_string() };
     Ok(format!("learned the digits of {shown}: {added} new shapes (knows {})", font.known()))
+}
+
+/// The digit a character OCR may read in its place, if any.
+fn look_alike(c: char) -> Option<char> {
+    match c {
+        '0'..='9' => Some(c),
+        'o' | 'O' | 'D' | 'Q' => Some('0'),
+        'l' | 'I' | 'i' | '|' => Some('1'),
+        'z' | 'Z' => Some('2'),
+        's' | 'S' => Some('5'),
+        'B' => Some('8'),
+        _ => None,
+    }
 }
 
 /// The full-frame finder's glyphs (`glyph_blobs`) where the learned `glyphs` (4x crop
