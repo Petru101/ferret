@@ -8,7 +8,18 @@ use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
-restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>";
+restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>
+shared library: shared, share, take <id>, unshare <id>";
+
+fn imported(done: core::Imported) {
+    println!("imported {} (not checked yet: confirm-value <name>)", done.added.join(", "));
+    for s in &done.skipped {
+        println!("skipped {s}");
+    }
+    if done.other_build {
+        println!("made with another build of the game: some may not be found");
+    }
+}
 
 fn bound(v: &str) -> Result<Option<f64>, String> {
     match v {
@@ -130,7 +141,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         // Sends a report with Ferret's log, as Send Feedback does (tests: FERRET_SERVER).
         "feedback" => {
             let report = crate::feedback::Report {
-                id: crate::feedback::new_id(),
+                id: crate::online::new_id(),
                 message: arg.to_owned(),
                 contact: String::new(),
                 game: None,
@@ -142,14 +153,31 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         }
         "import" => {
             let text = std::fs::read_to_string(arg).map_err(|e| format!("usage: import <file>: {e}"))?;
-            let done = core.import(&text)?;
-            println!("imported {} (not checked yet: confirm-value <name>)", done.added.join(", "));
-            for s in &done.skipped {
-                println!("skipped {s}");
+            imported(core.import(&text, None)?);
+        }
+        // The shared library (library.rs): uploads for this game, sharing its values, taking
+        // one, deleting one's own.
+        "shared" => {
+            let (game, steam, build) = core.library_key()?;
+            for p in crate::library::list(&game, steam.as_deref())? {
+                let same = if p.build.is_some() && p.build == build { "  [this build]" } else { "" };
+                let mine = if p.mine { "  [mine]" } else { "" };
+                println!("{}  {}  worked {} failed {}  {}{same}{mine}", p.id, p.day, p.worked, p.failed, p.names);
             }
-            if done.other_build {
-                println!("made with another build of the game: some may not be found");
-            }
+        }
+        "share" => {
+            let export = core.export()?;
+            println!("shared as {}", crate::library::upload(&export.text)?);
+        }
+        "take" => {
+            let id = crate::online::parse_id(arg).ok_or("usage: take <upload id>")?;
+            let text = crate::library::download(&id)?;
+            imported(core.import(&text, Some(&id))?);
+        }
+        "unshare" => {
+            let id = crate::online::parse_id(arg).ok_or("usage: unshare <upload id>")?;
+            crate::library::delete(&id)?;
+            println!("deleted {id}");
         }
         "remove" => {
             core.remove(arg)?;

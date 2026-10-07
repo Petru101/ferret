@@ -14,7 +14,7 @@ pub fn open(ui: &Rc<Ui>) {
     // The attached game, if any: its saved values can go with the report.
     let game = ui.attached.get().map(|_| ui.game_page.title().to_string()).filter(|g| !g.is_empty());
     // Made now, so Show What's Sent shows the id that goes.
-    let id = feedback::new_id();
+    let id = crate::online::new_id();
 
     let message = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)

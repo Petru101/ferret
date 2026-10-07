@@ -38,6 +38,9 @@ pub struct Shared {
 pub struct File {
     /// The game's program, as Ferret names it (`game_name`).
     pub game: String,
+    /// Its Steam app id, when Ferret knew it: games share program names (RPG Maker's
+    /// `Game.exe`), so two ids that differ are two games.
+    pub steam: Option<String>,
     pub build: Option<String>,
     pub values: Vec<Shared>,
     /// Values left out, and why.
@@ -66,9 +69,16 @@ pub fn shareable_path(path: &str) -> bool {
         || SYSTEM_START.iter().any(|s| stem.starts_with(s)))
 }
 
+/// Pointer paths kept per value: an import takes at most `MAX_PER_VALUE` ways of finding one
+/// (MEA's pistol ammo had 141 confirmed paths), with room for its names and code patterns.
+pub const PATHS_KEPT: usize = 48;
+
 /// The file's text. Values with nothing that travels are left out by the caller.
-pub fn write(game: &str, build: Option<&str>, values: &[Shared]) -> String {
+pub fn write(game: &str, steam: Option<&str>, build: Option<&str>, values: &[Shared]) -> String {
     let mut text = format!("{HEADER} {VERSION}\ngame {game}\n");
+    if let Some(s) = steam {
+        text += &format!("steam {s}\n");
+    }
     if let Some(b) = build {
         text += &format!("build {b}\n");
     }
@@ -89,7 +99,7 @@ pub fn write(game: &str, build: Option<&str>, values: &[Shared]) -> String {
         if let (Some(b), false) = (&v.build, v.sites.is_empty()) {
             text += &format!("build {b}\n");
         }
-        for p in &v.paths {
+        for p in v.paths.iter().take(PATHS_KEPT) {
             text += &format!("path {p}\n");
         }
         if let Some(l) = &v.limit {
@@ -158,7 +168,7 @@ pub fn read(text: &str) -> Result<File, String> {
     if version > VERSION {
         return Err("This file was made by a newer Ferret: update Ferret to import it.".into());
     }
-    let mut file = File { game: String::new(), build: None, values: Vec::new(), skipped: Vec::new() };
+    let mut file = File { game: String::new(), steam: None, build: None, values: Vec::new(), skipped: Vec::new() };
     // The value being read, and why it can't be taken (it is still read to its end).
     let mut current: Option<(Shared, Option<String>)> = None;
     let finish = |file: &mut File, current: Option<(Shared, Option<String>)>| {
@@ -198,6 +208,7 @@ pub fn read(text: &str) -> Result<File, String> {
                 current = Some((shared, bad));
             }
             ("game", None) => file.game = rest.to_owned(),
+            ("steam", None) => file.steam = Some(rest.to_owned()).filter(|s| !s.is_empty() && s.len() <= 12 && s.bytes().all(|b| b.is_ascii_digit())),
             ("build", None) => file.build = Some(rest.to_owned()).filter(|b| good_name(b)),
             (_, None) => {}
             (_, Some((v, bad))) => {
@@ -275,23 +286,24 @@ mod tests {
         };
         let mut values = brotato();
         values.push(energy.clone());
-        let text = write("brotato.exe", Some("abc123"), &values);
+        let text = write("brotato.exe", Some("1942280"), Some("abc123"), &values);
         let file = read(&text).unwrap();
         assert_eq!(file.game, "brotato.exe");
         assert_eq!(file.build.as_deref(), Some("abc123"));
+        assert_eq!(file.steam.as_deref(), Some("1942280"));
         assert_eq!(file.values, values);
         assert!(file.skipped.is_empty());
         // Its build only goes with code patterns.
         energy.sites.clear();
-        let file = read(&write("cw4.exe", None, &[energy])).unwrap();
+        let file = read(&write("cw4.exe", None, None, &[energy])).unwrap();
         assert_eq!(file.values[0].build, None);
     }
 
     #[test]
     fn takes_text_pasted_from_a_chat() {
-        let text = format!("Here you go:\n```\n{}```\n", write("brotato.exe", None, &brotato()));
+        let text = format!("Here you go:\n```\n{}```\n", write("brotato.exe", None, None, &brotato()));
         assert!(read(&text).is_err(), "text before the header isn't a file");
-        let text = format!("```\n  {}\n```", write("brotato.exe", None, &brotato()).replace('\n', "\n  "));
+        let text = format!("```\n  {}\n```", write("brotato.exe", None, None, &brotato()).replace('\n', "\n  "));
         assert_eq!(read(&text).unwrap().values.len(), 2);
     }
 

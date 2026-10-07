@@ -470,6 +470,16 @@ fn ptrace_help(scope: &str) -> String {
     }
 }
 
+/// Tells the shared library whether an upload worked, in the background (the server may be slow
+/// or away; nothing waits for it).
+fn vote(id: String, worked: bool) {
+    std::thread::spawn(move || {
+        if let Err(e) = crate::library::vote(&id, worked) {
+            eprintln!("vote on {id}: {e}");
+        }
+    });
+}
+
 fn first_error(reply: &[String]) -> Option<String> {
     reply.iter().find_map(|l| l.strip_prefix("error: ")).map(str::to_owned)
 }
@@ -542,6 +552,9 @@ struct Entry {
     imported: bool,
     /// "<min|-> <max|->": a range the import suggested, only filled into the Values tab's fields.
     suggested: Option<String>,
+    /// The shared library's upload it was imported from (library.rs): told whether it worked
+    /// when the player confirms it or removes it unconfirmed.
+    from: Option<String>,
     /// Lines this build doesn't understand (from a newer one), saved back unchanged.
     other: Vec<String>,
 }
@@ -556,8 +569,8 @@ pub fn one_word(name: &str) -> String {
 /// missing), its "site ...", "path ...", "named ..." and "candidate ..." lines, "run <pid>" (where the
 /// candidates came from), an optional "limit <min|-> <max|->" line and "decimals <n>" for a
 /// whole number shown with decimals, "last <value>" while its pointer paths are unconfirmed,
-/// "build <stamp>" with code patterns, "untraced <stamp>", "imported" and "suggest <min|-> <max|->"
-/// (see Entry).
+/// "build <stamp>" with code patterns, "untraced <stamp>", "imported", "suggest <min|-> <max|->"
+/// and "from <upload id>" (see Entry).
 /// Other lines are kept
 /// with their entry, so a build older than the profile doesn't drop what it doesn't know.
 fn read_profile(exe: &str) -> Vec<Entry> {
@@ -582,6 +595,7 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 untraced: None,
                 imported: false,
                 suggested: None,
+                from: None,
                 other: Vec::new(),
             });
         } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
@@ -610,6 +624,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.imported = true;
         } else if let (Some(l), Some(e)) = (line.strip_prefix("suggest "), entries.last_mut()) {
             e.suggested = Some(l.trim().to_owned());
+        } else if let (Some(id), Some(e)) = (line.strip_prefix("from "), entries.last_mut()) {
+            e.from = Some(id.trim().to_owned());
         } else if let (false, Some(e)) = (line.trim().is_empty(), entries.last_mut()) {
             e.other.push(line.to_owned());
         }
@@ -661,6 +677,9 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         if let Some(l) = &e.suggested {
             text.push_str(&format!("suggest {l}\n"));
+        }
+        if let Some(id) = &e.from {
+            text.push_str(&format!("from {id}\n"));
         }
         for l in &e.other {
             text.push_str(&format!("{l}\n"));
@@ -874,6 +893,9 @@ struct Game {
     last_written: Option<Instant>,
     /// The game's build stamp (helper `build`), when it could be read.
     build: Option<String>,
+    /// Its Steam app id, when it has one: the shared library tells games with the same program
+    /// name apart by it.
+    steam: Option<String>,
     /// A Java game (the helper's attach says so): nothing is saved or restored there.
     java: bool,
 }
@@ -1183,6 +1205,12 @@ impl Core {
             self.capture = None;
         }
         let build = self.helper.call("build").iter().find_map(|l| l.strip_prefix("build ")).map(str::to_owned);
+        let steam = self
+            .games()
+            .into_iter()
+            .find(|g| g.pid == pid)
+            .and_then(|g| g.app_id)
+            .filter(|id| id != "0" && id.bytes().all(|b| b.is_ascii_digit()));
         self.game = Some(Game {
             pid,
             exe: exe.clone(),
@@ -1196,6 +1224,7 @@ impl Core {
             last_written: None,
             upgrade_asked: Vec::new(),
             build,
+            steam,
             java: reply.iter().any(|l| l.starts_with("Java game: ")),
         });
         self.search = None;
@@ -1339,6 +1368,7 @@ impl Core {
             untraced: None,
             imported: false,
             suggested: None,
+            from: None,
             other: Vec::new(),
         };
         let known = entry.known(&entries);
@@ -1408,6 +1438,7 @@ impl Core {
             untraced: None,
             imported: false,
             suggested: None,
+            from: None,
             other: Vec::new(),
         });
         let path = write_profile(&game.exe, &entries)?;
@@ -1588,6 +1619,9 @@ impl Core {
         let entry = entry.clone();
         write_profile(exe, &entries)?;
         self.say(&format!("{name}: confirmed by the player, imported value kept as their own"));
+        if let Some(id) = entry.from.clone() {
+            vote(id, true);
+        }
         // Followed by the helper from now on (its code patterns, if the game moves it).
         if !entry.sites.is_empty() {
             if let Err(e) = self.apply_limit(&entry) {
@@ -1830,6 +1864,10 @@ impl Core {
         let name = name.as_str();
         let exe = self.game()?.exe.clone();
         let mut entries = read_profile(&exe);
+        // An imported value removed before it was confirmed: it didn't work for this player.
+        if let Some(id) = entries.iter().find(|e| e.name == name && e.imported).and_then(|e| e.from.clone()) {
+            vote(id, false);
+        }
         let before = entries.len();
         entries.retain(|e| e.name != name);
         if entries.len() == before {
@@ -1851,7 +1889,7 @@ impl Core {
     /// them that work on other computers. Values with none are left out, with the reason.
     pub fn export(&mut self) -> Result<Export, String> {
         let game = self.game()?;
-        let (exe, build) = (game.exe.clone(), game.build.clone());
+        let (exe, build, steam) = (game.exe.clone(), game.build.clone(), game.steam.clone());
         let (mut values, mut left_out) = (Vec::new(), Vec::new());
         for e in read_profile(&exe) {
             if e.imported {
@@ -1885,7 +1923,7 @@ impl Core {
                 false => format!("Nothing to export. {}", left_out.join("; ")),
             });
         }
-        let text = share::write(&exe, build.as_deref(), &values);
+        let text = share::write(&exe, steam.as_deref(), build.as_deref(), &values);
         let names: Vec<&str> = values.iter().map(|v| v.name.as_str()).collect();
         self.say(&format!("exported {}", names.join(", ")));
         for l in &left_out {
@@ -1895,16 +1933,28 @@ impl Core {
         Ok(Export { text, file_name: format!("{stem}.ferret"), count: values.len(), left_out })
     }
 
+    /// What the shared library knows the attached game by: its program, Steam app id and build.
+    pub fn library_key(&mut self) -> Result<(String, Option<String>, Option<String>), String> {
+        let game = self.game()?;
+        Ok((game.exe.clone(), game.steam.clone(), game.build.clone()))
+    }
+
     /// Adds the values in a `.ferret` file's text to the attached game's, and finds them. They
     /// stay unconfirmed (never written, no limit) until the player says the game shows their
     /// number: a wrong shared value would write into random memory. A value with the name of
     /// one already saved is skipped (the player's own stays).
-    pub fn import(&mut self, text: &str) -> Result<Imported, String> {
+    /// `from`: the shared library's upload it came from.
+    pub fn import(&mut self, text: &str, from: Option<&str>) -> Result<Imported, String> {
         let file = share::read(text)?;
         let game = self.game()?;
         let (exe, build) = (game.exe.clone(), game.build.clone());
         if !file.game.eq_ignore_ascii_case(&exe) {
             return Err(format!("These values are for {}, not {exe}", file.game));
+        }
+        if let (Some(theirs), Some(ours)) = (&file.steam, &game.steam) {
+            if theirs != ours {
+                return Err(format!("These values are for another game with a program called {exe} (Steam app {theirs}, this one is {ours})"));
+            }
         }
         let mut entries = read_profile(&exe);
         let (mut skipped, mut added) = (file.skipped, Vec::new());
@@ -1929,6 +1979,7 @@ impl Core {
                 untraced: None,
                 imported: true,
                 suggested: v.limit,
+                from: from.map(str::to_owned),
                 other: Vec::new(),
             });
         }
@@ -3979,6 +4030,7 @@ mod tests {
             untraced: None,
             imported: false,
             suggested: None,
+            from: None,
             other: Vec::new(),
         }
     }

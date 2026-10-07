@@ -4,12 +4,9 @@
 // folder's path is taken out of the log first.
 
 use std::fs;
-use std::time::Duration;
 
 use crate::core;
-
-/// Where reports go; `FERRET_SERVER` points a test build at a local `wrangler dev`.
-const SERVER: &str = "https://ferret.petru101.workers.dev";
+use crate::online::{self, json_string};
 
 /// The server takes at most 400 KB of log and 128 KB of saved values: the end of the log (the
 /// newest lines) and the profile without its unconfirmed candidates fit with room to spare.
@@ -17,7 +14,7 @@ const LOG_MAX: usize = 300 * 1024;
 const PROFILE_MAX: usize = 100 * 1024;
 
 pub struct Report {
-    /// A random id for this report (`new_id`), shown to the player once it is sent so they
+    /// A random id for this report (`online::new_id`), shown to the player once it is sent so they
     /// can point to it; the server refuses a second report with the same one.
     pub id: String,
     pub message: String,
@@ -72,57 +69,6 @@ fn scrub(text: &str) -> String {
     text
 }
 
-/// Letters and digits that can't be mistaken for each other when read out or typed (no I, L,
-/// O, U: Crockford's base 32).
-const ID_CHARS: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-/// Random bytes from the kernel.
-fn random<const N: usize>() -> [u8; N] {
-    let mut bytes = [0u8; N];
-    if let Ok(mut f) = fs::File::open("/dev/urandom") {
-        std::io::Read::read_exact(&mut f, &mut bytes).ok();
-    }
-    bytes
-}
-
-/// A report's id: "K7Q2-9XMB" (40 bits, so two reports never share one in practice). Row
-/// numbers were reused after a delete and told how many reports there are.
-pub fn new_id() -> String {
-    let chars: Vec<char> = random::<8>().iter().map(|b| ID_CHARS[(b % 32) as usize] as char).collect();
-    format!("{}-{}", chars[..4].iter().collect::<String>(), chars[4..].iter().collect::<String>())
-}
-
-/// A random id made once per install: the server's flood limit counts reports per install,
-/// and it tells one player's reports from another's. Nothing else is tied to it.
-fn install_id() -> String {
-    let path = gtk::glib::user_config_dir().join("install-id");
-    if let Some(id) = fs::read_to_string(&path).ok().map(|s| s.trim().to_owned()).filter(|s| s.len() == 32) {
-        return id;
-    }
-    let id: String = random::<16>().iter().map(|b| format!("{b:02x}")).collect();
-    fs::create_dir_all(path.parent().unwrap()).ok();
-    fs::write(&path, &id).ok();
-    id
-}
-
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 impl Report {
     /// What the server gets.
     fn body(&self, install: &str) -> String {
@@ -165,24 +111,13 @@ impl Report {
         if self.message.trim().is_empty() {
             return Err("Write something first".into());
         }
-        let url = format!("{}/v1/feedback", std::env::var("FERRET_SERVER").unwrap_or(SERVER.into()));
-        let mut response = ureq::post(&url)
-            .config()
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .header("content-type", "application/json")
-            .send(&self.body(&install_id()))
-            .map_err(|e| format!("Could not reach Ferret's server ({e}). Check your connection and try again."))?;
-        match response.status().as_u16() {
+        let reply = online::post("/v1/feedback", &self.body(&online::install_id()))?;
+        match reply.status {
             200 => Ok(()),
             429 => Err("Too many reports from here in the last hour: try again later.".into()),
             413 => Err("This report is too big to send: leave out the log and try again.".into()),
             409 => Err("A report with this id was sent already: close this window and write it again.".into()),
-            s => {
-                let why = response.body_mut().read_to_string().unwrap_or_default();
-                Err(format!("Ferret's server refused it ({s} {why})"))
-            }
+            _ => Err(online::server_error(&reply)),
         }
     }
 }
@@ -190,20 +125,6 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn makes_readable_ids() {
-        let id = new_id();
-        assert_eq!(id.len(), 9, "{id}");
-        assert_eq!(&id[4..5], "-");
-        assert!(id.chars().filter(|&c| c != '-').all(|c| ID_CHARS.contains(&(c as u8))));
-        assert_ne!(new_id(), new_id());
-    }
-
-    #[test]
-    fn escapes_json() {
-        assert_eq!(json_string("a \"b\" \\ c\n\u{1}é"), "\"a \\\"b\\\" \\\\ c\\n\\u0001é\"");
-    }
 
     #[test]
     fn takes_the_home_folder_out() {
@@ -216,7 +137,7 @@ mod tests {
 
     #[test]
     fn leaves_out_what_the_player_left_empty() {
-        let r = Report { id: new_id(), message: " hi ".into(), contact: " ".into(), game: None, log: None, profile: None };
+        let r = Report { id: online::new_id(), message: " hi ".into(), contact: " ".into(), game: None, log: None, profile: None };
         let body = r.body("0123456789abcdef0123456789abcdef");
         assert!(body.contains("\"message\":\"hi\""));
         assert!(body.starts_with(&format!("{{\"id\":\"{}\"", r.id)));

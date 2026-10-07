@@ -17,6 +17,8 @@ start)
     # FERRET_PIPEWIRE_NODE=<id>: read that PipeWire node instead of a window picked through the
     # portal (a game in a headless gamescope).
     extra=${FERRET_PIPEWIRE_NODE:+--filesystem=xdg-run/pipewire-0 --env=FERRET_PIPEWIRE_NODE=$FERRET_PIPEWIRE_NODE}
+    # FERRET_EXTRA: more `flatpak run` options (library-test.sh: --env=FERRET_SERVER=...).
+    extra="$extra ${FERRET_EXTRA:-}"
     systemd-run --user --quiet --collect --unit="ferret-$session" sh -c \
         "sleep infinity > '$dir/in' & flatpak run $extra io.github.Petru101.Ferret --cli < '$dir/in' > '$dir/out' 2>&1; kill \$!"
     echo "session started"

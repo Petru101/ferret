@@ -1,6 +1,9 @@
 // Ferret's server: takes feedback and bug reports from the app's Send Feedback dialog and
-// keeps them in a D1 database for the developer to read (reports.sh). Nothing is sent
-// anywhere from here, and no email is involved.
+// keeps them in a D1 database for the developer to read (reports.sh), and holds the shared
+// library of saved values (library.js). Nothing is sent anywhere from here, and no email is
+// involved.
+
+import { library } from "./library.js";
 
 const LIMITS = {
   body: 640 * 1024,
@@ -16,7 +19,7 @@ const LIMITS = {
 const PER_INSTALL_HOUR = 5;
 const ALL_DAY = 300;
 
-const PRIVACY = `Ferret: what the feedback server keeps
+const PRIVACY = `Ferret: what its server keeps
 
 When you send feedback or a bug report from Ferret, the server keeps what the dialog showed
 you before you sent it: your message, the contact you typed (if any), Ferret's version, the
@@ -28,6 +31,13 @@ The server runs on Cloudflare, which sees your IP address like any website does.
 server doesn't store it.
 
 Reports are read only by Ferret's developer, to fix bugs and answer questions.
+
+Shared values: when you share a game's values, the server keeps exactly the text Ferret
+showed you before uploading (the values' names and how to find them in the game), the game's
+program name and Steam id, Ferret's version and the install's random id (so you can delete
+your uploads). Anyone using Ferret can download it. When you confirm a downloaded value (or
+remove one you never confirmed), Ferret tells the server it worked (or didn't) for that upload,
+with the same random id, so each install counts once.
 `;
 
 function reply(status, body) {
@@ -92,7 +102,12 @@ async function feedback(request, env) {
 
 export default {
   async fetch(request, env) {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
+    const { pathname } = url;
+    const shared = await library(request, url, env);
+    if (shared) {
+      return shared;
+    }
     if (pathname === "/v1/feedback") {
       return request.method === "POST" ? feedback(request, env) : reply(405, { error: "POST only" });
     }

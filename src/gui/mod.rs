@@ -70,6 +70,8 @@ pub enum Event {
     Exported(Result<crate::core::Export, String>, share::To),
     /// What an import added and skipped.
     Imported(Result<crate::core::Imported, String>),
+    /// What the shared library knows the open game by (program, Steam id, build).
+    Browse(Result<(String, Option<String>, Option<String>), String>),
     /// The places still matching, with their values (the player tries them out).
     Matches(Result<Vec<crate::core::Match>, String>),
     /// The player picked one of them as the value.
@@ -593,6 +595,7 @@ impl Ui {
             Event::Done(Ok(msg)) => self.toast(&msg),
             Event::Exported(r, to) => share::exported(self, r, to),
             Event::Imported(r) => share::imported(self, r),
+            Event::Browse(key) => share::browse(self, key),
             Event::Saved(Err(e)) => {
                 self.find.save_failed(&e);
                 self.toast(&e);

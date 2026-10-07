@@ -5,19 +5,39 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::gio;
+use gtk::{gio, glib};
 
 use super::{listed, Event, Ui};
 use crate::core::{Export, Imported};
+use crate::library::{self, Pack};
 
 /// Where an export goes.
 pub enum To {
     File,
     Clipboard,
+    /// The shared library, after the player has read it.
+    Library,
+}
+
+/// Runs a call that blocks (the server) on a thread of its own, then `done` with its result
+/// on the GUI's thread.
+fn in_background<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(T) + 'static) {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        tx.send_blocking(f()).ok();
+    });
+    glib::spawn_future_local(async move {
+        if let Ok(r) = rx.recv().await {
+            done(r);
+        }
+    });
 }
 
 /// The game page's menu.
 pub fn menu_button() -> gtk::MenuButton {
+    let library = gio::Menu::new();
+    library.append(Some("Browse Shared Values…"), Some("app.browse"));
+    library.append(Some("Share Your Values…"), Some("app.share-values"));
     let export = gio::Menu::new();
     export.append(Some("Export Values…"), Some("app.export"));
     export.append(Some("Copy Values"), Some("app.copy-values"));
@@ -25,6 +45,7 @@ pub fn menu_button() -> gtk::MenuButton {
     import.append(Some("Import Values…"), Some("app.import"));
     import.append(Some("Paste Values"), Some("app.paste-values"));
     let menu = gio::Menu::new();
+    menu.append_section(None, &library);
     menu.append_section(None, &export);
     menu.append_section(None, &import);
     menu.append_section(None, &feedback_section());
@@ -62,6 +83,8 @@ pub fn add_actions(app: &adw::Application, ui: &Rc<Ui>) {
     add("export", |ui| ui.worker.run(|core| Event::Exported(core.export(), To::File)));
     add("copy-values", |ui| ui.worker.run(|core| Event::Exported(core.export(), To::Clipboard)));
     add("import", import_file);
+    add("browse", |ui| ui.worker.run(|core| Event::Browse(core.library_key())));
+    add("share-values", |ui| ui.worker.run(|core| Event::Exported(core.export(), To::Library)));
     add("feedback", super::feedback::open);
     add("paste-values", |ui| {
         let ui = ui.clone();
@@ -101,7 +124,7 @@ fn import_file(ui: &Rc<Ui>) {
 }
 
 fn import_text(ui: &Rc<Ui>, text: String) {
-    ui.worker.run(move |core| Event::Imported(core.import(&text)));
+    ui.worker.run(move |core| Event::Imported(core.import(&text, None)));
 }
 
 /// A message in a toast, or in a dialog when it is too long for one.
@@ -132,6 +155,7 @@ pub fn exported(ui: &Rc<Ui>, export: Result<Export, String>, to: To) {
         }
     };
     match to {
+        To::Library => share_dialog(ui, export),
         // A code block: chats show it as it is (names with "_" came out in italics).
         To::Clipboard => {
             ui.window.clipboard().set_text(&format!("```\n{}```", export.text));
@@ -184,4 +208,240 @@ pub fn imported(ui: &Rc<Ui>, result: Result<Imported, String>) {
     ui.stack.set_visible_child_name("values");
     ui.worker.run(|core| Event::Values(core.values()));
     ui.explain(&heading, &text);
+}
+
+/// "Share These Values?": the exact text that goes, then the upload.
+fn share_dialog(ui: &Rc<Ui>, export: Export) {
+    let intro = gtk::Label::builder()
+        .label("Anyone using Ferret can download these for this game. Only values you confirmed are in it, and nothing about you or your computer.")
+        .wrap(true)
+        .xalign(0.0)
+        .build();
+    let view = gtk::TextView::builder()
+        .editable(false)
+        .monospace(true)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(10)
+        .bottom_margin(10)
+        .left_margin(10)
+        .right_margin(10)
+        .build();
+    view.buffer().set_text(&export.text);
+    let scroll = gtk::ScrolledWindow::builder().child(&view).min_content_height(220).vexpand(true).css_classes(["card"]).build();
+    let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(12).margin_bottom(18).margin_start(18).margin_end(18).build();
+    content.append(&intro);
+    content.append(&scroll);
+    if !export.left_out.is_empty() {
+        let left = gtk::Label::builder()
+            .label(format!("Left out: {}", export.left_out.join("; ")))
+            .wrap(true)
+            .xalign(0.0)
+            .css_classes(["dim-label"])
+            .build();
+        content.append(&left);
+    }
+    let error = gtk::Label::builder().wrap(true).xalign(0.0).css_classes(["error"]).visible(false).build();
+    content.append(&error);
+    let send = gtk::Button::builder().label("Share").css_classes(["suggested-action"]).build();
+    let cancel = gtk::Button::with_label("Cancel");
+    let header = adw::HeaderBar::builder().show_end_title_buttons(false).show_start_title_buttons(false).build();
+    header.pack_start(&cancel);
+    header.pack_end(&send);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&content));
+    let dialog = adw::Dialog::builder().title("Share These Values?").content_width(560).content_height(520).child(&toolbar).build();
+    {
+        let dialog = dialog.clone();
+        cancel.connect_clicked(move |_| {
+            dialog.close();
+        });
+    }
+    {
+        let (ui, dialog) = (ui.clone(), dialog.clone());
+        send.connect_clicked(move |send| {
+            send.set_sensitive(false);
+            send.set_label("Sharing…");
+            error.set_visible(false);
+            let text = export.text.clone();
+            let (ui, dialog, error, send) = (ui.clone(), dialog.clone(), error.clone(), send.clone());
+            in_background(
+                move || library::upload(&text),
+                move |r| match r {
+                    Ok(id) => {
+                        dialog.close();
+                        ui.explain("Thanks for Sharing", &format!("Players of this game find them in Browse Shared Values now. Their id:\n  {id}"));
+                    }
+                    Err(e) => {
+                        error.set_label(&e);
+                        error.set_visible(true);
+                        send.set_label("Share");
+                        send.set_sensitive(true);
+                    }
+                },
+            );
+        });
+    }
+    dialog.present(Some(&ui.window));
+}
+
+/// "Worked for 3 players, not for 1 · Shared 2026-10-07 · Your version of the game"
+fn pack_subtitle(p: &Pack, build: Option<&str>) -> String {
+    let players = |n: u32| if n == 1 { "1 player".to_owned() } else { format!("{n} players") };
+    let mut parts = vec![match (p.worked, p.failed) {
+        (0, 0) => "Nobody has said whether it works yet".to_owned(),
+        (w, 0) => format!("Worked for {}", players(w)),
+        (0, f) => format!("Didn't work for {}", players(f)),
+        (w, f) => format!("Worked for {}, not for {f}", players(w)),
+    }];
+    parts.push(format!("Shared {}", p.day));
+    match (p.build.as_deref(), build) {
+        (Some(a), Some(b)) if a == b => parts.push("Your version of the game".into()),
+        (Some(_), Some(_)) => parts.push("Another version of the game".into()),
+        _ => {}
+    }
+    if p.mine {
+        parts.push("Shared by you".into());
+    }
+    parts.join(" · ")
+}
+
+/// Browse Shared Values: other players' uploads for the open game, best first (this build's
+/// first of all), each with Import, or Delete on the player's own.
+pub fn browse(ui: &Rc<Ui>, key: Result<(String, Option<String>, Option<String>), String>) {
+    let (game, steam, build) = match key {
+        Ok(k) => k,
+        Err(e) => return ui.toast(&e),
+    };
+    let stack = gtk::Stack::new();
+    let spinner = adw::StatusPage::builder().title("Looking for Shared Values…").child(&adw::Spinner::new()).build();
+    let empty = adw::StatusPage::builder()
+        .icon_name("system-search-symbolic")
+        .title("Nothing Shared Yet")
+        .description("Nobody has shared values for this game yet. Once you find some, you could be the first.")
+        .build();
+    let failed = adw::StatusPage::builder().icon_name("network-offline-symbolic").title("Couldn't Look").build();
+    let group = adw::PreferencesGroup::new();
+    let list = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&adw::Clamp::builder().child(&group).margin_top(12).margin_bottom(18).margin_start(12).margin_end(12).build())
+        .build();
+    stack.add_named(&spinner, Some("wait"));
+    stack.add_named(&empty, Some("empty"));
+    stack.add_named(&failed, Some("failed"));
+    stack.add_named(&list, Some("list"));
+    let share = gtk::Button::builder().label("Share Yours").action_name("app.share-values").build();
+    let header = adw::HeaderBar::new();
+    header.pack_start(&share);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&stack));
+    let dialog = adw::Dialog::builder().title("Shared Values").content_width(600).content_height(520).child(&toolbar).build();
+    dialog.present(Some(&ui.window));
+
+    // Fills the list from the server (again after a delete).
+    let rows: Rc<std::cell::RefCell<Vec<adw::ActionRow>>> = Rc::default();
+    let load: Rc<std::cell::RefCell<Option<Rc<dyn Fn()>>>> = Rc::default();
+    let fill: Rc<dyn Fn()> = {
+        let (ui, dialog, load) = (ui.clone(), dialog.clone(), load.clone());
+        Rc::new(move || {
+            stack.set_visible_child_name("wait");
+            let (game, steam, build) = (game.clone(), steam.clone(), build.clone());
+            let (ui, dialog, stack, group, rows, failed, empty, load) =
+                (ui.clone(), dialog.clone(), stack.clone(), group.clone(), rows.clone(), failed.clone(), empty.clone(), load.clone());
+            in_background(
+                move || library::list(&game, steam.as_deref()),
+                move |r| {
+                    for row in rows.borrow_mut().drain(..) {
+                        group.remove(&row);
+                    }
+                    let mut packs = match r {
+                        Ok(p) => p,
+                        Err(e) => {
+                            failed.set_description(Some(&e));
+                            return stack.set_visible_child_name("failed");
+                        }
+                    };
+                    if packs.is_empty() {
+                        empty.set_visible(true);
+                        return stack.set_visible_child_name("empty");
+                    }
+                    // This build's first; the server's order (most worked) within each.
+                    packs.sort_by_key(|p| !(p.build.is_some() && p.build == build));
+                    for p in packs {
+                        let row = adw::ActionRow::builder()
+                            .title(&p.names)
+                            .use_markup(false)
+                            .subtitle(pack_subtitle(&p, build.as_deref()))
+                            .subtitle_lines(2)
+                            .build();
+                        let button = match p.mine {
+                            true => gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Delete").css_classes(["flat"]).build(),
+                            false => gtk::Button::with_label("Import"),
+                        };
+                        button.set_valign(gtk::Align::Center);
+                        row.add_suffix(&button);
+                        let (ui, dialog, load, id) = (ui.clone(), dialog.clone(), load.clone(), p.id.clone());
+                        button.connect_clicked(move |button| match p.mine {
+                            true => ask_delete(&dialog, &id, load.borrow().clone()),
+                            false => {
+                                button.set_sensitive(false);
+                                let (ui, dialog, id, button) = (ui.clone(), dialog.clone(), id.clone(), button.clone());
+                                in_background(
+                                    {
+                                        let id = id.clone();
+                                        move || library::download(&id)
+                                    },
+                                    move |r| match r {
+                                        Ok(text) => {
+                                            dialog.close();
+                                            ui.worker.run(move |core| Event::Imported(core.import(&text, Some(&id))));
+                                        }
+                                        Err(e) => {
+                                            button.set_sensitive(true);
+                                            ui.toast(&e);
+                                        }
+                                    },
+                                );
+                            }
+                        });
+                        group.add(&row);
+                        rows.borrow_mut().push(row);
+                    }
+                    stack.set_visible_child_name("list");
+                },
+            );
+        })
+    };
+    load.replace(Some(fill.clone()));
+    fill();
+}
+
+/// Asks before deleting one of the player's uploads, then lists again.
+fn ask_delete(parent: &adw::Dialog, id: &str, reload: Option<Rc<dyn Fn()>>) {
+    let dialog = adw::AlertDialog::new(Some("Delete Your Upload?"), Some("Players who imported it keep what they have; nobody else can find it anymore."));
+    dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let id = id.to_owned();
+    let parent_ = parent.clone();
+    dialog.connect_response(Some("delete"), move |_, _| {
+        let id = id.clone();
+        let (reload, parent) = (reload.clone(), parent_.clone());
+        in_background(
+            move || library::delete(&id),
+            move |r| {
+                if let Err(e) = r {
+                    let alert = adw::AlertDialog::new(Some("Couldn't Delete It"), Some(&e));
+                    alert.add_response("ok", "OK");
+                    alert.present(Some(&parent));
+                }
+                if let Some(reload) = reload {
+                    reload();
+                }
+            },
+        );
+    });
+    dialog.present(Some(parent));
 }
