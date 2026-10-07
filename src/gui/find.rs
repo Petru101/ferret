@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::{gdk, gio};
+use gtk::{gdk, gio, glib};
 
 use super::guide::{self, Guide, Look};
 use super::{Event, Worker};
@@ -23,6 +23,16 @@ use crate::ocr::{self, Rect, Shown, Word};
 pub struct FindView {
     pub root: gtk::Stack,
     picture: gtk::Picture,
+    /// Around the picture: scrolls it while zoomed in.
+    scroll: gtk::ScrolledWindow,
+    /// How much the picture is zoomed (pixels on screen per pixel of the frame); 0 = fitted to
+    /// the window (never above actual size). Scroll to zoom: game numbers were too small to
+    /// pick at the fitted size.
+    zoom: Cell<f64>,
+    /// Where the pointer is over `scroll`: zooming keeps that spot under it.
+    pointer: Cell<(f64, f64)>,
+    /// Right-dragging the picture: the scroll positions when the drag began.
+    pan: Cell<Option<(f64, f64)>>,
     area: gtk::DrawingArea,
     texture: RefCell<Option<gdk::Texture>>,
     words: RefCell<Vec<Word>>,
@@ -259,7 +269,10 @@ impl FindView {
             .dropdown_tooltip("Watch another window")
             .menu_model(&window_menu)
             .build();
-        let zoom = gtk::ToggleButton::builder().icon_name("zoom-original-symbolic").tooltip_text("Actual size").build();
+        let zoom = gtk::Button::builder()
+            .icon_name("zoom-fit-best-symbolic")
+            .tooltip_text("Fit the picture in the window (scroll over it to zoom, drag with the right button to move it)")
+            .build();
         let crop = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::ScaleDown)
             .height_request(40)
@@ -500,6 +513,10 @@ impl FindView {
         let view = Rc::new(Self {
             root,
             picture,
+            scroll: scroll.clone(),
+            zoom: Cell::new(0.0),
+            pointer: Cell::new((0.0, 0.0)),
+            pan: Cell::new(None),
             area,
             texture: RefCell::default(),
             words: RefCell::default(),
@@ -585,10 +602,42 @@ impl FindView {
         }
         {
             let view_ = view.clone();
-            zoom.connect_toggled(move |z| {
-                view_.picture.set_can_shrink(!z.is_active());
-                view_.area.queue_draw();
+            zoom.connect_clicked(move |_| view_.fit());
+        }
+        {
+            // Scroll wheel: zoom around the pointer (instead of scrolling).
+            let motion = gtk::EventControllerMotion::new();
+            let view_ = view.clone();
+            motion.connect_motion(move |_, x, y| view_.pointer.set((x, y)));
+            scroll.add_controller(motion);
+            let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let view_ = view.clone();
+            wheel.connect_scroll(move |_, _, dy| {
+                view_.zoom_by(1.25f64.powf(-dy));
+                glib::Propagation::Stop
             });
+            scroll.add_controller(wheel);
+            // Right button: drag the picture around.
+            let pan = gtk::GestureDrag::builder().button(gdk::BUTTON_SECONDARY).build();
+            let view_ = view.clone();
+            pan.connect_drag_begin(move |_, _, _| {
+                view_.pan.set(Some((view_.scroll.hadjustment().value(), view_.scroll.vadjustment().value())));
+                view_.scroll.set_cursor_from_name(Some("grabbing"));
+            });
+            let view_ = view.clone();
+            pan.connect_drag_update(move |_, dx, dy| {
+                if let Some((h, v)) = view_.pan.get() {
+                    view_.scroll.hadjustment().set_value(h - dx);
+                    view_.scroll.vadjustment().set_value(v - dy);
+                }
+            });
+            let view_ = view.clone();
+            pan.connect_drag_end(move |_, _, _| {
+                view_.pan.set(None);
+                view_.scroll.set_cursor_from_name(None);
+            });
+            scroll.add_controller(pan);
         }
         {
             let view_ = view.clone();
@@ -690,8 +739,76 @@ impl FindView {
         let t = texture.as_ref()?;
         let (iw, ih) = (t.width() as f64, t.height() as f64);
         let (w, h) = (self.picture.width() as f64, self.picture.height() as f64);
-        let s = (w / iw).min(h / ih).min(1.0);
+        let s = (w / iw).min(h / ih);
+        // Fitted: never above actual size (the picture scales down only).
+        let s = if self.zoom.get() > 0.0 { s } else { s.min(1.0) };
         Some((s, (w - iw * s) / 2.0, (h - ih * s) / 2.0))
+    }
+
+    /// Shows a new frame of the game; a zoomed picture stays zoomed as much.
+    fn set_frame(&self, texture: gdk::Texture) {
+        let z = self.zoom.get();
+        if z > 0.0 {
+            self.picture.set_size_request((texture.width() as f64 * z).round() as i32, (texture.height() as f64 * z).round() as i32);
+        }
+        self.picture.set_paintable(Some(&texture));
+        *self.texture.borrow_mut() = Some(texture);
+    }
+
+    /// Debug actions: shows an image file as the game's frame (no capture), and zooms around
+    /// the middle of the picture (`factor`; 0 = fit).
+    pub fn debug_frame(&self, path: &str) {
+        if let Ok(t) = gdk::Texture::from_filename(path) {
+            self.root.set_visible_child_name("pick");
+            self.set_frame(t);
+            self.area.queue_draw();
+        }
+    }
+
+    pub fn debug_zoom(&self, factor: f64) {
+        if factor <= 0.0 {
+            self.fit();
+            return;
+        }
+        self.pointer.set((self.scroll.width() as f64 / 2.0, self.scroll.height() as f64 / 2.0));
+        self.zoom_by(factor);
+    }
+
+    /// Back to the picture fitted in the window.
+    fn fit(&self) {
+        self.zoom.set(0.0);
+        self.picture.set_size_request(-1, -1);
+        self.picture.set_content_fit(gtk::ContentFit::ScaleDown);
+        self.area.queue_draw();
+    }
+
+    /// Zooms by `factor`, keeping the spot under the pointer where it is.
+    fn zoom_by(&self, factor: f64) {
+        let Some((s, ox, oy)) = self.layout() else { return };
+        let Some((iw, ih)) = self.texture.borrow().as_ref().map(|t| (t.width() as f64, t.height() as f64)) else { return };
+        let (hadj, vadj) = (self.scroll.hadjustment(), self.scroll.vadjustment());
+        let (vw, vh) = (self.scroll.width() as f64, self.scroll.height() as f64);
+        let (px, py) = self.pointer.get();
+        // The frame's pixel under the pointer.
+        let (fx, fy) = ((px + hadj.value() - ox) / s, (py + vadj.value() - oy) / s);
+        let fitted = (vw / iw).min(vh / ih).min(1.0);
+        let z = (s * factor).min(8.0);
+        if z <= fitted * 1.001 {
+            self.fit();
+            return;
+        }
+        self.zoom.set(z);
+        let (w, h) = (iw * z, ih * z);
+        self.picture.set_content_fit(gtk::ContentFit::Contain);
+        self.picture.set_size_request(w.round() as i32, h.round() as i32);
+        // The scroll range grows on the next layout; set it now so the new position isn't cut to
+        // the old range.
+        let (nox, noy) = (((vw - w) / 2.0).max(0.0), ((vh - h) / 2.0).max(0.0));
+        hadj.set_upper(w.max(vw));
+        vadj.set_upper(h.max(vh));
+        hadj.set_value(fx * z + nox - px);
+        vadj.set_value(fy * z + noy - py);
+        self.area.queue_draw();
     }
 
     fn to_widget(&self, r: Rect) -> Option<(f64, f64, f64, f64)> {
@@ -866,8 +983,7 @@ impl FindView {
             gdk::Texture::from_filename(&frame).map(|t| (t, words)).map_err(|e| e.to_string())
         }) {
             Ok((texture, words)) => {
-                self.picture.set_paintable(Some(&texture));
-                *self.texture.borrow_mut() = Some(texture);
+                self.set_frame(texture);
                 self.log(&format!("{} numbers found on screen", words.len()));
                 *self.words.borrow_mut() = words;
                 self.root.set_visible_child_name("pick");
@@ -916,8 +1032,7 @@ impl FindView {
         // The read comes from a fresh frame: show that one, the game may have changed since the
         // capture (Forager's furnace used up ore while the player picked numbers).
         if let Ok(t) = gdk::Texture::from_filename(core::cache_dir().join("picked.png")) {
-            self.picture.set_paintable(Some(&t));
-            *self.texture.borrow_mut() = Some(t);
+            self.set_frame(t);
             self.area.queue_draw();
         }
         self.unconfirmed.replace(None);
@@ -1521,6 +1636,7 @@ impl FindView {
         self.last_count.set(None);
         self.again.set_visible(false);
         self.matches.set_visible(false);
+        self.fit();
         self.picture.set_paintable(None::<&gdk::Paintable>);
         self.crop.set_paintable(None::<&gdk::Paintable>);
         *self.texture.borrow_mut() = None;
@@ -1828,8 +1944,7 @@ impl FindView {
 
     /// The game as the search last saw it, with the watched box where it is now.
     pub fn show_frame(&self, texture: gdk::Texture, area: Option<Rect>) {
-        self.picture.set_paintable(Some(&texture));
-        *self.texture.borrow_mut() = Some(texture);
+        self.set_frame(texture);
         if area.is_some() {
             *self.selection.borrow_mut() = area;
         }

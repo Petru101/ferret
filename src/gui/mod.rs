@@ -728,6 +728,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("confirm", Box::new(|ui, yes| ui.find.answer_read(yes == "yes")));
     // Trying the places one at a time: start, try (with the number in the entry), yes, no, skip, stop.
     action("place", Box::new(|ui, step| ui.find.place_step(&step)));
+    action("frame", Box::new(|ui, path| ui.find.debug_frame(&path)));
+    action("zoom", Box::new(|ui, f| ui.find.debug_zoom(f.parse().unwrap_or(0.0))));
     action(
         "try",
         Box::new(|ui, arg| {
