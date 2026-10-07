@@ -8,6 +8,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
+use crate::i18n::tr;
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tip {
     /// On opening a game.
@@ -24,17 +26,17 @@ impl Tip {
         }
     }
 
-    fn text(self) -> &'static str {
+    fn text(self) -> String {
         match self {
-            Tip::SaveFirst => {
+            Tip::SaveFirst => tr!(
                 "Tip: Save your game before changing values. Finding a value briefly changes it, and a wrong \
                  change the game saves can't be undone by loading."
-            }
-            Tip::Slots => {
+            ),
+            Tip::Slots => tr!(
                 "Tip: In many games, inventory values are stored per slot, not per item. If you rearrange, sort, \
                  use up, or pick up items, the address you found may now point to a different item. Re-scan if \
                  values start changing unexpectedly."
-            }
+            ),
         }
     }
 }
@@ -78,10 +80,10 @@ pub struct Tips {
 impl Tips {
     pub fn new() -> Rc<Self> {
         let label = gtk::Label::builder().wrap(true).xalign(0.0).hexpand(true).build();
-        let never = gtk::Button::builder().label("Don't Show Again").valign(gtk::Align::Center).build();
+        let never = gtk::Button::builder().label(tr!("Don't Show Again")).valign(gtk::Align::Center).build();
         let close = gtk::Button::builder()
             .icon_name("window-close-symbolic")
-            .tooltip_text("Close")
+            .tooltip_text(tr!("Close"))
             .valign(gtk::Align::Center)
             .css_classes(["flat", "circular"])
             .build();
@@ -116,7 +118,7 @@ impl Tips {
         if hidden(tip) {
             return;
         }
-        self.label.set_label(tip.text());
+        self.label.set_label(&tip.text());
         self.shown.set(Some(tip));
         self.root.set_reveal_child(true);
     }

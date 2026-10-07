@@ -4,6 +4,7 @@
 // blocks (online.rs): never on the GUI's thread.
 
 use crate::online::{self, json_string};
+use crate::i18n::tr;
 
 /// One upload, as the list shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,7 +71,7 @@ pub fn download(id: &str) -> Result<String, String> {
     let reply = online::get(&format!("/v1/packs/{id}"))?;
     match reply.status {
         200 => Ok(reply.body),
-        404 => Err(format!("Upload {id} isn't there anymore: its player deleted it")),
+        404 => Err(tr!("Upload {id} isn't there anymore: its player deleted it", id)),
         _ => Err(online::server_error(&reply)),
     }
 }
@@ -82,8 +83,8 @@ pub fn upload(text: &str) -> Result<String, String> {
     let id = || reply.body.split_once("\"id\":\"").and_then(|(_, r)| r.split_once('"')).map(|(id, _)| id.to_owned());
     match reply.status {
         200 => id().ok_or_else(|| online::server_error(&reply)),
-        409 => Err(format!("These exact values are shared already, as {}", id().unwrap_or_default())),
-        429 => Err("You shared a lot today: try again tomorrow.".into()),
+        409 => Err(tr!("These exact values are shared already, as {id}", id = id().unwrap_or_default())),
+        429 => Err(tr!("You shared a lot today: try again tomorrow.")),
         _ => Err(online::server_error(&reply)),
     }
 }

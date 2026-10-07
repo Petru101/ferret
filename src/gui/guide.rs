@@ -17,6 +17,7 @@ use gtk::glib;
 use super::find::grouped;
 use super::notify::Notifier;
 use crate::bar::Kind as GaugeKind;
+use crate::i18n::{gettext, n_, ntr, tr};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Look {
@@ -44,13 +45,14 @@ impl Look {
         }
     }
 
-    fn tag(self) -> &'static str {
+    fn tag(self) -> String {
         match self {
-            Look::Pick => "YOUR PICK",
-            Look::Wait => "HANDS OFF",
-            Look::Go => "YOUR TURN",
-            Look::Call => "YOUR CALL",
-            Look::Found => "FOUND",
+            // Translators: the instruction bar's tags, short and in capitals.
+            Look::Pick => tr!("YOUR PICK"),
+            Look::Wait => tr!("HANDS OFF"),
+            Look::Go => tr!("YOUR TURN"),
+            Look::Call => tr!("YOUR CALL"),
+            Look::Found => tr!("FOUND"),
         }
     }
 
@@ -71,7 +73,8 @@ pub const HANDS_OFF: usize = 1;
 pub const CHANGE: usize = 2;
 pub const CHECK: usize = 3;
 pub const SAVE: usize = 4;
-const STEPS: [&str; 5] = ["Pick the number", "Hands off", "Change it", "Checking", "Save"];
+// Translators: the steps of a search, shown in a row of small pills.
+const STEPS: [&str; 5] = [n_!("Pick the number"), n_!("Hands off"), n_!("Change it"), n_!("Checking"), n_!("Save")];
 
 pub struct Guide {
     pub root: gtk::Box,
@@ -94,7 +97,7 @@ pub struct Guide {
     notify: Rc<Notifier>,
     /// What the bar asks of the player now (title, text, button, seconds): sent again when they
     /// switch to the game (`remind`); "Ready" usually comes while Ferret is still in front.
-    away: RefCell<Option<(String, String, Option<&'static str>, Option<u32>)>>,
+    away: RefCell<Option<(String, String, Option<String>, Option<u32>)>>,
     /// `away` went out already: once is enough (the player switching back and forth got the
     /// same one every time, until Plasma refused them as too many).
     reminded: Cell<bool>,
@@ -114,13 +117,15 @@ pub struct Guide {
     hands_off: Cell<bool>,
 }
 
-const HANDS_OFF_NOTICE: &str = "Hands off: don't change anything in the game yet";
+fn hands_off_notice() -> String {
+    tr!("Hands off: don't change anything in the game yet")
+}
 
 /// "Got it" notifications at most this often (Plasma refuses an app that sends too many).
 const GOT_IT_GAP: Duration = Duration::from_secs(2);
 
 fn places(n: usize) -> String {
-    format!("{} {}", grouped(n), if n == 1 { "place matches" } else { "places match" })
+    ntr!("{n} place matches", "{n} places match", n, n = grouped(n))
 }
 
 impl Guide {
@@ -128,7 +133,7 @@ impl Guide {
         let steps: Vec<gtk::Label> = STEPS
             .iter()
             .enumerate()
-            .map(|(i, s)| gtk::Label::builder().label(format!("{}  {s}", i + 1)).css_classes(["guide-step"]).build())
+            .map(|(i, s)| gtk::Label::builder().label(format!("{}  {}", i + 1, gettext(s))).css_classes(["guide-step"]).build())
             .collect();
         let steps_row = gtk::Box::builder().spacing(6).build();
         steps.iter().for_each(|s| steps_row.append(s));
@@ -146,7 +151,7 @@ impl Guide {
         text.append(&title);
         text.append(&hint);
         text.append(&bar);
-        let give_up = gtk::Button::builder().label("Cancel").visible(false).build();
+        let give_up = gtk::Button::builder().label(tr!("Cancel")).visible(false).build();
         let actions = gtk::Box::builder().spacing(8).valign(gtk::Align::Center).build();
         actions.append(&give_up);
         let main = gtk::Box::builder().spacing(14).build();
@@ -189,7 +194,7 @@ impl Guide {
             got_it_next: Rc::default(),
             hands_off: Cell::new(false),
         });
-        guide.pick("Click the number you want to find", "In the picture of your game below, or drag a box around it.");
+        guide.pick(&tr!("Click the number you want to find"), &tr!("In the picture of your game below, or drag a box around it."));
         guide
     }
 
@@ -221,7 +226,7 @@ impl Guide {
             }
         }
         self.icon.set_icon_name(Some(look.icon()));
-        self.tag.set_label(look.tag());
+        self.tag.set_label(&look.tag());
         self.spinner.set_spinning(look == Look::Wait);
         self.spinner.set_visible(look == Look::Wait);
         self.title.set_label(title);
@@ -238,11 +243,11 @@ impl Guide {
         // The player in the game must hear it too: started with the hotkey from the game, or
         // switching to the game while Ferret scans (sent then, by `remind`). Until the next step.
         if hands_off {
-            let body = format!("{title}. Ferret tells you when it's your turn.");
+            let body = tr!("{step}. Ferret tells you when it's your turn.", step = title);
             if still {
-                self.away.replace(Some((HANDS_OFF_NOTICE.to_owned(), body, None, None)));
+                self.away.replace(Some((hands_off_notice(), body, None, None)));
             } else {
-                self.tell(HANDS_OFF_NOTICE, &body, None, None, true);
+                self.tell(&hands_off_notice(), &body, None, None, true);
                 self.hands_off.set(self.notify.away());
             }
         }
@@ -295,9 +300,9 @@ impl Guide {
 
     /// Notifies the player of what the bar asks of them (`send`: now too, not only when they
     /// switch to the game).
-    fn tell(&self, title: &str, text: &str, button: Option<&'static str>, secs: Option<u32>, send: bool) {
+    fn tell(&self, title: &str, text: &str, button: Option<String>, secs: Option<u32>, send: bool) {
         if send {
-            self.notify.send(title, text, button, secs);
+            self.notify.send(title, text, button.as_deref(), secs);
         }
         self.reminded.set(send && self.notify.away());
         self.away.replace(Some((title.to_owned(), text.to_owned(), button, secs)));
@@ -309,8 +314,8 @@ impl Guide {
             return;
         }
         if let Some((title, text, button, secs)) = self.away.borrow().clone() {
-            self.notify.send(&title, &text, button, secs);
-            self.hands_off.set(title == HANDS_OFF_NOTICE);
+            self.notify.send(&title, &text, button.as_deref(), secs);
+            self.hands_off.set(title == hands_off_notice());
         }
     }
 
@@ -340,8 +345,8 @@ impl Guide {
         self.show(
             Look::Wait,
             HANDS_OFF,
-            &format!("Scanning the game's memory for {n}"),
-            "Don't change the number in the game yet. This turns green when it's your turn.",
+            &tr!("Scanning the game's memory for {n}", n),
+            &tr!("Don't change the number in the game yet. This turns green when it's your turn."),
             Some(done),
         );
     }
@@ -353,29 +358,29 @@ impl Guide {
             return;
         }
         let hint = match self.follows.get() {
-            Some(GaugeKind::Icons) => "Don't let the icons change in the game yet. This turns green when it's your turn.",
-            _ => "Don't let the bar change in the game yet. This turns green when it's your turn.",
+            Some(GaugeKind::Icons) => tr!("Don't let the icons change in the game yet. This turns green when it's your turn."),
+            _ => tr!("Don't let the bar change in the game yet. This turns green when it's your turn."),
         };
-        self.show(Look::Wait, HANDS_OFF, "Copying the game's memory", hint, Some(done));
+        self.show(Look::Wait, HANDS_OFF, &tr!("Copying the game's memory"), &hint, Some(done));
     }
 
     /// The copy is taken: the bar has to move before anything narrows down.
     pub fn bar_ready(&self) {
         let (title, notice) = match self.follows.get() {
-            Some(GaugeKind::Icons) => ("Now let the icons change in the game", "Ready: let the icons change in the game"),
-            _ => ("Now let the bar change in the game", "Ready: let the bar change in the game"),
+            Some(GaugeKind::Icons) => (tr!("Now let the icons change in the game"), tr!("Ready: let the icons change in the game")),
+            _ => (tr!("Now let the bar change in the game"), tr!("Ready: let the bar change in the game")),
         };
-        let hint = "Take a hit, or use some. Every change narrows it down.";
-        self.show(Look::Go, CHANGE, title, hint, None);
-        self.tell(notice, hint, None, Some(6), true);
+        let hint = tr!("Take a hit, or use some. Every change narrows it down.");
+        self.show(Look::Go, CHANGE, &title, &hint, None);
+        self.tell(&notice, &hint, None, Some(6), true);
     }
 
     /// What Start follows: "Keep the bar changing" and the like.
-    fn keep_changing(&self) -> &'static str {
+    fn keep_changing(&self) -> String {
         match self.follows.get() {
-            Some(GaugeKind::Bar) => "Keep the bar changing in the game",
-            Some(GaugeKind::Icons) => "Keep the icons changing in the game",
-            None => "Keep changing the number in the game",
+            Some(GaugeKind::Bar) => tr!("Keep the bar changing in the game"),
+            Some(GaugeKind::Icons) => tr!("Keep the icons changing in the game"),
+            None => tr!("Keep changing the number in the game"),
         }
     }
 
@@ -383,35 +388,44 @@ impl Guide {
     pub fn ready(&self, n: usize) {
         self.count.set(n);
         let (title, notice) = match self.follows.get() {
-            Some(GaugeKind::Bar) => ("Now let the bar change in the game", "Ready: keep the bar changing in the game"),
-            Some(GaugeKind::Icons) => ("Now let the icons change in the game", "Ready: keep the icons changing in the game"),
-            None => ("Now change the number in the game", "Ready: change the number in the game"),
+            Some(GaugeKind::Bar) => (tr!("Now let the bar change in the game"), tr!("Ready: keep the bar changing in the game")),
+            Some(GaugeKind::Icons) => (tr!("Now let the icons change in the game"), tr!("Ready: keep the icons changing in the game")),
+            None => (tr!("Now change the number in the game"), tr!("Ready: change the number in the game")),
         };
-        let hint = format!("{}. Every change narrows it down.", places(n));
-        self.show(Look::Go, CHANGE, title, &hint, None);
-        self.tell(notice, &hint, None, Some(6), true);
+        let hint = ntr!("{n} place matches. Every change narrows it down.", "{n} places match. Every change narrows it down.", n, n = grouped(n));
+        self.show(Look::Go, CHANGE, &title, &hint, None);
+        self.tell(&notice, &hint, None, Some(6), true);
     }
 
     /// A change on screen narrowed it down.
     pub fn watching(self: &Rc<Self>, n: usize) {
         let before = self.count.replace(n);
         let hint = match before {
-            b if b > n => format!("{} \u{2192} {}. Every change narrows it down.", grouped(b), places(n)),
-            _ => format!("{}. Every change narrows it down.", places(n)),
+            b if b > n => ntr!(
+                "{before} \u{2192} {n} place matches. Every change narrows it down.",
+                "{before} \u{2192} {n} places match. Every change narrows it down.",
+                n,
+                before = grouped(b),
+                n = grouped(n)
+            ),
+            _ => ntr!("{n} place matches. Every change narrows it down.", "{n} places match. Every change narrows it down.", n, n = grouped(n)),
         };
         if self.look.get() == Look::Go {
-            self.title.set_label(self.keep_changing());
+            self.title.set_label(&self.keep_changing());
             self.note(&hint);
         } else {
-            self.show(Look::Go, CHANGE, self.keep_changing(), &hint, None);
+            self.show(Look::Go, CHANGE, &self.keep_changing(), &hint, None);
         }
         // Each change Ferret counted, while the player is in the game: they waited for a word
         // that it took and got nothing (only "keep changing" when switching to the game, before
         // any change).
         if before > n {
-            self.got_it(format!("Got it: {} \u{2192} {}", grouped(before), places(n)), format!("{}.", self.keep_changing()));
+            self.got_it(
+                ntr!("Got it: {before} \u{2192} {n} place matches", "Got it: {before} \u{2192} {n} places match", n, before = grouped(before), n = grouped(n)),
+                format!("{}.", self.keep_changing()),
+            );
         }
-        self.away.replace(Some((self.keep_changing().to_owned(), format!("{}.", places(n)), None, Some(6))));
+        self.away.replace(Some((self.keep_changing(), format!("{}.", places(n)), None, Some(6))));
         self.reminded.set(true);
     }
 
@@ -442,15 +456,22 @@ impl Guide {
     pub fn scanned_again(&self, before: usize, after: usize) {
         self.count.set(after);
         let hint = match before == after {
-            true => format!("Scanned again: still {}. Keep changing it, or press Scan Again while it stays the same.", places(after)),
-            false => format!(
-                "Scanned again: {} \u{2192} {}. Keep changing it, or press Scan Again while it stays the same.",
-                grouped(before),
-                places(after)
+            true => ntr!(
+                "Scanned again: still {n} place matches. Keep changing it, or press Scan Again while it stays the same.",
+                "Scanned again: still {n} places match. Keep changing it, or press Scan Again while it stays the same.",
+                after,
+                n = grouped(after)
+            ),
+            false => ntr!(
+                "Scanned again: {before} \u{2192} {n} place matches. Keep changing it, or press Scan Again while it stays the same.",
+                "Scanned again: {before} \u{2192} {n} places match. Keep changing it, or press Scan Again while it stays the same.",
+                after,
+                before = grouped(before),
+                n = grouped(after)
             ),
         };
-        self.show(Look::Go, CHANGE, self.keep_changing(), &hint, None);
-        self.notify.send("Scanned again", &hint, None, Some(4));
+        self.show(Look::Go, CHANGE, &self.keep_changing(), &hint, None);
+        self.notify.send(&tr!("Scanned again"), &hint, None, Some(4));
     }
 
     pub fn checking(&self, places: usize, done: f64) {
@@ -459,26 +480,31 @@ impl Guide {
             return;
         }
         let title = match places {
-            1 => "Checking the place found".to_owned(),
-            n => format!("Checking which of the {n} places it is"),
+            1 => tr!("Checking the place found"),
+            n => ntr!("Checking which of the {n} place it is", "Checking which of the {n} places it is", n),
         };
-        self.show(Look::Wait, CHECK, &title, "A few seconds. Don't change anything in the game.", Some(done));
+        self.show(Look::Wait, CHECK, &title, &tr!("A few seconds. Don't change anything in the game."), Some(done));
     }
 
     /// The player has to change the number in the game: blinks, and counts down.
     pub fn your_turn(self: &Rc<Self>, places: usize, secs: u64) {
         let hint = move |left: u64| {
-            format!(
-                "Pick some up or use some, once. Ferret watches which of the {places} places the game carries on from. {}:{:02} left.",
-                left / 60,
-                left % 60
+            ntr!(
+                "Pick some up or use some, once. Ferret watches which of the {n} place the game carries on from. {time} left.",
+                "Pick some up or use some, once. Ferret watches which of the {n} places the game carries on from. {time} left.",
+                places,
+                time = format!("{}:{:02}", left / 60, left % 60)
             )
         };
-        let shown = self.show(Look::Go, CHECK, "Your turn: change the number in the game!", &hint(secs), Some(1.0));
+        let shown = self.show(Look::Go, CHECK, &tr!("Your turn: change the number in the game!"), &hint(secs), Some(1.0));
         self.tell(
-            "Your turn: change the number in the game",
-            &format!("Pick some up or use some. Ferret watches which of the {places} places the game carries on from."),
-            Some("Stop Waiting"),
+            &tr!("Your turn: change the number in the game"),
+            &ntr!(
+                "Pick some up or use some. Ferret watches which of the {n} place the game carries on from.",
+                "Pick some up or use some. Ferret watches which of the {n} places the game carries on from.",
+                places
+            ),
+            Some(tr!("Stop Waiting")),
             None,
             true,
         );
@@ -496,18 +522,20 @@ impl Guide {
         let shown = self.show(
             Look::Go,
             SAVE,
-            "Your turn: change the number in the game!",
-            "Use some or pick some up, once. Ferret watches which of the game's code changes it, \
-             the surest way to find it again after a restart.",
+            &tr!("Your turn: change the number in the game!"),
+            &tr!(
+                "Use some or pick some up, once. Ferret watches which of the game's code changes it, \
+                 the surest way to find it again after a restart."
+            ),
             None,
         );
-        self.give_up.set_label("Cancel");
-        self.give_up.set_tooltip_text(Some("Stop waiting and save it another way, which may not last a restart"));
+        self.give_up.set_label(&tr!("Cancel"));
+        self.give_up.set_tooltip_text(Some(&tr!("Stop waiting and save it another way, which may not last a restart")));
         self.give_up.set_visible(true);
         self.tell(
-            "Your turn: change the number in the game",
-            "Use some or pick some up, once. Ferret watches which of the game's code changes it.",
-            Some("Cancel"),
+            &tr!("Your turn: change the number in the game"),
+            &tr!("Use some or pick some up, once. Ferret watches which of the game's code changes it."),
+            Some(tr!("Cancel")),
             None,
             true,
         );
@@ -517,8 +545,20 @@ impl Guide {
     /// A typed number narrowed the search to `text` ("7 places match"): the player changes the
     /// number in the game next, then types the new one.
     pub fn change_now(&self, text: &str) {
-        self.show(Look::Go, CHANGE, "Now change the number in the game", &format!("{text}. Then type the new number below."), None);
-        self.tell("Now change the number in the game", &format!("{text}. Then type the new number in Ferret."), None, Some(6), true);
+        self.show(
+            Look::Go,
+            CHANGE,
+            &tr!("Now change the number in the game"),
+            &tr!("{count}. Then type the new number below.", count = text),
+            None,
+        );
+        self.tell(
+            &tr!("Now change the number in the game"),
+            &tr!("{count}. Then type the new number in Ferret.", count = text),
+            None,
+            Some(6),
+            true,
+        );
     }
 
     /// How a search or a step of it ended; `away` = the notification's text, when the hint

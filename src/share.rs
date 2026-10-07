@@ -4,6 +4,7 @@
 // unconfirmed (core.rs: nothing is written before the player says the game shows its number).
 
 use crate::core::Kind;
+use crate::i18n::tr;
 
 /// The first line of every file; a newer format gets a higher number.
 const HEADER: &str = "ferret";
@@ -159,25 +160,25 @@ fn good_limit(limit: &str) -> bool {
 /// with a line Ferret can't take are skipped whole, with the reason.
 pub fn read(text: &str) -> Result<File, String> {
     if text.len() > MAX_BYTES {
-        return Err("This is too big to be a Ferret file.".into());
+        return Err(tr!("This is too big to be a Ferret file."));
     }
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("```"));
-    let not_ours = || "This isn't a Ferret file: it should start with \"ferret 1\".".to_owned();
+    let not_ours = || tr!("This isn't a Ferret file: it should start with “ferret 1”.");
     let first = lines.next().ok_or_else(not_ours)?;
     let version: u32 = first.strip_prefix(HEADER).and_then(|v| v.trim().parse().ok()).ok_or_else(not_ours)?;
     if version > VERSION {
-        return Err("This file was made by a newer Ferret: update Ferret to import it.".into());
+        return Err(tr!("This file was made by a newer Ferret: update Ferret to import it."));
     }
     let mut file = File { game: String::new(), steam: None, build: None, values: Vec::new(), skipped: Vec::new() };
     // The value being read, and why it can't be taken (it is still read to its end).
     let mut current: Option<(Shared, Option<String>)> = None;
     let finish = |file: &mut File, current: Option<(Shared, Option<String>)>| {
         let Some((v, bad)) = current else { return };
-        let why = bad.or_else(|| (v.sites.is_empty() && v.paths.is_empty() && v.named.is_empty()).then(|| "no way to find it".into()));
+        let why = bad.or_else(|| (v.sites.is_empty() && v.paths.is_empty() && v.named.is_empty()).then(|| tr!("no way to find it")));
         match why {
             Some(why) => file.skipped.push(format!("{}: {why}", v.name)),
-            None if file.values.len() >= MAX_VALUES => file.skipped.push(format!("{}: too many values in one file", v.name)),
-            None if file.values.iter().any(|o| o.name == v.name) => file.skipped.push(format!("{}: in the file twice", v.name)),
+            None if file.values.len() >= MAX_VALUES => file.skipped.push(format!("{}: {}", v.name, tr!("too many values in one file"))),
+            None if file.values.iter().any(|o| o.name == v.name) => file.skipped.push(format!("{}: {}", v.name, tr!("in the file twice"))),
             None => file.values.push(v),
         }
     };
@@ -185,8 +186,8 @@ pub fn read(text: &str) -> Result<File, String> {
         let (key, rest) = line.split_once(' ').map_or((line, ""), |(k, r)| (k, r.trim()));
         if line.len() > MAX_LINE {
             match current.as_mut() {
-                Some((_, bad)) => *bad = Some("a line too long".into()),
-                None => return Err("This file has a line too long to be a Ferret file.".into()),
+                Some((_, bad)) => *bad = Some(tr!("a line too long")),
+                None => return Err(tr!("This file has a line too long to be a Ferret file.")),
             }
             continue;
         }
@@ -194,7 +195,7 @@ pub fn read(text: &str) -> Result<File, String> {
             ("value", _) => {
                 finish(&mut file, current.take());
                 let name = crate::core::one_word(rest);
-                let bad = (!good_name(&name)).then(|| "a name Ferret can't use (letters, digits, _ and - only)".to_owned());
+                let bad = (!good_name(&name)).then(|| tr!("a name Ferret can't use (letters, digits, _ and - only)"));
                 let shared = Shared {
                     name: if name.is_empty() { "(no name)".into() } else { name },
                     kind: Kind::I32,
@@ -219,23 +220,23 @@ pub fn read(text: &str) -> Result<File, String> {
                 match key {
                     "type" => match Kind::parse(rest) {
                         Some(k) => v.kind = k,
-                        None => problem(&format!("a value type this Ferret doesn't know ({rest})")),
+                        None => problem(&tr!("a value type this Ferret doesn't know ({kind})", kind = rest)),
                     },
                     "decimals" => match rest.parse() {
                         Ok(d) if d <= 6 => v.decimals = d,
-                        _ => problem("a broken decimals line"),
+                        _ => problem(&tr!("a broken decimals line")),
                     },
                     "named" if good_named(rest) && room => v.named.push(rest.to_owned()),
                     "site" if good_site(rest) && room => v.sites.push(rest.to_owned()),
                     "path" if good_path(rest) && room => v.paths.push(rest.to_owned()),
-                    "named" | "site" | "path" if !room => problem("too many ways to find it"),
-                    "named" => problem("a broken name line"),
-                    "site" => problem("a broken code pattern"),
-                    "path" => problem("a broken pointer path"),
+                    "named" | "site" | "path" if !room => problem(&tr!("too many ways to find it")),
+                    "named" => problem(&tr!("a broken name line")),
+                    "site" => problem(&tr!("a broken code pattern")),
+                    "path" => problem(&tr!("a broken pointer path")),
                     "build" if good_name(rest) => v.build = Some(rest.to_owned()),
-                    "build" => problem("a broken build line"),
+                    "build" => problem(&tr!("a broken build line")),
                     "limit" if good_limit(rest) => v.limit = Some(rest.to_owned()),
-                    "limit" => problem("a broken limit line"),
+                    "limit" => problem(&tr!("a broken limit line")),
                     // From a newer Ferret: what this one knows of the value still works.
                     _ => {}
                 }
@@ -244,10 +245,10 @@ pub fn read(text: &str) -> Result<File, String> {
     }
     finish(&mut file, current);
     if file.game.is_empty() {
-        return Err("This Ferret file doesn't say which game it is for.".into());
+        return Err(tr!("This Ferret file doesn't say which game it is for."));
     }
     if file.values.is_empty() && file.skipped.is_empty() {
-        return Err("This Ferret file has no values in it.".into());
+        return Err(tr!("This Ferret file has no values in it."));
     }
     Ok(file)
 }

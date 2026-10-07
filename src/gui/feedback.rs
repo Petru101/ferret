@@ -9,6 +9,7 @@ use gtk::glib;
 
 use super::Ui;
 use crate::feedback::{self, Report};
+use crate::i18n::tr;
 
 pub fn open(ui: &Rc<Ui>) {
     // The attached game, if any: its saved values can go with the report.
@@ -30,14 +31,14 @@ pub fn open(ui: &Rc<Ui>) {
         .hscrollbar_policy(gtk::PolicyType::Never)
         .css_classes(["card"])
         .build();
-    let contact = adw::EntryRow::builder().title("How to Reach You (Optional)").build();
+    let contact = adw::EntryRow::builder().title(tr!("How to Reach You (Optional)")).build();
     let log = adw::SwitchRow::builder()
-        .title("Include Ferret's Log")
-        .subtitle("What Ferret did lately, with your home folder's path taken out. Helps most with bugs.")
+        .title(tr!("Include Ferret's Log"))
+        .subtitle(tr!("What Ferret did lately, with your home folder's path taken out. Helps most with bugs."))
         .active(true)
         .build();
     let saved = adw::SwitchRow::builder()
-        .title("Include This Game's Saved Values")
+        .title(tr!("Include This Game's Saved Values"))
         .subtitle(game.as_deref().unwrap_or_default())
         .visible(game.is_some())
         .build();
@@ -45,10 +46,10 @@ pub fn open(ui: &Rc<Ui>) {
     group.add(&contact);
     group.add(&log);
     group.add(&saved);
-    let show = gtk::Button::builder().label("Show What's Sent").halign(gtk::Align::Start).css_classes(["flat"]).build();
+    let show = gtk::Button::builder().label(tr!("Show What's Sent")).halign(gtk::Align::Start).css_classes(["flat"]).build();
     let error = gtk::Label::builder().wrap(true).xalign(0.0).css_classes(["error"]).visible(false).build();
     let intro = gtk::Label::builder()
-        .label("What happened, or what would you like Ferret to do? It goes to Ferret's developer, who reads every one.")
+        .label(tr!("What happened, or what would you like Ferret to do? It goes to Ferret's developer, who reads every one."))
         .wrap(true)
         .xalign(0.0)
         .build();
@@ -63,15 +64,15 @@ pub fn open(ui: &Rc<Ui>) {
     for w in [intro.upcast_ref::<gtk::Widget>(), message_box.upcast_ref(), group.upcast_ref(), show.upcast_ref(), error.upcast_ref()] {
         content.append(w);
     }
-    let send = gtk::Button::builder().label("Send").css_classes(["suggested-action"]).sensitive(false).build();
+    let send = gtk::Button::builder().label(tr!("Send")).css_classes(["suggested-action"]).sensitive(false).build();
     let header = adw::HeaderBar::builder().show_end_title_buttons(false).show_start_title_buttons(false).build();
-    let cancel = gtk::Button::with_label("Cancel");
+    let cancel = gtk::Button::with_label(&tr!("Cancel"));
     header.pack_start(&cancel);
     header.pack_end(&send);
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&content));
-    let dialog = adw::Dialog::builder().title("Send Feedback").content_width(520).child(&toolbar).build();
+    let dialog = adw::Dialog::builder().title(tr!("Send Feedback")).content_width(520).child(&toolbar).build();
 
     message.buffer().connect_changed({
         let send = send.clone();
@@ -108,7 +109,7 @@ pub fn open(ui: &Rc<Ui>) {
             let report = report();
             let id = report.id.clone();
             send.set_sensitive(false);
-            send.set_label("Sending…");
+            send.set_label(&tr!("Sending…"));
             error.set_visible(false);
             let (tx, rx) = async_channel::bounded(1);
             std::thread::spawn(move || {
@@ -120,12 +121,12 @@ pub fn open(ui: &Rc<Ui>) {
                     Ok(Ok(())) => {
                         dialog.close();
                         // Indented: `explain` shows it selectable, to copy.
-                        ui.explain("Thanks, It Was Sent", &format!("If you write about it somewhere, mention this id:\n  {id}"));
+                        ui.explain(&tr!("Thanks, It Was Sent"), &format!("{}\n  {id}", tr!("If you write about it somewhere, mention this id:")));
                     }
                     Ok(Err(e)) => {
                         error.set_label(&e);
                         error.set_visible(true);
-                        send.set_label("Send");
+                        send.set_label(&tr!("Send"));
                         send.set_sensitive(true);
                     }
                     Err(_) => {}
@@ -153,6 +154,6 @@ fn show_sent(parent: &adw::Dialog, text: &str) {
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
     toolbar.set_content(Some(&scroll));
-    let dialog = adw::Dialog::builder().title("What's Sent").content_width(640).content_height(560).child(&toolbar).build();
+    let dialog = adw::Dialog::builder().title(tr!("What's Sent")).content_width(640).content_height(560).child(&toolbar).build();
     dialog.present(Some(parent));
 }

@@ -60,7 +60,13 @@ modules:
         RUSTFLAGS="-C target-feature=+crt-static -L native=$PWD/stub"
         cargo build --release --offline --target x86_64-unknown-linux-gnu -p ferret-helper
       - install -Dm755 target/x86_64-unknown-linux-gnu/release/ferret-helper /app/bin/ferret-helper
-      - install -Dm644 data/io.github.Petru101.Ferret.desktop /app/share/applications/io.github.Petru101.Ferret.desktop
+      # Translations (po/): the window's texts and the desktop file's.
+      - >-
+        for lang in $(cat po/LINGUAS); do
+        install -d /app/share/locale/$lang/LC_MESSAGES &&
+        msgfmt -c -o /app/share/locale/$lang/LC_MESSAGES/ferret.mo po/$lang.po || exit 1; done
+      - install -d /app/share/applications
+      - msgfmt --desktop -d po --template data/io.github.Petru101.Ferret.desktop -o /app/share/applications/io.github.Petru101.Ferret.desktop
       - install -Dm644 data/io.github.Petru101.Ferret.svg /app/share/icons/hicolor/scalable/apps/io.github.Petru101.Ferret.svg
       # The helper carries AreWeAntiCheatYet's list (MIT).
       - install -Dm644 data/areweanticheatyet/LICENSE /app/share/licenses/io.github.Petru101.Ferret/AreWeAntiCheatYet-LICENSE

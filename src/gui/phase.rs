@@ -4,6 +4,8 @@
 
 use adw::prelude::*;
 
+use crate::i18n::tr;
+
 pub struct PhaseCard {
     pub root: gtk::Box,
     title: gtk::Label,
@@ -39,9 +41,9 @@ impl PhaseCard {
     }
 
     pub fn restoring(&self, game: &str, name: &str, i: usize, n: usize) {
-        self.title.set_label(&format!("Opening {game}…"));
+        self.title.set_label(&tr!("Opening {game}…", game));
         self.bar.set_fraction(i as f64 / n as f64);
-        self.hint.set_label(&format!("Finding your saved values: {name} ({} of {n})", i + 1));
+        self.hint.set_label(&tr!("Finding your saved values: {name} ({i} of {n})", name, i = i + 1, n));
         self.root.set_visible(true);
     }
 }

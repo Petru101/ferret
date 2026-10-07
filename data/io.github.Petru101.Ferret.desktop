@@ -6,5 +6,6 @@ Exec=ferret
 Icon=io.github.Petru101.Ferret
 Terminal=false
 Categories=Game;Utility;
+# Translators: search words for the app, each ending with a semicolon.
 Keywords=cheat;trainer;memory;game;
 StartupNotify=true

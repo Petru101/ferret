@@ -5,6 +5,7 @@
 use image::RgbImage;
 
 use crate::ocr::Rect;
+use crate::i18n::tr;
 
 /// Colours this close (the channels' differences added up, 0..765) are the same paint.
 const SAME: u32 = 90;
@@ -22,9 +23,18 @@ pub struct Bar {
     holes: Vec<bool>,
 }
 
-const OUTSIDE: &str = "The box is outside the game picture (the window got smaller?): capture again and pick it again.";
+fn outside() -> String {
+    tr!("The box is outside the game picture (the window got smaller?): capture again and pick it again.")
+}
 
-const NOT_A_BAR: &str = "The box doesn't look like a bar (one colour from one end, maybe another after it): draw it close around the bar.";
+fn not_a_bar() -> String {
+    tr!("The box doesn't look like a bar (one colour from one end, maybe another after it): draw it close around the bar.")
+}
+
+/// Why a box isn't taken as a bar when its shape isn't one (the Find tab says nothing more then).
+pub fn not_bar_shaped() -> String {
+    tr!("The box isn't long and thin like a bar.")
+}
 
 /// The first and last of `lines` (average colours) in the paint most of them share, when
 /// nearly all of those between them are in it too.
@@ -87,7 +97,7 @@ fn inside(img: &RgbImage, area: Rect) -> Result<Rect, String> {
     let y0 = area.y.min(img.height());
     let rect = Rect { x: x0, y: y0, w: area.w.min(img.width() - x0), h: area.h.min(img.height() - y0) };
     match rect.w == 0 || rect.h == 0 {
-        true => Err(OUTSIDE.into()),
+        true => Err(outside()),
         false => Ok(rect),
     }
 }
@@ -168,7 +178,7 @@ impl Bar {
         let vertical = rect.h > rect.w;
         let (long, short) = if vertical { (rect.h, rect.w) } else { (rect.w, rect.h) };
         if long < 12 || long < 3 * short {
-            return Err("The box isn't long and thin like a bar.".into());
+            return Err(not_bar_shaped());
         }
         let at = |i: u32, j: u32| -> [u8; 3] {
             let (x, y) = if vertical { (rect.x + j, rect.y + i) } else { (rect.x + i, rect.y + j) };
@@ -181,10 +191,10 @@ impl Bar {
         let runs = runs(&slices);
         let big = (long as usize / 50).max(3);
         let ends = (runs.iter().find(|r| r.1 - r.0 >= big), runs.iter().rev().find(|r| r.1 - r.0 >= big));
-        let (Some(a), Some(b)) = ends else { return Err(NOT_A_BAR.into()) };
+        let (Some(a), Some(b)) = ends else { return Err(not_a_bar()) };
         let (first, last) = (a.0 as u32, b.1 as u32 - 1);
         if (first + (long - 1 - last)) as f64 > (0.1 * long as f64).max(4.0) {
-            return Err(NOT_A_BAR.into());
+            return Err(not_a_bar());
         }
         let (fill, empty) = match diff(a.2, b.2) <= SAME {
             true => (a.2, None),
@@ -201,7 +211,7 @@ impl Bar {
             .collect();
         let n = kind.len();
         if kind.iter().filter(|&&k| k == 0).count() * 5 > n {
-            return Err(NOT_A_BAR.into());
+            return Err(not_a_bar());
         }
         // Where the full part ends: the split with the fewest lines on the wrong side (dark
         // digits on the full part look like the empty one), from either end.
@@ -220,7 +230,7 @@ impl Bar {
                 }
             }
             if wrong * 10 > n {
-                return Err(NOT_A_BAR.into());
+                return Err(not_a_bar());
             }
         }
         let full_side = |i: usize| (i < edge) == fill_first;
@@ -479,7 +489,7 @@ impl Icons {
         let full_in = |a: u32| (a..(a + size).min(long)).flat_map(|i| (top..=bottom).map(move |j| (i, j))).filter(|&(i, j)| full_paint(at(i, j), full, background)).count();
         let full_px = icons.iter().map(|&(a, _)| full_in(a)).max().unwrap();
         if full_px < 6 {
-            return Err("Those look like icons, but none of them looks full: pick them while at least one is full.".into());
+            return Err(tr!("Those look like icons, but none of them looks full: pick them while at least one is full."));
         }
         let first = icons[0].0;
         let slots = (0..).map(|k| first % period + k * period).take_while(|&a| a + size <= long).collect();

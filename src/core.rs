@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::bar::{Gauge, Kind as GaugeKind};
 use crate::capture::WindowCapture;
 use crate::font::{self, Font};
+use crate::i18n::{gettext, n_, ntr, tr};
 use crate::ocr::{self, Rect, Shown, Word};
 use crate::shapes::{self, Learned, Shape};
 use crate::share;
@@ -329,6 +330,8 @@ pub struct Match {
     pub value: String,
     /// What it is, when Ferret can tell (an entry of a Godot dictionary: its key and ids).
     pub about: Option<String>,
+    /// Already saved as a value of this game.
+    pub saved: bool,
 }
 
 /// How the game stores a value.
@@ -451,22 +454,29 @@ pub fn number_text(v: f64, decimals: Option<u32>) -> String {
 /// Why attaching was blocked by kernel.yama.ptrace_scope and how to allow it. Lines starting
 /// with two spaces are commands (the GUI shows them selectable).
 fn ptrace_help(scope: &str) -> String {
-    let now = "To allow it until the next restart, run this in a terminal:\n  sudo sysctl kernel.yama.ptrace_scope=0\n";
+    let now = format!("{}\n  sudo sysctl kernel.yama.ptrace_scope=0\n", tr!("To allow it until the next restart, run this in a terminal:"));
     let keep = "  echo kernel.yama.ptrace_scope=0 | sudo tee /etc/sysctl.d/60-ptrace.conf";
-    let risk = "This lets any program you run read and change your other programs' memory.";
+    let risk = tr!("This lets any program you run read and change your other programs' memory.");
+    let keep_it = tr!("To keep it that way:");
     match scope {
         "1" => format!(
-            "Your system only lets programs change the memory of programs they started themselves \
-             (kernel.yama.ptrace_scope is 1). Windows games running through Proton or Wine still work.\n\
-             {now}To keep it that way:\n{keep}\n{risk}"
+            "{}\n{now}{keep_it}\n{keep}\n{risk}",
+            tr!(
+                "Your system only lets programs change the memory of programs they started themselves \
+                 (kernel.yama.ptrace_scope is 1). Windows games running through Proton or Wine still work."
+            )
         ),
         "2" => format!(
-            "Your system only lets administrators change other programs' memory \
-             (kernel.yama.ptrace_scope is 2).\n{now}To keep it that way:\n{keep}\n{risk}"
+            "{}\n{now}{keep_it}\n{keep}\n{risk}",
+            tr!("Your system only lets administrators change other programs' memory (kernel.yama.ptrace_scope is 2).")
         ),
         _ => format!(
-            "Your system has turned off changing other programs' memory until it restarts \
-             (kernel.yama.ptrace_scope is {scope}).\nTo allow it, run this in a terminal and restart:\n{keep}\n{risk}"
+            "{}\n{}\n{keep}\n{risk}",
+            tr!(
+                "Your system has turned off changing other programs' memory until it restarts (kernel.yama.ptrace_scope is {scope}).",
+                scope
+            ),
+            tr!("To allow it, run this in a terminal and restart:")
         ),
     }
 }
@@ -890,7 +900,9 @@ pub struct Imported {
 }
 
 /// Why saved values of Java games are only shown.
-pub const JAVA_WRITE: &str = "Java game: Ferret only shows saved values. Java moves its objects around, so a later write could land in another object and crash the game. Change it from the Find tab while you search instead.";
+fn java_write() -> String {
+    tr!("Java game: Ferret only shows saved values. Java moves its objects around, so a later write could land in another object and crash the game. Change it from the Find tab while you search instead.")
+}
 
 pub enum AutoResult {
     /// One address left: the value.
@@ -961,8 +973,6 @@ const RESTORE_WAIT: Duration = Duration::from_secs(2);
 const IMPLAUSIBLE: &str = "it read a number no game keeps";
 /// The helper's reason when a value's code didn't run while it waited.
 const NOT_RUN: &str = "none of its code ran meanwhile";
-/// Why an imported value isn't written yet.
-const IMPORTED: &str = "it was imported and isn't checked yet. If the game shows the number Ferret reads, say so in the Values tab";
 
 /// How often values seen in trusted places are written to the profile as `last`.
 const LAST_EVERY: Duration = Duration::from_secs(10);
@@ -997,9 +1007,19 @@ impl Votes {
 
     fn doubt(&self) -> String {
         if self.elsewhere > 0 {
-            format!("its pointer paths disagree ({} of {} lead to one place, {} to another)", self.agree, self.total, self.elsewhere)
+            tr!(
+                "its pointer paths disagree ({agree} of {total} lead to one place, {elsewhere} to another)",
+                agree = self.agree,
+                total = self.total,
+                elsewhere = self.elsewhere
+            )
         } else {
-            format!("only {} of its {} pointer paths leads anywhere", self.agree, self.total)
+            ntr!(
+                "only {agree} of its {n} pointer path leads anywhere",
+                "only {agree} of its {n} pointer paths leads anywhere",
+                self.total,
+                agree = self.agree
+            )
         }
     }
 }
@@ -1030,8 +1050,12 @@ const STEADY_LOOKS: u32 = 60;
 const STEADY_SHARE: f64 = 0.95;
 
 /// A search that ended on what looks like a display copy.
-const COPY_ONLY: &str = "The one place left put a test value back at once, like a copy the game redraws its display \
-    from; the game may keep the value in a form Ferret can't search for yet (a 2-byte number or an encoded one).";
+fn copy_only() -> String {
+    tr!(
+        "The one place left put a test value back at once, like a copy the game redraws its display \
+         from; the game may keep the value in a form Ferret can't search for yet (a 2-byte number or an encoded one)."
+    )
+}
 
 /// Most pointer paths kept from a scan. The real one can rank far down (Forager's gems: 590th
 /// of 81235), and only a later run tells which it is.
@@ -1206,7 +1230,7 @@ impl Core {
     }
 
     fn game(&mut self) -> Result<&mut Game, String> {
-        self.game.as_mut().ok_or_else(|| "attach to a game first".into())
+        self.game.as_mut().ok_or_else(|| tr!("attach to a game first"))
     }
 
     // --- Games
@@ -1352,11 +1376,11 @@ impl Core {
         let name = one_word(name);
         let name = name.as_str();
         if name.is_empty() {
-            return Err("the value needs a name".into());
+            return Err(tr!("the value needs a name"));
         }
         let listed = self.helper.call("list");
         let [(loc, _)] = parse_values(&listed)[..] else {
-            return Err("narrow down to exactly one address first".into());
+            return Err(tr!("narrow down to exactly one address first"));
         };
         if self.game()?.java {
             return self.save_java(name, loc);
@@ -1401,7 +1425,7 @@ impl Core {
                 paths = self.proven_paths(loc, &old);
             }
             if paths.is_empty() {
-                candidates = self.pointer_paths(loc).map_err(|e| format!("Ferret can't find it again by code or by name, and {e}"))?;
+                candidates = self.pointer_paths(loc).map_err(|e| tr!("Ferret can't find it again by code or by name, and {why}", why = e))?;
             }
         }
         let how = if let (false, Some((_, places, about))) = (sites.is_empty(), &named) {
@@ -1530,21 +1554,21 @@ impl Core {
     fn pointer_paths(&mut self, loc: Loc) -> Result<Vec<String>, String> {
         let reply = self.helper.call(&format!("ptrscan {loc} 5 1000 {MAX_CANDIDATES}"));
         if let Some(e) = first_error(&reply) {
-            return Err(format!("the pointer scan failed: {e}"));
+            return Err(tr!("the pointer scan failed: {e}", e));
         }
         for l in reply.iter().filter(|l| !l.starts_with("path ")) {
             self.say(l);
         }
         let mut paths: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("path ")).map(str::to_owned).collect();
         if paths.is_empty() {
-            return Err("no pointer from the game's own memory leads to it".into());
+            return Err(tr!("no pointer from the game's own memory leads to it"));
         }
         std::thread::sleep(Duration::from_secs(3));
         let (ends, _) = self.follow(loc.kind, &paths);
         let before = paths.len();
         paths = paths.into_iter().zip(ends).filter(|(_, e)| *e == Some(loc.addr)).map(|(p, _)| p).collect();
         if paths.is_empty() {
-            return Err("every pointer path to it changed within seconds".into());
+            return Err(tr!("every pointer path to it changed within seconds"));
         }
         self.say(&format!("{} of {before} pointer paths still lead to it after 3 s", paths.len()));
         Ok(paths.iter().map(|p| p.replace(',', " ")).collect())
@@ -1625,16 +1649,17 @@ impl Core {
             (game.exe.clone(), game.pid)
         };
         let mut entries = read_profile(&exe);
-        let entry = entries.iter().find(|e| e.name == name).ok_or_else(|| format!("{name} isn't saved"))?;
+        let entry = entries.iter().find(|e| e.name == name).ok_or_else(|| tr!("{name} isn't saved", name))?;
         if entry.imported {
             return self.confirm_imported(&exe, entries, &name);
         }
         if !entry.unconfirmed() {
-            return Err(format!("{name} is confirmed already"));
+            return Err(tr!("{name} is confirmed already", name));
         }
         if entry.run == Some(pid) {
-            return Err(format!(
-                "{name} was saved in this run of the game, where all its pointer paths lead to it: that proves nothing yet. Confirm it after restarting the game"
+            return Err(tr!(
+                "{name} was saved in this run of the game, where all its pointer paths lead to it: that proves nothing yet. Confirm it after restarting the game",
+                name
             ));
         }
         let (kind, mut candidates) = (entry.kind, entry.candidates.clone());
@@ -1648,10 +1673,10 @@ impl Core {
         let args: Vec<String> = candidates.iter().map(|p| path_arg(p)).collect();
         let (ends, best, votes) = self.follow_votes(kind, &args);
         let Some((loc, _)) = best else {
-            return Err(format!("none of {name}'s pointer paths lead anywhere now"));
+            return Err(tr!("none of {name}'s pointer paths lead anywhere now", name));
         };
         if let Some(v) = votes.filter(|v| !v.clear) {
-            return Err(format!("{name} can't be confirmed: {}", v.doubt()));
+            return Err(tr!("{name} can't be confirmed: {why}", name, why = v.doubt()));
         }
         let kept: Vec<String> = candidates.iter().zip(&ends).filter(|(_, e)| **e == Some(loc.addr)).map(|(p, _)| p.clone()).collect();
         let entry = entries.iter_mut().find(|e| e.name == name).expect("found above");
@@ -1671,7 +1696,7 @@ impl Core {
         if let Err(e) = self.apply_limit(&entry) {
             self.say(&format!("{name}: limit not applied: {e}"));
         }
-        Ok(format!("{name} confirmed: Ferret finds it this way from now on"))
+        Ok(tr!("{name} confirmed: Ferret finds it this way from now on", name))
     }
 
     /// The player says the game shows the number an imported value leads to: from now on it is
@@ -1680,15 +1705,15 @@ impl Core {
     fn confirm_imported(&mut self, exe: &str, mut entries: Vec<Entry>, name: &str) -> Result<String, String> {
         let game = self.game()?;
         if !game.entries.iter().any(|(n, l)| n == name && l.addr != 0) {
-            return Err(format!("{name} isn't in the game right now: load a save, then check it again"));
+            return Err(tr!("{name} isn't in the game right now: load a save, then check it again", name));
         }
         if let Some((_, why)) = game.named_doubt.iter().find(|(n, _)| n == name) {
-            return Err(format!("{name} can't be confirmed: its name doesn't lead to one value ({why})"));
+            return Err(tr!("{name} can't be confirmed: its name doesn't lead to one value ({why})", name, why));
         }
         if let Some((_, v)) = game.votes.iter().find(|(n, v)| n == name && !v.clear) {
-            return Err(format!("{name} can't be confirmed: {}", v.doubt()));
+            return Err(tr!("{name} can't be confirmed: {why}", name, why = v.doubt()));
         }
-        let entry = entries.iter_mut().find(|e| e.name == name).ok_or_else(|| format!("{name} isn't saved"))?;
+        let entry = entries.iter_mut().find(|e| e.name == name).ok_or_else(|| tr!("{name} isn't saved", name))?;
         entry.imported = false;
         let entry = entry.clone();
         write_profile(exe, &entries)?;
@@ -1751,14 +1776,14 @@ impl Core {
     fn doubtful(&self, name: &str, saved: &[Entry]) -> Option<String> {
         let game = self.game.as_ref()?;
         if saved.iter().any(|e| e.name == name && e.imported) {
-            return Some(IMPORTED.into());
+            return Some(tr!("it was imported and isn't checked yet. If the game shows the number Ferret reads, say so in the Values tab"));
         }
         if let Some((_, why)) = game.named_doubt.iter().find(|(n, _)| n == name) {
-            return Some(format!("its name doesn't lead to one value ({why})"));
+            return Some(tr!("its name doesn't lead to one value ({why})", why));
         }
         game.paths.iter().any(|(n, _)| n == name).then_some(())?;
         if saved.iter().any(|e| e.name == name && e.guessed(saved, game.pid)) {
-            return Some("its pointer paths are guesses until a later run of the game confirms them".into());
+            return Some(tr!("its pointer paths are guesses until a later run of the game confirms them"));
         }
         game.votes.iter().find(|(n, _)| n == name).map(|(_, v)| *v).filter(|v| !v.clear).map(|v| v.doubt())
     }
@@ -1852,12 +1877,15 @@ impl Core {
             return Err("no saved code pattern, pointer path or name".into());
         }
         if entry.limit.is_some() && entry.imported {
-            return Err(format!("{}: {IMPORTED}", entry.name));
+            return Err(tr!(
+                "{name}: it was imported and isn't checked yet. If the game shows the number Ferret reads, say so in the Values tab",
+                name = entry.name
+            ));
         }
         if entry.limit.is_some() && entry.sites.is_empty() && entry.guessed(&saved, game.pid) {
-            return Err(format!(
-                "its pointer paths aren't confirmed yet: confirm it in the Values tab if the game shows its number, or find it again and save it as {}",
-                entry.name
+            return Err(tr!(
+                "its pointer paths aren't confirmed yet: confirm it in the Values tab if the game shows its number, or find it again and save it as {name}",
+                name = entry.name
             ));
         }
         let via = game.via.iter().filter(|(n, _)| *n == entry.name).map(|(_, p)| p.clone());
@@ -1894,7 +1922,7 @@ impl Core {
         self.game()?;
         let reply = self.helper.call("switch * toggle");
         if reply.iter().any(|l| l.starts_with("error: no limit")) {
-            return Err("Nothing is kept in range in this game".into());
+            return Err(tr!("Nothing is kept in range in this game"));
         }
         if let Some(e) = first_error(&reply) {
             return Err(e);
@@ -1945,7 +1973,7 @@ impl Core {
         let before = entries.len();
         entries.retain(|e| e.name != name);
         if entries.len() == before {
-            return Err(format!("no saved value called {name}"));
+            return Err(tr!("no saved value called {name}", name));
         }
         write_profile(&exe, &entries)?;
         self.helper.call(&format!("unlimit {name}"));
@@ -1969,20 +1997,24 @@ impl Core {
             if e.imported {
                 // Says what to do: the player re-imported their own export and couldn't tell
                 // why it stayed out (Particle Fleet's omni).
-                left_out.push(format!(
-                    "{}: imported and not checked yet. On its card in the Values tab, click \"Yes, It Shows…\" if the game shows that number",
-                    e.name
+                left_out.push(tr!(
+                    "{name}: imported and not checked yet. On its card in the Values tab, click “Yes, It Shows…” if the game shows that number",
+                    name = e.name
                 ));
                 continue;
             }
             let paths: Vec<String> = e.paths.iter().filter(|p| share::shareable_path(p)).cloned().collect();
             if e.sites.is_empty() && paths.is_empty() && e.named.is_empty() {
-                let why = match () {
-                    _ if !e.paths.is_empty() => "its pointer paths start in files that differ between computers (graphics driver, Wine, Steam)",
-                    _ if !e.candidates.is_empty() => "its pointer paths aren't confirmed yet (restart the game and check it)",
-                    _ => "Ferret has no way to find it that works on other computers",
-                };
-                left_out.push(format!("{}: {why}", e.name));
+                left_out.push(match () {
+                    _ if !e.paths.is_empty() => tr!(
+                        "{name}: its pointer paths start in files that differ between computers (graphics driver, Wine, Steam)",
+                        name = e.name
+                    ),
+                    _ if !e.candidates.is_empty() => {
+                        tr!("{name}: its pointer paths aren't confirmed yet (restart the game and check it)", name = e.name)
+                    }
+                    _ => tr!("{name}: Ferret has no way to find it that works on other computers", name = e.name),
+                });
                 continue;
             }
             values.push(share::Shared {
@@ -1998,8 +2030,8 @@ impl Core {
         }
         if values.is_empty() {
             return Err(match left_out.is_empty() {
-                true => "Nothing is saved for this game yet".into(),
-                false => format!("Nothing to export. {}", left_out.join("; ")),
+                true => tr!("Nothing is saved for this game yet"),
+                false => format!("{} {}", tr!("Nothing to export."), left_out.join("; ")),
             });
         }
         let text = share::write(&exe, steam.as_deref(), build.as_deref(), &values);
@@ -2028,18 +2060,23 @@ impl Core {
         let game = self.game()?;
         let (exe, build) = (game.exe.clone(), game.build.clone());
         if !file.game.eq_ignore_ascii_case(&exe) {
-            return Err(format!("These values are for {}, not {exe}", file.game));
+            return Err(tr!("These values are for {theirs}, not {exe}", theirs = file.game, exe));
         }
         if let (Some(theirs), Some(ours)) = (&file.steam, &game.steam) {
             if theirs != ours {
-                return Err(format!("These values are for another game with a program called {exe} (Steam app {theirs}, this one is {ours})"));
+                return Err(tr!(
+                    "These values are for another game with a program called {exe} (Steam app {theirs}, this one is {ours})",
+                    exe,
+                    theirs,
+                    ours
+                ));
             }
         }
         let mut entries = read_profile(&exe);
         let (mut skipped, mut added) = (file.skipped, Vec::new());
         for v in file.values {
             if entries.iter().any(|e| e.name == v.name) {
-                skipped.push(format!("{}: you have a value with this name already (remove yours to import it)", v.name));
+                skipped.push(tr!("{name}: you have a value with this name already (remove yours to import it)", name = v.name));
                 continue;
             }
             added.push(v.name.clone());
@@ -2066,7 +2103,7 @@ impl Core {
             self.say(&format!("import skipped {s}"));
         }
         if added.is_empty() {
-            return Err(format!("Nothing imported. {}", skipped.join("; ")));
+            return Err(format!("{} {}", tr!("Nothing imported."), skipped.join("; ")));
         }
         write_profile(&exe, &entries)?;
         self.say(&format!("imported {} (unconfirmed until the player checks them)", added.join(", ")));
@@ -2084,20 +2121,20 @@ impl Core {
         let name = one_word(name);
         let name = name.as_str();
         if self.game()?.java && (min.is_some() || max.is_some()) {
-            return Err(JAVA_WRITE.into());
+            return Err(java_write());
         }
         if let (Some(lo), Some(hi)) = (min, max) {
             if hi < lo {
-                return Err(format!(
-                    "At most ({}) is lower than at least ({}): nothing changed",
-                    number_text(hi, None),
-                    number_text(lo, None)
+                return Err(tr!(
+                    "At most ({max}) is lower than at least ({min}): nothing changed",
+                    max = number_text(hi, None),
+                    min = number_text(lo, None)
                 ));
             }
         }
         let exe = self.game()?.exe.clone();
         let mut entries = read_profile(&exe);
-        let i = entries.iter().position(|e| e.name == name).ok_or(format!("no saved value called {name}"))?;
+        let i = entries.iter().position(|e| e.name == name).ok_or_else(|| tr!("no saved value called {name}", name))?;
         let (lo, hi) = (min.map(|v| entries[i].to_memory(v)).transpose()?, max.map(|v| entries[i].to_memory(v)).transpose()?);
         entries[i].limit = (lo.is_some() || hi.is_some()).then(|| range_text(lo, hi));
         if entries[i].limit.is_some() {
@@ -2646,12 +2683,15 @@ impl Core {
         let name = one_word(name);
         let name = name.as_str();
         if self.game()?.java {
-            return Err(JAVA_WRITE.into());
+            return Err(java_write());
         }
         let exe = self.game()?.exe.clone();
         let saved = read_profile(&exe);
         if saved.iter().any(|e| e.name == name && e.imported) {
-            return Err(format!("{name} not written: {IMPORTED}"));
+            return Err(tr!(
+                "{name} not written: it was imported and isn't checked yet. If the game shows the number Ferret reads, say so in the Values tab",
+                name
+            ));
         }
         // Kept at least some number and nothing more (Keep It): the minimum moves to the new
         // number, first, so the limit doesn't put the old one back (the player set Age of War's
@@ -2671,10 +2711,10 @@ impl Core {
         self.sync_addresses();
         if let Some((_, _, places)) = self.game()?.named.iter().find(|(n, _, _)| n == name).cloned() {
             if places.is_empty() {
-                return Err(format!("{name} isn't in the game right now (is a save loaded?)"));
+                return Err(tr!("{name} isn't in the game right now (is a save loaded?)", name));
             }
             if let Some((_, why)) = self.game()?.named_doubt.iter().find(|(n, _)| n == name) {
-                return Err(format!("{name} not written: its name doesn't lead to one value ({why}). Find it again and save it as {name}."));
+                return Err(tr!("{name} not written: its name doesn't lead to one value ({why}). Find it again and save it as {name}.", name, why));
             }
             for p in &places {
                 let reply = self.helper.call(&format!("write {p} {value}"));
@@ -2690,13 +2730,15 @@ impl Core {
             .entries
             .iter()
             .find(|(n, _)| n == name)
-            .ok_or(format!("no saved value called {name}"))?;
+            .ok_or_else(|| tr!("no saved value called {name}", name))?;
         if loc.addr == 0 {
-            return Err(format!("{name} can't be found right now (is a save loaded?)"));
+            return Err(tr!("{name} can't be found right now (is a save loaded?)", name));
         }
         if let Some(why) = self.doubtful(name, &saved) {
-            return Err(format!(
-                "not written: {why}, so it could land in the wrong place. Find it again and save it as {name}: that confirms the right path"
+            return Err(tr!(
+                "not written: {why}, so it could land in the wrong place. Find it again and save it as {name}: that confirms the right path",
+                why,
+                name
             ));
         }
         let reply = self.helper.call(&format!("write {loc} {value}"));
@@ -2835,17 +2877,18 @@ impl Core {
         let step = reply.get(1).and_then(|l| l.strip_prefix(done)).unwrap_or_default();
         let place = |a: &str| parse_loc(a).map_or(a.to_owned(), |l| format!("0x{:x}", l.addr));
         let mut words = step.split_whitespace();
-        let what = match (words.next(), words.next()) {
-            (Some("next"), Some("bar")) => "a move of the bar".to_owned(),
-            (Some("snap"), _) => "copying the game's memory".to_owned(),
-            (Some("scan" | "next"), Some(n)) => format!("the search for {n}"),
-            (Some("drop"), Some(at)) => format!("ruling out {}", place(at)),
-            (Some("keep"), Some(at)) => format!("picking {}", place(at)),
-            _ => "starting over".to_owned(),
+        // In English for the log, and in the player's language for the window.
+        let (what, shown) = match (words.next(), words.next()) {
+            (Some("next"), Some("bar")) => ("a move of the bar".to_owned(), tr!("a move of the bar")),
+            (Some("snap"), _) => ("copying the game's memory".to_owned(), tr!("copying the game's memory")),
+            (Some("scan" | "next"), Some(n)) => (format!("the search for {n}"), tr!("the search for {n}", n)),
+            (Some("drop"), Some(at)) => (format!("ruling out {}", place(at)), tr!("ruling out {place}", place = place(at))),
+            (Some("keep"), Some(at)) => (format!("picking {}", place(at)), tr!("picking {place}", place = place(at))),
+            _ => ("starting over".to_owned(), tr!("starting over")),
         };
         self.search = (count > 0).then_some((count, 0));
         self.say(&format!("{done} {what}: {count} matches"));
-        Ok((count, what))
+        Ok((count, shown))
     }
 
     /// Reads the number inside the watched area of a fresh frame.
@@ -2895,16 +2938,20 @@ impl Core {
                 self.hides += 1;
             }
             let msg = if shows {
-                "The number is back in the box."
+                n_!("The number is back in the box.")
             } else if self.hides >= 3 {
-                "The box keeps changing: it may take in something that moves or blinks around the \
-                 number. Pick the number again with a box around its digits only."
+                n_!(
+                    "The box keeps changing: it may take in something that moves or blinks around the \
+                     number. Pick the number again with a box around its digits only."
+                )
             } else {
-                "The box doesn't show the number now (it looks different from when you picked it: \
-                 a menu or the inventory closed?). Ferret waits until it's back."
+                n_!(
+                    "The box doesn't show the number now (it looks different from when you picked it: \
+                     a menu or the inventory closed?). Ferret waits until it's back."
+                )
             };
             self.say(msg);
-            self.status(msg);
+            self.status(&gettext(msg));
             if !shows && self.hides == 3 {
                 self.phase(Phase::BoxChanging);
             }
@@ -2925,7 +2972,7 @@ impl Core {
         // The window got smaller since the capture the box was drawn on (or the game moved).
         if let Ok((w, h)) = image::image_dimensions(&frame) {
             if area.x >= w || area.y >= h {
-                return Err("The box is outside the game picture now (the window got smaller?): capture again and pick it again.".into());
+                return Err(tr!("The box is outside the game picture now (the window got smaller?): capture again and pick it again."));
             }
         }
         self.picked_look = ocr::Look::of(&frame, area).ok();
@@ -3003,7 +3050,7 @@ impl Core {
             .iter()
             .filter_map(|l| {
                 let (a, v) = l.split_once(" = ")?;
-                Some(Match { loc: parse_loc(a)?, value: v.trim().to_owned(), about: None })
+                Some(Match { loc: parse_loc(a)?, value: v.trim().to_owned(), about: None, saved: false })
             })
             .collect();
         let addrs: Vec<String> = list.iter().map(|m| format!("{:x}", m.loc.addr)).collect();
@@ -3023,8 +3070,9 @@ impl Core {
                 names.sort_unstable();
                 names.dedup();
                 if !names.is_empty() {
-                    let saved = format!("saved as {}", names.join(", "));
+                    let saved = tr!("saved as {names}", names = names.join(", "));
                     m.about = Some(m.about.take().map_or(saved.clone(), |a| format!("{saved}: {a}")));
+                    m.saved = true;
                 }
             }
         }
@@ -3046,7 +3094,7 @@ impl Core {
     /// game shows it (when Ferret couldn't tell from the screen); the places a second later
     /// (a copy the game keeps rewriting is back to the old value by then).
     pub fn try_match(&mut self, loc: Loc, value: &str) -> Result<(Vec<Match>, String), String> {
-        let v = Shown::parse(value).map(|s| s.value()).ok_or(format!("not a number: {value}"))?;
+        let v = Shown::parse(value).map(|s| s.value()).ok_or_else(|| tr!("not a number: {value}", value))?;
         let before = self.peek_exact(&[loc])[0];
         let reply = self.helper.call(&format!("write {loc} {v}"));
         if let Some(e) = first_error(&reply) {
@@ -3064,17 +3112,21 @@ impl Core {
             if (now - v).abs() > 1e-3 && (now - before).abs() <= (now - v).abs() {
                 self.say(&format!("the game put {} back at once: ruling 0x{:x} out", shown(now), loc.addr));
                 let left = self.drop_match(loc)?;
-                let mut msg = format!("The game put {} back at once, so that place isn't where it keeps the value: removed it.", shown(now));
+                let mut msg = tr!(
+                    "The game put {n} back at once, so that place isn't where it keeps the value: removed it.",
+                    n = shown(now)
+                );
                 if left.is_empty() {
-                    msg.push_str(" No places are left: press Start Over and search again.");
+                    msg.push(' ');
+                    msg.push_str(&tr!("No places are left: press Start Over and search again."));
                 }
                 return Ok((left, msg));
             }
         }
         self.last_try = before.map(|b| (loc, b, v));
-        let msg = format!(
-            "It kept {}. If the game shows it too, press Use This One (some games only redraw a number when they change it themselves).",
-            shown(now.unwrap_or(v))
+        let msg = tr!(
+            "It kept {n}. If the game shows it too, press Use This One (some games only redraw a number when they change it themselves).",
+            n = shown(now.unwrap_or(v))
         );
         Ok((self.matches(), msg))
     }
@@ -3195,8 +3247,7 @@ impl Core {
     /// as another value last.
     pub fn try_order(list: &mut [Match]) {
         list.sort_by_key(|m| {
-            let saved = m.about.as_deref().is_some_and(|a| a.starts_with("saved as"));
-            (saved, matches!(m.loc.kind, Kind::F32 | Kind::F64), m.about.is_none())
+            (m.saved, matches!(m.loc.kind, Kind::F32 | Kind::F64), m.about.is_none())
         });
     }
 
@@ -3213,7 +3264,7 @@ impl Core {
     pub fn choose(&mut self, loc: Loc) -> Result<Loc, String> {
         let reply = self.helper.call(&format!("keep {loc}"));
         if match_count(&reply) != Some(1) {
-            return Err(format!("0x{:x} isn't among the matches any more", loc.addr));
+            return Err(tr!("{place} isn't among the matches any more", place = format!("0x{:x}", loc.addr)));
         }
         self.search = None;
         self.say(&format!("picked 0x{:x} ({}) as the value", loc.addr, loc.kind.describe()));
@@ -3421,10 +3472,10 @@ impl Core {
         }
         self.cancel.store(false, Ordering::Relaxed);
         self.phase(Phase::SaveTurn);
-        self.status(
+        self.status(&tr!(
             "Now change the number in the game once (use some or pick some up): Ferret watches which of the game's code \
-             does it, the surest way to find it again. Cancel saves it another way.",
-        );
+             does it, the surest way to find it again. Cancel saves it another way."
+        ));
         let cancel = self.cancel.clone();
         let reply = self.helper.call_cancellable(&format!("sites {loc} 1 wait"), &cancel);
         let cancelled = self.cancel.swap(false, Ordering::Relaxed);
@@ -3453,9 +3504,11 @@ impl Core {
             WAIT.as_secs()
         ));
         self.phase(Phase::YourTurn(watched.len(), WAIT.as_secs()));
-        self.status(&format!(
+        self.status(&ntr!(
             "Now change the number in the game once (pick some up or use some): Ferret waits and watches which \
-             of the {} places the game carries on from. Stop Waiting lists them to try instead.",
+             of the {n} place the game carries on from. Stop Waiting lists them to try instead.",
+            "Now change the number in the game once (pick some up or use some): Ferret waits and watches which \
+             of the {n} places the game carries on from. Stop Waiting lists them to try instead.",
             watched.len()
         ));
         self.tell_matches(tests.len());
@@ -3584,10 +3637,10 @@ impl Core {
         if !v.is_some_and(|v| shows(v, n)) {
             let held = v.map_or("nothing readable".into(), |v| v.to_string());
             self.say(&format!("the last match holds {held} but the screen shows {n}: kept for the player to try"));
-            return Some(format!("The one place left holds {held}, not the {n} on screen."));
+            return Some(tr!("The one place left holds {held}, not the {n} on screen.", held, n));
         }
         if !self.sticks(loc) {
-            return Some(COPY_ONLY.into());
+            return Some(copy_only());
         }
         None
     }
@@ -3608,7 +3661,7 @@ impl Core {
                 break n;
             }
             if start.elapsed() > limit || cancelled(&self.cancel) {
-                return Err("could not read the number".into());
+                return Err(tr!("could not read the number"));
             }
         };
         let continuing = self.search.is_some();
@@ -3818,8 +3871,8 @@ impl Core {
             }
             if start.elapsed() > limit || cancelled(&self.cancel) {
                 return Err(match self.icons() {
-                    true => "The icons are all empty, hidden or keep changing.".into(),
-                    false => "The bar is empty, hidden or keeps moving.".into(),
+                    true => tr!("The icons are all empty, hidden or keep changing."),
+                    false => tr!("The bar is empty, hidden or keeps moving."),
                 });
             }
         };
@@ -3897,7 +3950,7 @@ impl Core {
         let end = self.bar_end(count, last);
         // Only a copy the game redraws the screen from was left: the value itself was lost on the
         // way (Isaac's hearts). Start again rather than stop with nothing.
-        if matches!(&end, Ok(AutoResult::Unsure(why)) if why == COPY_ONLY) && !cancelled(&self.cancel) && start.elapsed() < limit {
+        if matches!(&end, Ok(AutoResult::Unsure(why)) if *why == copy_only()) && !cancelled(&self.cancel) && start.elapsed() < limit {
             self.say("the one place left is a copy the game redraws the screen from: lost the value, copying the game's memory again");
             self.helper.call("track");
             self.search = None;
@@ -3914,8 +3967,8 @@ impl Core {
         self.searched_decimals = 0;
         if count == 0 {
             return Err(match self.icons() {
-                true => "Stopped before the icons changed. Press Start again and let them change in the game.".into(),
-                false => "Stopped before the bar moved. Press Start again and let the bar change in the game.".into(),
+                true => tr!("Stopped before the icons changed. Press Start again and let them change in the game."),
+                false => tr!("Stopped before the bar moved. Press Start again and let the bar change in the game."),
             });
         }
         for l in self.helper.call("list") {
@@ -3947,10 +4000,10 @@ impl Core {
             // its own changes, maybe something else that moved alike (SPD: a junk number of a
             // billion passed every step). The player tries it.
             (1, 1) => Ok(AutoResult::Unsure(match self.icons() {
-                true => "The one place left kept a test value, but the icons didn't show it.".into(),
-                false => "The one place left kept a test value, but the bar didn't show it.".into(),
+                true => tr!("The one place left kept a test value, but the icons didn't show it."),
+                false => tr!("The one place left kept a test value, but the bar didn't show it."),
             })),
-            (1, _) => Ok(AutoResult::Unsure(COPY_ONLY.into())),
+            (1, _) => Ok(AutoResult::Unsure(copy_only())),
             _ => Ok(AutoResult::Several(count)),
         }
     }
@@ -4027,10 +4080,10 @@ impl Core {
         self.game()?;
         self.cancel.store(false, Ordering::Relaxed);
         if self.search.is_none() {
-            return Err("Nothing to narrow down yet: press Start or type the number the game shows.".into());
+            return Err(tr!("Nothing to narrow down yet: press Start or type the number the game shows."));
         }
         if self.area.is_none() {
-            return Err("No number picked: type the number the game shows instead.".into());
+            return Err(tr!("No number picked: type the number the game shows instead."));
         }
         if self.bar.is_some() {
             if self.search.is_some() {
@@ -4038,13 +4091,13 @@ impl Core {
             }
             let Some(f) = self.read_bar_stable()? else {
                 return Err(match self.icons() {
-                    true => "The icons are all empty, hidden or changing: try again while they show and stay still.".into(),
-                    false => "The bar is empty, hidden or moving: try again while it shows and stays still.".into(),
+                    true => tr!("The icons are all empty, hidden or changing: try again while they show and stay still."),
+                    false => tr!("The bar is empty, hidden or moving: try again while it shows and stays still."),
                 });
             };
             let missed = match self.icons() {
-                true => "Nothing in the game's memory changed like the icons did. Press Start Over and search again.",
-                false => "Nothing in the game's memory moved like the bar did. Press Start Over and search again.",
+                true => tr!("Nothing in the game's memory changed like the icons did. Press Start Over and search again."),
+                false => tr!("Nothing in the game's memory moved like the bar did. Press Start Over and search again."),
             };
             let count = self.bar_step(f).ok_or(missed)?;
             return self.bar_end(count, f);
@@ -4059,7 +4112,7 @@ impl Core {
                     self.say(&format!("can't read the box: scanning again for the typed {n}"));
                     self.typed_search(n)
                 }
-                None => Err("Can't read the number now (is it on screen?). Type it below instead.".into()),
+                None => Err(tr!("Can't read the number now (is it on screen?). Type it below instead.")),
             },
         }
     }
@@ -4097,7 +4150,7 @@ impl Core {
         let found = match count {
             0 => {
                 self.search = None;
-                return Err(format!("{n} is nowhere in the game's memory"));
+                return Err(tr!("{n} is nowhere in the game's memory", n));
             }
             // It may be another item holding the same number: it has to follow the next one.
             1 if fresh && self.shaped => {

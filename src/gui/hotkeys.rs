@@ -11,15 +11,17 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+use crate::i18n::{gettext, n_, tr};
+
 const PORTAL: &str = "org.freedesktop.portal.Desktop";
 const DESKTOP: &str = "/org/freedesktop/portal/desktop";
 const IFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 
 /// Id, what it does, the trigger asked for (the desktop may give another, or none).
 const KEYS: [(&str, &str, &str); 3] = [
-    ("limits", "Turn limits off or on", "CTRL+SHIFT+F9"),
-    ("search", "Start or stop the search", "CTRL+SHIFT+F10"),
-    ("again", "Scan again (the number stayed the same)", "CTRL+SHIFT+F11"),
+    ("limits", n_!("Turn limits off or on"), "CTRL+SHIFT+F9"),
+    ("search", n_!("Start or stop the search"), "CTRL+SHIFT+F10"),
+    ("again", n_!("Scan again (the number stayed the same)"), "CTRL+SHIFT+F11"),
 ];
 
 pub struct Hotkeys {
@@ -45,7 +47,7 @@ impl Hotkeys {
             .iter()
             .enumerate()
             .map(|(i, (_, what, _))| {
-                grid.attach(&gtk::Label::builder().label(*what).xalign(0.0).build(), 0, i as i32, 1, 1);
+                grid.attach(&gtk::Label::builder().label(gettext(what)).xalign(0.0).build(), 0, i as i32, 1, 1);
                 let key = gtk::Label::builder().xalign(1.0).hexpand(true).css_classes(["dim-label", "monospace"]).build();
                 grid.attach(&key, 1, i as i32, 1, 1);
                 key
@@ -61,13 +63,13 @@ impl Hotkeys {
             .margin_start(12)
             .margin_end(12)
             .build();
-        content.append(&gtk::Label::builder().label("Hotkeys").xalign(0.0).css_classes(["heading"]).build());
+        content.append(&gtk::Label::builder().label(tr!("Hotkeys")).xalign(0.0).css_classes(["heading"]).build());
         content.append(&grid);
         content.append(&note);
         content.append(&setup);
         let button = gtk::MenuButton::builder()
             .icon_name("input-keyboard-symbolic")
-            .tooltip_text("Hotkeys")
+            .tooltip_text(tr!("Hotkeys"))
             .popover(&gtk::Popover::builder().child(&content).build())
             .build();
         let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).ok();
@@ -110,23 +112,26 @@ impl Hotkeys {
         let bound = self.bound.borrow();
         for ((id, _, _), label) in KEYS.iter().zip(&self.keys) {
             let key = bound.iter().find(|(b, _)| b == id).map(|(_, k)| k.as_str());
-            label.set_label(match key {
-                Some("") => "None",
-                Some(k) => k,
-                None => "",
+            label.set_label(&match key {
+                Some("") => tr!("None"),
+                Some(k) => k.to_owned(),
+                None => String::new(),
             });
         }
         let (note, setup) = match (error, self.active.get()) {
-            (Some(_), _) => ("This desktop doesn't offer hotkeys to apps.", None),
-            (None, true) => ("They work while the game is in front. A notification says what they did.", Some("Change Hotkeys…")),
-            (None, false) => ("Turn limits off or on, and search, without leaving the game. They aren't set up: your desktop asks you to accept them.", Some("Set Up Hotkeys…")),
+            (Some(_), _) => (tr!("This desktop doesn't offer hotkeys to apps."), None),
+            (None, true) => (tr!("They work while the game is in front. A notification says what they did."), Some(tr!("Change Hotkeys…"))),
+            (None, false) => (
+                tr!("Turn limits off or on, and search, without leaving the game. They aren't set up: your desktop asks you to accept them."),
+                Some(tr!("Set Up Hotkeys…")),
+            ),
         };
         if let Some(e) = error {
             eprintln!("hotkeys: {e}");
         }
-        self.note.set_label(note);
+        self.note.set_label(&note);
         self.setup.set_visible(setup.is_some());
-        self.setup.set_label(setup.unwrap_or_default());
+        self.setup.set_label(&setup.unwrap_or_default());
     }
 
     fn listen(self: &Rc<Self>) {
@@ -229,7 +234,7 @@ impl Hotkeys {
         let Some(session) = self.session_path() else { return };
         let list = KEYS.iter().map(|(id, what, key)| {
             let d = glib::VariantDict::new(None);
-            d.insert("description", *what);
+            d.insert("description", gettext(what));
             d.insert("preferred_trigger", *key);
             glib::Variant::tuple_from_iter([id.to_variant(), d.end()])
         });

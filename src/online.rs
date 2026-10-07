@@ -5,6 +5,8 @@
 use std::fs;
 use std::time::Duration;
 
+use crate::i18n::tr;
+
 /// Where requests go; `FERRET_SERVER` points a test build at a local `wrangler dev`.
 const SERVER: &str = "https://ferret.petru101.workers.dev";
 
@@ -19,7 +21,7 @@ fn url(path: &str) -> String {
 }
 
 fn unreachable(e: ureq::Error) -> String {
-    format!("Could not reach Ferret's server ({e}). Check your connection and try again.")
+    tr!("Could not reach Ferret's server ({e}). Check your connection and try again.", e)
 }
 
 fn reply(mut response: ureq::http::Response<ureq::Body>) -> Result<Reply, String> {
@@ -131,7 +133,7 @@ pub fn server_error(reply: &Reply) -> String {
         .split_once("\"error\":\"")
         .and_then(|(_, rest)| rest.split_once('"'))
         .map_or(reply.body.trim(), |(e, _)| e);
-    format!("Ferret's server refused it ({} {why})", reply.status)
+    tr!("Ferret's server refused it ({why})", why = format!("{} {why}", reply.status))
 }
 
 #[cfg(test)]

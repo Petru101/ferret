@@ -22,6 +22,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 
 use crate::core::{AutoResult, Core, GameProcess, Gone, Refusal, ValueRow};
+use crate::i18n::{ntr, tr};
 use crate::ocr::Word;
 
 pub const APP_ID: &str = "io.github.Petru101.Ferret";
@@ -57,8 +58,8 @@ pub enum Event {
     /// The search was cleared (the Find tab already shows it).
     Reset,
     /// A step of the search was taken back (Undo) or again (Redo): the places matching now and
-    /// what it was, and "Undid" or "Redid".
-    Undone(Result<(usize, String), String>, &'static str),
+    /// what it was, and whether it was Redo.
+    Undone(Result<(usize, String), String>, bool),
     /// A job with nothing to show.
     Idle,
     /// The attached game's learned digits, 0 to 9.
@@ -194,9 +195,8 @@ fn start_worker(cancel: Arc<AtomicBool>, scan_now: Arc<AtomicBool>) -> (Worker, 
                     .map(|s| s.to_string())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_default();
-                let msg = format!("Ferret hit a bug and stopped: {what}");
-                core.say(&msg);
-                Event::Bug(msg)
+                core.say(&format!("Ferret hit a bug and stopped: {what}"));
+                Event::Bug(tr!("Ferret hit a bug and stopped: {what}", what))
             });
             if events_tx.send_blocking(event).is_err() {
                 break;
@@ -276,10 +276,10 @@ impl Ui {
         let notify = {
             let (app, list) = (app.clone(), list.clone());
             move || {
-                let n = gio::Notification::new("Ferret Is Still Running");
-                n.set_body(Some(&format!("It keeps {list} in range while you play, and quits when the game does.")));
+                let n = gio::Notification::new(&tr!("Ferret Is Still Running"));
+                n.set_body(Some(&tr!("It keeps {values} in range while you play, and quits when the game does.", values = list)));
                 n.set_default_action("app.show");
-                n.add_button("Quit Ferret", "app.quit");
+                n.add_button(&tr!("Quit Ferret"), "app.quit");
                 app.send_notification(Some("background"), &n);
             }
         };
@@ -315,7 +315,7 @@ impl Ui {
         }
         let options = glib::VariantDict::new(None);
         options.insert("handle_token", &token);
-        options.insert("reason", format!("To keep {list} in range while you play"));
+        options.insert("reason", tr!("To keep {values} in range while you play", values = list));
         options.insert("autostart", false);
         options.insert("dbus-activatable", false);
         let ui = Rc::downgrade(self);
@@ -342,7 +342,7 @@ impl Ui {
         );
         // What desktops listing background apps show for it (GNOME); older portals lack it.
         let status = glib::VariantDict::new(None);
-        status.insert("message", format!("Keeping {list} in range"));
+        status.insert("message", tr!("Keeping {values} in range", values = list));
         conn.call(
             Some("org.freedesktop.portal.Desktop"),
             "/org/freedesktop/portal/desktop",
@@ -364,14 +364,14 @@ impl Ui {
                 self.worker.run_now(|core| Event::Switched(core.switch_limits()));
                 None
             }
-            "search" if self.attached.get().is_none() => Some(("Can't search yet", "Open the game in Ferret first.")),
-            "search" => self.find.hotkey_search().map(|why| ("Can't search yet", why)),
-            "again" => self.find.hotkey_again().map(|why| ("Can't scan again yet", why)),
+            "search" if self.attached.get().is_none() => Some((tr!("Can't search yet"), tr!("Open the game in Ferret first."))),
+            "search" => self.find.hotkey_search().map(|why| (tr!("Can't search yet"), why)),
+            "again" => self.find.hotkey_again().map(|why| (tr!("Can't scan again yet"), why)),
             _ => None,
         };
         if let Some((title, why)) = refused {
-            self.toast(why);
-            self.notify.send(title, why, None, Some(6));
+            self.toast(&why);
+            self.notify.send(&title, &why, None, Some(6));
         }
     }
 
@@ -415,7 +415,7 @@ impl Ui {
         }
         let dialog = adw::AlertDialog::new(Some(heading), None);
         dialog.set_extra_child(Some(&lines));
-        dialog.add_response("close", "Close");
+        dialog.add_response("close", &tr!("Close"));
         dialog.present(Some(&self.nav));
     }
 
@@ -431,11 +431,12 @@ impl Ui {
         }
         let name = self.game_names.borrow().get(exe).cloned().unwrap_or_else(|| exe.to_owned());
         let mut text = online.join("\n");
-        text.push_str(
-            "\nOnly change values while you play alone and offline. If anti-cheat starts in the game, Ferret lets go \
-             of it at once.",
-        );
-        self.explain(&format!("{name} has online features"), &text);
+        text.push('\n');
+        text.push_str(&tr!(
+            "Only change values while you play alone and offline. If anti-cheat starts in the game, Ferret lets go \
+             of it at once."
+        ));
+        self.explain(&tr!("{name} has online features", name), &text);
     }
 
     /// The first time a game with a memory scrambler is opened: most of its numbers can't be found.
@@ -448,12 +449,14 @@ impl Ui {
             eprintln!("settings: {e}");
         }
         let name = self.game_names.borrow().get(exe).cloned().unwrap_or_else(|| exe.to_owned());
-        let text = format!(
+        let text = tr!(
             "{name} uses {scrambler}, which keeps its numbers scrambled in memory. Ferret can't find or change \
              most of them: the plain copies it finds are decoys the game puts back, and changing them may be \
-             noticed by the game."
+             noticed by the game.",
+            name,
+            scrambler
         );
-        self.explain(&format!("{name} hides its numbers"), &text);
+        self.explain(&tr!("{name} hides its numbers", name), &text);
     }
 
     fn on_game_page(&self) -> bool {
@@ -470,7 +473,7 @@ impl Ui {
         let waiting = self.waiting_for.borrow().clone();
         if let Some(g) = waiting.and_then(|exe| games.iter().find(|g| g.exe == exe && g.refused.is_none())) {
             self.waiting_for.replace(None);
-            self.toast(&format!("{} started again: opening it", g.name.as_deref().unwrap_or(&g.exe)));
+            self.toast(&tr!("{name} started again: opening it", name = g.name.as_deref().unwrap_or(&g.exe)));
             let pid = g.pid;
             self.attaching.set(Some(pid));
             self.worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
@@ -486,9 +489,9 @@ impl Ui {
             self.games.remove(&row);
         }
         for g in games {
-            let mut subtitle = format!("Process {}", g.pid);
+            let mut subtitle = tr!("Process {pid}", pid = g.pid);
             if let Some(id) = &g.app_id {
-                subtitle = format!("Steam app {id} · {subtitle}");
+                subtitle = format!("{} · {subtitle}", tr!("Steam app {id}", id));
             }
             let title = match &g.name {
                 Some(name) => {
@@ -500,14 +503,13 @@ impl Ui {
             let row = adw::ActionRow::builder().title(title).subtitle(&subtitle).build();
             row.set_subtitle_lines(2);
             let refused = g.refused.as_ref().map(|r| match r {
-                Refusal::AntiCheat(ac) => format!("{ac} is running. Ferret won't attach while anti-cheat runs."),
-                Refusal::OnlineOnly => "Online-only game. Ferret won't attach to online games.".to_owned(),
-                Refusal::Vac => "Uses Valve Anti-Cheat. Ferret won't attach to it. Source games started with -insecure \
-                                 in their launch options are allowed."
-                    .to_owned(),
-                Refusal::FlagsEdits => {
-                    "This game flags edited characters when they go online. Ferret won't attach to it.".to_owned()
-                }
+                Refusal::AntiCheat(ac) => tr!("{anticheat} is running. Ferret won't attach while anti-cheat runs.", anticheat = ac),
+                Refusal::OnlineOnly => tr!("Online-only game. Ferret won't attach to online games."),
+                Refusal::Vac => tr!(
+                    "Uses Valve Anti-Cheat. Ferret won't attach to it. Source games started with -insecure \
+                     in their launch options are allowed."
+                ),
+                Refusal::FlagsEdits => tr!("This game flags edited characters when they go online. Ferret won't attach to it."),
             });
             if let Some(why) = refused {
                 row.set_subtitle(&why);
@@ -516,7 +518,7 @@ impl Ui {
                 let online = online_features(&g);
                 if !online.is_empty() {
                     let badge = gtk::Label::builder()
-                        .label("Online features")
+                        .label(tr!("Online features"))
                         .tooltip_text(online.join("\n"))
                         .valign(gtk::Align::Center)
                         .css_classes(["caption-heading", "warning"])
@@ -536,7 +538,7 @@ impl Ui {
                     self.toasts.clone(),
                 );
                 let pid = g.pid;
-                let opening = format!("Opening {}…", g.name.as_deref().unwrap_or(&g.exe));
+                let opening = tr!("Opening {game}…", game = g.name.as_deref().unwrap_or(&g.exe));
                 row.connect_activated(move |_| {
                     waiting_for.replace(None);
                     // Back to the same game: everything (a search in progress too) is still there.
@@ -605,8 +607,8 @@ impl Ui {
                     self.nav.pop();
                 }
                 let name = self.game_names.borrow().get(&exe).cloned().unwrap_or_else(|| exe.clone());
-                self.toast(&format!("{name} closed. Ferret opens it again when it starts."));
-                self.notify.send(&format!("{name} closed"), "Ferret opens it again when it starts.", None, Some(6));
+                self.toast(&tr!("{name} closed. Ferret opens it again when it starts.", name));
+                self.notify.send(&tr!("{name} closed", name), &tr!("Ferret opens it again when it starts."), None, Some(6));
                 self.waiting_for.replace(Some(exe));
             }
             Event::Scrambler(Some((exe, scrambler))) => self.warn_scrambler(&exe, &scrambler),
@@ -618,10 +620,12 @@ impl Ui {
                     self.nav.pop();
                 }
                 let name = self.game_names.borrow().get(&exe).cloned().unwrap_or_else(|| exe.clone());
-                let heading = format!("Ferret let go of {name}");
-                let text = format!(
-                    "{ac} started in {name}. Ferret stopped keeping values in range and won't change anything in \
-                     the game while the anti-cheat runs."
+                let heading = tr!("Ferret let go of {name}", name);
+                let text = tr!(
+                    "{anticheat} started in {name}. Ferret stopped keeping values in range and won't change anything in \
+                     the game while the anti-cheat runs.",
+                    anticheat = ac,
+                    name
                 );
                 self.notify.send(&heading, &text, None, Some(10));
                 if self.background.get() {
@@ -654,7 +658,7 @@ impl Ui {
             Event::Undone(r, done) => self.find.undone(r, done),
             Event::Saved(Ok((name, msg))) => {
                 self.toast(&msg);
-                self.notify.send("Saved", &msg, None, Some(6));
+                self.notify.send(&tr!("Saved"), &msg, None, Some(6));
                 self.find.saved(&name);
                 self.tips.show(tips::Tip::Slots);
                 self.stack.set_visible_child_name("values");
@@ -666,16 +670,16 @@ impl Ui {
             Event::Closing(names) => self.keep_running(&names),
             Event::Switched(Ok((on, names))) => {
                 let (title, body) = match on {
-                    true => ("Limits on", format!("Ferret keeps {} in range again.", listed(&names))),
-                    false => ("Limits off", format!("{} can change freely until you turn limits on again.", listed(&names))),
+                    true => (tr!("Limits on"), tr!("Ferret keeps {values} in range again.", values = listed(&names))),
+                    false => (tr!("Limits off"), tr!("{values} can change freely until you turn limits on again.", values = listed(&names))),
                 };
                 self.toast(&format!("{title}: {body}"));
-                self.notify.send(title, &body, None, Some(4));
+                self.notify.send(&title, &body, None, Some(4));
                 self.worker.run(|core| Event::Values(core.values()));
             }
             Event::Switched(Err(e)) => {
                 self.toast(&e);
-                self.notify.send("Limits", &e, None, Some(4));
+                self.notify.send(&tr!("Limits"), &e, None, Some(4));
             }
             Event::Reset | Event::Idle => {}
             Event::Digits(shapes) => self.find.show_digits(shapes),
@@ -692,7 +696,7 @@ impl Ui {
                 self.attaching.set(None);
                 self.phase.hide();
                 match e.contains('\n') {
-                    true => self.explain("Ferret Can't Open This Game", &e),
+                    true => self.explain(&tr!("Ferret Can't Open This Game"), &e),
                     false => self.toast(&e),
                 }
             }
@@ -708,8 +712,8 @@ impl Ui {
 
 fn games_page(ui_list: &gtk::ListBox, stack: &gtk::Stack, error: &adw::StatusPage, refresh: &gtk::Button, banner: &adw::Banner) -> adw::NavigationPage {
     let group = adw::PreferencesGroup::builder()
-        .title("Running games")
-        .description("Pick the game to attach to. Ferret only works with single-player games.")
+        .title(tr!("Running games"))
+        .description(tr!("Pick the game to attach to. Ferret only works with single-player games."))
         .build();
     group.add(ui_list);
     let list = gtk::ScrolledWindow::builder()
@@ -727,8 +731,8 @@ fn games_page(ui_list: &gtk::ListBox, stack: &gtk::Stack, error: &adw::StatusPag
         .build();
     let empty = adw::StatusPage::builder()
         .icon_name("input-gaming-symbolic")
-        .title("No Games Running")
-        .description("Start a game and it shows up here.")
+        .title(tr!("No Games Running"))
+        .description(tr!("Start a game and it shows up here."))
         .build();
     stack.add_named(&list, Some("list"));
     stack.add_named(&empty, Some("empty"));
@@ -948,8 +952,8 @@ fn build(app: &adw::Application) {
         let find_ = find.clone();
         notify.on_button(move || find_.stop());
     }
-    stack.add_titled_with_icon(&values.root, Some("values"), "Values", "view-list-symbolic");
-    stack.add_titled_with_icon(&find.root, Some("find"), "Find Value", "edit-find-symbolic");
+    stack.add_titled_with_icon(&values.root, Some("values"), &tr!("Values"), "view-list-symbolic");
+    stack.add_titled_with_icon(&find.root, Some("find"), &tr!("Find Value"), "edit-find-symbolic");
 
     let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
     let header = adw::HeaderBar::new();
@@ -958,7 +962,7 @@ fn build(app: &adw::Application) {
     header.pack_end(&share::menu_button());
     header.pack_end(&hotkeys.button);
     // One per page (a widget has one parent), shown together.
-    let banners = [(); 2].map(|_| adw::Banner::builder().title("A newer version of Ferret is installed").button_label("Restart").build());
+    let banners = [(); 2].map(|_| adw::Banner::builder().title(tr!("A newer version of Ferret is installed")).button_label(tr!("Restart")).build());
     banners.iter().for_each(|b| b.set_action_name(Some("app.restart")));
     let restart = gio::SimpleAction::new("restart", None);
     {
@@ -982,16 +986,16 @@ fn build(app: &adw::Application) {
         guide.on_values(stack.visible_child_name().as_deref() != Some("find"));
     }
     toolbar.set_content(Some(&stack));
-    let game_page = adw::NavigationPage::builder().title("Game").tag("game").child(&toolbar).build();
+    let game_page = adw::NavigationPage::builder().title(tr!("Game")).tag("game").child(&toolbar).build();
 
     let games = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
     let games_stack = gtk::Stack::new();
     let games_error = adw::StatusPage::builder()
         .icon_name("dialog-error-symbolic")
-        .title("Ferret Could Not Start")
+        .title(tr!("Ferret Could Not Start"))
         .build();
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
-    refresh.set_tooltip_text(Some("Refresh"));
+    refresh.set_tooltip_text(Some(&tr!("Refresh")));
     let nav = adw::NavigationView::new();
     // Esc is for pausing the game; pressing it here by mistake shouldn't leave the game page.
     nav.set_pop_on_escape(false);
@@ -1149,7 +1153,7 @@ fn build(app: &adw::Application) {
 fn listed(names: &[String]) -> String {
     match names {
         [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        [rest @ .., last] => tr!("{names} and {last}", names = rest.join(", "), last),
         [] => String::new(),
     }
 }
@@ -1166,14 +1170,42 @@ pub fn run() -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
+/// How a value is stored (core's `Kind::describe`, which the log keeps in English).
+fn kind_text(kind: crate::core::Kind) -> String {
+    use crate::core::Kind;
+    match kind {
+        Kind::I32 => tr!("whole number"),
+        Kind::F32 => tr!("float"),
+        Kind::F64 => tr!("double"),
+        Kind::Xor => tr!("encoded whole number"),
+        Kind::U16 => tr!("2-byte whole number"),
+    }
+}
+
+/// "at least 5", "between 1 and 9" (core's `limit_text`).
+fn range_text(min: Option<f64>, max: Option<f64>) -> String {
+    let (min, max) = (min.map(|v| crate::core::number_text(v, None)), max.map(|v| crate::core::number_text(v, None)));
+    match (min, max) {
+        (None, Some(max)) => tr!("at most {max}", max),
+        (Some(min), None) => tr!("at least {min}", min),
+        (Some(min), Some(max)) => tr!("between {min} and {max}", min, max),
+        (None, None) => tr!("unlimited"),
+    }
+}
+
+/// "one kind of place", "3 kinds of places" (core's `kinds_of_places`).
+fn kinds_of_places(n: usize) -> String {
+    ntr!("one kind of place", "{n} kinds of places", n)
+}
+
 /// A game's online features, one sentence each (none: it has none Ferret knows of).
 fn online_features(g: &GameProcess) -> Vec<String> {
     let mut lines = Vec::new();
     if g.multiplayer {
-        lines.push("It can be played with other people.".to_owned());
+        lines.push(tr!("It can be played with other people."));
     }
     if let Some(ac) = &g.ships {
-        lines.push(format!("It comes with {ac}, which isn't running now."));
+        lines.push(tr!("It comes with {anticheat}, which isn't running now.", anticheat = ac));
     }
     lines
 }

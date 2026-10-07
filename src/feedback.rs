@@ -7,6 +7,7 @@ use std::fs;
 
 use crate::core;
 use crate::online::{self, json_string};
+use crate::i18n::tr;
 
 /// The server takes at most 400 KB of log and 128 KB of saved values: the end of the log (the
 /// newest lines) and the profile without its unconfirmed candidates fit with room to spare.
@@ -109,14 +110,14 @@ impl Report {
     /// Sends it; blocks for up to 30 s (not on the GUI's thread). The player is shown its id.
     pub fn send(&self) -> Result<(), String> {
         if self.message.trim().is_empty() {
-            return Err("Write something first".into());
+            return Err(tr!("Write something first"));
         }
         let reply = online::post("/v1/feedback", &self.body(&online::install_id()))?;
         match reply.status {
             200 => Ok(()),
-            429 => Err("Too many reports from here in the last hour: try again later.".into()),
-            413 => Err("This report is too big to send: leave out the log and try again.".into()),
-            409 => Err("A report with this id was sent already: close this window and write it again.".into()),
+            429 => Err(tr!("Too many reports from here in the last hour: try again later.")),
+            413 => Err(tr!("This report is too big to send: leave out the log and try again.")),
+            409 => Err(tr!("A report with this id was sent already: close this window and write it again.")),
             _ => Err(online::server_error(&reply)),
         }
     }

@@ -145,7 +145,7 @@ impl Notifier {
         let sent = self.sent.get() + 1;
         self.sent.set(sent);
         self.waiting.set(secs.is_none());
-        let mut actions = vec!["default".to_owned(), "Show Ferret".to_owned()];
+        let mut actions = vec!["default".to_owned(), crate::i18n::tr!("Show Ferret")];
         if let Some(label) = button {
             actions.extend(["button".to_owned(), label.to_owned()]);
         }

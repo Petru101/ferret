@@ -61,7 +61,7 @@ fn request(
     let (code, results): (u32, HashMap<String, OwnedValue>) = msg.body().deserialize().map_err(|e| e.to_string())?;
     match code {
         0 => Ok(results),
-        1 => Err("cancelled in the window picker".into()),
+        1 => Err(crate::i18n::tr!("cancelled in the window picker")),
         _ => Err(format!("portal request failed (code {code})")),
     }
 }

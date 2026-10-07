@@ -5,6 +5,7 @@ mod core;
 mod feedback;
 mod font;
 mod gui;
+mod i18n;
 mod library;
 mod ocr;
 mod online;
@@ -16,6 +17,7 @@ fn main() {
     if std::env::args().any(|a| a == "--cli") {
         cli::run();
     } else {
+        i18n::init();
         gui::run();
     }
 }
