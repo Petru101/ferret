@@ -6,6 +6,7 @@ mod find;
 mod hotkeys;
 mod notify;
 mod phase;
+mod share;
 mod tips;
 mod values;
 
@@ -64,6 +65,10 @@ pub enum Event {
     Shapes(usize),
     /// Anything else: a message to show, or an error.
     Done(Result<String, String>),
+    /// The attached game's values as a `.ferret` file, and where it goes.
+    Exported(Result<crate::core::Export, String>, share::To),
+    /// What an import added and skipped.
+    Imported(Result<crate::core::Imported, String>),
     /// The places still matching, with their values (the player tries them out).
     Matches(Result<Vec<crate::core::Match>, String>),
     /// The player picked one of them as the value.
@@ -585,6 +590,8 @@ impl Ui {
             Event::Digits(shapes) => self.find.show_digits(shapes),
             Event::Shapes(n) => self.find.show_shapes(n),
             Event::Done(Ok(msg)) => self.toast(&msg),
+            Event::Exported(r, to) => share::exported(self, r, to),
+            Event::Imported(r) => share::imported(self, r),
             Event::Saved(Err(e)) => {
                 self.find.save_failed(&e);
                 self.toast(&e);
@@ -835,6 +842,7 @@ fn build(app: &adw::Application) {
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&switcher));
     let hotkeys = hotkeys::Hotkeys::new();
+    header.pack_end(&share::menu_button());
     header.pack_end(&hotkeys.button);
     // One per page (a widget has one parent), shown together.
     let banners = [(); 2].map(|_| adw::Banner::builder().title("A newer version of Ferret is installed").button_label("Restart").build());
@@ -1010,6 +1018,7 @@ fn build(app: &adw::Application) {
     }
     ui.worker.run(|core| Event::Games(core.games()));
     add_debug_actions(app, &ui);
+    share::add_actions(app, &ui);
     ui.window.present();
 }
 

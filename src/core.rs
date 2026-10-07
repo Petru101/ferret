@@ -15,6 +15,7 @@ use crate::capture::WindowCapture;
 use crate::font::{self, Font};
 use crate::ocr::{self, Rect, Shown, Word};
 use crate::shapes::{self, Learned, Shape};
+use crate::share;
 
 fn flatpak_info(key: &str) -> Option<String> {
     let info = fs::read_to_string("/.flatpak-info").ok()?;
@@ -345,7 +346,7 @@ impl Kind {
         }
     }
 
-    fn parse(s: &str) -> Option<Kind> {
+    pub fn parse(s: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.name() == s)
     }
 
@@ -522,6 +523,11 @@ struct Entry {
     /// health while the player isn't hit): not traced again at restores until the next build
     /// (saving it again traces it).
     untraced: Option<String>,
+    /// Came from a `.ferret` file (share.rs) and the player hasn't said yet that the game shows
+    /// the number it leads to: never written, no limit, until they do (`confirm_paths`).
+    imported: bool,
+    /// "<min|-> <max|->": a range the import suggested, only filled into the Values tab's fields.
+    suggested: Option<String>,
     /// Lines this build doesn't understand (from a newer one), saved back unchanged.
     other: Vec<String>,
 }
@@ -536,7 +542,8 @@ pub fn one_word(name: &str) -> String {
 /// missing), its "site ...", "path ...", "named ..." and "candidate ..." lines, "run <pid>" (where the
 /// candidates came from), an optional "limit <min|-> <max|->" line and "decimals <n>" for a
 /// whole number shown with decimals, "last <value>" while its pointer paths are unconfirmed,
-/// "build <stamp>" with code patterns, "untraced <stamp>" (see Entry).
+/// "build <stamp>" with code patterns, "untraced <stamp>", "imported" and "suggest <min|-> <max|->"
+/// (see Entry).
 /// Other lines are kept
 /// with their entry, so a build older than the profile doesn't drop what it doesn't know.
 fn read_profile(exe: &str) -> Vec<Entry> {
@@ -559,6 +566,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 last: None,
                 build: None,
                 untraced: None,
+                imported: false,
+                suggested: None,
                 other: Vec::new(),
             });
         } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
@@ -583,6 +592,10 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.build = Some(b.trim().to_owned());
         } else if let (Some(b), Some(e)) = (line.strip_prefix("untraced "), entries.last_mut()) {
             e.untraced = Some(b.trim().to_owned());
+        } else if let ("imported", Some(e)) = (line.trim(), entries.last_mut()) {
+            e.imported = true;
+        } else if let (Some(l), Some(e)) = (line.strip_prefix("suggest "), entries.last_mut()) {
+            e.suggested = Some(l.trim().to_owned());
         } else if let (false, Some(e)) = (line.trim().is_empty(), entries.last_mut()) {
             e.other.push(line.to_owned());
         }
@@ -628,6 +641,12 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         if let Some(b) = &e.untraced {
             text.push_str(&format!("untraced {b}\n"));
+        }
+        if e.imported {
+            text.push_str("imported\n");
+        }
+        if let Some(l) = &e.suggested {
+            text.push_str(&format!("suggest {l}\n"));
         }
         for l in &e.other {
             text.push_str(&format!("{l}\n"));
@@ -777,6 +796,29 @@ pub struct ValueRow {
     pub confirmable: bool,
     /// Shown only, never written (Java games: see `JAVA_WRITE`).
     pub read_only: bool,
+    /// Came from a shared file and isn't confirmed by the player yet (`confirmable` asks).
+    pub imported: bool,
+    /// A range the import suggested (as the game shows it), for the fields only.
+    pub suggested: (Option<f64>, Option<f64>),
+}
+
+/// A game's saved values as a `.ferret` file.
+pub struct Export {
+    pub text: String,
+    /// "<program>.ferret".
+    pub file_name: String,
+    pub count: usize,
+    /// Values left out, and why.
+    pub left_out: Vec<String>,
+}
+
+/// What an import added (unconfirmed) and skipped.
+pub struct Imported {
+    pub added: Vec<String>,
+    /// Values not taken, and why.
+    pub skipped: Vec<String>,
+    /// The file was made with another build of the game: some may not be found.
+    pub other_build: bool,
 }
 
 /// Why saved values of Java games are only shown.
@@ -832,6 +874,8 @@ const RESTORE_WAIT: Duration = Duration::from_secs(2);
 const IMPLAUSIBLE: &str = "it read a number no game keeps";
 /// The helper's reason when a value's code didn't run while it waited.
 const NOT_RUN: &str = "none of its code ran meanwhile";
+/// Why an imported value isn't written yet.
+const IMPORTED: &str = "it was imported and isn't checked yet. If the game shows the number Ferret reads, say so in the Values tab";
 
 /// How often values seen in trusted places are written to the profile as `last`.
 const LAST_EVERY: Duration = Duration::from_secs(10);
@@ -1279,6 +1323,8 @@ impl Core {
             last,
             build,
             untraced: None,
+            imported: false,
+            suggested: None,
             other: Vec::new(),
         };
         let known = entry.known(&entries);
@@ -1346,6 +1392,8 @@ impl Core {
             last,
             build,
             untraced: None,
+            imported: false,
+            suggested: None,
             other: Vec::new(),
         });
         let path = write_profile(&game.exe, &entries)?;
@@ -1459,6 +1507,9 @@ impl Core {
         };
         let mut entries = read_profile(&exe);
         let entry = entries.iter().find(|e| e.name == name).ok_or_else(|| format!("{name} isn't saved"))?;
+        if entry.imported {
+            return self.confirm_imported(&exe, entries, &name);
+        }
         if !entry.unconfirmed() {
             return Err(format!("{name} is confirmed already"));
         }
@@ -1502,6 +1553,34 @@ impl Core {
             self.say(&format!("{name}: limit not applied: {e}"));
         }
         Ok(format!("{name} confirmed: Ferret finds it this way from now on"))
+    }
+
+    /// The player says the game shows the number an imported value leads to: from now on it is
+    /// theirs, written and kept in range like any other. Not while its ways of finding it
+    /// disagree (another build of the game, a name leading to several values).
+    fn confirm_imported(&mut self, exe: &str, mut entries: Vec<Entry>, name: &str) -> Result<String, String> {
+        let game = self.game()?;
+        if !game.entries.iter().any(|(n, l)| n == name && l.addr != 0) {
+            return Err(format!("{name} isn't in the game right now: load a save, then check it again"));
+        }
+        if let Some((_, why)) = game.named_doubt.iter().find(|(n, _)| n == name) {
+            return Err(format!("{name} can't be confirmed: its name doesn't lead to one value ({why})"));
+        }
+        if let Some((_, v)) = game.votes.iter().find(|(n, v)| n == name && !v.clear) {
+            return Err(format!("{name} can't be confirmed: {}", v.doubt()));
+        }
+        let entry = entries.iter_mut().find(|e| e.name == name).ok_or_else(|| format!("{name} isn't saved"))?;
+        entry.imported = false;
+        let entry = entry.clone();
+        write_profile(exe, &entries)?;
+        self.say(&format!("{name}: confirmed by the player, imported value kept as their own"));
+        // Followed by the helper from now on (its code patterns, if the game moves it).
+        if !entry.sites.is_empty() {
+            if let Err(e) = self.apply_limit(&entry) {
+                self.say(&format!("{name}: Ferret can't keep track of it if the game moves it: {e}"));
+            }
+        }
+        Ok(format!("{name} confirmed: Ferret can change it now"))
     }
 
     /// Saving a value again after it moved (a restart, a new level) keeps the saved pointer
@@ -1549,6 +1628,9 @@ impl Core {
     /// guesses, or they didn't agree clearly when last followed.
     fn doubtful(&self, name: &str, saved: &[Entry]) -> Option<String> {
         let game = self.game.as_ref()?;
+        if saved.iter().any(|e| e.name == name && e.imported) {
+            return Some(IMPORTED.into());
+        }
         if let Some((_, why)) = game.named_doubt.iter().find(|(n, _)| n == name) {
             return Some(format!("its name doesn't lead to one value ({why})"));
         }
@@ -1646,6 +1728,9 @@ impl Core {
         let followed = entry.followed(&saved);
         if entry.sites.is_empty() && followed.is_empty() && entry.named.is_empty() {
             return Err("no saved code pattern, pointer path or name".into());
+        }
+        if entry.limit.is_some() && entry.imported {
+            return Err(format!("{}: {IMPORTED}", entry.name));
         }
         if entry.limit.is_some() && entry.sites.is_empty() && entry.guessed(&saved, game.pid) {
             return Err(format!(
@@ -1748,6 +1833,107 @@ impl Core {
         Ok(())
     }
 
+    /// The attached game's saved values as a `.ferret` file (share.rs): only the ways of finding
+    /// them that work on other computers. Values with none are left out, with the reason.
+    pub fn export(&mut self) -> Result<Export, String> {
+        let game = self.game()?;
+        let (exe, build) = (game.exe.clone(), game.build.clone());
+        let (mut values, mut left_out) = (Vec::new(), Vec::new());
+        for e in read_profile(&exe) {
+            if e.imported {
+                left_out.push(format!("{}: imported and not checked yet", e.name));
+                continue;
+            }
+            let paths: Vec<String> = e.paths.iter().filter(|p| share::shareable_path(p)).cloned().collect();
+            if e.sites.is_empty() && paths.is_empty() && e.named.is_empty() {
+                let why = match () {
+                    _ if !e.paths.is_empty() => "its pointer paths start in files that differ between computers (graphics driver, Wine, Steam)",
+                    _ if !e.candidates.is_empty() => "its pointer paths aren't confirmed yet (restart the game and check it)",
+                    _ => "Ferret has no way to find it that works on other computers",
+                };
+                left_out.push(format!("{}: {why}", e.name));
+                continue;
+            }
+            values.push(share::Shared {
+                name: e.name,
+                kind: e.kind,
+                decimals: e.decimals,
+                sites: e.sites,
+                build: e.build,
+                paths,
+                named: e.named,
+                limit: e.limit,
+            });
+        }
+        if values.is_empty() {
+            return Err(match left_out.is_empty() {
+                true => "Nothing is saved for this game yet".into(),
+                false => format!("Nothing to export. {}", left_out.join("; ")),
+            });
+        }
+        let text = share::write(&exe, build.as_deref(), &values);
+        let names: Vec<&str> = values.iter().map(|v| v.name.as_str()).collect();
+        self.say(&format!("exported {}", names.join(", ")));
+        for l in &left_out {
+            self.say(&format!("left out {l}"));
+        }
+        let stem = Path::new(&exe).file_stem().map_or(exe.clone(), |s| s.to_string_lossy().into_owned());
+        Ok(Export { text, file_name: format!("{stem}.ferret"), count: values.len(), left_out })
+    }
+
+    /// Adds the values in a `.ferret` file's text to the attached game's, and finds them. They
+    /// stay unconfirmed (never written, no limit) until the player says the game shows their
+    /// number: a wrong shared value would write into random memory. A value with the name of
+    /// one already saved is skipped (the player's own stays).
+    pub fn import(&mut self, text: &str) -> Result<Imported, String> {
+        let file = share::read(text)?;
+        let game = self.game()?;
+        let (exe, build) = (game.exe.clone(), game.build.clone());
+        if !file.game.eq_ignore_ascii_case(&exe) {
+            return Err(format!("These values are for {}, not {exe}", file.game));
+        }
+        let mut entries = read_profile(&exe);
+        let (mut skipped, mut added) = (file.skipped, Vec::new());
+        for v in file.values {
+            if entries.iter().any(|e| e.name == v.name) {
+                skipped.push(format!("{}: you have a value with this name already (remove yours to import it)", v.name));
+                continue;
+            }
+            added.push(v.name.clone());
+            entries.push(Entry {
+                name: v.name,
+                kind: v.kind,
+                sites: v.sites,
+                paths: v.paths,
+                candidates: Vec::new(),
+                run: None,
+                named: v.named,
+                limit: None,
+                decimals: v.decimals,
+                last: None,
+                build: v.build,
+                untraced: None,
+                imported: true,
+                suggested: v.limit,
+                other: Vec::new(),
+            });
+        }
+        for s in &skipped {
+            self.say(&format!("import skipped {s}"));
+        }
+        if added.is_empty() {
+            return Err(format!("Nothing imported. {}", skipped.join("; ")));
+        }
+        write_profile(&exe, &entries)?;
+        self.say(&format!("imported {} (unconfirmed until the player checks them)", added.join(", ")));
+        let other_build = file.build.is_some() && build.is_some() && file.build != build;
+        if other_build {
+            self.say("import: made with another build of the game");
+        }
+        self.restore_some(Some(&added))?;
+        Ok(Imported { added, skipped, other_build })
+    }
+
     /// Keeps a saved value within a range (as the game shows it); `None` on both sides turns
     /// the limit off.
     pub fn limit(&mut self, name: &str, min: Option<f64>, max: Option<f64>) -> Result<(), String> {
@@ -1786,8 +1972,14 @@ impl Core {
 
     /// Finds every saved value of this game again, and re-applies saved limits.
     pub fn restore(&mut self) -> Result<(), String> {
+        self.restore_some(None)
+    }
+
+    /// `restore` for some of the values only (`None`: all of them).
+    fn restore_some(&mut self, only: Option<&[String]>) -> Result<(), String> {
         let (exe, pid) = (self.game()?.exe.clone(), self.game()?.pid);
-        let entries = read_profile(&exe);
+        let all = read_profile(&exe);
+        let entries: Vec<Entry> = all.iter().filter(|e| only.is_none_or(|o| o.contains(&e.name))).cloned().collect();
         if entries.is_empty() {
             return Err(format!("nothing saved for {exe}"));
         }
@@ -1858,7 +2050,7 @@ impl Core {
                 }
                 None => None,
             };
-            let paths = entry.followed(&entries);
+            let paths = entry.followed(&all);
             if resolved.is_none() && !paths.is_empty() {
                 let (ends, mut best, mut votes) = self.follow_votes(entry.kind, &paths);
                 let mut paths = paths;
@@ -2121,7 +2313,9 @@ impl Core {
             // Pointer paths no run confirmed may lead to the wrong place: never written, and
             // never made into a name that would be.
             let unsure = e.named.is_empty() && e.sites.is_empty() && e.unconfirmed();
-            if !engine && !stacks && !unsure && e.foreign_type().is_none() {
+            // An imported value may lead somewhere else in this player's game: not made into a
+            // name before the player confirms it.
+            if !engine && !stacks && !unsure && !e.imported && e.foreign_type().is_none() {
                 jobs.push(UpgradeJob { pid: game.pid, name: name.clone(), loc: *loc });
             }
         }
@@ -2276,8 +2470,29 @@ impl Core {
                 // A named value that leads nowhere now (no stack of the item): the last address
                 // holds something else by now (iron showed 1118760170, a float of another object).
                 let value = value.filter(|_| places > 0);
-                let confirmable = value.is_some() && saved.iter().any(|e| e.name == name && e.unconfirmed() && e.run != Some(pid));
-                ValueRow { name, addr: loc.addr, kind: loc.kind, value, min, max, decimals, limit_state, unconfirmed, doubtful, places, confirmable, read_only: java }
+                let imported = entry.is_some_and(|e| e.imported);
+                let confirmable = value.is_some() && (imported || saved.iter().any(|e| e.name == name && e.unconfirmed() && e.run != Some(pid)));
+                let suggested = entry.and_then(|e| Some((e, e.suggested.as_deref()?))).map_or((None, None), |(e, l)| {
+                    let (lo, hi) = parse_range(l);
+                    (lo.map(|v| v / e.scale()), hi.map(|v| v / e.scale()))
+                });
+                ValueRow {
+                    name,
+                    addr: loc.addr,
+                    kind: loc.kind,
+                    value,
+                    min,
+                    max,
+                    decimals,
+                    limit_state,
+                    unconfirmed,
+                    doubtful,
+                    places,
+                    confirmable,
+                    read_only: java,
+                    imported,
+                    suggested,
+                }
             })
             .collect())
     }
@@ -2291,6 +2506,9 @@ impl Core {
         }
         let exe = self.game()?.exe.clone();
         let saved = read_profile(&exe);
+        if saved.iter().any(|e| e.name == name && e.imported) {
+            return Err(format!("{name} not written: {IMPORTED}"));
+        }
         // Kept at least some number and nothing more (Keep It): the minimum moves to the new
         // number, first, so the limit doesn't put the old one back (the player set Age of War's
         // base health to 1000 and 1100 while it was kept at least 992.45).
@@ -3745,6 +3963,8 @@ mod tests {
             last: None,
             build: None,
             untraced: None,
+            imported: false,
+            suggested: None,
             other: Vec::new(),
         }
     }

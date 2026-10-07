@@ -8,7 +8,7 @@ use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
-restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>";
+restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>";
 
 fn bound(v: &str) -> Result<Option<f64>, String> {
     match v {
@@ -114,6 +114,30 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             core.save(arg)?;
         }
         "restore" => core.restore()?,
+        "export" => {
+            let export = core.export()?;
+            for l in &export.left_out {
+                eprintln!("left out {l}");
+            }
+            match arg {
+                "" => print!("{}", export.text),
+                path => {
+                    std::fs::write(path, &export.text).map_err(|e| e.to_string())?;
+                    println!("exported {} values to {path}", export.count);
+                }
+            }
+        }
+        "import" => {
+            let text = std::fs::read_to_string(arg).map_err(|e| format!("usage: import <file>: {e}"))?;
+            let done = core.import(&text)?;
+            println!("imported {} (not checked yet: confirm-value <name>)", done.added.join(", "));
+            for s in &done.skipped {
+                println!("skipped {s}");
+            }
+            if done.other_build {
+                println!("made with another build of the game: some may not be found");
+            }
+        }
         "remove" => {
             core.remove(arg)?;
             println!("removed {arg}");

@@ -32,6 +32,8 @@ struct ValueWidgets {
     fill_limit: Rc<dyn Fn(Option<f64>, Option<f64>)>,
 }
 
+const CONFIRM_PATHS: &str = "Then Ferret finds it this way from now on, and keeps it in range. If it shows another number, find it again instead.";
+
 /// Confirms a value's pointer paths: the player saw the game show the number Ferret reads.
 pub fn confirm_value(worker: &Worker, name: &str) {
     let name = name.to_owned();
@@ -60,7 +62,10 @@ fn limit_subtitle(v: &ValueRow) -> String {
     match &v.limit_state {
         Some(state) if state.ends_with("turned off") => format!("Turned off with the hotkey · keeps {} when on", core::limit_text(v.min, v.max)),
         Some(state) => format!("Kept {} · {}", core::limit_text(v.min, v.max), state_text(state)),
-        None => "Off".into(),
+        None => match v.suggested {
+            (None, None) => "Off".into(),
+            (min, max) => format!("Off · the import suggests keeping it {}", core::limit_text(min, max)),
+        },
     }
 }
 
@@ -154,12 +159,14 @@ impl ValuesView {
             if v.places > 1 {
                 about.push_str(&format!(". Kept in {} places (every stack): setting it sets each", v.places));
             }
-            if v.confirmable {
+            if v.imported {
+                about.push_str(". Imported, not checked yet: if the game shows this number, say so below. Ferret won't change it until then");
+            } else if v.confirmable {
                 about.push_str(". Not confirmed yet: if the game shows this number, say so below");
             } else if v.unconfirmed {
                 about.push_str(". Not confirmed yet: restart the game, then check the number here");
             }
-            if let Some(d) = &v.doubtful {
+            if let (Some(d), false) = (&v.doubtful, v.imported) {
                 about.push_str(&format!(". Not written right now: {d}"));
             }
             if v.read_only {
@@ -182,6 +189,10 @@ impl ValuesView {
                 let n = core::number_text(n, v.decimals);
                 w.confirm.set_title(&format!("Does the game show {n}?"));
                 w.confirm_button.set_label(&format!("Yes, It Shows {n}"));
+                w.confirm.set_subtitle(match v.imported {
+                    true => "Then Ferret can change it and keep it in range. If it shows another number, remove it and find it yourself.",
+                    false => CONFIRM_PATHS,
+                });
             }
         }
     }
@@ -240,7 +251,7 @@ impl ValuesView {
         let confirm_button = gtk::Button::builder().valign(gtk::Align::Center).css_classes(["suggested-action"]).build();
         let confirm = adw::ActionRow::builder()
             .title_lines(1)
-            .subtitle("Then Ferret finds it this way from now on, and keeps it in range. If it shows another number, find it again instead.")
+            .subtitle(CONFIRM_PATHS)
             .visible(false)
             .build();
         confirm.add_suffix(&confirm_button);
@@ -259,18 +270,20 @@ impl ValuesView {
             .build();
         // Floats get 2 decimals; whole numbers shown with decimals step by their last digit.
         let digits = v.decimals.unwrap_or(2);
+        // The fields start at the saved range, else at the one an import suggested (off).
+        let (lo, hi) = if v.min.is_some() || v.max.is_some() { (v.min, v.max) } else { v.suggested };
         let step = v.decimals.map_or(1.0, |d| 10f64.powi(-(d as i32)));
         let top = i32::MAX as f64 * step;
         let max = adw::SpinRow::with_range(0.0, top, step);
         max.set_digits(digits);
         max.set_title("At Most");
-        max.set_value(v.max.or(v.value).unwrap_or(0.0));
+        max.set_value(hi.or(v.value).unwrap_or(0.0));
         // Only a minimum: the game can raise it as far as it likes.
         let endless = gtk::ToggleButton::builder()
             .label("\u{221e}")
             .tooltip_text("No maximum: only At Least is kept")
             .valign(gtk::Align::Center)
-            .active(v.min.is_some() && v.max.is_none())
+            .active(lo.is_some() && hi.is_none())
             .build();
         max.add_suffix(&endless);
         if endless.is_active() {
@@ -280,7 +293,7 @@ impl ValuesView {
         min.set_digits(digits);
         min.set_title("At Least");
         min.set_subtitle("0 means no minimum");
-        min.set_value(v.min.unwrap_or(0.0));
+        min.set_value(lo.unwrap_or(0.0));
         limit.add_row(&max);
         limit.add_row(&min);
         let keep = gtk::Button::builder()

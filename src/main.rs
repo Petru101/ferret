@@ -7,6 +7,7 @@ mod gui;
 mod ocr;
 mod reader;
 mod shapes;
+mod share;
 
 fn main() {
     if std::env::args().any(|a| a == "--cli") {
