@@ -109,7 +109,12 @@ pub struct Guide {
     /// "Got it" notifications: when the last went out, and one held back to keep them apart.
     got_it: Cell<Option<Instant>>,
     got_it_next: Rc<RefCell<Option<(String, String)>>>,
+    /// A "Hands off" notification is out: the next hands-off step (Start, then the scan) keeps
+    /// it instead of closing and sending it again.
+    hands_off: Cell<bool>,
 }
+
+const HANDS_OFF_NOTICE: &str = "Hands off: don't change anything in the game yet";
 
 /// "Got it" notifications at most this often (Plasma refuses an app that sends too many).
 const GOT_IT_GAP: Duration = Duration::from_secs(2);
@@ -182,6 +187,7 @@ impl Guide {
             on_show: RefCell::default(),
             got_it: Cell::new(None),
             got_it_next: Rc::default(),
+            hands_off: Cell::new(false),
         });
         guide.pick("Click the number you want to find", "In the picture of your game below, or drag a box around it.");
         guide
@@ -191,7 +197,13 @@ impl Guide {
     pub fn show(&self, look: Look, step: usize, title: &str, hint: &str, bar: Option<f64>) -> u32 {
         let shown = self.shown.get() + 1;
         self.shown.set(shown);
-        self.notify.withdraw_waiting();
+        // Hands off for something in the game (not a capture, a read or Stop).
+        let hands_off = look == Look::Wait && step != PICK;
+        let still = hands_off && self.look.get() == Look::Wait && self.hands_off.get();
+        if !still {
+            self.notify.withdraw_waiting();
+            self.hands_off.set(false);
+        }
         self.away.take();
         self.look.set(look);
         for l in Look::ALL {
@@ -223,6 +235,17 @@ impl Guide {
             w.set_visible(false);
         }
         self.shown_on_tab();
+        // The player in the game must hear it too: started with the hotkey from the game, or
+        // switching to the game while Ferret scans (sent then, by `remind`). Until the next step.
+        if hands_off {
+            let body = format!("{title}. Ferret tells you when it's your turn.");
+            if still {
+                self.away.replace(Some((HANDS_OFF_NOTICE.to_owned(), body, None, None)));
+            } else {
+                self.tell(HANDS_OFF_NOTICE, &body, None, None, true);
+                self.hands_off.set(self.notify.away());
+            }
+        }
         if let Some(f) = self.on_show.borrow().as_ref() {
             f(look);
         }
@@ -287,6 +310,7 @@ impl Guide {
         }
         if let Some((title, text, button, secs)) = self.away.borrow().clone() {
             self.notify.send(&title, &text, button, secs);
+            self.hands_off.set(title == HANDS_OFF_NOTICE);
         }
     }
 
