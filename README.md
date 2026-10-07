@@ -117,6 +117,11 @@ Steam Linux Runtime), and `bench/` compares OCR engines on saved game frames.
   (MIT License, Copyright © 2021 Starz0r, Curve; see `data/areweanticheatyet/LICENSE` and
   `SOURCE`). Refresh it with `data/areweanticheatyet/update.sh` before a release.
 
+## Made with AI
+
+Most of Ferret's code, its translations and this README were written by Claude (Anthropic's AI).
+Its author designed it, directed every change and tests it on real games.
+
 ## License
 
 GPL-3.0-or-later (`LICENSE`).
