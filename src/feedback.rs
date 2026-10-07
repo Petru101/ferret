@@ -17,6 +17,9 @@ const LOG_MAX: usize = 300 * 1024;
 const PROFILE_MAX: usize = 100 * 1024;
 
 pub struct Report {
+    /// A random id for this report (`new_id`), shown to the player once it is sent so they
+    /// can point to it; the server refuses a second report with the same one.
+    pub id: String,
     pub message: String,
     /// How the player would like an answer, if at all.
     pub contact: String,
@@ -69,6 +72,26 @@ fn scrub(text: &str) -> String {
     text
 }
 
+/// Letters and digits that can't be mistaken for each other when read out or typed (no I, L,
+/// O, U: Crockford's base 32).
+const ID_CHARS: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Random bytes from the kernel.
+fn random<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    if let Ok(mut f) = fs::File::open("/dev/urandom") {
+        std::io::Read::read_exact(&mut f, &mut bytes).ok();
+    }
+    bytes
+}
+
+/// A report's id: "K7Q2-9XMB" (40 bits, so two reports never share one in practice). Row
+/// numbers were reused after a delete and told how many reports there are.
+pub fn new_id() -> String {
+    let chars: Vec<char> = random::<8>().iter().map(|b| ID_CHARS[(b % 32) as usize] as char).collect();
+    format!("{}-{}", chars[..4].iter().collect::<String>(), chars[4..].iter().collect::<String>())
+}
+
 /// A random id made once per install: the server's flood limit counts reports per install,
 /// and it tells one player's reports from another's. Nothing else is tied to it.
 fn install_id() -> String {
@@ -76,11 +99,7 @@ fn install_id() -> String {
     if let Some(id) = fs::read_to_string(&path).ok().map(|s| s.trim().to_owned()).filter(|s| s.len() == 32) {
         return id;
     }
-    let mut bytes = [0u8; 16];
-    if let Ok(mut f) = fs::File::open("/dev/urandom") {
-        std::io::Read::read_exact(&mut f, &mut bytes).ok();
-    }
-    let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let id: String = random::<16>().iter().map(|b| format!("{b:02x}")).collect();
     fs::create_dir_all(path.parent().unwrap()).ok();
     fs::write(&path, &id).ok();
     id
@@ -109,7 +128,8 @@ impl Report {
     fn body(&self, install: &str) -> String {
         let field = |name: &str, v: Option<&str>| v.map(|v| format!(",{}:{}", json_string(name), json_string(v))).unwrap_or_default();
         format!(
-            "{{\"install\":{},\"version\":{},\"message\":{}{}{}{}{}}}",
+            "{{\"id\":{},\"install\":{},\"version\":{},\"message\":{}{}{}{}{}}}",
+            json_string(&self.id),
             json_string(install),
             json_string(&core::version()),
             json_string(self.message.trim()),
@@ -122,7 +142,7 @@ impl Report {
 
     /// Everything that is sent, as the player reads it.
     pub fn preview(&self) -> String {
-        let mut text = format!("Ferret {}\n", core::version());
+        let mut text = format!("Report {}\nFerret {}\n", self.id, core::version());
         if let Some(g) = &self.game {
             text += &format!("Game: {g}\n");
         }
@@ -140,7 +160,7 @@ impl Report {
         text
     }
 
-    /// Sends it; blocks for up to 30 s (not on the GUI's thread).
+    /// Sends it; blocks for up to 30 s (not on the GUI's thread). The player is shown its id.
     pub fn send(&self) -> Result<(), String> {
         if self.message.trim().is_empty() {
             return Err("Write something first".into());
@@ -158,6 +178,7 @@ impl Report {
             200 => Ok(()),
             429 => Err("Too many reports from here in the last hour: try again later.".into()),
             413 => Err("This report is too big to send: leave out the log and try again.".into()),
+            409 => Err("A report with this id was sent already: close this window and write it again.".into()),
             s => {
                 let why = response.body_mut().read_to_string().unwrap_or_default();
                 Err(format!("Ferret's server refused it ({s} {why})"))
@@ -169,6 +190,15 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn makes_readable_ids() {
+        let id = new_id();
+        assert_eq!(id.len(), 9, "{id}");
+        assert_eq!(&id[4..5], "-");
+        assert!(id.chars().filter(|&c| c != '-').all(|c| ID_CHARS.contains(&(c as u8))));
+        assert_ne!(new_id(), new_id());
+    }
 
     #[test]
     fn escapes_json() {
@@ -186,9 +216,10 @@ mod tests {
 
     #[test]
     fn leaves_out_what_the_player_left_empty() {
-        let r = Report { message: " hi ".into(), contact: " ".into(), game: None, log: None, profile: None };
+        let r = Report { id: new_id(), message: " hi ".into(), contact: " ".into(), game: None, log: None, profile: None };
         let body = r.body("0123456789abcdef0123456789abcdef");
         assert!(body.contains("\"message\":\"hi\""));
+        assert!(body.starts_with(&format!("{{\"id\":\"{}\"", r.id)));
         assert!(!body.contains("contact") && !body.contains("log"));
     }
 }

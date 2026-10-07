@@ -130,6 +130,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         // Sends a report with Ferret's log, as Send Feedback does (tests: FERRET_SERVER).
         "feedback" => {
             let report = crate::feedback::Report {
+                id: crate::feedback::new_id(),
                 message: arg.to_owned(),
                 contact: String::new(),
                 game: None,
@@ -137,7 +138,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                 profile: None,
             };
             report.send()?;
-            println!("feedback sent");
+            println!("feedback sent as {}", report.id);
         }
         "import" => {
             let text = std::fs::read_to_string(arg).map_err(|e| format!("usage: import <file>: {e}"))?;

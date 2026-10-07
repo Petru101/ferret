@@ -60,6 +60,7 @@ async function feedback(request, env) {
     return reply(400, { error: "not JSON" });
   }
   const report = {
+    id: typeof body.id === "string" && /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/.test(body.id) ? body.id : undefined,
     install: typeof body.install === "string" && /^[0-9a-f]{32}$/.test(body.install) ? body.install : undefined,
     version: text(body.version, LIMITS.version, true),
     message: text(body.message?.trim(), LIMITS.message, true),
@@ -79,10 +80,14 @@ async function feedback(request, env) {
   if (mine.results[0].n >= PER_INSTALL_HOUR || all.results[0].n >= ALL_DAY) {
     return reply(429, { error: "too many reports, try again later" });
   }
-  await env.DB.prepare("INSERT INTO reports (install, version, message, contact, game, log, profile) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(report.install, report.version, report.message, report.contact, report.game, report.log, report.profile)
-    .run();
-  return reply(200, { ok: true });
+  const insert = env.DB.prepare(
+    "INSERT INTO reports (ref, install, version, message, contact, game, log, profile) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (ref) DO NOTHING",
+  ).bind(report.id, report.install, report.version, report.message, report.contact, report.game, report.log, report.profile);
+  const { meta } = await insert.run();
+  if (meta.changes === 0) {
+    return reply(409, { error: "a report with this id exists" });
+  }
+  return reply(200, { ok: true, id: report.id });
 }
 
 export default {

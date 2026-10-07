@@ -13,6 +13,8 @@ use crate::feedback::{self, Report};
 pub fn open(ui: &Rc<Ui>) {
     // The attached game, if any: its saved values can go with the report.
     let game = ui.attached.get().map(|_| ui.game_page.title().to_string()).filter(|g| !g.is_empty());
+    // Made now, so Show What's Sent shows the id that goes.
+    let id = feedback::new_id();
 
     let message = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
@@ -87,6 +89,7 @@ pub fn open(ui: &Rc<Ui>) {
         move || {
             let b = message.buffer();
             Report {
+                id: id.clone(),
                 message: b.text(&b.start_iter(), &b.end_iter(), false).to_string(),
                 contact: contact.text().to_string(),
                 profile: game.as_deref().filter(|_| saved.is_active()).and_then(feedback::profile_text),
@@ -103,6 +106,7 @@ pub fn open(ui: &Rc<Ui>) {
         let (ui, dialog, error) = (ui.clone(), dialog.clone(), error.clone());
         send.connect_clicked(move |send| {
             let report = report();
+            let id = report.id.clone();
             send.set_sensitive(false);
             send.set_label("Sending…");
             error.set_visible(false);
@@ -115,7 +119,8 @@ pub fn open(ui: &Rc<Ui>) {
                 match rx.recv().await {
                     Ok(Ok(())) => {
                         dialog.close();
-                        ui.toast("Thanks! Your feedback was sent");
+                        // Indented: `explain` shows it selectable, to copy.
+                        ui.explain("Thanks, It Was Sent", &format!("If you write about it somewhere, mention this id:\n  {id}"));
                     }
                     Ok(Err(e)) => {
                         error.set_label(&e);
