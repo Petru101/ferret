@@ -6,6 +6,7 @@ mod feedback;
 mod find;
 mod hotkeys;
 mod notify;
+mod guide;
 mod phase;
 mod share;
 mod tips;
@@ -90,6 +91,9 @@ pub enum Event {
     Closing(Vec<String>),
     /// Try on a listed place: the places left and how it went.
     Tried(Result<(Vec<crate::core::Match>, String), String>),
+    /// Trying the places one at a time: the game didn't show the number tried, so the place
+    /// got its old number back; the places left.
+    PutBack(Vec<crate::core::Match>),
     /// The limits hotkey: whether limits are on now, and their names.
     Switched(Result<(bool, Vec<String>), String>),
 }
@@ -211,6 +215,7 @@ struct Ui {
     values: Rc<values::ValuesView>,
     find: Rc<find::FindView>,
     phase: Rc<phase::PhaseCard>,
+    guide: Rc<guide::Guide>,
     tips: Rc<tips::Tips>,
     notify: Rc<notify::Notifier>,
     hotkeys: Rc<hotkeys::Hotkeys>,
@@ -557,17 +562,21 @@ impl Ui {
             Event::Seen(n) => self.find.seen(n),
             Event::Matches(Ok(list)) => self.find.show_matches(list),
             Event::Tried(Ok((list, msg))) => self.find.tried(list, &msg),
-            Event::Tried(Err(e)) => self.toast(&e),
+            Event::Tried(Err(e)) => {
+                self.toast(&e);
+                self.find.try_failed();
+            }
+            Event::PutBack(list) => self.find.put_back(list),
             Event::Chosen(Ok(loc)) => self.find.chosen(loc),
             Event::Matches(Err(e)) | Event::Chosen(Err(e)) => self.toast(&e),
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
             Event::ScannedAgain(r) => self.find.scanned_again(r),
             Event::Undone(r, done) => self.find.undone(r, done),
-            Event::Saved(Ok((_, msg))) => {
+            Event::Saved(Ok((name, msg))) => {
                 self.toast(&msg);
                 self.notify.send("Saved", &msg, None, Some(6));
-                self.find.saved();
+                self.find.saved(&name);
                 self.tips.show(tips::Tip::Slots);
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));
@@ -717,6 +726,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     );
     action("find", Box::new(|ui, _| ui.find.start()));
     action("confirm", Box::new(|ui, yes| ui.find.answer_read(yes == "yes")));
+    // Trying the places one at a time: start, try (with the number in the entry), yes, no, skip, stop.
+    action("place", Box::new(|ui, step| ui.find.place_step(&step)));
     action(
         "try",
         Box::new(|ui, arg| {
@@ -756,17 +767,20 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action(
         "phase",
         Box::new(|ui, what| match what.as_str() {
-            "scan" => ui.phase.scanning("192", 0.4),
-            "ready" => ui.phase.ready(5094),
-            "watch" => ui.phase.watching(183),
-            "check" => ui.phase.checking(3, 0.5),
-            "turn" => ui.phase.your_turn(3, 180),
-            "save" => ui.phase.save_turn(),
+            "scan" => ui.guide.scanning("192", 0.4),
+            "ready" => ui.guide.ready(5094),
+            "watch" => ui.guide.watching(183),
+            "check" => ui.guide.checking(3, 0.5),
+            "turn" => ui.guide.your_turn(3, 180),
+            "save" => ui.guide.save_turn(),
             "restore" => ui.phase.restoring("Lumencraft", "lumen", 2, 5),
-            "found" => ui.phase.done(true, "Found it!", "Give it a name below to keep it."),
-            "several" => ui.phase.done(false, "7 places match", "Change the number in the game, then type the new one."),
-            "change" => ui.phase.change_now("7 places match"),
-            _ => ui.phase.hide(),
+            "found" => ui.guide.ended(guide::Look::Found, guide::SAVE, "Found it!", "Give it a name and save it.", "Give it a name."),
+            "several" => ui.guide.ended(guide::Look::Call, guide::CHECK, "7 places match: Ferret can't tell which one it is", "Try them below.", "Try them."),
+            "change" => ui.guide.change_now("7 places match"),
+            _ => {
+                ui.phase.hide();
+                ui.guide.pick("Click the number you want to find", "");
+            }
         }),
     );
     action("remove", Box::new(|ui, name| values::ask_remove(&ui.worker, name.trim(), &ui.stack)));
@@ -787,26 +801,37 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
 fn load_css() {
     let css = gtk::CssProvider::new();
     css.load_from_string(
-        ".found-row { background-color: alpha(@success_color, 0.15); border: 1px solid alpha(@success_color, 0.6); \
-         border-radius: 12px; padding: 8px 12px; } \
-         entry.searching { background-color: alpha(@accent_bg_color, 0.3); outline: 2px solid @accent_bg_color; \
+        "entry.searching { background-color: alpha(@accent_bg_color, 0.3); outline: 2px solid @accent_bg_color; \
          outline-offset: -2px; } \
-         label.news { background-color: alpha(@accent_bg_color, 0.18); border-radius: 8px; padding: 4px 8px; \
-         transition: background-color 1200ms ease-out; } \
-         label.news.flash { background-color: alpha(@accent_bg_color, 0.65); transition: none; } \
-         label.news.success { background-color: alpha(@success_color, 0.15); } \
-         label.news.success.flash { background-color: alpha(@success_color, 0.5); transition: none; } \
-         .phase-card { padding: 18px 24px; border-radius: 16px; border: 3px solid @warning_color; \
-         background-color: mix(@window_bg_color, @warning_color, 0.25); box-shadow: 0 4px 16px alpha(black, 0.3); \
-         transition: background-color 300ms ease-out; } \
-         .phase-card.ready { border-color: @success_color; background-color: mix(@window_bg_color, @success_color, 0.3); } \
-         .phase-card.watching { padding: 8px 20px; border-color: @accent_bg_color; \
-         background-color: mix(@window_bg_color, @accent_bg_color, 0.2); } \
-         .phase-card.done { border-color: @accent_bg_color; background-color: mix(@window_bg_color, @accent_bg_color, 0.2); } \
-         .phase-card.turn { border-color: @accent_bg_color; background-color: mix(@window_bg_color, @accent_bg_color, 0.25); } \
-         .phase-card.turn.flash { background-color: mix(@window_bg_color, @accent_bg_color, 0.6); } \
+         .phase-card { padding: 18px 24px; border-radius: 16px; border: 3px solid @accent_bg_color; \
+         background-color: mix(@window_bg_color, @accent_bg_color, 0.2); box-shadow: 0 4px 16px alpha(black, 0.3); } \
          .phase-card progressbar trough, .phase-card progressbar progress { min-height: 14px; border-radius: 7px; } \
          .phase-card progressbar text { font-size: 1.4em; font-weight: bold; color: @window_fg_color; opacity: 1; } \
+         .guide { padding: 12px 16px; border-radius: 12px; border: 2px solid alpha(currentColor, 0.15); \
+         background-color: @card_bg_color; transition: background-color 300ms ease-out; } \
+         .guide.wait { border-color: #e66100; background-color: mix(@window_bg_color, #e66100, 0.18); } \
+         .guide.go { border-color: #26a269; background-color: mix(@window_bg_color, #26a269, 0.2); animation: go 1.6s ease-in-out infinite; } \
+         .guide.go.flash { background-color: mix(@window_bg_color, #26a269, 0.45); } \
+         .guide.call { border-color: #9141ac; background-color: mix(@window_bg_color, #9141ac, 0.16); } \
+         .guide.found { border-color: #3584e4; background-color: mix(@window_bg_color, #3584e4, 0.18); } \
+         @keyframes go { 0% { box-shadow: 0 0 0 0 alpha(#26a269, 0); } 50% { box-shadow: 0 0 0 5px alpha(#26a269, 0.35); } \
+         100% { box-shadow: 0 0 0 0 alpha(#26a269, 0); } } \
+         .guide-tag { font-size: 0.8em; font-weight: 800; letter-spacing: 1px; color: white; padding: 2px 8px; \
+         border-radius: 6px; background-color: #3a4a5e; } \
+         .guide-icon { min-width: 40px; min-height: 40px; border-radius: 20px; color: white; background-color: #3a4a5e; } \
+         .guide.wait .guide-tag, .guide.wait .guide-icon, .guide.wait .guide-step.now { background-color: #b84700; } \
+         .guide.go .guide-tag, .guide.go .guide-icon, .guide.go .guide-step.now { background-color: #16713f; } \
+         .guide.call .guide-tag, .guide.call .guide-icon, .guide.call .guide-step.now { background-color: #6b2f86; } \
+         .guide.found .guide-tag, .guide.found .guide-icon, .guide.found .guide-step.now { background-color: #1c5fb8; } \
+         .guide-title { font-size: 1.45em; font-weight: 800; } \
+         .guide-hint { font-size: 1.05em; } \
+         .guide progressbar trough, .guide progressbar progress { min-height: 10px; border-radius: 5px; } \
+         .guide progressbar text { font-weight: bold; color: @window_fg_color; opacity: 1; } \
+         .guide-step { padding: 2px 10px; border-radius: 99px; border: 1px solid alpha(currentColor, 0.2); \
+         font-size: 0.9em; font-weight: 600; opacity: 0.6; } \
+         .guide-step.past { opacity: 0.85; } \
+         .guide-step.now { opacity: 1; color: white; background-color: #3a4a5e; border-color: transparent; font-weight: 800; } \
+         button.guide-button { min-height: 40px; padding-left: 20px; padding-right: 20px; font-weight: 800; } \
          @keyframes nudge { from { box-shadow: 0 0 0 0 alpha(@accent_bg_color, 0.9); } \
          to { box-shadow: 0 0 0 12px alpha(@accent_bg_color, 0); } } \
          button.nudge { animation: nudge 1.3s ease-out infinite; } \
@@ -832,13 +857,15 @@ fn build(app: &adw::Application) {
         values::ValuesView::new(worker.clone(), move || stack.set_visible_child_name("find"))
     };
     let notify = notify::Notifier::new();
-    let phase = phase::PhaseCard::new(notify.clone());
-    let find = find::FindView::new(worker.clone(), cancel, scan_now, phase.clone());
+    let phase = Rc::new(phase::PhaseCard::new());
+    let guide = guide::Guide::new(notify.clone());
+    let find = find::FindView::new(worker.clone(), cancel, scan_now, guide.clone());
     {
-        let find = find.clone();
-        phase.give_up.connect_clicked(move |_| find.stop());
-        let give_up = phase.give_up.clone();
-        notify.on_button(move || give_up.emit_clicked());
+        // Stop Waiting and Cancel (a save waiting for the game) both stop what waits.
+        let find_ = find.clone();
+        guide.give_up.connect_clicked(move |_| find_.stop());
+        let find_ = find.clone();
+        notify.on_button(move || find_.stop());
     }
     stack.add_titled_with_icon(&values.root, Some("values"), "Values", "view-list-symbolic");
     stack.add_titled_with_icon(&find.root, Some("find"), "Find Value", "edit-find-symbolic");
@@ -866,6 +893,13 @@ fn build(app: &adw::Application) {
     toolbar.add_top_bar(&banners[0]);
     let tips = tips::Tips::new();
     toolbar.add_top_bar(&tips.root);
+    // The instruction bar: on the Find tab always, on the Values tab while a search does something.
+    toolbar.add_top_bar(&guide.root);
+    {
+        let guide_ = guide.clone();
+        stack.connect_visible_child_name_notify(move |s| guide_.on_values(s.visible_child_name().as_deref() != Some("find")));
+        guide.on_values(stack.visible_child_name().as_deref() != Some("find"));
+    }
     toolbar.set_content(Some(&stack));
     let game_page = adw::NavigationPage::builder().title("Game").tag("game").child(&toolbar).build();
 
@@ -882,7 +916,7 @@ fn build(app: &adw::Application) {
     nav.set_pop_on_escape(false);
     nav.add(&games_page(&games, &games_stack, &games_error, &refresh, &banners[1]));
 
-    // Over every page: the player may look at the Values tab or the games list meanwhile.
+    // Over every page: a game opens from the games list.
     let over = gtk::Overlay::builder().child(&nav).build();
     over.add_overlay(&phase.root);
     let toasts = adw::ToastOverlay::new();
@@ -896,10 +930,10 @@ fn build(app: &adw::Application) {
         .build();
     notify.set_window(&window);
     {
-        let phase = phase.clone();
+        let guide = guide.clone();
         window.connect_is_active_notify(move |w| {
             if !w.is_active() && w.is_visible() {
-                phase.remind();
+                guide.remind();
             }
         });
     }
@@ -917,6 +951,7 @@ fn build(app: &adw::Application) {
         values,
         find,
         phase,
+        guide,
         tips,
         notify,
         hotkeys,

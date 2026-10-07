@@ -322,6 +322,7 @@ pub enum Phase {
 }
 
 /// One of the places still matching a search, as the matches list shows it.
+#[derive(Clone, Debug)]
 pub struct Match {
     pub loc: Loc,
     /// Its value as the game holds it.
@@ -1066,6 +1067,9 @@ pub struct Core {
     /// How full the bar was when the matches' values were taken (None: the search has a copy
     /// of the game's memory to compare with, or none at all).
     bar_last: Option<(f64, f64)>,
+    /// The last place tried that kept its test number: where, what it held before, the number
+    /// written (`put_back_try`).
+    last_try: Option<(Loc, f64, f64)>,
     log_name: &'static str,
 }
 
@@ -1118,6 +1122,7 @@ impl Core {
             side_jobs: None,
             bar: None,
             bar_last: None,
+            last_try: None,
         })
     }
 
@@ -2997,11 +3002,28 @@ impl Core {
                 return Ok((left, msg));
             }
         }
+        self.last_try = before.map(|b| (loc, b, v));
         let msg = format!(
             "It kept {}. If the game shows it too, press Use This One (some games only redraw a number when they change it themselves).",
             shown(now.unwrap_or(v))
         );
         Ok((self.matches(), msg))
+    }
+
+    /// The player says the game doesn't show the number tried last: what the place held before
+    /// goes back (only the test's difference, when the game changed it meanwhile). It stays among
+    /// the matches: some games only redraw a number when they change it themselves.
+    pub fn put_back_try(&mut self) -> Vec<Match> {
+        if let Some((loc, before, tried)) = self.last_try.take() {
+            if let Some(now) = self.peek_exact(&[loc])[0] {
+                let back = if (now - tried).abs() < 1e-3 { before } else { now - (tried - before) };
+                if (now - tried).abs() < 1e-3 || (now - tried).abs() < (now - before).abs() {
+                    self.helper.call(&format!("write {loc} {back}"));
+                    self.say(&format!("put {} back at 0x{:x}", number_text(back, None), loc.addr));
+                }
+            }
+        }
+        self.matches()
     }
 
     fn phase(&mut self, p: Phase) {
@@ -3097,6 +3119,16 @@ impl Core {
             Err(e) => self.say(&format!("could not save the shapes: {e}")),
         }
         self.send_shapes();
+    }
+
+    /// The order to try the places left one at a time: whole numbers before decimals (games keep
+    /// most counts as whole numbers), places Ferret can name before others, places already saved
+    /// as another value last.
+    pub fn try_order(list: &mut [Match]) {
+        list.sort_by_key(|m| {
+            let saved = m.about.as_deref().is_some_and(|a| a.starts_with("saved as"));
+            (saved, matches!(m.loc.kind, Kind::F32 | Kind::F64), m.about.is_none())
+        });
     }
 
     /// The player ruled out one of the places still matching; the places left.
