@@ -7,6 +7,10 @@
 // m_CachedPtr (their native object), null once destroyed: those are skipped.
 //
 // Text: `mono:NewMovement.hp`, `mono:Some.Namespace::Class.field`, `il2cpp:CommandBase._ammo`.
+// A class with many objects (Terraria keeps 256 Players, one per multiplayer slot) is reached
+// through a static field instead (Mono only): `mono:Terraria::Main.player[0].statLife` = slot 0
+// of the array in Main's static field `player`, its field `statLife`; `mono:Game.instance.gold`
+// without a slot. Mono keeps a class's static fields in a block its vtable points to.
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -26,6 +30,15 @@ const NOT_IN_OBJECT: u16 = 0x10 | 0x40;
 const MAX_PLACES: usize = 2;
 /// How far into a Unity native object its pointer back to the managed one is.
 const NATIVE_BACK: u64 = 0x80;
+/// How far into a vtable its pointer to the class's static data may be (after the method
+/// slots; +0xe0 for Terraria's Main).
+const MAX_VTABLE: u64 = 0x2000;
+/// How big a class's static data may be (Terraria's Main: `player` at +0xf98).
+const MAX_STATIC_DATA: u64 = 0x10000;
+/// How far into an array a slot holding the object is looked for.
+const MAX_SLOT: u64 = 4096;
+/// MonoTypeEnum: a single-dimension array.
+const TYPE_SZARRAY: u8 = 0x1d;
 
 /// How the game runs its C#: Mono's runtime, or IL2CPP's (compiled to native code in
 /// GameAssembly; class names in the read-only global-metadata.dat).
@@ -49,7 +62,33 @@ pub struct MonoPath {
     pub runtime: Runtime,
     pub namespace: String,
     pub class: String,
+    /// A static field of the class leading to the object (and its slot, when it's an array):
+    /// `field` is then a field of that object.
+    pub via: Option<Static>,
     pub field: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Static {
+    pub field: String,
+    pub slot: Option<u64>,
+}
+
+impl Static {
+    fn parse(text: &str) -> Option<Self> {
+        let (field, slot) = match text.strip_suffix(']').and_then(|t| t.split_once('[')) {
+            Some((f, n)) => (f, Some(n.parse().ok()?)),
+            None => (text, None),
+        };
+        ident(field).then(|| Static { field: field.into(), slot })
+    }
+
+    fn text(&self) -> String {
+        match self.slot {
+            Some(n) => format!("{}[{n}]", self.field),
+            None => self.field.clone(),
+        }
+    }
 }
 
 fn ident(s: &str) -> bool {
@@ -61,21 +100,33 @@ impl MonoPath {
         let runtime = [Runtime::Mono, Runtime::Il2cpp].into_iter().find(|r| text.starts_with(r.prefix()))?;
         let rest = &text[runtime.prefix().len()..];
         let (namespace, rest) = rest.rsplit_once("::").unwrap_or(("", rest));
-        let (class, field) = rest.split_once('.')?;
+        let (class, rest) = rest.split_once('.')?;
+        let (via, field) = match rest.split_once('.') {
+            Some((s, f)) if runtime == Runtime::Mono => (Some(Static::parse(s)?), f),
+            Some(_) => return None,
+            None => (None, rest),
+        };
         let ns_ok = namespace.is_empty() || namespace.split('.').all(ident);
-        (ns_ok && ident(class) && ident(field)).then(|| MonoPath { runtime, namespace: namespace.into(), class: class.into(), field: field.into() })
+        (ns_ok && ident(class) && ident(field)).then(|| MonoPath { runtime, namespace: namespace.into(), class: class.into(), via, field: field.into() })
     }
 
     pub fn text(&self) -> String {
         let pre = self.runtime.prefix();
+        let class = match &self.via {
+            Some(s) => format!("{}.{}", self.class, s.text()),
+            None => self.class.clone(),
+        };
         match self.namespace.as_str() {
-            "" => format!("{pre}{}.{}", self.class, self.field),
-            ns => format!("{pre}{ns}::{}.{}", self.class, self.field),
+            "" => format!("{pre}{class}.{}", self.field),
+            ns => format!("{pre}{ns}::{class}.{}", self.field),
         }
     }
 
     pub fn describe(&self) -> String {
-        format!("{} of {}", self.field, self.class)
+        match &self.via {
+            Some(s) => format!("{} of {}.{}", self.field, self.class, s.text()),
+            None => format!("{} of {}", self.field, self.class),
+        }
     }
 }
 
@@ -99,12 +150,26 @@ struct Layout {
 static LAYOUT: Mutex<Option<(u32, Layout)>> = Mutex::new(None);
 /// The vtables of classes searched for this run: (pid, namespace::class, vtables).
 static VTABLES: Mutex<Vec<(u32, String, Vec<u64>)>> = Mutex::new(Vec::new());
+/// Classes whose static data was found this run: (pid, class, its static data).
+static STATICS: Mutex<Vec<(u32, u64, u64)>> = Mutex::new(Vec::new());
+/// Static paths found this run (field left empty): the next value of the same object (mana
+/// after life) is tried there first, in a moment instead of three passes over memory.
+static FOUND: Mutex<Vec<(u32, u64, u64, MonoPath)>> = Mutex::new(Vec::new());
+/// Fields looked up this run (a walk runs 4 times a second for a limit; Terraria's Main
+/// declares 1178 fields): (pid, class, name, static) -> offset and type.
+#[allow(clippy::type_complexity)]
+static FIELDS: Mutex<Vec<((u32, u64, String, bool), Option<(u64, u64)>)>> = Mutex::new(Vec::new());
 
-/// Whether the game runs Mono (Unity's, or another's) or IL2CPP.
+/// Whether the game runs Mono (Unity's, or another's) or IL2CPP. Mono can be linked into the
+/// game's program (mkbundle: native Linux Terraria) with no library of its own: it still maps
+/// the assemblies (mscorlib.dll) and its shared counters file. Microsoft's .NET Framework
+/// under Wine maps an mscorlib.dll too, from its own folder.
 fn runtime(pid: u32) -> Option<Runtime> {
     let maps = crate::helper::maps(pid).ok()?;
     let paths: Vec<String> = maps.iter().map(|r| r.path.to_lowercase()).collect();
-    if paths.iter().any(|p| p.contains("libmono") || p.contains("mono-2.0") || p.ends_with("/mono.dll")) {
+    let library = |p: &String| p.contains("libmono") || p.contains("mono-2.0") || p.ends_with("/mono.dll");
+    let built_in = |p: &String| p.starts_with("/dev/shm/mono.") || p.ends_with("/mscorlib.dll") && !p.contains("microsoft.net");
+    if paths.iter().any(|p| library(p) || built_in(p)) {
         return Some(Runtime::Mono);
     }
     paths.iter().any(|p| p.ends_with("/gameassembly.dll") || p.ends_with("/gameassembly.so")).then_some(Runtime::Il2cpp)
@@ -274,8 +339,10 @@ impl Mono<'_> {
         chain
     }
 
-    /// The fields this class itself declares that objects hold: name and offset.
-    fn own_fields(&self, k: u64) -> Vec<(String, u64)> {
+    /// The fields this class itself declares: name, offset, attributes and type (a MonoType:
+    /// data, then attrs u16 and the type's kind u8; data is the class for objects and the
+    /// element class for arrays).
+    fn declared(&self, k: u64) -> Vec<(String, u64, u16, u64)> {
         let lay = self.lay;
         let w = lay.w;
         let Some(p) = self.word(k + lay.fields).filter(|&p| p >= 0x10000) else { return Vec::new() };
@@ -289,12 +356,88 @@ impl Mono<'_> {
             let (Some(name), Ok(())) = (self.word(f + lay.field_name).and_then(|n| cstr(self.mem, n)), self.mem.read_exact_at(&mut off, f + 3 * w)) else { break };
             let off = u32::from_le_bytes(off) as u64;
             let mut attrs = [0u8; 2];
-            let in_object = self.word(f + lay.field_type).is_some_and(|t| self.mem.read_exact_at(&mut attrs, t + w).is_ok() && u16::from_le_bytes(attrs) & NOT_IN_OBJECT == 0);
-            if in_object {
-                fields.push((name, off));
-            }
+            let Some(t) = self.word(f + lay.field_type).filter(|&t| self.mem.read_exact_at(&mut attrs, t + w).is_ok()) else { continue };
+            fields.push((name, off, u16::from_le_bytes(attrs), t));
         }
         fields
+    }
+
+    /// The fields this class itself declares that objects hold: name and offset.
+    fn own_fields(&self, k: u64) -> Vec<(String, u64)> {
+        self.declared(k).into_iter().filter(|f| f.2 & NOT_IN_OBJECT == 0).map(|f| (f.0, f.1)).collect()
+    }
+
+    /// The static fields this class itself declares (not constants): name, offset in its
+    /// static data, type.
+    fn static_fields(&self, k: u64) -> Vec<(String, u64, u64)> {
+        self.declared(k).into_iter().filter(|f| f.2 & NOT_IN_OBJECT == 0x10).map(|f| (f.0, f.1, f.3)).collect()
+    }
+
+    /// A field's offset and type, remembered for the run: an object's field (declared by the
+    /// class or a parent) or a static field of the class.
+    fn field(&self, pid: u32, k: u64, name: &str, statics: bool) -> Option<(u64, u64)> {
+        let key = (pid, k, name.to_owned(), statics);
+        if let Some((_, found)) = FIELDS.lock().unwrap().iter().find(|(k, _)| *k == key) {
+            return *found;
+        }
+        let found = match statics {
+            true => self.static_fields(k).into_iter().find(|f| f.0 == name).map(|f| (f.1, f.2)),
+            false => self.chain(k).into_iter().find_map(|c| self.declared(c).into_iter().find(|f| f.2 & NOT_IN_OBJECT == 0 && f.0 == name).map(|f| (f.1, f.3))),
+        };
+        let mut cache = FIELDS.lock().unwrap();
+        cache.retain(|(k, _)| k.0 == pid);
+        cache.push((key, found));
+        found
+    }
+
+    /// The kind of a MonoType (MonoTypeEnum).
+    fn kind(&self, t: u64) -> Option<u8> {
+        let mut b = [0u8; 1];
+        self.mem.read_exact_at(&mut b, t + self.lay.w + 2).ok().map(|_| b[0])
+    }
+
+    /// A Mono array: its element class and length. An array is {vtable, sync, bounds, length,
+    /// elements}; its class's first word is the element class (not itself).
+    fn array(&self, a: u64) -> Option<(u64, u64)> {
+        let ak = self.word(self.word(a).filter(|&v| v >= 0x10000)?).filter(|&k| k >= 0x10000)?;
+        let elem = self.word(ak).filter(|&e| e != ak && self.is_class(e))?;
+        let len = self.word(a + 3 * self.lay.w).filter(|&n| n < 1 << 24)?;
+        Some((elem, len))
+    }
+
+    /// The object the class's static field leads to, from its static data `data`.
+    fn static_target(&self, pid: u32, k: u64, data: u64, via: &Static) -> Option<u64> {
+        let w = self.lay.w;
+        let (off, t) = self.field(pid, k, &via.field, true)?;
+        let v = self.word(data + off).filter(|&v| v >= 0x10000)?;
+        let (obj, of) = match via.slot {
+            None => (v, self.word(t)?),
+            Some(i) => {
+                if self.kind(t) != Some(TYPE_SZARRAY) {
+                    return None;
+                }
+                let (elem, _) = self.array(v).filter(|&(e, n)| Some(e) == self.word(t) && i < n)?;
+                (self.word(v + 4 * w + i * w).filter(|&o| o >= 0x10000)?, elem)
+            }
+        };
+        self.class_of(obj).filter(|&c| self.chain(c).contains(&of)).map(|_| obj)
+    }
+
+    /// Where the field of the object a static path leads to is.
+    fn static_walk(&self, pid: u32, k: u64, data: u64, path: &MonoPath) -> Option<u64> {
+        let obj = self.static_target(pid, k, data, path.via.as_ref()?)?;
+        Some(obj + self.field(pid, self.class_of(obj)?, &path.field, false)?.0)
+    }
+
+    /// The array slot holding the object at `x`, when it's in an array of `k`'s objects:
+    /// the array and the slot.
+    fn array_slot(&self, x: u64, k: u64) -> Option<(u64, u64)> {
+        let w = self.lay.w;
+        (0..MAX_SLOT).find_map(|i| {
+            let a = x.checked_sub(4 * w + i * w)?;
+            let (elem, len) = self.array(a)?;
+            (i < len && self.chain(k).contains(&elem)).then_some((a, i))
+        })
     }
 
     /// The field's offset, declared by the class or one of its parents.
@@ -366,9 +509,110 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(MonoPath, Vec<u64>)> {
     if !m.live(obj, k) {
         return None;
     }
-    let path = MonoPath { runtime: lay.runtime, namespace, class, field };
+    let found: Vec<(u64, u64, MonoPath)> = FOUND.lock().unwrap().iter().filter(|f| f.0 == heap.pid).map(|f| (f.1, f.2, f.3.clone())).collect();
+    for (k2, data, via) in found {
+        let path = MonoPath { field: field.clone(), ..via };
+        if m.static_walk(heap.pid, k2, data, &path) == Some(target) {
+            return Some((path, vec![target]));
+        }
+    }
+    let path = MonoPath { runtime: lay.runtime, namespace, class, via: None, field: field.clone() };
     let leads = walk(heap, &find_roots(heap, &path), &path);
-    (leads.len() <= MAX_PLACES && leads.contains(&target)).then_some((path, leads))
+    if leads.len() <= MAX_PLACES && leads.contains(&target) {
+        return Some((path, leads));
+    }
+    match lay.runtime {
+        Runtime::Mono => static_discover(heap, &m, obj, k, &field, target),
+        Runtime::Il2cpp => None,
+    }
+}
+
+/// The static field the object is kept in, itself or in a slot of an array, for a class with
+/// too many objects to tell by its name (Terraria: `Main.player[0]` of 256 Players). Three
+/// passes over memory: what points to the object, to the arrays holding it, and to the static
+/// data holding either (from a vtable).
+fn static_discover(heap: &Heap, m: &Mono, obj: u64, k: u64, field: &str, target: u64) -> Option<(MonoPath, Vec<u64>)> {
+    let w = m.lay.w;
+    let refs = heap.referrers(&[obj]);
+    let mut arrays: Vec<(u64, u64)> = refs.iter().filter_map(|&x| m.array_slot(x, k)).collect();
+    arrays.sort_unstable();
+    arrays.dedup();
+    // Words that may be a static field: holding the object, or an array holding it (and its slot).
+    let mut holders: Vec<(u64, Option<u64>)> = refs.iter().map(|&x| (x, None)).collect();
+    if !arrays.is_empty() {
+        for y in heap.referrers(&arrays.iter().map(|a| a.0).collect::<Vec<_>>()) {
+            if let Some(&(_, slot)) = m.word(y).and_then(|a| arrays.iter().find(|x| x.0 == a)) {
+                holders.push((y, Some(slot)));
+            }
+        }
+    }
+    let starts: Vec<u64> =
+        holders.iter().flat_map(|&(y, _)| (0..MAX_STATIC_DATA).step_by(w as usize).filter_map(move |o| y.checked_sub(o))).collect();
+    let mut statics: Vec<(u64, Vec<(String, u64, u64)>)> = Vec::new();
+    for r in heap.referrers(&starts) {
+        let Some(data) = m.word(r) else { continue };
+        // The vtable pointing to the static data: the nearest class pointer before (its start).
+        let Some(k2) = (0..MAX_VTABLE).step_by(w as usize).find_map(|back| {
+            let vt = r.checked_sub(back)?;
+            m.word(vt).filter(|&c| c != vt && m.is_class(c))
+        }) else {
+            continue;
+        };
+        if !statics.iter().any(|s| s.0 == k2) {
+            statics.push((k2, m.static_fields(k2)));
+        }
+        let fields = &statics.iter().find(|s| s.0 == k2).unwrap().1;
+        for &(y, slot) in holders.iter().filter(|h| h.0 >= data && h.0 - data < MAX_STATIC_DATA) {
+            let Some(f) = fields.iter().find(|f| f.1 == y - data) else { continue };
+            let Some((namespace, class)) = m.name(k2) else { continue };
+            let path = MonoPath { runtime: Runtime::Mono, namespace, class, via: Some(Static { field: f.0.clone(), slot }), field: field.to_owned() };
+            if m.static_walk(heap.pid, k2, data, &path) == Some(target) {
+                keep_static(heap.pid, k2, data);
+                let mut found = FOUND.lock().unwrap();
+                found.retain(|f| f.0 == heap.pid);
+                found.push((heap.pid, k2, data, MonoPath { field: String::new(), ..path.clone() }));
+                return Some((path, vec![target]));
+            }
+        }
+    }
+    None
+}
+
+fn keep_static(pid: u32, k: u64, data: u64) {
+    let mut cache = STATICS.lock().unwrap();
+    cache.retain(|s| s.0 == pid && s.1 != k);
+    cache.push((pid, k, data));
+}
+
+/// The class and its static data a static path starts from: known this run, or found from
+/// the class's vtables (a slot after the methods points to it).
+fn find_static(heap: &Heap, path: &MonoPath) -> Option<(u64, u64)> {
+    let pid = heap.pid;
+    if let Some(lay) = known_layout(pid) {
+        let m = Mono { mem: heap.file(), lay };
+        let known = STATICS.lock().unwrap().iter().filter(|s| s.0 == pid).map(|s| (s.1, s.2)).collect::<Vec<_>>();
+        if let Some(found) = known.into_iter().find(|&(k, d)| m.is(k, path) && m.static_walk(pid, k, d, path).is_some()) {
+            return Some(found);
+        }
+    }
+    let vts = vtables(heap, path);
+    let m = Mono { mem: heap.file(), lay: known_layout(pid)? };
+    let w = m.lay.w;
+    let mut b = vec![0u8; MAX_VTABLE as usize];
+    for &vt in &vts {
+        let Some(k) = m.word(vt).filter(|&k| k != vt && m.is_class(k) && m.is(k, path)) else { continue };
+        let n = heap.file().read_at(&mut b, vt).unwrap_or(0);
+        for at in (w as usize..n - n % w as usize).step_by(w as usize) {
+            let mut x = [0u8; 8];
+            x[..w as usize].copy_from_slice(&b[at..at + w as usize]);
+            let data = u64::from_le_bytes(x);
+            if data >= 0x10000 && m.static_walk(pid, k, data, path).is_some() {
+                keep_static(pid, k, data);
+                return Some((k, data));
+            }
+        }
+    }
+    None
 }
 
 /// What `addr` is, when it's a field of a Mono object: "hp of NewMovement" (for the matches
@@ -398,20 +642,29 @@ fn find_in(found: &mut Vec<u64>, bytes: &[u8], addr: u64, b: &[u8], fresh: usize
     }
 }
 
-/// Every place these bytes are where the runtime keeps class names: Mono in writable memory,
-/// IL2CPP in global-metadata.dat (mapped read-only).
+/// Every place these bytes are where the runtime keeps class names: Mono in writable memory
+/// (Unity's reads its assemblies in) or in assemblies mapped read-only next to mscorlib.dll
+/// (native Linux Terraria's; not every DLL: under Proton those are many), IL2CPP in
+/// global-metadata.dat (mapped read-only).
 fn find_name(heap: &Heap, runtime: Runtime, bytes: &[u8]) -> Vec<u64> {
     let mut found = Vec::new();
-    match runtime {
-        Runtime::Mono => heap.each_chunk(bytes.len(), |addr, b, fresh| find_in(&mut found, bytes, addr, b, fresh)),
-        Runtime::Il2cpp => {
-            let maps = crate::helper::maps(heap.pid).unwrap_or_default();
-            for r in maps.iter().filter(|r| r.path.to_lowercase().ends_with("global-metadata.dat")) {
-                let mut b = vec![0u8; (r.end - r.start) as usize];
-                let n = heap.file().read_at(&mut b, r.start).unwrap_or(0);
-                find_in(&mut found, bytes, r.start, &b[..n], n);
-            }
+    let maps = crate::helper::maps(heap.pid).unwrap_or_default();
+    let read_only = maps.iter().filter(|r| !r.perms.starts_with("rw"));
+    let files: Vec<_> = match runtime {
+        Runtime::Mono => {
+            heap.each_chunk(bytes.len(), |addr, b, fresh| find_in(&mut found, bytes, addr, b, fresh));
+            let corlib = maps.iter().find_map(|r| r.path.strip_suffix("/mscorlib.dll"));
+            read_only
+                .filter(|r| corlib.is_some_and(|dir| r.path.strip_prefix(dir).is_some_and(|f| !f[1..].contains('/'))))
+                .filter(|r| [".dll", ".exe"].iter().any(|e| r.path.to_lowercase().ends_with(e)))
+                .collect()
         }
+        Runtime::Il2cpp => read_only.filter(|r| r.path.to_lowercase().ends_with("global-metadata.dat")).collect(),
+    };
+    for r in files {
+        let mut b = vec![0u8; (r.end - r.start) as usize];
+        let n = heap.file().read_at(&mut b, r.start).unwrap_or(0);
+        find_in(&mut found, bytes, r.start, &b[..n], n);
     }
     found
 }
@@ -425,8 +678,13 @@ fn vtables(heap: &Heap, path: &MonoPath) -> Vec<u64> {
         return v.clone();
     }
     let (mem, w) = (heap.file(), heap.width() as u64);
-    let pattern: Vec<u8> = [&[0u8][..], path.class.as_bytes(), &[0]].concat();
-    let names: Vec<u64> = find_name(heap, path.runtime, &pattern).into_iter().map(|a| a + 1).collect();
+    // An assembly's names share endings: Terraria.exe keeps "Player" only as the end of
+    // "DeadPlayer" and others, where Mono points. The classes found are checked by name.
+    let (pattern, skip): (Vec<u8>, u64) = match path.runtime {
+        Runtime::Mono => ([path.class.as_bytes(), &[0]].concat(), 0),
+        Runtime::Il2cpp => ([&[0u8][..], path.class.as_bytes(), &[0]].concat(), 1),
+    };
+    let names: Vec<u64> = find_name(heap, path.runtime, &pattern).into_iter().map(|a| a + skip).collect();
     if names.is_empty() {
         return Vec::new();
     }
@@ -467,6 +725,9 @@ fn vtables(heap: &Heap, path: &MonoPath) -> Vec<u64> {
 
 /// The live objects of the path's class (a pass over memory, three on a new run).
 pub fn find_roots(heap: &Heap, path: &MonoPath) -> Vec<u64> {
+    if path.via.is_some() {
+        return find_static(heap, path).map(|(_, data)| vec![data]).unwrap_or_default();
+    }
     let vts = vtables(heap, path);
     let (Some(lay), false) = (known_layout(heap.pid), vts.is_empty()) else { return Vec::new() };
     let m = Mono { mem: heap.file(), lay };
@@ -483,6 +744,12 @@ pub fn find_roots(heap: &Heap, path: &MonoPath) -> Vec<u64> {
 pub fn walk(heap: &Heap, roots: &[u64], path: &MonoPath) -> Vec<u64> {
     let Some(lay) = known_layout(heap.pid) else { return Vec::new() };
     let m = Mono { mem: heap.file(), lay };
+    // A static path: its root is the class's static data.
+    if path.via.is_some() {
+        let pid = heap.pid;
+        let class = roots.first().and_then(|&d| STATICS.lock().unwrap().iter().find(|s| s.0 == pid && s.2 == d).map(|s| (s.1, d)));
+        return class.and_then(|(k, d)| m.static_walk(pid, k, d, path)).into_iter().collect();
+    }
     let leads: Option<Vec<((bool, u32), u64)>> = roots
         .iter()
         .map(|&obj| {
@@ -511,6 +778,13 @@ mod tests {
         assert!(MonoPath::parse("mono:NewMovement").is_none());
         assert!(MonoPath::parse("mono:New Movement.hp").is_none());
         assert!(MonoPath::parse("gd:a.gd.x").is_none());
+        let t = "mono:Terraria::Main.player[0].statLife";
+        let p = MonoPath::parse(t).unwrap();
+        assert_eq!((p.class.as_str(), p.via.clone(), p.field.as_str()), ("Main", Some(Static { field: "player".into(), slot: Some(0) }), "statLife"));
+        assert_eq!((p.text(), p.describe()), (t.to_owned(), "statLife of Main.player[0]".to_owned()));
+        assert_eq!(MonoPath::parse("mono:Game.instance.gold").unwrap().text(), "mono:Game.instance.gold");
+        assert!(MonoPath::parse("mono:Main.player[x].statLife").is_none());
+        assert!(MonoPath::parse("il2cpp:Main.player[0].statLife").is_none());
         let p = MonoPath::parse("il2cpp:CommandBase._ammo").unwrap();
         assert_eq!((p.runtime, p.describe()), (Runtime::Il2cpp, "_ammo of CommandBase".to_owned()));
         assert_eq!(p.text(), "il2cpp:CommandBase._ammo");
