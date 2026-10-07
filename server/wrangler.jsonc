@@ -8,8 +8,7 @@
     {
       "binding": "DB",
       "database_name": "ferret",
-      // Filled in by `npx wrangler d1 create ferret`.
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "98299f19-9ac5-4269-b139-9fe35f83c54c"
     }
   ]
 }
