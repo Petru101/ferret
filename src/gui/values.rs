@@ -419,7 +419,8 @@ impl ValuesView {
         }
         let current: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(v.value));
         let keep_it: Rc<dyn Fn()> = {
-            let (current, limit, min, endless, filling) = (current.clone(), limit.clone(), min.clone(), endless.clone(), filling.clone());
+            let (current, limit, min, max, endless, filling) =
+                (current.clone(), limit.clone(), min.clone(), max.clone(), endless.clone(), filling.clone());
             Rc::new(move || {
                 let Some(n) = current.get().filter(|&n| n > 0.0) else { return };
                 // Rounded down to the field's digits: never above what the game has now.
@@ -427,6 +428,10 @@ impl ValuesView {
                 filling.set(true);
                 endless.set_active(true);
                 min.set_value((n * f).floor() / f);
+                // The unused maximum showed an older, lower number (At Most 104, At Least 200).
+                if max.value() < min.value() {
+                    max.set_value(min.value());
+                }
                 limit.set_enable_expansion(true);
                 filling.set(false);
                 apply_limit();
@@ -441,8 +446,11 @@ impl ValuesView {
             Rc::new(move |lo, hi| {
                 filling.set(true);
                 endless.set_active(lo.is_some() && hi.is_none());
-                if let Some(hi) = hi {
-                    max.set_value(hi);
+                match (lo, hi) {
+                    (_, Some(hi)) => max.set_value(hi),
+                    // No maximum: the unused field isn't left below the minimum.
+                    (Some(lo), None) if max.value() < lo => max.set_value(lo),
+                    _ => {}
                 }
                 max.set_subtitle(&if endless.is_active() { tr!("No maximum") } else { String::new() });
                 min.set_value(lo.unwrap_or(0.0));

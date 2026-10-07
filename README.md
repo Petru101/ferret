@@ -5,6 +5,8 @@
 <sub>The game in the screenshot is [SuperTux](https://www.supertux.org/), free and open source;
 its artwork is under its own free licenses.</sub>
 
+![The coins saved in the Values tab: set them, or keep them in a range](data/screenshots/values-supertux.png)
+
 Find and change values in your games. Proof of concept for a single-player game cheat tool for
 Linux, packaged as a flatpak.
 
