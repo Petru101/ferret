@@ -152,7 +152,7 @@ impl Reader {
         let (steps, classes) = (*shape.get(1)?, *shape.get(2)?);
         let probs: Vec<f32> = out.iter().copied().collect();
         let allowed = |c: usize| {
-            !digits || c == 0 || self.chars.get(c - 1).is_some_and(|s| s.chars().all(|ch| ch.is_ascii_digit() || "/.:,".contains(ch)))
+            !digits || c == 0 || self.chars.get(c - 1).is_some_and(|s| s.chars().all(|ch| ch.is_ascii_digit() || MARKS.contains(ch)))
         };
         let mut chars = Vec::new();
         let mut weakest_digit = 1f32;
@@ -173,6 +173,11 @@ impl Reader {
         Some(Line { text: chars.iter().map(|c| c.0.as_str()).collect(), chars, rect: b, weakest_digit })
     }
 }
+
+/// Marks that belong inside a number: thousands separators (",", and "'" or "’" as in
+/// Turmoil's $53'731: cut there, its money read as 8 and its boxes as 53 and 731), decimal
+/// points, times' colons, current/most slashes.
+const MARKS: &str = ",.:/'\u{2019}";
 
 /// The character list in a PaddleOCR inference.yml (`character_dict:` entries, YAML-quoted
 /// where needed).
@@ -218,7 +223,7 @@ fn unescape(s: &str) -> String {
 
 /// The first number in a piece of text: digits with their separators ("ENERGY 13/40" -> 13).
 fn first_number(text: &str) -> Option<Shown> {
-    text.split(|c: char| !(c.is_ascii_digit() || ",.:/".contains(c)))
+    text.split(|c: char| !(c.is_ascii_digit() || MARKS.contains(c)))
         .map(|t| t.trim_matches(|c: char| !c.is_ascii_digit()))
         .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
         .find_map(|t| Shown::parse(t).or_else(|| crate::ocr::digits(t).and_then(|n| Shown::parse(&n.to_string()))))
@@ -281,7 +286,7 @@ pub fn numbers(img: &RgbImage) -> Result<Vec<Word>, String> {
             run.clear();
         };
         for c in &l.chars {
-            if c.0.chars().all(|ch| ch.is_ascii_digit() || ",.:/".contains(ch)) {
+            if c.0.chars().all(|ch| ch.is_ascii_digit() || MARKS.contains(ch)) {
                 run.push(c);
             } else {
                 flush(&mut run);
@@ -307,6 +312,8 @@ mod tests {
         let n = |t: &str| first_number(t).map(|s| s.to_string());
         assert_eq!(n("ENERGY 13/40"), Some("13".into()));
         assert_eq!(n("$8,810"), Some("8810".into()));
+        assert_eq!(n("$8'731"), Some("8731".into()));
+        assert_eq!(n("$53\u{2019}731"), Some("53731".into()));
         assert_eq!(n("x57"), Some("57".into()));
         assert_eq!(n("Lv.17"), Some("17".into()));
         assert_eq!(n("3:17"), Some("3:17".into()));

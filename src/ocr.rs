@@ -30,14 +30,14 @@ pub struct Word {
 pub struct Shown(String);
 
 impl Shown {
-    /// "1,250" (thousands separators go), "1.2", "3:17", "1:02:03", "-5"; "13/40" (current/most)
+    /// "1,250" and "1'250" (thousands separators go), "1.2", "3:17", "1:02:03", "-5"; "13/40" (current/most)
     /// is its first part, or its second when the first is missing ("/40"). None for anything else.
     pub fn parse(text: &str) -> Option<Shown> {
         let text = text.trim();
         if let Some((a, b)) = text.split_once('/') {
             return Shown::parse(a).or_else(|| a.trim().is_empty().then(|| Shown::parse(b)).flatten());
         }
-        let t: String = text.chars().filter(|c| *c != ',').collect();
+        let t: String = text.chars().filter(|c| !matches!(c, ',' | '\'' | '\u{2019}')).collect();
         let (sign, body) = t.strip_prefix('-').map_or(("", t.as_str()), |b| ("-", b));
         let digits = |p: &str| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit());
         let ok = if body.contains(':') {
@@ -921,6 +921,7 @@ mod shown_tests {
     fn parses_what_games_show() {
         let p = |t: &str| Shown::parse(t).map(|s| (s.to_string(), s.digits(), s.value(), s.search()));
         assert_eq!(p("1,250"), Some(("1250".into(), "1250".into(), 1250.0, "1250".into())));
+        assert_eq!(p("53'731"), Some(("53731".into(), "53731".into(), 53731.0, "53731".into())));
         assert_eq!(p("1.2"), Some(("1.2".into(), "12".into(), 1.2, "1.2".into())));
         assert_eq!(p("0.05").map(|s| s.1), Some("005".into()));
         assert_eq!(p("3:17"), Some(("3:17".into(), "317".into(), 197.0, "197".into())));
