@@ -515,7 +515,8 @@ struct Limit {
     /// one, all of them are found through it on every check and kept in range.
     named: Option<NamedLimit>,
     // First bytes of the object holding the value (its type pointer). If they
-    // change, the object is gone and writing would corrupt unrelated memory.
+    // change, the object is gone and writing would corrupt unrelated memory. 0: no object (see
+    // `guard_of`).
     guard_addr: u64,
     guard: [u8; 4],
     fixes: u64,
@@ -654,6 +655,18 @@ fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
     mem.read_exact_at(&mut g, addr).ok().map(|_| g)
 }
 
+/// The guard for a value whose code patterns found `object` in their base register. Code that
+/// addresses the value itself (a global array indexed by player: Jazz Jackrabbit 2's
+/// `mov ecx,[esi+eax*4+0x5c8960]` with esi 0) has no object: the value sits at a fixed address
+/// and can't be replaced, so it gets none (address 0). Before, its limits failed with "cannot
+/// read the object at 0x0" and a restore never found it in the background.
+fn guard_of(mem: &File, object: u64) -> Option<(u64, [u8; 4])> {
+    if object < 0x10000 {
+        return Some((0, [0; 4]));
+    }
+    read_guard(mem, object).map(|g| (object, g))
+}
+
 /// How often limits check their values (and write the ones out of range), and how often they
 /// find where the values are (pointer paths, named paths). Lumencraft's lumen took a moment to
 /// come back after a purchase.
@@ -774,7 +787,7 @@ fn limiter_loop(shared: SharedLimiter) {
                     }
                     continue;
                 }
-                if l.paths.is_empty() && read_guard(mem, l.guard_addr) != Some(l.guard) {
+                if l.paths.is_empty() && l.guard_addr != 0 && read_guard(mem, l.guard_addr) != Some(l.guard) {
                     l.paused = Some("the object holding it changed, finding it again");
                     l.retry_at = Instant::now();
                     continue;
@@ -852,8 +865,8 @@ fn limiter_loop(shared: SharedLimiter) {
             l.checked_at = Instant::now();
             l.searched_code |= search_code && found.is_some();
             let object = found.and_then(|(r, disp)| {
-                let object = r.addr.wrapping_sub(disp as u64);
-                Some((r, object, read_guard(&mem, object)?))
+                let (object, g) = guard_of(&mem, r.addr.wrapping_sub(disp as u64))?;
+                Some((r, object, g))
             });
             match object {
                 Some((r, object, g)) => {
@@ -913,15 +926,15 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         return writeln!(out, "error: not attached");
     };
     let (addr, kind) = addr;
-    let guard_addr = addr.wrapping_sub(sites.first().map_or(0, |s| s.disp) as u64);
+    let object = addr.wrapping_sub(sites.first().map_or(0, |s| s.disp) as u64);
     // Address 0: not found yet (the game hasn't run its code); found in the background like a
     // value the game moved, instead of holding up the restore.
     let waiting = addr == 0 && !sites.is_empty();
     // Paths are followed on every check, so they need no guard (and the value may not exist yet).
-    let guard = match read_guard(mem, guard_addr) {
+    let (guard_addr, guard) = match guard_of(mem, object).filter(|_| !waiting) {
         Some(g) => g,
-        None if waiting || !paths.is_empty() || !named.is_empty() => [0; 4],
-        None => return writeln!(out, "error: cannot read the object at 0x{guard_addr:x}"),
+        None if waiting || !paths.is_empty() || !named.is_empty() => (object, [0; 4]),
+        None => return writeln!(out, "error: cannot read the object at 0x{object:x}"),
     };
     // Found again or given new bounds: a limit the player turned off stays off.
     let off = l.limits.iter().any(|l| l.name == *name && l.off);
