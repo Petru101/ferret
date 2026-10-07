@@ -106,7 +106,13 @@ pub struct Guide {
     offered: RefCell<Option<gtk::Widget>>,
     /// Told each new look (the Find tab shows Start only while it's the player's pick).
     on_show: RefCell<Option<Box<dyn Fn(Look)>>>,
+    /// "Got it" notifications: when the last went out, and one held back to keep them apart.
+    got_it: Cell<Option<Instant>>,
+    got_it_next: Rc<RefCell<Option<(String, String)>>>,
 }
+
+/// "Got it" notifications at most this often (Plasma refuses an app that sends too many).
+const GOT_IT_GAP: Duration = Duration::from_secs(2);
 
 fn places(n: usize) -> String {
     format!("{} {}", grouped(n), if n == 1 { "place matches" } else { "places match" })
@@ -174,6 +180,8 @@ impl Guide {
             on_values: Cell::new(false),
             offered: RefCell::default(),
             on_show: RefCell::default(),
+            got_it: Cell::new(None),
+            got_it_next: Rc::default(),
         });
         guide.pick("Click the number you want to find", "In the picture of your game below, or drag a box around it.");
         guide
@@ -361,7 +369,7 @@ impl Guide {
     }
 
     /// A change on screen narrowed it down.
-    pub fn watching(&self, n: usize) {
+    pub fn watching(self: &Rc<Self>, n: usize) {
         let before = self.count.replace(n);
         let hint = match before {
             b if b > n => format!("{} \u{2192} {}. Every change narrows it down.", grouped(b), places(n)),
@@ -373,7 +381,37 @@ impl Guide {
         } else {
             self.show(Look::Go, CHANGE, self.keep_changing(), &hint, None);
         }
-        self.tell(self.keep_changing(), &format!("{}.", places(n)), None, Some(6), false);
+        // Each change Ferret counted, while the player is in the game: they waited for a word
+        // that it took and got nothing (only "keep changing" when switching to the game, before
+        // any change).
+        if before > n {
+            self.got_it(format!("Got it: {} \u{2192} {}", grouped(before), places(n)), format!("{}.", self.keep_changing()));
+        }
+        self.away.replace(Some((self.keep_changing().to_owned(), format!("{}.", places(n)), None, Some(6))));
+        self.reminded.set(true);
+    }
+
+    /// Sends a "Got it" notification, or holds it back until `GOT_IT_GAP` after the last one
+    /// (the newest text wins).
+    fn got_it(self: &Rc<Self>, title: String, body: String) {
+        let wait = self.got_it.get().map_or(Duration::ZERO, |t| GOT_IT_GAP.saturating_sub(t.elapsed()));
+        if wait.is_zero() {
+            self.got_it.set(Some(Instant::now()));
+            self.notify.send(&title, &body, None, Some(4));
+            return;
+        }
+        if self.got_it_next.replace(Some((title, body))).is_some() {
+            return;
+        }
+        let guide = self.clone();
+        glib::timeout_add_local_once(wait, move || {
+            if let Some((title, body)) = guide.got_it_next.take() {
+                if guide.look.get() == Look::Go {
+                    guide.got_it.set(Some(Instant::now()));
+                    guide.notify.send(&title, &body, None, Some(4));
+                }
+            }
+        });
     }
 
     /// Scan Again while Start runs.
