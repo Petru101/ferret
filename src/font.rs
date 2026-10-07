@@ -56,6 +56,28 @@ impl Glyph {
         Some(Glyph { x: self.x + x0, w, h, ink, cut: self.cut })
     }
 
+    /// Whether its ink rings background the glyph's edges can't reach, of at least one frame
+    /// pixel (`scale` mask pixels a side): a 0's middle.
+    pub fn has_hole(&self, scale: u32) -> bool {
+        let (w, h) = (self.w as usize, self.h as usize);
+        let mut seen = vec![false; w * h];
+        let mut stack: Vec<usize> = (0..w * h).filter(|&i| (i % w == 0 || i % w == w - 1 || i / w == 0 || i / w == h - 1) && !self.ink[i]).collect();
+        for &i in &stack {
+            seen[i] = true;
+        }
+        while let Some(i) = stack.pop() {
+            let (x, y) = (i % w, i / w);
+            let next = [(x > 0).then(|| i - 1), (x + 1 < w).then(|| i + 1), (y > 0).then(|| i - w), (y + 1 < h).then(|| i + w)];
+            for j in next.into_iter().flatten() {
+                if !self.ink[j] && !seen[j] {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        (0..w * h).filter(|&i| !self.ink[i] && !seen[i]).count() >= (scale * scale) as usize
+    }
+
     /// `n` equal-width slices, for digits drawn touching each other.
     fn split(&self, n: u32) -> Vec<Glyph> {
         (0..n)
@@ -556,5 +578,15 @@ mod grid_tests {
         // A solid block (a panel behind the number) is no digit but a 1.
         let block = Glyph { x: 0, w: 80, h: 92, ink: vec![true; 80 * 92], cut: false };
         assert_eq!(font.learn(std::slice::from_ref(&block), 4, "2", true), 0);
+    }
+
+    #[test]
+    fn only_ringed_ink_has_a_hole() {
+        // A 0 rings its middle; a pound sign, a 2 or an x don't (left of a number they are signs).
+        assert!(draw(ZERO, 3.0).has_hole(4));
+        assert!(draw(EIGHT, 3.0).has_hole(4));
+        assert!(!draw(TWO, 3.0).has_hole(4));
+        assert!(!draw([".##", "#..", "###", "#..", "###"], 3.0).has_hole(4));
+        assert!(!draw(["#.#", "#.#", ".#.", "#.#", "#.#"], 3.0).has_hole(4));
     }
 }

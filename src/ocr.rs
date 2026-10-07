@@ -876,14 +876,18 @@ pub fn learn(frame: &Path, area: Rect, n: &Shown, font: &mut Font, trusted: bool
     // Leading zeros are a guess. Glyphs that read as other digits aren't zeros; ones the font
     // can't read are taken as zeros only when the player typed the number and no 0 is known
     // yet (once it is, something that doesn't read as 0 is an icon or a symbol: Creeper World
-    // got a junk "0" from the shape left of a typed 40).
+    // got a junk "0" from the shape left of a typed 40), and only when they ring a hole, as a
+    // 0 does (OpenTTD's "£" before a typed 97518 was learned as a 0).
     let zeros = match font.read(&glyphs[..extra], SCALE) {
         Some(r) => r.n == 0 && r.glyphs == extra,
-        None => !trusted && font.shapes(0).is_empty(),
+        None => !trusted && font.shapes(0).is_empty() && glyphs[..extra].iter().all(|g| g.has_hole(SCALE)),
     };
-    if extra > 0 && !zeros {
+    // Ones that can't be a 0 are a sign before the number ("£", the "x" of "x53"): left out.
+    let sign = extra > 0 && !zeros && glyphs[..extra].iter().all(|g| !g.has_hole(SCALE));
+    if extra > 0 && !zeros && !sign {
         return Err(format!("{extra} glyph(s) left of {n} that may not be zeros; not learning from it"));
     }
+    let (glyphs, extra) = if sign { (glyphs[extra..].to_vec(), 0) } else { (glyphs, extra) };
     let label = format!("{}{text}", "0".repeat(extra));
     let mut added = font.learn(&glyphs, SCALE, &label, trusted);
     if let Some(seen) = finder_glyphs(&img, font, area, &glyphs) {
