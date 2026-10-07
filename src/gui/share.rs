@@ -1,5 +1,6 @@
-// Sharing saved values (`.ferret` files, core::export / core::import) from the game page's
-// menu: to a file or the clipboard (pasted in a chat), from a file or the clipboard.
+// The main menus: sharing saved values (`.ferret` files, core::export / core::import) from
+// the game page's, to a file or the clipboard (pasted in a chat), from a file or the
+// clipboard; Send Feedback on both pages (feedback.rs).
 
 use std::rc::Rc;
 
@@ -26,10 +27,27 @@ pub fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     menu.append_section(None, &export);
     menu.append_section(None, &import);
+    menu.append_section(None, &feedback_section());
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
-        .tooltip_text("Share Values")
+        .tooltip_text("Main Menu")
         .menu_model(&menu)
+        .primary(true)
+        .build()
+}
+
+fn feedback_section() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("Send Feedback…"), Some("app.feedback"));
+    menu
+}
+
+/// The games page's menu: feedback only (sharing needs a game).
+pub fn games_menu_button() -> gtk::MenuButton {
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Main Menu")
+        .menu_model(&feedback_section())
         .primary(true)
         .build()
 }
@@ -44,6 +62,7 @@ pub fn add_actions(app: &adw::Application, ui: &Rc<Ui>) {
     add("export", |ui| ui.worker.run(|core| Event::Exported(core.export(), To::File)));
     add("copy-values", |ui| ui.worker.run(|core| Event::Exported(core.export(), To::Clipboard)));
     add("import", import_file);
+    add("feedback", super::feedback::open);
     add("paste-values", |ui| {
         let ui = ui.clone();
         ui.window.clipboard().read_text_async(gio::Cancellable::NONE, move |text| match text {

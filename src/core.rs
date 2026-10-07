@@ -28,6 +28,15 @@ fn flatpak_app_path() -> Option<String> {
 
 const APP_ID: &str = "io.github.Petru101.Ferret";
 
+/// Ferret's version and, in the flatpak, the start of its build's commit ("0.1.0 (3f2a9c1e)").
+pub fn version() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match flatpak_info("app-commit") {
+        Some(c) => format!("{version} ({})", &c[..c.len().min(8)]),
+        None => version.to_owned(),
+    }
+}
+
 /// Whether a newer build of Ferret was installed since this one started: a running app keeps
 /// its build until it's restarted, and an old build drops what it doesn't know when it saves.
 /// The running build is `<deploy dir>/<commit>/files`; `<deploy dir>/active` is the installed one.
@@ -472,6 +481,11 @@ fn profile_path(exe: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/ferret"));
     base.join("profiles").join(format!("{}.profile", exe.to_lowercase()))
+}
+
+/// The game's saved values as the profile holds them (feedback.rs sends them with a report).
+pub fn saved_text(exe: &str) -> Option<String> {
+    fs::read_to_string(profile_path(exe)).ok()
 }
 
 /// "one kind of place", "3 kinds of places".

@@ -2,6 +2,7 @@
 // (scans, OCR, the window picker, tracing) never blocks the window; the
 // interface sends it jobs and gets events back.
 
+mod feedback;
 mod find;
 mod hotkeys;
 mod notify;
@@ -645,6 +646,7 @@ fn games_page(ui_list: &gtk::ListBox, stack: &gtk::Stack, error: &adw::StatusPag
 
     let header = adw::HeaderBar::new();
     header.pack_start(refresh);
+    header.pack_end(&share::games_menu_button());
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(banner);

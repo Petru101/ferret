@@ -8,7 +8,7 @@ use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
-restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>";
+restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>";
 
 fn bound(v: &str) -> Result<Option<f64>, String> {
     match v {
@@ -126,6 +126,18 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                     println!("exported {} values to {path}", export.count);
                 }
             }
+        }
+        // Sends a report with Ferret's log, as Send Feedback does (tests: FERRET_SERVER).
+        "feedback" => {
+            let report = crate::feedback::Report {
+                message: arg.to_owned(),
+                contact: String::new(),
+                game: None,
+                log: crate::feedback::log_text(),
+                profile: None,
+            };
+            report.send()?;
+            println!("feedback sent");
         }
         "import" => {
             let text = std::fs::read_to_string(arg).map_err(|e| format!("usage: import <file>: {e}"))?;

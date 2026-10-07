@@ -13,6 +13,8 @@ async-channel = "2.5.0"
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_14"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
+# Feedback and bug reports (feedback.rs): HTTPS with its own certificates, no system TLS.
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 rten = "0.26"
 rten-tensor = "0.26"
 zbus = "5"

@@ -13,6 +13,8 @@ finish-args:
   - --talk-name=org.freedesktop.Flatpak
   # Notifications over a fullscreen game need critical urgency, which the portal can't send.
   - --talk-name=org.freedesktop.Notifications
+  # Send Feedback (feedback.rs): reports go to Ferret's server over HTTPS.
+  - --share=network
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 cleanup:

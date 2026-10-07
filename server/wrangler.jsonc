@@ -1,0 +1,15 @@
+// Ferret's server: feedback and bug reports from the app (notes/sharing.md). Deploy with
+// `npx wrangler deploy` from this folder.
+{
+  "name": "ferret",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ferret",
+      // Filled in by `npx wrangler d1 create ferret`.
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
+}

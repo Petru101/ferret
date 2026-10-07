@@ -2,6 +2,7 @@ mod bar;
 mod capture;
 mod cli;
 mod core;
+mod feedback;
 mod font;
 mod gui;
 mod ocr;
