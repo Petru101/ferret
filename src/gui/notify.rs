@@ -62,9 +62,13 @@ impl Notifier {
     /// The window: notifications only go out while it isn't in front, and leave when it comes.
     pub fn set_window(self: &Rc<Self>, window: &impl IsA<gtk::Window>) {
         let n = Rc::downgrade(self);
+        // Only logged when it closes a notification: every switch to and from the game filled
+        // half the log (and bug reports) with "in front" / "left the front".
         window.connect_is_active_notify(move |w| {
-            log(if w.is_active() { "Ferret's window is in front" } else { "Ferret's window left the front" });
             if let (true, Some(n)) = (w.is_active(), n.upgrade()) {
+                if n.id.get() != 0 {
+                    log("Ferret's window came to the front: its notification closed");
+                }
                 n.withdraw();
             }
         });
