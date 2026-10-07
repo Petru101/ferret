@@ -94,6 +94,13 @@ pub fn exe_name(pid: u32) -> String {
 pub fn game_name(pid: u32) -> String {
     let exe = exe_name(pid);
     let lower = exe.to_ascii_lowercase();
+    if DOSBOXES.contains(&lower.trim_end_matches(".exe")) {
+        let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        let argv0 = String::from_utf8_lossy(raw.split(|b| *b == 0).next().unwrap_or_default()).into_owned();
+        let cwd = fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let home = std::env::var("HOME").unwrap_or_default();
+        return dosbox_game(&argv0, &cwd, &home).map_or(exe, |g| format!("{g} (DOSBox)"));
+    }
     let ending = match lower.as_str() {
         "ruffle" | "ruffle.exe" => ".swf",
         "solarus-run" | "solarus-run.exe" => ".solarus",
@@ -106,6 +113,42 @@ pub fn game_name(pid: u32) -> String {
         file.to_ascii_lowercase().ends_with(ending).then_some(file)
     });
     file.unwrap_or(exe)
+}
+
+/// DOSBox and its forks, as programs (".exe" left off).
+const DOSBOXES: &[&str] = &["dosbox", "dosbox-x", "dosbox-staging"];
+
+/// The DOS game a DOSBox runs, by its folder: every DOSBox game is `dosbox.exe`, and all of them
+/// shared one profile (GOG and Steam ship DOS games each with its own DOSBox: Tyrian 2000's is
+/// `Tyrian 2000\DOSBOX\dosbox.exe`). The program's folder, or the one above it when that is
+/// DOSBox's own; for a DOSBox installed system-wide (Lutris, a flatpak), the folder it runs in.
+fn dosbox_game(argv0: &str, cwd: &str, home: &str) -> Option<String> {
+    let parts = |p: &str| -> Vec<String> { p.split(['/', '\\']).filter(|s| !s.is_empty()).map(str::to_owned).collect() };
+    let game = |mut dirs: Vec<String>| {
+        // DOSBox's own folder, and GOG's Linux layout (<game>/dosbox, <game>/data).
+        while dirs.last().is_some_and(|d| {
+            let d = d.to_ascii_lowercase();
+            d.contains("dosbox") || ["game", "data", "bin"].contains(&d.as_str())
+        }) {
+            dirs.pop();
+        }
+        // A drive letter alone ("S:") isn't a game.
+        dirs.pop().filter(|d| !d.ends_with(':'))
+    };
+    // A relative path ("dosbox/dosbox", as GOG's Linux start.sh runs it) is from the folder it
+    // runs in; a Windows one starts with a drive.
+    let absolute = argv0.starts_with('/') || argv0.get(1..2) == Some(":");
+    let mut exe_dirs = if absolute { parts(argv0) } else { parts(&format!("{cwd}/{argv0}")) };
+    exe_dirs.pop();
+    let system = ["usr", "app", "bin", "sbin", "snap"].contains(&exe_dirs.first().map_or("", String::as_str));
+    if let Some(g) = (argv0.contains(['/', '\\']) && !system).then(|| game(exe_dirs)).flatten() {
+        return Some(g);
+    }
+    let cwd = cwd.trim_end_matches('/');
+    if cwd.is_empty() || cwd == home.trim_end_matches('/') {
+        return None;
+    }
+    game(parts(cwd))
 }
 
 /// GameMaker games keep every number as a double; they ship their assets as data.win (or
@@ -3047,4 +3090,25 @@ pub fn run() {
         }
     }
     put_back_tests(&mut session);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dosbox_game;
+
+    #[test]
+    fn names_a_dosbox_game_by_its_folder() {
+        let home = "/home/p";
+        let game = |argv0: &str, cwd: &str| dosbox_game(argv0, cwd, home);
+        // GOG under Wine, Steam's own copy, GOG's Linux layout (relative), a game's folder.
+        assert_eq!(game("S:\\Games\\Tyrian 2000\\Tyrian 2000\\DOSBOX\\dosbox.exe", "/x"), Some("Tyrian 2000".into()));
+        assert_eq!(game("C:\\Steam\\steamapps\\common\\Doom\\dosbox\\DOSBox.exe", "/x"), Some("Doom".into()));
+        assert_eq!(game("dosbox/dosbox", "/home/p/GOG Games/Tyrian 2000"), Some("Tyrian 2000".into()));
+        assert_eq!(game("/home/p/Games/Ultima IV/dosbox", "/home/p"), Some("Ultima IV".into()));
+        // Installed system-wide: the folder it runs in, never the home folder or a lone drive.
+        assert_eq!(game("/usr/bin/dosbox", "/home/p/Games/Keen/data"), Some("Keen".into()));
+        assert_eq!(game("dosbox", "/home/p/Games/Keen"), Some("Keen".into()));
+        assert_eq!(game("/app/bin/dosbox", "/home/p"), None);
+        assert_eq!(game("C:\\DOSBox\\dosbox.exe", "/x"), Some("x".into()));
+    }
 }
