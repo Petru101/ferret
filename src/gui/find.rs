@@ -122,12 +122,15 @@ pub struct FindView {
 
 /// A number to try on a place: half what it holds (easy to spot, and under any cap the game
 /// puts on it: a capped number set higher is put back at once, which rules the place out).
-fn test_number(value: &str) -> String {
-    match value.trim().parse::<f64>() {
-        Ok(v) if v.abs() < 2.0 => format!("{}", v.round() as i64 + 10),
-        Ok(v) if v.fract() == 0.0 => format!("{}", (v / 2.0).floor() as i64),
-        Ok(v) => format!("{:.1}", v / 2.0),
-        Err(_) => String::new(),
+/// Half the number, whole (under any cap the game puts on it); 0 and 1 (no whole half) go up
+/// by as little as shows: 1 and 2. `shown`: the number the player
+/// last typed, what the place should hold; else the place's value. A float holding 3.87 got
+/// "1.9", which the game shows as the 2 already on screen.
+fn test_number(value: &str, shown: Option<f64>) -> String {
+    let Some(v) = shown.or_else(|| value.trim().parse::<f64>().ok()) else { return String::new() };
+    match v.abs() < 2.0 {
+        true => format!("{}", (v.round() as i64 * 2).max(1)),
+        false => format!("{}", (v / 2.0).floor() as i64),
     }
 }
 
@@ -1205,6 +1208,8 @@ impl FindView {
             return;
         }
         self.one_by_one.replace(None);
+        // Start follows the screen: an older typed number isn't what it shows now.
+        self.last_typed.replace(String::new());
         self.result.set_visible(false);
         self.nudge(None);
         self.start.set_visible(false);
@@ -1415,7 +1420,8 @@ impl FindView {
         self.typed_searching(true);
         self.searching(true);
         self.guide.wait(guide::HANDS_OFF, "Scanning again…", "Ferret keeps the places that hold the number on screen now. Don't change it in the game yet.");
-        self.worker.run(|core| Event::ScannedAgain(core.scan_again()));
+        let typed = Shown::parse(&self.last_typed.borrow());
+        self.worker.run(move |core| Event::ScannedAgain(core.scan_again(typed)));
     }
 
     pub fn scanned_again(&self, r: Result<AutoResult, String>) {
@@ -1544,6 +1550,7 @@ impl FindView {
     pub fn start_over(&self) {
         self.one_by_one.replace(None);
         self.last_count.set(None);
+        self.last_typed.replace(String::new());
         self.again.set_visible(false);
         self.matches.set_visible(false);
         self.result.set_visible(false);
@@ -1817,7 +1824,8 @@ impl FindView {
             ),
             None,
         );
-        self.try_entry.set_text(&test_number(&m.value));
+        let shown = Shown::parse(&self.last_typed.borrow()).map(|s| s.value());
+        self.try_entry.set_text(&test_number(&m.value, shown));
         self.guide.offer(&self.try_box);
     }
 
@@ -2096,12 +2104,16 @@ mod tests {
 
     #[test]
     fn suggests_numbers_to_try() {
-        assert_eq!(test_number("1000"), "500");
-        assert_eq!(test_number("7"), "3");
-        assert_eq!(test_number("1"), "11");
-        assert_eq!(test_number("0"), "10");
-        assert_eq!(test_number("12.5"), "6.2");
-        assert_eq!(test_number("x"), "");
+        assert_eq!(test_number("1000", None), "500");
+        assert_eq!(test_number("7", None), "3");
+        assert_eq!(test_number("1", None), "2");
+        assert_eq!(test_number("0", None), "1");
+        assert_eq!(test_number("12.5", None), "6");
+        assert_eq!(test_number("3.869", None), "1");
+        assert_eq!(test_number("3.869", Some(2.0)), "1");
+        assert_eq!(test_number("4.2", Some(2.0)), "1");
+        assert_eq!(test_number("40", Some(37.0)), "18");
+        assert_eq!(test_number("x", None), "");
     }
 
     #[test]

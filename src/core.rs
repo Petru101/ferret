@@ -3948,8 +3948,9 @@ impl Core {
     }
 
     /// Narrows the search down by the number the game shows now, changed or not: the places
-    /// that changed meanwhile are other things.
-    pub fn scan_again(&mut self) -> Result<AutoResult, String> {
+    /// that changed meanwhile are other things. `typed`: the last number the player typed,
+    /// searched again when the box can't be read (they typed it because it couldn't).
+    pub fn scan_again(&mut self, typed: Option<Shown>) -> Result<AutoResult, String> {
         self.game()?;
         self.cancel.store(false, Ordering::Relaxed);
         if self.search.is_none() {
@@ -3980,7 +3981,13 @@ impl Core {
                 self.say(&format!("scanning again for {n}"));
                 self.typed_search(n)
             }
-            None => Err("Can't read the number now (is it on screen?). Type it below instead.".into()),
+            None => match typed {
+                Some(n) => {
+                    self.say(&format!("can't read the box: scanning again for the typed {n}"));
+                    self.typed_search(n)
+                }
+                None => Err("Can't read the number now (is it on screen?). Type it below instead.".into()),
+            },
         }
     }
 
@@ -3989,6 +3996,10 @@ impl Core {
         let fresh = self.search.is_none();
         let (count, unchanged) = match self.search {
             Some((before, unchanged)) => {
+                // `next` keeps values that went past the number since their last snapshot (the
+                // screen lags memory). The player types what the game shows now: a snapshot
+                // now, or a float that drifted 1 -> 3.87 since the last number stays for "2".
+                self.helper.call("mark");
                 let reply = self.helper.call(&format!("next {}", n.search()));
                 self.say(&format!("typed {n}: {}", reply.join(" ")));
                 let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
