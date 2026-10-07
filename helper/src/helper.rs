@@ -1281,7 +1281,10 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         // Steam's runtime starts a launcher service next to Proton games, with the game's app ID
         // (steam-runtime-launcher-service, now <arch>-srt-launcher-service).
         let not_game = NOT_GAMES.contains(&lower.as_str()) || lower.ends_with("-launcher-service");
-        if not_game || lower.contains("crashhandler") || lower.contains("crashreport") {
+        // Anti-cheat's own programs (EasyAntiCheat_EOS.exe, BEService.exe) refuse the game they
+        // run beside; they aren't games themselves.
+        let anti_cheat = anticheat::named(&exe).is_some();
+        if not_game || anti_cheat || lower.contains("crashhandler") || lower.contains("crashreport") {
             continue;
         }
         if !(windows || app_id.is_some() || draws_like_a_game(pid)) || windows && windows_non_game(pid) {
