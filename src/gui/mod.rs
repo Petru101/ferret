@@ -21,7 +21,7 @@ use std::sync::{mpsc, Arc};
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-use crate::core::{AutoResult, Core, GameProcess, ValueRow};
+use crate::core::{AutoResult, Core, GameProcess, Gone, Refusal, ValueRow};
 use crate::ocr::Word;
 
 pub const APP_ID: &str = "io.github.Petru101.Ferret";
@@ -79,6 +79,10 @@ pub enum Event {
     Chosen(Result<crate::core::Loc, String>),
     /// The attached game quit (its program name).
     Quit(String),
+    /// Anti-cheat started in the attached game (its program name, the anti-cheat): Ferret let go.
+    AntiCheat(String, String),
+    /// The game just opened hides its numbers (its program name, the memory scrambler).
+    Scrambler(Option<(String, String)>),
     /// A frame the watched number was just read from, and the watched area: shown while
     /// searching (at most one a second).
     Frame(gtk::gdk::Texture, Option<crate::ocr::Rect>),
@@ -228,6 +232,8 @@ struct Ui {
     waiting_for: Rc<RefCell<Option<String>>>,
     /// The names games go by (Steam's), by program, from the games list.
     game_names: RefCell<std::collections::HashMap<String, String>>,
+    /// What the games list knows of each game's online features, by pid: the warning on opening it.
+    online: RefCell<std::collections::HashMap<u32, Vec<String>>>,
     /// The window was closed while limits ran: Ferret runs on without it until the game quits.
     background: Rc<Cell<bool>>,
     /// How many times the window was closed (a wait for the core belongs to one close).
@@ -413,6 +419,43 @@ impl Ui {
         dialog.present(Some(&self.nav));
     }
 
+    /// The first time a game with online features is opened: what they are and what to keep to.
+    fn warn_online(&self, pid: u32, exe: &str) {
+        let Some(online) = self.online.borrow().get(&pid).cloned().filter(|o| !o.is_empty()) else { return };
+        let setting = format!("warned-online {exe}");
+        if tips::has_setting(&setting) {
+            return;
+        }
+        if let Err(e) = tips::add_setting(&setting) {
+            eprintln!("settings: {e}");
+        }
+        let name = self.game_names.borrow().get(exe).cloned().unwrap_or_else(|| exe.to_owned());
+        let mut text = online.join("\n");
+        text.push_str(
+            "\nOnly change values while you play alone and offline. If anti-cheat starts in the game, Ferret lets go \
+             of it at once.",
+        );
+        self.explain(&format!("{name} has online features"), &text);
+    }
+
+    /// The first time a game with a memory scrambler is opened: most of its numbers can't be found.
+    fn warn_scrambler(&self, exe: &str, scrambler: &str) {
+        let setting = format!("warned-scrambled {exe}");
+        if tips::has_setting(&setting) {
+            return;
+        }
+        if let Err(e) = tips::add_setting(&setting) {
+            eprintln!("settings: {e}");
+        }
+        let name = self.game_names.borrow().get(exe).cloned().unwrap_or_else(|| exe.to_owned());
+        let text = format!(
+            "{name} uses {scrambler}, which keeps its numbers scrambled in memory. Ferret can't find or change \
+             most of them: the plain copies it finds are decoys the game puts back, and changing them may be \
+             noticed by the game."
+        );
+        self.explain(&format!("{name} hides its numbers"), &text);
+    }
+
     fn on_game_page(&self) -> bool {
         self.nav.visible_page().as_ref() == Some(&self.game_page)
     }
@@ -425,14 +468,15 @@ impl Ui {
         }
         // The game that quit is back: open it again (its saved values come back with it).
         let waiting = self.waiting_for.borrow().clone();
-        if let Some(g) = waiting.and_then(|exe| games.iter().find(|g| g.exe == exe && g.anti_cheat.is_none() && !g.online_only)) {
+        if let Some(g) = waiting.and_then(|exe| games.iter().find(|g| g.exe == exe && g.refused.is_none())) {
             self.waiting_for.replace(None);
             self.toast(&format!("{} started again: opening it", g.name.as_deref().unwrap_or(&g.exe)));
             let pid = g.pid;
             self.attaching.set(Some(pid));
             self.worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
         }
-        let shown: String = games.iter().map(|g| format!("{}:{};", g.pid, g.exe)).collect();
+        *self.online.borrow_mut() = games.iter().map(|g| (g.pid, online_features(g))).collect();
+        let shown: String = games.iter().map(|g| format!("{}:{}:{:?}:{:?}:{};", g.pid, g.exe, g.refused, g.ships, g.multiplayer)).collect();
         self.games_stack.set_visible_child_name(if games.is_empty() { "empty" } else { "list" });
         if *self.games_shown.borrow() == shown {
             return;
@@ -453,20 +497,32 @@ impl Ui {
                 }
                 None => &g.exe,
             };
-            if g.multiplayer {
-                subtitle = format!("Multiplayer game: only change values when playing alone · {subtitle}");
-            }
             let row = adw::ActionRow::builder().title(title).subtitle(&subtitle).build();
             row.set_subtitle_lines(2);
-            let refused = match (&g.anti_cheat, g.online_only) {
-                (Some(ac), _) => Some(format!("{ac} found. Ferret won't attach to games with anti-cheat.")),
-                (None, true) => Some("Online-only game. Ferret won't attach to online games.".to_owned()),
-                _ => None,
-            };
+            let refused = g.refused.as_ref().map(|r| match r {
+                Refusal::AntiCheat(ac) => format!("{ac} is running. Ferret won't attach while anti-cheat runs."),
+                Refusal::OnlineOnly => "Online-only game. Ferret won't attach to online games.".to_owned(),
+                Refusal::Vac => "Uses Valve Anti-Cheat. Ferret won't attach to it. Source games started with -insecure \
+                                 in their launch options are allowed."
+                    .to_owned(),
+                Refusal::FlagsEdits => {
+                    "This game flags edited characters when they go online. Ferret won't attach to it.".to_owned()
+                }
+            });
             if let Some(why) = refused {
                 row.set_subtitle(&why);
                 row.add_suffix(&gtk::Image::from_icon_name("action-unavailable-symbolic"));
             } else {
+                let online = online_features(&g);
+                if !online.is_empty() {
+                    let badge = gtk::Label::builder()
+                        .label("Online features")
+                        .tooltip_text(online.join("\n"))
+                        .valign(gtk::Align::Center)
+                        .css_classes(["caption-heading", "warning"])
+                        .build();
+                    row.add_suffix(&badge);
+                }
                 row.set_activatable(true);
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
                 let (worker, find, nav, page, attached, attaching, waiting_for, toasts) = (
@@ -531,6 +587,8 @@ impl Ui {
                 if self.attached.replace(Some(pid)) != Some(pid) {
                     self.find.new_game();
                     self.tips.show(tips::Tip::SaveFirst);
+                    self.warn_online(pid, &exe);
+                    self.worker.run(|core| Event::Scrambler(core.scrambler()));
                 }
                 self.game_page.set_title(&exe);
                 if !self.on_game_page() {
@@ -550,6 +608,27 @@ impl Ui {
                 self.toast(&format!("{name} closed. Ferret opens it again when it starts."));
                 self.notify.send(&format!("{name} closed"), "Ferret opens it again when it starts.", None, Some(6));
                 self.waiting_for.replace(Some(exe));
+            }
+            Event::Scrambler(Some((exe, scrambler))) => self.warn_scrambler(&exe, &scrambler),
+            Event::Scrambler(None) => {}
+            Event::AntiCheat(exe, ac) => {
+                self.attached.set(None);
+                self.find.stop();
+                if self.on_game_page() {
+                    self.nav.pop();
+                }
+                let name = self.game_names.borrow().get(&exe).cloned().unwrap_or_else(|| exe.clone());
+                let heading = format!("Ferret let go of {name}");
+                let text = format!(
+                    "{ac} started in {name}. Ferret stopped keeping values in range and won't change anything in \
+                     the game while the anti-cheat runs."
+                );
+                self.notify.send(&heading, &text, None, Some(10));
+                if self.background.get() {
+                    self.quit();
+                } else {
+                    self.explain(&heading, &text);
+                }
             }
             Event::Values(Ok(values)) => {
                 self.find.saved_values(&values);
@@ -962,6 +1041,7 @@ fn build(app: &adw::Application) {
         attaching: Rc::default(),
         waiting_for: Rc::default(),
         game_names: RefCell::default(),
+        online: RefCell::default(),
         background: Rc::default(),
         closes: Rc::default(),
         portal_answer: RefCell::default(),
@@ -988,7 +1068,8 @@ fn build(app: &adw::Application) {
                 // The places still matching a search, with their values as they are now.
                 let matches = values && ui.stack.visible_child_name().as_deref() == Some("find") && ui.find.matches_shown();
                 ui.worker.run(move |core| match core.check_game() {
-                    Some(exe) => Event::Quit(exe),
+                    Some(Gone::Quit(exe)) => Event::Quit(exe),
+                    Some(Gone::AntiCheat(exe, ac)) => Event::AntiCheat(exe, ac),
                     None if matches => Event::Matches(Ok(core.matches())),
                     None if values => Event::Values(core.values()),
                     None => Event::Games(core.games()),
@@ -1083,4 +1164,16 @@ pub fn run() -> glib::ExitCode {
         build(app);
     });
     app.run_with_args::<&str>(&[])
+}
+
+/// A game's online features, one sentence each (none: it has none Ferret knows of).
+fn online_features(g: &GameProcess) -> Vec<String> {
+    let mut lines = Vec::new();
+    if g.multiplayer {
+        lines.push("It can be played with other people.".to_owned());
+    }
+    if let Some(ac) = &g.ships {
+        lines.push(format!("It comes with {ac}, which isn't running now."));
+    }
+    lines
 }

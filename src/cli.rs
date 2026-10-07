@@ -36,14 +36,17 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         "games" => {
             for g in core.games() {
                 let id = g.app_id.map(|id| format!("  [SteamAppId={id}]")).unwrap_or_default();
-                let ac = g.anti_cheat.map(|ac| format!("  [{ac}]")).unwrap_or_default();
-                let name = g.name.map(|n| format!("  ({n})")).unwrap_or_default();
-                let mp = match (g.online_only, g.multiplayer) {
-                    (true, _) => "  [online only]",
-                    (_, true) => "  [multiplayer]",
-                    _ => "",
+                let refused = match &g.refused {
+                    Some(core::Refusal::AntiCheat(ac)) => format!("  [refused: {ac}]"),
+                    Some(core::Refusal::OnlineOnly) => "  [refused: online only]".into(),
+                    Some(core::Refusal::Vac) => "  [refused: Valve Anti-Cheat]".into(),
+                    Some(core::Refusal::FlagsEdits) => "  [refused: flags edited characters online]".into(),
+                    None => String::new(),
                 };
-                println!("{:>7}  {}{name}{id}{ac}{mp}", g.pid, g.exe);
+                let ships = g.ships.as_ref().map(|ac| format!("  [ships {ac}]")).unwrap_or_default();
+                let mp = if g.multiplayer { "  [multiplayer]" } else { "" };
+                let name = g.name.map(|n| format!("  ({n})")).unwrap_or_default();
+                println!("{:>7}  {}{name}{id}{refused}{ships}{mp}", g.pid, g.exe);
             }
         }
         "attach" => {

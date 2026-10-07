@@ -44,20 +44,29 @@ fn settings_path() -> PathBuf {
     glib::user_config_dir().join("settings")
 }
 
-fn hidden(tip: Tip) -> bool {
-    let line = format!("hide-tip {}", tip.id());
+/// Whether the settings file has this line.
+pub fn has_setting(line: &str) -> bool {
     std::fs::read_to_string(settings_path()).unwrap_or_default().lines().any(|l| l.trim() == line)
 }
 
-fn hide(tip: Tip) -> std::io::Result<()> {
+pub fn add_setting(line: &str) -> std::io::Result<()> {
     let path = settings_path();
     let mut text = std::fs::read_to_string(&path).unwrap_or_default();
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    text.push_str(&format!("hide-tip {}\n", tip.id()));
+    text.push_str(line);
+    text.push('\n');
     std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
     std::fs::write(&path, text)
+}
+
+fn hidden(tip: Tip) -> bool {
+    has_setting(&format!("hide-tip {}", tip.id()))
+}
+
+fn hide(tip: Tip) -> std::io::Result<()> {
+    add_setting(&format!("hide-tip {}", tip.id()))
 }
 
 pub struct Tips {

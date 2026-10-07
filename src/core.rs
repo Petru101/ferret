@@ -798,13 +798,47 @@ pub struct GameProcess {
     pub pid: u32,
     pub exe: String,
     pub app_id: Option<String>,
-    pub anti_cheat: Option<String>,
+    /// Why Ferret won't attach to it.
+    pub refused: Option<Refusal>,
     /// The name Steam gives the game.
     pub name: Option<String>,
-    /// Steam lists it as played online or with others.
+    /// Its store lists it as played online or with others (and as single-player: else it's refused).
     pub multiplayer: bool,
-    /// ... and not as single-player: Ferret refuses it.
-    pub online_only: bool,
+    /// Anti-cheat it ships or is listed with, not running.
+    pub ships: Option<String>,
+}
+
+/// Why Ferret won't attach to a game (the helper's verdict).
+#[derive(Clone, PartialEq, Debug)]
+pub enum Refusal {
+    /// Loaded in the game or running beside it.
+    AntiCheat(String),
+    OnlineOnly,
+    /// Steam lists Valve Anti-Cheat.
+    Vac,
+    /// Its characters get flagged online for edits made offline.
+    FlagsEdits,
+}
+
+impl Refusal {
+    fn parse(code: &str) -> Option<Refusal> {
+        Some(match code {
+            "-" => return None,
+            "online" => Refusal::OnlineOnly,
+            "vac" => Refusal::Vac,
+            "edits" => Refusal::FlagsEdits,
+            // An unknown reason from a newer helper still refuses.
+            other => Refusal::AntiCheat(other.strip_prefix("anti-cheat ").unwrap_or(other).to_owned()),
+        })
+    }
+}
+
+/// How the attached game went away.
+pub enum Gone {
+    /// It quit: its program name.
+    Quit(String),
+    /// Anti-cheat started in it: its program name and the anti-cheat. Ferret let go.
+    AntiCheat(String, String),
 }
 
 pub struct ValueRow {
@@ -886,6 +920,8 @@ pub enum Probed {
 struct Game {
     pid: u32,
     exe: String,
+    /// A memory scrambler the game uses (CodeStage Anti-Cheat Toolkit): its numbers are hidden.
+    scrambler: Option<String>,
     entries: Vec<(String, Loc)>,
     /// Values found through pointer paths (as the helper takes them), followed again on every
     /// look: the game may have moved them.
@@ -1186,26 +1222,43 @@ impl Core {
                     pid: f.first()?.parse().ok()?,
                     exe: f.get(1)?.to_string(),
                     app_id: opt(f.get(2)?),
-                    anti_cheat: opt(f.get(3)?),
+                    refused: Refusal::parse(f.get(3)?),
                     name: f.get(4).and_then(|s| opt(s)),
                     multiplayer: matches!(f.get(5), Some(&"multiplayer" | &"online")),
-                    online_only: f.get(5) == Some(&"online"),
+                    ships: f.get(6).and_then(|s| opt(s)),
                 })
             })
             .collect()
     }
 
-    /// Lets go of the attached game when it quit; returns the program name it ran under.
-    pub fn check_game(&mut self) -> Option<String> {
+    /// The attached game's program and the memory scrambler it uses.
+    pub fn scrambler(&self) -> Option<(String, String)> {
+        let g = self.game.as_ref()?;
+        Some((g.exe.clone(), g.scrambler.clone()?))
+    }
+
+    /// Lets go of the attached game when it quit, or when anti-cheat started in it (the helper
+    /// already let go then).
+    pub fn check_game(&mut self) -> Option<Gone> {
         self.game.as_ref()?;
-        if self.helper.call("alive").first().map(String::as_str) != Some("alive no") {
+        let reply = self.helper.call("alive");
+        let anti_cheat = reply.first().and_then(|l| l.strip_prefix("alive anti-cheat ")).map(str::to_owned);
+        if anti_cheat.is_none() && reply.first().map(String::as_str) != Some("alive no") {
             return None;
         }
         let exe = self.game.take()?.exe;
         self.search = None;
         self.capture = None;
-        self.say(&format!("{exe} quit"));
-        Some(exe)
+        Some(match anti_cheat {
+            Some(ac) => {
+                self.say(&format!("{ac} started in {exe}: Ferret let go of the game and changes nothing in it"));
+                Gone::AntiCheat(exe, ac)
+            }
+            None => {
+                self.say(&format!("{exe} quit"));
+                Gone::Quit(exe)
+            }
+        })
     }
 
     /// Attaches and, when the game has a profile, finds its saved values again.
@@ -1230,9 +1283,11 @@ impl Core {
             .find(|g| g.pid == pid)
             .and_then(|g| g.app_id)
             .filter(|id| id != "0" && id.bytes().all(|b| b.is_ascii_digit()));
+        let scrambler = reply.iter().find_map(|l| l.strip_prefix("memory scrambler: ")).map(str::to_owned);
         self.game = Some(Game {
             pid,
             exe: exe.clone(),
+            scrambler,
             entries: Vec::new(),
             paths: Vec::new(),
             votes: Vec::new(),

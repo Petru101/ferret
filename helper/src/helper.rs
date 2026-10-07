@@ -130,6 +130,30 @@ fn is_java(pid: u32) -> bool {
     })
 }
 
+/// Memory scramblers: Unity games using CodeStage Anti-Cheat Toolkit's obscured types keep their
+/// numbers XORed with a per-value key, next to a plain decoy the game rewrites (Moonlighter's
+/// health). Found by its namespace in the game's assemblies (Mono) or IL2CPP's metadata, in
+/// <Game>_Data (from the maps, else next to the program).
+fn scrambler(pid: u32, regions: &[Region]) -> Option<&'static str> {
+    let mapped = regions.iter().find_map(|r| r.path.find("_Data/").map(|i| PathBuf::from(&r.path[..i + 5])));
+    let beside = || {
+        let program = program_path(pid, regions)?;
+        Some(program.with_file_name(format!("{}_Data", program.file_stem()?.to_string_lossy())))
+    };
+    let data = mapped.or_else(beside)?;
+    let root = Path::new("/proc").join(pid.to_string()).join("root");
+    let data = root.join(data.strip_prefix("/").unwrap_or(&data));
+    let assembly = |p: &PathBuf| {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        name.ends_with(".dll") && (name.starts_with("assembly-csharp") || name.starts_with("actk"))
+    };
+    let managed = fs::read_dir(data.join("Managed")).into_iter().flatten().flatten().map(|e| e.path()).filter(assembly);
+    let metadata = data.join("il2cpp_data/Metadata/global-metadata.dat");
+    let needle = b"CodeStage.AntiCheat.ObscuredTypes";
+    let uses = |p: PathBuf| fs::read(p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle));
+    managed.chain([metadata]).any(uses).then_some("CodeStage Anti-Cheat Toolkit")
+}
+
 /// Godot games load <program>.pck from next to the program, or carry it at the end of the
 /// program (which then ends with its magic, "GDPC").
 fn is_godot(pid: u32) -> bool {
@@ -148,23 +172,135 @@ fn is_godot(pid: u32) -> bool {
     ends_with_magic(&inside(&program)) || ends_with_magic(&program)
 }
 
-/// Anti-cheat loaded in the game, shipped in its folder, or known to its launcher or to
-/// AreWeAntiCheatYet (VAC runs in the Steam client, others may load only when going online).
-fn anti_cheat(pid: u32) -> Option<String> {
-    let maps = maps(pid).ok()?;
+/// Why Ferret won't touch a game: the line is no cheating where other players or the player's
+/// account can be reached.
+enum Refusal {
+    /// Loaded in the game, or running beside it in its Wine prefix.
+    AntiCheat(String),
+    /// Its store lists it as played only with others (or as an MMO or a battle royale).
+    Online,
+    /// Steam lists Valve Anti-Cheat; it can't be seen running (it's in the Steam client).
+    Vac,
+    /// Its characters get flagged online for edits made offline (`launchers::FLAGS_EDITS`).
+    FlagsEdits,
+}
+
+impl Refusal {
+    /// The games list's word for it.
+    fn code(&self) -> String {
+        match self {
+            Refusal::AntiCheat(ac) => format!("anti-cheat {ac}"),
+            Refusal::Online => "online".into(),
+            Refusal::Vac => "vac".into(),
+            Refusal::FlagsEdits => "edits".into(),
+        }
+    }
+
+    fn why(&self) -> String {
+        match self {
+            Refusal::AntiCheat(ac) => format!("{ac} is running with the game"),
+            Refusal::Online => "the game is played online only".into(),
+            Refusal::Vac => "the game uses Valve Anti-Cheat (Source games started with -insecure are allowed)".into(),
+            Refusal::FlagsEdits => "the game flags edited characters when they go online".into(),
+        }
+    }
+}
+
+struct Verdict {
+    refused: Option<Refusal>,
+    /// Anti-cheat shipped in its folder or listed for it but not running: only a warning
+    /// (most such games have a single-player mode that runs without it).
+    ships: Option<String>,
+}
+
+/// Blocked: anti-cheat running, online only, VAC (unless it can't reach secured servers), or a
+/// game that flags edited characters. Warned: anti-cheat shipped or listed but not running.
+/// `programs` = `anti_cheat_programs()`.
+fn verdict(pid: u32, programs: &[(String, &'static str)]) -> Verdict {
+    let maps = maps(pid).unwrap_or_default();
+    let env = environ(pid);
+    let about = about(&env);
+    let refused = if let Some(ac) = running_anti_cheat(&maps, &env, programs) {
+        Some(Refusal::AntiCheat(ac))
+    } else if about.online_only {
+        Some(Refusal::Online)
+    } else if about.flags_edits {
+        Some(Refusal::FlagsEdits)
+    } else if about.vac && !vac_safe(pid, &maps) {
+        Some(Refusal::Vac)
+    } else {
+        None
+    };
+    let ships = if refused.is_some() { None } else { shipped_anti_cheat(pid, &maps, &env, about.listed) };
+    Verdict { refused, ships }
+}
+
+/// The Wine prefix a program runs in (Proton's, Heroic's, Lutris's, umu's).
+fn wine_prefix(env: &HashMap<String, String>) -> Option<&String> {
+    env.get("WINEPREFIX").or_else(|| env.get("STEAM_COMPAT_DATA_PATH")).filter(|p| !p.is_empty())
+}
+
+/// Anti-cheat programs running now and the Wine prefix each runs in: under Proton
+/// EasyAntiCheat_EOS.exe, BEService.exe and start_protected_game.exe run beside the game.
+fn anti_cheat_programs() -> Vec<(String, &'static str)> {
+    let uid = my_uid();
+    let Ok(dir) = fs::read_dir("/proc") else { return Vec::new() };
+    dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| owner_uid(*pid) == Some(uid))
+        .filter_map(|pid| {
+            let ac = anticheat::named(&exe_name(pid))?;
+            Some((wine_prefix(&environ(pid))?.clone(), ac))
+        })
+        .collect()
+}
+
+/// Anti-cheat loaded in the game, or running in its Wine prefix.
+fn running_anti_cheat(maps: &[Region], env: &HashMap<String, String>, programs: &[(String, &'static str)]) -> Option<String> {
     if let Some(ac) = maps.iter().find_map(|r| anticheat::in_path(&r.path)) {
         return Some(ac.to_owned());
     }
-    let env = environ(pid);
-    if let Some(ac) = about(&env).anti_cheat {
-        return Some(ac);
+    let prefix = wine_prefix(env)?;
+    programs.iter().find(|(p, _)| p == prefix).map(|(_, ac)| (*ac).to_owned())
+}
+
+/// Anti-cheat that started in the attached game since the last look.
+fn started_anti_cheat(pid: u32) -> Option<String> {
+    let maps = maps(pid).ok()?;
+    running_anti_cheat(&maps, &environ(pid), &anti_cheat_programs())
+}
+
+/// Call of Duty's single-player programs, shipped beside the multiplayer ones of the same Steam
+/// app (which Steam lists with VAC). Not checked on the games yet.
+const SINGLE_PLAYER_PROGRAMS: &[&str] = &["iw3sp.exe", "iw4sp.exe", "iw5sp.exe", "t6sp.exe"];
+
+/// A VAC game that can't reach VAC-secured servers: a single-player program, or a Source or
+/// GoldSrc game started with -insecure (Valve: it can't join secured servers then). Only for
+/// those engines: other games ignore the option.
+fn vac_safe(pid: u32, maps: &[Region]) -> bool {
+    if SINGLE_PLAYER_PROGRAMS.contains(&exe_name(pid).to_ascii_lowercase().as_str()) {
+        return true;
+    }
+    let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    let insecure = raw.split(|b| *b == 0).any(|a| a.eq_ignore_ascii_case(b"-insecure"));
+    let engine = |r: &Region| {
+        let name = r.path.rsplit(['/', '\\']).next().unwrap_or_default().to_ascii_lowercase();
+        ["tier0.dll", "libtier0.so", "libtier0_client.so", "hw.dll", "hw.so", "sw.dll"].contains(&name.as_str())
+    };
+    insecure && maps.iter().any(engine)
+}
+
+/// Anti-cheat shipped in the game's folder, or listed by AreWeAntiCheatYet for it (`listed`:
+/// what its launcher's IDs found there).
+fn shipped_anti_cheat(pid: u32, maps: &[Region], env: &HashMap<String, String>, listed: Option<String>) -> Option<String> {
+    if listed.is_some() {
+        return listed;
     }
     // Seen from inside the game's sandbox (pressure-vessel, flatpak).
     let root = Path::new("/proc").join(pid.to_string()).join("root");
     let inside = |p: &Path| root.join(p.strip_prefix("/").unwrap_or(p));
     let folder = match env.get("STEAM_COMPAT_INSTALL_PATH") {
         Some(dir) => PathBuf::from(dir),
-        None => anticheat::game_folder(&program_path(pid, &maps)?),
+        None => anticheat::game_folder(&program_path(pid, maps)?),
     };
     if let Some(ac) = anticheat::in_folder(&inside(&folder)) {
         return Some(ac.to_owned());
@@ -198,11 +334,6 @@ fn unreal_stub_folder(program: &Path) -> Option<&Path> {
         return None;
     }
     binaries.parent()?.parent()
-}
-
-/// A game its store lists as played only with other people.
-fn online_only(pid: u32) -> bool {
-    about(&environ(pid)).online_only
 }
 
 /// The Steam app ID a game was started with (umu sets 0 or "default" for games not on Steam).
@@ -527,6 +658,13 @@ fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
 /// find where the values are (pointer paths, named paths). Lumencraft's lumen took a moment to
 /// come back after a purchase.
 const LIMIT_WRITE_EVERY: Duration = Duration::from_millis(50);
+/// How often the attached game is checked for anti-cheat that started after attaching (some
+/// games start it only when going online).
+const ANTI_CHEAT_EVERY: Duration = Duration::from_secs(3);
+
+/// Anti-cheat that started in the attached game (its pid and name): the limiter thread lets go
+/// of the game, and the next command drops the session.
+static CAUGHT: Mutex<Option<(u32, String)>> = Mutex::new(None);
 const LIMIT_FIND_EVERY: Duration = Duration::from_millis(250);
 
 /// Keeps limited values in range; paused limits are found again through their
@@ -535,8 +673,17 @@ const LIMIT_FIND_EVERY: Duration = Duration::from_millis(250);
 /// one) on every check. A limit with no bounds only keeps the address current.
 fn limiter_loop(shared: SharedLimiter) {
     let mut found_at = Instant::now() - LIMIT_FIND_EVERY;
+    let mut checked_at = Instant::now();
     loop {
         std::thread::sleep(LIMIT_WRITE_EVERY);
+        if checked_at.elapsed() >= ANTI_CHEAT_EVERY {
+            checked_at = Instant::now();
+            let pid = shared.lock().unwrap().pid;
+            if let Some(ac) = (pid != 0).then(|| started_anti_cheat(pid)).flatten() {
+                *shared.lock().unwrap() = Limiter::default();
+                *CAUGHT.lock().unwrap() = Some((pid, ac));
+            }
+        }
         let due: Vec<(String, Vec<Site>, bool)>;
         let named_due: Vec<(String, Named)>;
         let (pid, mem, width) = {
@@ -1005,6 +1152,7 @@ fn cmd_info(out: &mut impl Write) -> io::Result<()> {
 fn cmd_ps(out: &mut impl Write, filter: &str) -> io::Result<()> {
     let uid = my_uid();
     let filter = filter.to_ascii_lowercase();
+    let programs = anti_cheat_programs();
     let mut pids: Vec<u32> = fs::read_dir("/proc")?
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
         .filter(|pid| owner_uid(*pid) == Some(uid))
@@ -1027,8 +1175,9 @@ fn cmd_ps(out: &mut impl Write, filter: &str) -> io::Result<()> {
         if let Some(id) = app_id {
             write!(out, "  [SteamAppId={id}]")?;
         }
-        if let Some(ac) = anti_cheat(pid) {
-            write!(out, "  [{ac}]")?;
+        let v = verdict(pid, &programs);
+        if let Some(r) = v.refused.as_ref().map(Refusal::code).or(v.ships) {
+            write!(out, "  [{r}]")?;
         }
         writeln!(out)?;
     }
@@ -1110,11 +1259,12 @@ fn windows_non_game(pid: u32) -> bool {
         || !names().any(gpu_driver) && launcher_folder(pid, &program)
 }
 
-/// Running games, one per line: pid, program name, Steam app ID, anti-cheat, the name its
-/// launcher gives it and "online" (online only) or "multiplayer" (tab-separated, "-" when
-/// unknown or not).
+/// Running games, one per line: pid, program name, Steam app ID, why it's refused (`Refusal::code`),
+/// the name its launcher gives it, "online" (online only) or "multiplayer", and anti-cheat it
+/// ships but isn't running (tab-separated, "-" when unknown or not).
 fn cmd_games(out: &mut impl Write) -> io::Result<()> {
     let uid = my_uid();
+    let programs = anti_cheat_programs();
     let mut pids: Vec<u32> = fs::read_dir("/proc")?
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
         .filter(|pid| owner_uid(*pid) == Some(uid))
@@ -1142,9 +1292,12 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let name = about.name.as_ref().map(|n| n.replace('\t', " "));
         let play = if about.online_only { Some("online") } else { about.multiplayer.then_some("multiplayer") };
         let id = dash(app_id.map(String::as_str));
-        let ac = dash(anti_cheat(pid).as_deref());
+        let v = verdict(pid, &programs);
+        let refused = dash(v.refused.as_ref().map(Refusal::code).as_deref());
+        let ships = dash(v.ships.as_deref());
         let program = maps(pid).ok().and_then(|m| program_path(pid, &m));
-        rows.push((program, format!("{pid}\t{name_now}\t{id}\t{ac}\t{}\t{}", dash(name.as_deref()), dash(play))));
+        let name = dash(name.as_deref());
+        rows.push((program, format!("{pid}\t{name_now}\t{id}\t{refused}\t{name}\t{}\t{ships}", dash(play))));
     }
     // An Unreal stub holds none of the game's values (Astro Colony: two entries, a search in
     // the stub found nothing).
@@ -1162,11 +1315,8 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
     let Ok(pid) = arg.parse::<u32>() else {
         return writeln!(out, "error: usage: attach <pid>");
     };
-    if let Some(ac) = anti_cheat(pid) {
-        return writeln!(out, "error: refusing to attach, the game comes with {ac}");
-    }
-    if online_only(pid) {
-        return writeln!(out, "error: refusing to attach, the game is played online only");
+    if let Some(r) = verdict(pid, &anti_cheat_programs()).refused {
+        return writeln!(out, "error: refusing to attach, {}", r.why());
     }
     match OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem")) {
         Ok(f) => {
@@ -1190,6 +1340,9 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             }
             if java {
                 writeln!(out, "{JAVA}")?;
+            }
+            if let Some(name) = scrambler(pid, &regions) {
+                writeln!(out, "memory scrambler: {name}")?;
             }
             Ok(())
         }
@@ -2779,6 +2932,8 @@ pub fn run() {
     let mut out = io::stdout().lock();
     let mut session = Session::default();
     let limiter = SharedLimiter::default();
+    // Anti-cheat that started in the attached game, until `alive` reports it.
+    let mut caught: Option<String> = None;
     {
         let limiter = limiter.clone();
         std::thread::spawn(move || limiter_loop(limiter));
@@ -2791,6 +2946,16 @@ pub fn run() {
         // and gets no reply (the frontend doesn't wait for one).
         if cmd == "cancel" {
             continue;
+        }
+        // Anti-cheat started in the game: nothing more is written to it, test values included.
+        if let Some((pid, ac)) = CAUGHT.lock().unwrap().take() {
+            if pid == session.pid {
+                session = Session::default();
+                caught = Some(ac);
+            }
+        }
+        if cmd == "attach" {
+            caught = None;
         }
         let res = match cmd {
             "info" => cmd_info(&mut out),
@@ -2809,7 +2974,10 @@ pub fn run() {
             "peek" => cmd_peek(&mut out, &session, arg),
             "keep" => cmd_keep(&mut out, &mut session, arg),
             "drop" => cmd_drop(&mut out, &mut session, arg),
-            "alive" => cmd_alive(&mut out, &session),
+            "alive" => match caught.take() {
+                Some(ac) => writeln!(out, "alive anti-cheat {ac}"),
+                None => cmd_alive(&mut out, &session),
+            },
             "about" => cmd_about(&mut out, &mut session, arg),
             "shape" => cmd_shape(&mut out, &session, arg),
             "shapes" => cmd_shapes(&mut out, &mut session, arg),
