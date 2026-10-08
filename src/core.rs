@@ -94,6 +94,36 @@ pub fn cache_dir() -> PathBuf {
     dir
 }
 
+/// Whether the helper runs with the player's password (`Core::allow_with_password`): it then
+/// opens the player's own programs where kernel.yama.ptrace_scope 1 or 2 would refuse.
+static PRIVILEGED: AtomicBool = AtomicBool::new(false);
+
+/// kernel.yama.ptrace_scope: 0 = any of the player's programs can be opened, 1 = only ones
+/// started by Ferret itself (Ubuntu's and the kernel's default; Wine lets anyone trace it, so
+/// Windows games still work), 2 = administrators only, 3 = nobody until a restart.
+pub fn ptrace_scope() -> Option<u8> {
+    fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok()?.trim().parse().ok()
+}
+
+/// What the player's system says about opening native games: `None` when they open, else
+/// whether the password would help (scope 1 or 2 and no password given yet; never at 3).
+pub fn native_games_blocked() -> Option<bool> {
+    match ptrace_scope()? {
+        0 => None,
+        1 | 2 => Some(!PRIVILEGED.load(Ordering::Relaxed)),
+        _ => Some(false),
+    }
+}
+
+/// `<uid>:<gid>:<home>` of the player, for the helper started as root (pkexec wipes its
+/// environment).
+fn as_user() -> Result<String, String> {
+    let status = fs::read_to_string("/proc/self/status").map_err(|e| e.to_string())?;
+    let id = |key: &str| status.lines().find_map(|l| l.strip_prefix(key)?.split_whitespace().next()).ok_or(format!("no {key} in /proc/self/status"));
+    let home = std::env::var("HOME").map_err(|_| "HOME isn't set")?;
+    Ok(format!("{}:{}:{home}", id("Uid:")?, id("Gid:")?))
+}
+
 /// The host helper, started through flatpak-spawn so it can see the game.
 struct Helper {
     child: Child,
@@ -102,15 +132,26 @@ struct Helper {
 }
 
 impl Helper {
-    fn start() -> Result<Self, String> {
+    /// `privileged`: through pkexec (the desktop asks for the password); the helper becomes
+    /// the player again at once, keeping only the right to open their programs.
+    fn start(privileged: bool) -> Result<Self, String> {
+        let helper = match flatpak_app_path() {
+            Some(app) => PathBuf::from(format!("{app}/bin/ferret-helper")),
+            None => std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("ferret-helper"),
+        };
         let mut cmd = match flatpak_app_path() {
-            Some(app) => {
+            Some(_) => {
                 let mut c = Command::new("flatpak-spawn");
-                c.args(["--host", "--watch-bus", &format!("{app}/bin/ferret-helper")]);
+                c.args(["--host", "--watch-bus"]);
                 c
             }
-            None => Command::new(std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("ferret-helper")),
+            None => Command::new("env"),
         };
+        if privileged {
+            cmd.arg("pkexec").arg(&helper).arg("--as").arg(as_user()?);
+        } else {
+            cmd.arg(&helper);
+        }
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -245,7 +286,7 @@ impl Upgrader {
             let (mut helper, mut attached) = (None, 0);
             for job in todo {
                 if helper.is_none() {
-                    helper = Helper::start().ok();
+                    helper = Helper::start(false).ok();
                 }
                 let Some(h) = helper.as_mut() else { continue };
                 if attached != job.pid {
@@ -458,16 +499,17 @@ fn ptrace_help(scope: &str) -> String {
     let keep = "  echo kernel.yama.ptrace_scope=0 | sudo tee /etc/sysctl.d/60-ptrace.conf";
     let risk = tr!("This lets any program you run read and change your other programs' memory.");
     let keep_it = tr!("To keep it that way:");
+    let password = tr!("With your password, Ferret allows it for itself until you close it. The rest of your system stays as it is.");
     match scope {
         "1" => format!(
-            "{}\n{now}{keep_it}\n{keep}\n{risk}",
+            "{}\n{password}\n{now}{keep_it}\n{keep}\n{risk}",
             tr!(
                 "Your system only lets programs change the memory of programs they started themselves \
                  (kernel.yama.ptrace_scope is 1). Windows games running through Proton or Wine still work."
             )
         ),
         "2" => format!(
-            "{}\n{now}{keep_it}\n{keep}\n{risk}",
+            "{}\n{password}\n{now}{keep_it}\n{keep}\n{risk}",
             tr!("Your system only lets administrators change other programs' memory (kernel.yama.ptrace_scope is 2).")
         ),
         _ => format!(
@@ -821,6 +863,39 @@ pub struct GameProcess {
     pub ships: Option<String>,
 }
 
+/// Why attaching failed, as shown to the player; `password_may_help`: the system's
+/// kernel.yama.ptrace_scope blocked it and `Core::attach_with_password` gets around that.
+#[derive(Clone, Debug)]
+pub struct AttachError {
+    pub pid: u32,
+    pub text: String,
+    pub password_may_help: bool,
+}
+
+impl std::fmt::Display for AttachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl From<AttachError> for String {
+    fn from(e: AttachError) -> String {
+        e.text
+    }
+}
+
+impl From<&str> for AttachError {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
+impl From<String> for AttachError {
+    fn from(text: String) -> Self {
+        AttachError { pid: 0, text, password_may_help: false }
+    }
+}
+
 /// Why Ferret won't attach to a game (the helper's verdict).
 #[derive(Clone, PartialEq, Debug)]
 pub enum Refusal {
@@ -1171,7 +1246,7 @@ impl Core {
         fs::write(file(0), "").ok();
         Ok(Self {
             log_name,
-            helper: Helper::start()?,
+            helper: Helper::start(false)?,
             upgrader: None,
             capture: None,
             words: Vec::new(),
@@ -1289,13 +1364,62 @@ impl Core {
     }
 
     /// Attaches and, when the game has a profile, finds its saved values again.
-    pub fn attach(&mut self, pid: u32) -> Result<String, String> {
+    pub fn attach(&mut self, pid: u32) -> Result<String, AttachError> {
+        self.attach_inner(pid).map_err(|e| AttachError { pid, ..e })
+    }
+
+    /// `attach`, after getting the helper the right to open the player's programs with their
+    /// password (the desktop asks for it).
+    pub fn attach_with_password(&mut self, pid: u32) -> Result<String, AttachError> {
+        self.allow_with_password().map_err(|text| AttachError { pid, password_may_help: false, text })?;
+        self.attach(pid)
+    }
+
+    /// Starts the helper again through pkexec (the desktop asks for the password once) and goes
+    /// on with it: kernel.yama.ptrace_scope 1 or 2 keeps the plain helper out of native games.
+    /// The old helper, the attached game and the search are let go. On failure the old helper
+    /// stays.
+    pub fn allow_with_password(&mut self) -> Result<(), String> {
+        let mut helper = Helper::start(true)?;
+        let reply = helper.call("info");
+        if !reply.iter().any(|l| l == "privileged: yes") {
+            if let Some(e) = first_error(&reply).filter(|e| e != "host helper exited") {
+                self.say(&format!("helper with password: {e}"));
+                return Err(tr!("Ferret couldn't get permission: {why}", why = e));
+            }
+            // pkexec: 126 = the dialog was dismissed, 127 = not authorized (a wrong password, no
+            // password set, as on a Steam Deck out of the box, or no password dialog at all).
+            let code = helper.child.wait().ok().and_then(|st| st.code());
+            self.say(&format!("helper with password: pkexec failed (exit code {code:?})"));
+            return Err(match code {
+                Some(126) => tr!("The password dialog was closed before Ferret got permission."),
+                Some(127) => format!(
+                    "{}\n{}\n  passwd",
+                    tr!("Ferret didn't get permission."),
+                    tr!("On a Steam Deck, set a password first: open Konsole in desktop mode and run this, then try again.")
+                ),
+                _ => tr!("Ferret couldn't get permission: {why}", why = format!("pkexec exit code {code:?}")),
+            });
+        }
+        PRIVILEGED.store(true, Ordering::Relaxed);
+        self.helper = helper;
+        self.game = None;
+        self.search = None;
+        self.capture = None;
+        self.say("helper restarted with your password: it runs as you, with the right to open your programs");
+        Ok(())
+    }
+
+    fn attach_inner(&mut self, pid: u32) -> Result<String, AttachError> {
         let reply = self.helper.call(&format!("attach {pid}"));
         for l in &reply {
             self.say(l);
         }
         if let Some(e) = first_error(&reply) {
-            return Err(e.strip_prefix("blocked by ptrace_scope ").map_or_else(|| e.clone(), ptrace_help));
+            return Err(match e.strip_prefix("blocked by ptrace_scope ") {
+                Some(scope) => AttachError { pid, text: ptrace_help(scope), password_may_help: scope == "1" || scope == "2" },
+                None => e.into(),
+            });
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
         // Another game (or the same one restarted) has another window: the old capture shows
@@ -2512,6 +2636,10 @@ impl Core {
             game.upgrade_asked.extend(fresh.into_iter().map(|(n, _)| n));
         }
         if jobs.is_empty() {
+            return;
+        }
+        // The upgrader's own helper would need the password again (pkexec asks each time).
+        if PRIVILEGED.load(Ordering::Relaxed) {
             return;
         }
         let upgrader = self.upgrader.get_or_insert_with(Upgrader::start);

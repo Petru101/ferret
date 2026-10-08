@@ -9,6 +9,7 @@ use crate::ocr::{Rect, Shown};
 
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
 restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>
+system: allow (the helper with your password, for native games under kernel.yama.ptrace_scope 1 or 2)
 shared library: shared, share, take <id>, unshare <id>";
 
 fn imported(done: core::Imported) {
@@ -53,6 +54,9 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             let pid = arg.parse().map_err(|_| "usage: attach <pid>")?;
             core.attach(pid)?;
         }
+        // The helper again through pkexec (the desktop asks for the password): for native games
+        // on systems with kernel.yama.ptrace_scope 1 or 2.
+        "allow" => core.allow_with_password().map(|_| println!("helper runs with your password"))?,
         "window" => core.start_capture().map(|_| println!("capturing window"))?,
         "shot" => println!("saved {}", core.frame()?.display()),
         "numbers" => {

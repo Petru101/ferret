@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -405,6 +405,69 @@ fn my_uid() -> u32 {
 fn owner_uid(pid: u32) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     fs::metadata(format!("/proc/{pid}")).ok().map(|m| m.uid())
+}
+
+/// The real user id a process runs as (`/proc/<pid>` itself belongs to root when the process
+/// can't be dumped).
+fn real_uid(pid: u32) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|l| l.strip_prefix("Uid:"))?.split_whitespace().next()?.parse().ok()
+}
+
+/// Running with CAP_SYS_PTRACE after `drop_root` (started through pkexec).
+static PRIVILEGED: AtomicBool = AtomicBool::new(false);
+
+const CAP_SYS_PTRACE: u32 = 19;
+
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: libc::c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+/// Started as root through pkexec (kernel.yama.ptrace_scope 1 or 2 keeps the player's own
+/// programs from being opened): becomes the player again at once, keeping only CAP_SYS_PTRACE,
+/// which is all that reading another program's memory needs. `as_user` is `<uid>:<gid>:<home>`
+/// from Ferret; the uid must be the one pkexec says asked. Never serves as root: anything that
+/// fails here ends the helper.
+fn drop_root(as_user: Option<&str>) -> Result<(), String> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let asked: u32 = std::env::var("PKEXEC_UID").ok().and_then(|v| v.parse().ok()).ok_or("started as root, but not through pkexec")?;
+    let mut parts = as_user.ok_or("started as root without --as <uid>:<gid>:<home>")?.splitn(3, ':');
+    let uid: u32 = parts.next().and_then(|v| v.parse().ok()).ok_or("bad --as uid")?;
+    let gid: u32 = parts.next().and_then(|v| v.parse().ok()).ok_or("bad --as gid")?;
+    let home = parts.next().ok_or("bad --as home")?;
+    if uid != asked || uid == 0 {
+        return Err(format!("--as {uid} isn't the user who asked ({asked})"));
+    }
+    let check = |ok: bool, what: &str| if ok { Ok(()) } else { Err(format!("{what}: {}", io::Error::last_os_error())) };
+    unsafe {
+        check(libc::setgroups(0, std::ptr::null()) == 0, "setgroups")?;
+        check(libc::setresgid(gid, gid, gid) == 0, "setresgid")?;
+        // Permitted capabilities survive the uid change; effective ones are cleared by it.
+        check(libc::prctl(8 /* PR_SET_KEEPCAPS */, 1) == 0, "keepcaps")?;
+        check(libc::setresuid(uid, uid, uid) == 0, "setresuid")?;
+        let header = CapHeader { version: 0x2008_0522 /* _LINUX_CAPABILITY_VERSION_3 */, pid: 0 };
+        let bit = 1u32 << CAP_SYS_PTRACE;
+        let data = [CapData { effective: bit, permitted: bit, inheritable: 0 }, CapData { effective: 0, permitted: 0, inheritable: 0 }];
+        check(libc::syscall(libc::SYS_capset, &header, data.as_ptr()) == 0, "capset")?;
+        // Nothing this process starts can gain privileges either.
+        check(libc::prctl(38 /* PR_SET_NO_NEW_PRIVS */, 1, 0, 0, 0) == 0, "no_new_privs")?;
+        check(libc::geteuid() == uid && libc::getegid() == gid, "still not the user")?;
+    }
+    std::env::set_var("HOME", home);
+    PRIVILEGED.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 // --- How a value is stored. Addresses in commands are "<hex>[:type]", i32 when left out.
@@ -1202,6 +1265,7 @@ fn cmd_info(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "helper pid namespace: {ns}")?;
     writeln!(out, "helper uid: {}", my_uid())?;
     writeln!(out, "yama ptrace_scope: {}", scope.trim())?;
+    writeln!(out, "privileged: {}", if PRIVILEGED.load(Ordering::Relaxed) { "yes" } else { "no" })?;
     writeln!(out, "processes visible to helper: {visible}")
 }
 
@@ -1376,6 +1440,10 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
     };
     if let Some(r) = verdict(pid, &anti_cheat_programs()).refused {
         return writeln!(out, "error: refusing to attach, {}", r.why());
+    }
+    // With CAP_SYS_PTRACE the kernel would open anyone's: only the player's own programs.
+    if real_uid(pid) != Some(my_uid()) {
+        return writeln!(out, "error: refusing to attach: not your program");
     }
     match OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem")) {
         Ok(f) => {
@@ -3001,12 +3069,17 @@ fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<(
     }
 }
 
-pub fn run() {
+pub fn run(as_user: Option<&str>) {
     // Losing Ferret (it closed or crashed) ends stdin: test values are put back then. The
     // SIGINT flatpak-spawn's --watch-bus sends at the same time would end the helper first.
     unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
     let stdin = io::stdin();
     let mut out = io::stdout().lock();
+    // Before anything else runs, threads included.
+    if let Err(e) = drop_root(as_user) {
+        writeln!(out, "error: cannot drop root: {e}").and_then(|_| writeln!(out, "end")).ok();
+        return;
+    }
     let mut session = Session::default();
     let limiter = SharedLimiter::default();
     // Anti-cheat that started in the attached game, until `alive` reports it.

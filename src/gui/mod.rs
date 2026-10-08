@@ -40,7 +40,7 @@ pub enum Event {
     Failed(String),
     Games(Vec<GameProcess>),
     /// The game's pid and program name.
-    Attached(Result<(u32, String), String>),
+    Attached(Result<(u32, String), crate::core::AttachError>),
     Values(Result<Vec<ValueRow>, String>),
     Numbers(Result<(PathBuf, Vec<Word>), String>),
     /// The read, the watched area afterwards (it snaps to the number found), and the matches
@@ -398,6 +398,30 @@ impl Ui {
     /// A longer explanation than a toast holds. Lines starting with two spaces are commands,
     /// shown selectable so they can be copied.
     fn explain(&self, heading: &str, text: &str) {
+        self.explanation(heading, text).present(Some(&self.nav));
+    }
+
+    /// The system blocks opening the game (kernel.yama.ptrace_scope): the explanation, with
+    /// Allow With Your Password, which starts the helper again through pkexec (the desktop
+    /// asks for the password once) and opens the game with it.
+    fn offer_password(self: &Rc<Self>, pid: u32, heading: &str, text: &str) {
+        let dialog = self.explanation(heading, text);
+        dialog.add_response("allow", &tr!("Allow With Your Password"));
+        dialog.set_response_appearance("allow", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("allow"));
+        let ui = self.clone();
+        dialog.connect_response(Some("allow"), move |_, _| {
+            if ui.attaching.get().is_some() {
+                return;
+            }
+            ui.attaching.set(Some(pid));
+            ui.find.stop();
+            ui.worker.run(move |core| Event::Attached(core.attach_with_password(pid).map(|exe| (pid, exe))));
+        });
+        dialog.present(Some(&self.nav));
+    }
+
+    fn explanation(&self, heading: &str, text: &str) -> adw::AlertDialog {
         let lines = gtk::Box::new(gtk::Orientation::Vertical, 6);
         for line in text.lines() {
             let command = line.strip_prefix("  ");
@@ -416,7 +440,7 @@ impl Ui {
         let dialog = adw::AlertDialog::new(Some(heading), None);
         dialog.set_extra_child(Some(&lines));
         dialog.add_response("close", &tr!("Close"));
-        dialog.present(Some(&self.nav));
+        dialog
     }
 
     /// The first time a game with online features is opened: what they are and what to keep to.
@@ -479,7 +503,9 @@ impl Ui {
             self.worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
         }
         *self.online.borrow_mut() = games.iter().map(|g| (g.pid, online_features(g))).collect();
-        let shown: String = games.iter().map(|g| format!("{}:{}:{:?}:{:?}:{};", g.pid, g.exe, g.refused, g.ships, g.multiplayer)).collect();
+        let blocked = crate::core::native_games_blocked();
+        let shown: String =
+            games.iter().map(|g| format!("{}:{}:{:?}:{:?}:{};", g.pid, g.exe, g.refused, g.ships, g.multiplayer)).chain([format!("{blocked:?}")]).collect();
         self.games_stack.set_visible_child_name(if games.is_empty() { "empty" } else { "list" });
         if *self.games_shown.borrow() == shown {
             return;
@@ -500,6 +526,15 @@ impl Ui {
                 }
                 None => &g.exe,
             };
+            // Native games on a system whose ptrace_scope keeps Ferret out (Windows games open
+            // regardless: Wine lets anyone trace it).
+            if !g.exe.to_ascii_lowercase().ends_with(".exe") {
+                match blocked {
+                    Some(true) => subtitle = format!("{} · {subtitle}", tr!("Needs your password")),
+                    Some(false) => subtitle = format!("{} · {subtitle}", tr!("Blocked by your system until it restarts")),
+                    None => {}
+                }
+            }
             let row = adw::ActionRow::builder().title(title).subtitle(&subtitle).build();
             row.set_subtitle_lines(2);
             let refused = g.refused.as_ref().map(|r| match r {
@@ -695,9 +730,13 @@ impl Ui {
             Event::Attached(Err(e)) => {
                 self.attaching.set(None);
                 self.phase.hide();
-                match e.contains('\n') {
-                    true => self.explain(&tr!("Ferret Can't Open This Game"), &e),
-                    false => self.toast(&e),
+                let heading = tr!("Ferret Can't Open This Game");
+                if e.password_may_help {
+                    self.offer_password(e.pid, &heading, &e.text);
+                } else if e.text.contains('\n') {
+                    self.explain(&heading, &e.text);
+                } else {
+                    self.toast(&e.text);
                 }
             }
             Event::Done(Err(e)) => self.toast(&e),
