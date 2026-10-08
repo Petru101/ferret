@@ -48,18 +48,15 @@ Notifications tell you what Ferret needs while the game is in front, even in ful
 
 ## Single-player only
 
-Ferret never touches online games. It refuses to open a game when:
+Ferret refuses online games: games with anti-cheat running, online-only games and MMOs, games
+with Valve Anti-Cheat, and games that flag edited characters online (Elden Ring, the Souls
+games). If anti-cheat starts while Ferret is open, it lets go of the game at once. Games with a
+multiplayer mode, or with anti-cheat that isn't running, open with a warning to play offline.
 
-- anti-cheat runs in it or next to it (EasyAntiCheat, BattlEye and others), checked again every
-  few seconds while it's open: if anti-cheat starts, Ferret lets go at once;
-- the store lists it as online-only or an MMO;
-- it uses Valve Anti-Cheat (except Source games started with `-insecure`);
-- it flags edited characters when they go online (the Souls games, Elden Ring).
-
-Games that ship anti-cheat they don't run, or that have a multiplayer mode, open with a warning:
-change values only while you play alone and offline. Ferret looks at what runs, what's in the
-game's folder, the store's information (Steam, Heroic) and
-[AreWeAntiCheatYet](https://areweanticheatyet.com/)'s list.
+There are no store lookups over the network. Ferret checks Steam's and Heroic's local cache for
+game info, has a copy of [AreWeAntiCheatYet](https://areweanticheatyet.com/)'s list of games
+with anti-cheat, looks for anti-cheat programs running, and checks the game's folder for
+anti-cheat files.
 
 ## Games
 
