@@ -276,7 +276,23 @@ fn shortcuts(list: &glib::Variant) -> Vec<(String, String)> {
         .filter_map(|s| {
             let id = s.try_child_value(0)?.get::<String>()?;
             let props = glib::VariantDict::new(s.try_child_value(1).as_ref());
-            Some((id, props.lookup::<String>("trigger_description").ok().flatten().unwrap_or_default()))
+            Some((id, key_label(&props.lookup::<String>("trigger_description").ok().flatten().unwrap_or_default())))
         })
         .collect()
+}
+
+/// The keys in a portal's trigger description, as GTK names them. KDE's ("Ctrl+Shift+F9") read
+/// well already; GNOME's are a sentence around GTK accelerators ("Press <Shift><Control>F9", or
+/// "Press %s or %s", translated): only the words that parse as keys are kept.
+fn key_label(description: &str) -> String {
+    if !description.contains('<') {
+        return description.to_owned();
+    }
+    let keys: Vec<String> = description
+        .split_whitespace()
+        // a one-letter word ("o", Spanish for "or") would parse as a key
+        .filter(|w| w.contains('<') || w.chars().count() > 1)
+        .filter_map(|w| gtk::accelerator_parse(w).map(|(key, mods)| gtk::accelerator_get_label(key, mods).to_string()))
+        .collect();
+    if keys.is_empty() { description.to_owned() } else { keys.join(" / ") }
 }
