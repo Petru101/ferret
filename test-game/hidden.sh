@@ -17,9 +17,18 @@ set -eu
 unit="hidden-${2:-}"
 gamescope_pid() { systemctl --user show -p MainPID --value "$unit"; }
 display() {
-    for p in $(pgrep -P "$(gamescope_pid)") $(pgrep -g "$(gamescope_pid)"); do
+    # Never the desktop's: with the unit gone MainPID is 0, and "pgrep -g 0" is this script's own
+    # process group, whose DISPLAY is the desktop's (keys once went there); gamescope itself
+    # also carries the desktop's DISPLAY, only its children have its own.
+    gs=$(gamescope_pid)
+    if [ -z "$gs" ] || [ "$gs" = 0 ]; then
+        echo "$unit is not running" >&2
+        exit 1
+    fi
+    for p in $(pgrep -P "$gs") $(pgrep -g "$gs"); do
+        [ "$p" = "$gs" ] && continue
         d=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^DISPLAY=//p')
-        [ -n "$d" ] && echo "$d" && return
+        [ -n "$d" ] && [ "$d" != "${DISPLAY:-}" ] && [ "$d" != :0 ] && echo "$d" && return
     done
     echo "no display for $unit" >&2
     exit 1
