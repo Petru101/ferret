@@ -58,6 +58,13 @@ fn pe_image(mem: &File, start: u64) -> Option<(u16, u64)> {
     Some((machine, read_u32(mem, pe + 24 + 56)? as u64))
 }
 
+/// A library loaded from a copy in a temp folder under a new name each run (F.E.A.R. unpacks its
+/// game DLLs to `AppData/Local/Temp/Gam39e4.tmp`): paths from it can't be found again.
+fn temporary(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".tmp") || lower.contains("/appdata/local/temp/") || lower.starts_with("/tmp/")
+}
+
 pub fn modules(pid: u32, mem: &File) -> Vec<Module> {
     let regions = maps(pid).unwrap_or_default();
     let mut mods: Vec<(String, Module)> = Vec::new();
@@ -92,9 +99,9 @@ pub fn modules(pid: u32, mem: &File) -> Vec<Module> {
     // Only programs and libraries have statics: data files mapped in (Ruffle maps its fonts)
     // were followed by heap memory taken for theirs, and paths from "DejaVuSans.ttf+9c018"
     // led nowhere after a restart.
-    mods.retain(|(_, m)| {
+    mods.retain(|(path, m)| {
         let mut magic = [0u8; 4];
-        mem.read_exact_at(&mut magic, m.start).is_ok() && (magic == *b"\x7fELF" || magic[..2] == *b"MZ")
+        mem.read_exact_at(&mut magic, m.start).is_ok() && (magic == *b"\x7fELF" || magic[..2] == *b"MZ") && !temporary(path)
     });
     let mut mods: Vec<Module> = mods.into_iter().map(|(_, m)| m).collect();
     // Under Wine the game's threads run on stacks of Wine's own, not this one.
@@ -542,5 +549,13 @@ mod tests {
         let p = PtrPath::parse("[stack]-1a8,10").unwrap();
         assert_eq!((p.module.as_str(), p.base), (STACK, 0x1a8));
         assert!(PtrPath::parse("[stack]+1a8,10").is_none());
+    }
+
+    #[test]
+    fn temp_copies_are_no_roots() {
+        assert!(temporary("/home/u/Games/pfx/drive_c/users/steamuser/AppData/Local/Temp/Gam39e4.tmp"));
+        assert!(temporary("/tmp/.mount_x/lib.so"));
+        assert!(!temporary("/run/media/u/Games/FEAR/FEAR.exe"));
+        assert!(!temporary("/usr/lib/libtmpfiles.so"));
     }
 }
