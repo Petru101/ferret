@@ -1367,9 +1367,10 @@ fn launcher_folder(pid: u32, program: &Path) -> bool {
 }
 
 /// A library only desktop apps load: GTK, Qt, Chromium Embedded (Linux names and Windows DLLs).
+/// GDK 3 alone too: GNOME's ibus-x11 loads it and Mesa without GTK, and showed up as a game.
 fn desktop_toolkit(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    ["libgtk-3.", "libgtk-4.", "libqt5core.", "libqt6core.", "libcef.", "qt5core.dll", "qt6core.dll"]
+    ["libgtk-3.", "libgdk-3.", "libgtk-4.", "libqt5core.", "libqt6core.", "libcef.", "qt5core.dll", "qt6core.dll"]
         .iter()
         .any(|t| name.starts_with(t))
 }
