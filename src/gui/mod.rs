@@ -789,11 +789,13 @@ fn games_page(ui_list: &gtk::ListBox, stack: &gtk::Stack, error: &adw::StatusPag
 }
 
 /// Renders the window into a PNG, so the interface can be checked without
-/// taking a screenshot of the desktop.
+/// taking a screenshot of the desktop. At the window's scale (2x on HiDPI screens).
 fn save_screenshot(window: &adw::ApplicationWindow, path: &str) -> Result<(), String> {
     let (w, h) = (window.width(), window.height());
     let paintable = gtk::WidgetPaintable::new(Some(window));
     let snapshot = gtk::Snapshot::new();
+    let scale = window.scale_factor() as f32;
+    snapshot.scale(scale, scale);
     paintable.snapshot(&snapshot, w as f64, h as f64);
     let node = snapshot.to_node().ok_or("nothing to render")?;
     let renderer = window.native().and_then(|n| n.renderer()).ok_or("no renderer")?;

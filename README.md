@@ -4,12 +4,10 @@
 window, play a little, and Ferret finds where the game keeps it. Then set it, keep it from going
 down, and get it back automatically every time you play. For single-player games on Linux.
 
-![Ferret following SuperTux's coin count: 21 → 2 places match, the player's turn to change it](data/screenshots/find-supertux.png)
+![Ferret finding SuperTux's coins: click the number, play while the matches drop from 2,132 to 2, Ferret checks which is real, save it, set it to 999 and keep it there](data/screenshots/ferret-supertux.gif)
 
-![The coins saved in the Values tab: set them, or keep them in a range](data/screenshots/values-supertux.png)
-
-<sub>The game in the screenshots is [SuperTux](https://www.supertux.org/), free and open source;
-its artwork is under its own free licenses.</sub>
+<sub>The game is [SuperTux](https://www.supertux.org/), free and open source; its artwork is
+under its own free licenses. The GIF is sped up.</sub>
 
 Ferret is in development: it works on the games listed below, but there are no ready-made
 packages yet (see [Building](#building)).
@@ -24,11 +22,15 @@ packages yet (see [Building](#building)).
    it's your turn to change the number: pick up some coins, take a hit. Every change narrows the
    search. When a few places are left that all follow the number, Ferret writes test values to
    tell the real one from the game's display copies; if it still can't tell, you try them.
+
+   ![Ferret following SuperTux's coin count: 58 → 11 places match, the player's turn to change it](data/screenshots/find-supertux.png)
 4. **Save it with a name.** Ferret works out how the game gets to the value, so it finds it
    again after the game restarts, usually within a second or two of opening the game.
 5. **Change it** in the Values tab, or **keep it in a range** (Keep It: never below the number
    now). Limits keep working while you play, even with Ferret's window closed; a hotkey turns
    them off and on from inside the game.
+
+   ![The coins saved in the Values tab, set to 999 and kept at least there](data/screenshots/values-supertux.png)
 
 Notifications tell you what Ferret needs while the game is in front, even in fullscreen.
 
