@@ -12,3 +12,5 @@ vendor/
 CLAUDE.md
 images/
 images 2/
+.claude/rules/
+notes/
