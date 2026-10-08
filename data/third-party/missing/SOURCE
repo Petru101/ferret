@@ -1,0 +1,5 @@
+License texts for crates whose published packages ship none (vendor/ has no LICENSE file for
+them), taken from their repositories at the versions Ferret uses:
+- rten-LICENSE-MIT, rten-LICENSE-APACHE: https://github.com/robertknight/rten at tag v0.26.0
+  (LICENSE-MIT.txt, LICENSE-APACHE.txt); they cover rten and its rten-* crates.
+- flatbuffers-LICENSE: https://github.com/google/flatbuffers at tag v24.12.23 (LICENSE).

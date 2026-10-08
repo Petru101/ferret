@@ -120,6 +120,10 @@ Steam Linux Runtime), and `bench/` compares OCR engines on saved game frames.
 - `data/areweanticheatyet/games.json` is a trimmed copy of AreWeAntiCheatYet's `games.json`
   (MIT License, Copyright © 2021 Starz0r, Curve; see `data/areweanticheatyet/LICENSE` and
   `SOURCE`). Refresh it with `data/areweanticheatyet/update.sh` before a release.
+- The Rust crates Ferret is built from (MIT, Apache-2.0, BSD, ISC and similar licenses) are
+  listed with their license texts in `data/third-party/THIRD-PARTY-LICENSES.txt`, installed with
+  the app in `/app/share/licenses/io.github.Petru101.Ferret/`. Regenerate it with
+  `python3 data/third-party/update.py` after changing dependencies.
 
 ## Made with AI
 

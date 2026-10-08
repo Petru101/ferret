@@ -72,6 +72,7 @@ modules:
       - install -Dm644 data/io.github.Petru101.Ferret.svg /app/share/icons/hicolor/scalable/apps/io.github.Petru101.Ferret.svg
       # The helper carries AreWeAntiCheatYet's list (MIT).
       - install -Dm644 data/areweanticheatyet/LICENSE /app/share/licenses/io.github.Petru101.Ferret/AreWeAntiCheatYet-LICENSE
+      - install -Dm644 data/third-party/THIRD-PARTY-LICENSES.txt /app/share/licenses/io.github.Petru101.Ferret/THIRD-PARTY-LICENSES.txt
     sources:
       - type: dir
         path: .
