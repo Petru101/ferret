@@ -11,8 +11,18 @@ If you know Cheat Engine or GameConqueror (scanmem): Ferret is a memory editor i
 <sub>The game is [SuperTux](https://www.supertux.org/), free and open source; its artwork is
 under its own free licenses. The GIF is sped up.</sub>
 
-Ferret is in development: it works on the games listed below, but there are no ready-made
-packages yet (see [Building](#building)).
+## Install
+
+Download the `.flatpak` file from the [latest release](https://github.com/Petru101/ferret/releases/latest)
+and install it (Ferret uses the GNOME runtime from Flathub, already set up on most distros):
+
+```sh
+flatpak install --user ferret-0.1.0-x86_64.flatpak
+```
+
+There are no automatic updates yet: install the new file when a new release comes out. Ferret is
+young: it works on the games listed below, and feedback on others is welcome (Send Feedback in
+its menu, or an issue here).
 
 ## How it works
 
