@@ -351,7 +351,8 @@ impl Bits {
 /// kept, and so on. A pointer can be on several steps (objects next to each other make short
 /// paths across them, and the real, longer one must not be lost to those). Pointers kept
 /// inside a module are where paths start: they are there in every run.
-/// `collected`: the pointers from `collect_pointers`, when there are recent ones.
+/// `collected`: the pointers from `collect_pointers`, when there are recent ones. `loose`: skip
+/// the strict pass (the caller found its paths unsteady).
 #[allow(clippy::too_many_arguments)]
 pub fn scan(
     pid: u32,
@@ -363,6 +364,7 @@ pub fn scan(
     max_off: u64,
     max_paths: usize,
     collected: Option<(Pointers, u64)>,
+    loose: bool,
 ) -> io::Result<ScanResult> {
     let mods = modules(pid, mem);
     let roots: Vec<&Module> = mods.iter().filter(|m| !m.ambiguous).collect();
@@ -389,7 +391,7 @@ pub fn scan(
     let mut graph = Graph { pointers: &pointers, by_addr: &by_addr, fixed: &fixed, near: &near, levels: Vec::new(), target, max_off, strict: true };
     // First only along pointers between objects; if that finds nothing, also across them.
     let mut found = Vec::new();
-    for strict in [true, false] {
+    for strict in [true, false].into_iter().skip(loose as usize) {
         graph.strict = strict;
         graph.levels = graph.levels(depth);
         let is_exe = |i: usize| module_of(addr(i)).is_some_and(|m| m.name.eq_ignore_ascii_case(exe));
@@ -415,14 +417,17 @@ pub fn scan(
             break;
         }
     }
-    // Across objects: keep the paths that cross the fewest times.
+    // Across objects: keep the paths that cross the fewest times. Loose: keep them all, the
+    // game's own module first, then by crossings (a step inside one object can look like one:
+    // Dawn of War's player object has small arrays pointing 12 bytes ahead at their own items).
     let crossings: Vec<usize> = found.iter().map(|p| p.pointers(mem, &mods, width).map_or(usize::MAX, |r| graph.crossings(&r, &p.offsets))).collect();
     let fewest = crossings.iter().copied().min().unwrap_or(0);
     let before = found.len();
-    let mut paths: Vec<PtrPath> = found.into_iter().zip(crossings).filter(|(_, c)| *c == fewest).map(|(p, _)| p).collect();
+    let mut paths: Vec<(PtrPath, usize)> = found.into_iter().zip(crossings).filter(|(_, c)| loose || *c == fewest).collect();
     let dropped = before - paths.len();
     let biggest = |p: &PtrPath| p.offsets.iter().max().copied().unwrap_or(0);
-    paths.sort_by_key(|p| (!p.module.eq_ignore_ascii_case(exe), biggest(p), p.offsets.len()));
+    paths.sort_by_key(|(p, c)| (!p.module.eq_ignore_ascii_case(exe), *c, biggest(p), p.offsets.len()));
+    let mut paths: Vec<PtrPath> = paths.into_iter().map(|(p, _)| p).collect();
     paths.dedup();
     paths.truncate(max_paths);
     let levels = graph.levels.iter().map(Bits::count).collect();

@@ -2832,19 +2832,21 @@ fn cmd_resolve_all(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Resu
     Ok(())
 }
 
-/// ptrscan <hex addr[:type]> [depth] [max offset, hex] [max paths]: pointer paths to the address, best
-/// first, as lines "path <module>+<offset>,<offset>,...".
+/// ptrscan <hex addr[:type]> [depth] [max offset, hex] [max paths] [loose]: pointer paths to the
+/// address, best first, as lines "path <module>+<offset>,<offset>,..."; "loose": also paths that
+/// step from one object into the next, without trying only the others first.
 fn cmd_ptrscan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace();
     let (Some((target, _)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: ptrscan <hex addr[:type]> [depth] [max offset] [max paths] (after attach)");
+        return writeln!(out, "error: usage: ptrscan <hex addr[:type]> [depth] [max offset] [max paths] [loose] (after attach)");
     };
     let depth = it.next().and_then(|v| v.parse().ok()).unwrap_or(5);
     let max_off = it.next().and_then(parse_addr).unwrap_or(0x1000);
     let max_paths = it.next().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let loose = it.next() == Some("loose");
     let t = Instant::now();
     let collected = s.pointer_map.take().filter(|(at, _)| at.elapsed() < Duration::from_secs(60)).map(|(_, c)| c);
-    let r = pointers::scan(s.pid, mem, s.width, &s.exe, target, depth, max_off, max_paths, collected)?;
+    let r = pointers::scan(s.pid, mem, s.width, &s.exe, target, depth, max_off, max_paths, collected, loose)?;
     for p in &r.paths {
         writeln!(out, "path {}", p.text())?;
     }
@@ -3168,7 +3170,7 @@ pub fn run(as_user: Option<&str>) {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all], mark, snap <file> [types], next <n>|+|-|=|!|bar <full before> <full now> <error>, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all], mark, snap <file> [types], next <n>|+|-|=|!|bar <full before> <full now> <error>, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset] [max paths] [loose], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

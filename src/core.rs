@@ -1531,7 +1531,7 @@ impl Core {
             let shared = reply.iter().any(|l| l.contains(": shared code,"));
             let why = match accessed {
                 Some(0) => "nothing in the game touched the value while Ferret watched",
-                _ if shared => "the game only reads this value through code it shares with other values (GameMaker games do this)",
+                _ if shared => "the game only reads this value through code it shares with other values (one routine for every object of its kind: GameMaker games, RTS players)",
                 _ => "the game uses the value in a way Ferret can't save by code",
             };
             self.say(&format!("{why}; looking for objects the game names that lead to it"));
@@ -1677,28 +1677,49 @@ impl Core {
 
     /// Pointer paths from the game's static memory to the value (see helper/src/pointers.rs),
     /// in profile form, best first. Paths through memory that changes within a few seconds
-    /// would not survive a restart either, so they are dropped.
+    /// would not survive a restart either, so they are dropped. A loose scan adds its steady
+    /// paths to the strict scan's: Dawn of War's exe reaches the player's requisition in 2 steps
+    /// (`exe+9a0270,f4,204`, held across restarts), which the strict scan takes for a crossing
+    /// (small arrays in the object point 12 bytes ahead at their own items); its strict paths
+    /// (GOG Galaxy's DLL, the DivX decoder, 5-step chains from the exe) broke within a run or at
+    /// the next start. Later runs keep the paths that still lead there.
     fn pointer_paths(&mut self, loc: Loc) -> Result<Vec<String>, String> {
-        let reply = self.helper.call(&format!("ptrscan {loc} 5 1000 {MAX_CANDIDATES}"));
+        // No path at all: the strict scan already tried the loose way.
+        let mut paths = self.steady_paths(loc, false)?.ok_or_else(|| tr!("no pointer from the game's own memory leads to it"))?;
+        let exe = self.game()?.exe.to_lowercase();
+        for p in self.steady_paths(loc, true)?.unwrap_or_default() {
+            let own = p.to_lowercase().starts_with(&format!("{exe}+"));
+            if (own || paths.len() < MAX_CANDIDATES) && !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+        if paths.is_empty() {
+            return Err(tr!("every pointer path to it changed within seconds"));
+        }
+        Ok(paths.iter().map(|p| p.replace(',', " ")).collect())
+    }
+
+    /// One pointer scan (`loose`: see `pointers::scan`), then the paths that still lead to the
+    /// value 3 s later; None when the scan found none.
+    fn steady_paths(&mut self, loc: Loc, loose: bool) -> Result<Option<Vec<String>>, String> {
+        let loose = if loose { " loose" } else { "" };
+        let reply = self.helper.call(&format!("ptrscan {loc} 5 1000 {MAX_CANDIDATES}{loose}"));
         if let Some(e) = first_error(&reply) {
             return Err(tr!("the pointer scan failed: {e}", e));
         }
         for l in reply.iter().filter(|l| !l.starts_with("path ")) {
             self.say(l);
         }
-        let mut paths: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("path ")).map(str::to_owned).collect();
+        let paths: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("path ")).map(str::to_owned).collect();
         if paths.is_empty() {
-            return Err(tr!("no pointer from the game's own memory leads to it"));
+            return Ok(None);
         }
         std::thread::sleep(Duration::from_secs(3));
         let (ends, _) = self.follow(loc.kind, &paths);
         let before = paths.len();
-        paths = paths.into_iter().zip(ends).filter(|(_, e)| *e == Some(loc.addr)).map(|(p, _)| p).collect();
-        if paths.is_empty() {
-            return Err(tr!("every pointer path to it changed within seconds"));
-        }
+        let paths: Vec<String> = paths.into_iter().zip(ends).filter(|(_, e)| *e == Some(loc.addr)).map(|(p, _)| p).collect();
         self.say(&format!("{} of {before} pointer paths still lead to it after 3 s", paths.len()));
-        Ok(paths.iter().map(|p| p.replace(',', " ")).collect())
+        Ok(Some(paths))
     }
 
     /// The best named path to the value (see helper/src/names.rs): its text, how many places it
