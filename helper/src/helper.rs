@@ -3,7 +3,7 @@
 // Protocol: one command per line on stdin; each reply ends with a line "end".
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -407,10 +407,24 @@ fn owner_uid(pid: u32) -> Option<u32> {
     fs::metadata(format!("/proc/{pid}")).ok().map(|m| m.uid())
 }
 
-/// The real user id a process runs as (`/proc/<pid>` itself belongs to root when the process
-/// can't be dumped).
-fn real_uid(pid: u32) -> Option<u32> {
-    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+/// A file inside an open `/proc/<pid>` directory. The directory handle stays that process's
+/// even if its pid is reused meanwhile, so what was checked is what gets opened.
+fn open_in(dir: &File, name: &str, flags: libc::c_int) -> io::Result<File> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let name = std::ffi::CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// The real user id the process behind an open `/proc/<pid>` runs as (the directory itself
+/// belongs to root when the process can't be dumped).
+fn real_uid(proc_dir: &File) -> Option<u32> {
+    use std::io::Read;
+    let mut status = String::new();
+    open_in(proc_dir, "status", libc::O_RDONLY).ok()?.read_to_string(&mut status).ok()?;
     status.lines().find_map(|l| l.strip_prefix("Uid:"))?.split_whitespace().next()?.parse().ok()
 }
 
@@ -1441,11 +1455,16 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
     if let Some(r) = verdict(pid, &anti_cheat_programs()).refused {
         return writeln!(out, "error: refusing to attach, {}", r.why());
     }
-    // With CAP_SYS_PTRACE the kernel would open anyone's: only the player's own programs.
-    if real_uid(pid) != Some(my_uid()) {
+    // With CAP_SYS_PTRACE the kernel would open anyone's: only the player's own programs, and
+    // the memory is opened through the same directory handle the owner was checked on.
+    let proc_dir = match File::open(format!("/proc/{pid}")) {
+        Ok(d) => d,
+        Err(e) => return writeln!(out, "error: cannot open /proc/{pid}: {e}"),
+    };
+    if real_uid(&proc_dir) != Some(my_uid()) {
         return writeln!(out, "error: refusing to attach: not your program");
     }
-    match OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem")) {
+    match open_in(&proc_dir, "mem", libc::O_RDWR) {
         Ok(f) => {
             let exe = exe_name(pid);
             let modules = pointers::modules(pid, &f);
