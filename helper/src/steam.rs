@@ -1,5 +1,6 @@
 // What Steam knows about a game (appcache/appinfo.vdf): its name, whether it uses Valve
-// Anti-Cheat and whether it's played with other people (an MMO always is).
+// Anti-Cheat, whether it's played with other people (an MMO always is) and whether it has
+// Steam's online leaderboards.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -15,6 +16,7 @@ pub struct App {
     pub multiplayer: bool,
     pub single_player: bool,
     pub mmo: bool,
+    pub leaderboards: bool,
 }
 
 impl App {
@@ -25,9 +27,10 @@ impl App {
 }
 
 /// Store categories: 2 = Single-player, 8 = Valve Anti-Cheat enabled; 1 = Multi-player,
-/// 20 = MMO, 36 = Online PvP, 38 = Online Co-op.
+/// 20 = MMO, 36 = Online PvP, 38 = Online Co-op; 25 = Steam Leaderboards.
 const SINGLE_PLAYER: &str = "category_2";
 const VAC: &str = "category_8";
+const LEADERBOARDS: &str = "category_25";
 const MMO: &str = "category_20";
 const MULTIPLAYER: &[&str] = &["category_1", "category_20", "category_36", "category_38"];
 
@@ -130,6 +133,7 @@ fn parse(d: &[u8], table: Option<&[String]>) -> Option<App> {
             app.vac |= key == VAC;
             app.single_player |= key == SINGLE_PLAYER;
             app.mmo |= key == MMO;
+            app.leaderboards |= key == LEADERBOARDS;
             app.multiplayer |= MULTIPLAYER.contains(&key.as_str());
         }
         match t {

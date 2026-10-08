@@ -1394,8 +1394,10 @@ fn windows_non_game(pid: u32) -> bool {
 }
 
 /// Running games, one per line: pid, program name, Steam app ID, why it's refused (`Refusal::code`),
-/// the name its launcher gives it, "online" (online only) or "multiplayer", and anti-cheat it
-/// ships but isn't running (tab-separated, "-" when unknown or not).
+/// the name its launcher gives it, "online" (online only) or "multiplayer", anti-cheat it ships
+/// but isn't running, and what else is online about it, comma-separated: "marks" (accounts with
+/// edited saves get marked, `launchers::MARKS_ACCOUNTS`), "leaderboards" (tab-separated, "-"
+/// when unknown or not).
 fn cmd_games(out: &mut impl Write) -> io::Result<()> {
     let uid = my_uid();
     let programs = anti_cheat_programs();
@@ -1432,9 +1434,14 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let v = verdict(pid, &programs);
         let refused = dash(v.refused.as_ref().map(Refusal::code).as_deref());
         let ships = dash(v.ships.as_deref());
+        let extras: Vec<&str> = [(about.marks_accounts, "marks"), (about.leaderboards, "leaderboards")]
+            .into_iter()
+            .filter_map(|(on, word)| on.then_some(word))
+            .collect();
+        let extras = dash(Some(extras.join(",").as_str()));
         let program = maps(pid).ok().and_then(|m| program_path(pid, &m));
         let name = dash(name.as_deref());
-        rows.push((program, format!("{pid}\t{name_now}\t{id}\t{refused}\t{name}\t{}\t{ships}", dash(play))));
+        rows.push((program, format!("{pid}\t{name_now}\t{id}\t{refused}\t{name}\t{}\t{ships}\t{extras}", dash(play))));
     }
     // An Unreal stub holds none of the game's values (Astro Colony: two entries, a search in
     // the stub found nothing).

@@ -505,7 +505,7 @@ impl Ui {
         *self.online.borrow_mut() = games.iter().map(|g| (g.pid, online_features(g))).collect();
         let blocked = crate::core::native_games_blocked();
         let shown: String =
-            games.iter().map(|g| format!("{}:{}:{:?}:{:?}:{};", g.pid, g.exe, g.refused, g.ships, g.multiplayer)).chain([format!("{blocked:?}")]).collect();
+            games.iter().map(|g| format!("{}:{}:{:?}:{:?}:{}:{}:{};", g.pid, g.exe, g.refused, g.ships, g.multiplayer, g.marks_accounts, g.leaderboards)).chain([format!("{blocked:?}")]).collect();
         self.games_stack.set_visible_child_name(if games.is_empty() { "empty" } else { "list" });
         if *self.games_shown.borrow() == shown {
             return;
@@ -1245,6 +1245,15 @@ fn online_features(g: &GameProcess) -> Vec<String> {
     }
     if let Some(ac) = &g.ships {
         lines.push(tr!("It comes with {anticheat}, which isn't running now.", anticheat = ac));
+    }
+    if g.marks_accounts {
+        lines.push(tr!(
+            "Its publisher marks accounts whose saves were changed: a marked account may be kept off leaderboards, \
+             events or co-op."
+        ));
+    }
+    if g.leaderboards {
+        lines.push(tr!("Its scores go on online leaderboards that other players see."));
     }
     lines
 }

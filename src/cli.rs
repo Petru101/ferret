@@ -46,8 +46,10 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                 };
                 let ships = g.ships.as_ref().map(|ac| format!("  [ships {ac}]")).unwrap_or_default();
                 let mp = if g.multiplayer { "  [multiplayer]" } else { "" };
+                let marks = if g.marks_accounts { "  [marks edited accounts]" } else { "" };
+                let boards = if g.leaderboards { "  [leaderboards]" } else { "" };
                 let name = g.name.map(|n| format!("  ({n})")).unwrap_or_default();
-                println!("{:>7}  {}{name}{id}{refused}{ships}{mp}", g.pid, g.exe);
+                println!("{:>7}  {}{name}{id}{refused}{ships}{mp}{marks}{boards}", g.pid, g.exe);
             }
         }
         "attach" => {

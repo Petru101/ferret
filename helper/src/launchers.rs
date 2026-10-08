@@ -21,6 +21,10 @@ pub struct About {
     pub online_only: bool,
     /// Its characters are flagged online after edits made offline (`FLAGS_EDITS`).
     pub flags_edits: bool,
+    /// Its publisher marks accounts whose saves were edited (`MARKS_ACCOUNTS`): only a warning.
+    pub marks_accounts: bool,
+    /// Steam lists online leaderboards for it: scores made with edited values show there.
+    pub leaderboards: bool,
 }
 
 /// GOG's game modes that mean playing with other people, and the ones that are never played alone.
@@ -47,6 +51,15 @@ const FLAGS_EDITS: &[(&str, u32)] = &[
     ("Elden Ring Nightreign", 2622380),
     ("Armored Core VI", 1888160),
 ];
+
+/// Single-player games whose publisher marks accounts with edited saves (kept off leaderboards,
+/// co-op or events), by Steam app ID and Epic namespace: a warning, not a refusal (the user's
+/// call: the risk is to the player's own account, and many won't mind). Each entry says where
+/// that is documented.
+/// Bloons TD 6: flagged accounts are kept out of competitive events and matched with other
+/// flagged players, and Ninja Kiwi no longer unflags accounts for modding (bloons.fandom.com
+/// "Hacking", Steam discussions of app 960090; Ninja Kiwi's support site refused the fetch).
+const MARKS_ACCOUNTS: &[(&str, u32, &str)] = &[("Bloons TD 6", 960090, "6a8dfa6e441e4f2f9048a98776c6077d")];
 
 /// The games list asks every second; a game's launcher info doesn't change while it runs.
 static CACHE: Mutex<Option<HashMap<String, About>>> = Mutex::new(None);
@@ -78,13 +91,19 @@ fn look_up(env: &HashMap<String, String>, steam_id: Option<u32>) -> About {
             a.multiplayer = app.multiplayer;
             a.online_only = app.online_only();
             a.vac = app.vac;
+            a.leaderboards = app.leaderboards;
         }
     } else if let (Some(runner), Some(app)) = (env.get("HEROIC_APP_RUNNER"), env.get("HEROIC_APP_NAME")) {
         heroic_game(&heroic, runner, app, &mut a, &mut ids);
+        // The same game's Steam entry, when Steam has seen it (GOG's database gives its ID).
+        a.leaderboards = ids.steam.and_then(|id| steam::app(None, id)).is_some_and(|app| app.leaderboards);
     } else if let Some(name) = env.get("GAME_NAME") {
         a.name = Some(name.clone());
     }
     a.flags_edits = ids.steam.is_some_and(|id| FLAGS_EDITS.iter().any(|&(_, f)| f == id));
+    a.marks_accounts = MARKS_ACCOUNTS
+        .iter()
+        .any(|&(_, steam, epic)| ids.steam == Some(steam) || ids.namespace.as_deref() == Some(epic));
     a.listed = listed_anti_cheat(&heroic, &ids, a.name.as_deref());
     // VAC games Steam hasn't shown yet (not in appinfo.vdf): AreWeAntiCheatYet's word for it.
     a.vac |= a.listed.as_deref().is_some_and(|l| l.split(" / ").any(|ac| ac == "VAC" || ac == "Valve Anti-Cheat"));

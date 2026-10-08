@@ -861,6 +861,10 @@ pub struct GameProcess {
     pub multiplayer: bool,
     /// Anti-cheat it ships or is listed with, not running.
     pub ships: Option<String>,
+    /// Its publisher marks accounts whose saves were edited (a warning, not a refusal).
+    pub marks_accounts: bool,
+    /// Steam lists online leaderboards for it.
+    pub leaderboards: bool,
 }
 
 /// Why attaching failed, as shown to the player; `password_may_help`: the system's
@@ -1328,6 +1332,8 @@ impl Core {
                     name: f.get(4).and_then(|s| opt(s)),
                     multiplayer: matches!(f.get(5), Some(&"multiplayer" | &"online")),
                     ships: f.get(6).and_then(|s| opt(s)),
+                    marks_accounts: f.get(7).is_some_and(|s| s.split(',').any(|w| w == "marks")),
+                    leaderboards: f.get(7).is_some_and(|s| s.split(',').any(|w| w == "leaderboards")),
                 })
             })
             .collect()
