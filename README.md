@@ -4,6 +4,8 @@
 window, play a little, and Ferret finds where the game keeps it. Then set it, keep it from going
 down, and get it back automatically every time you play. For single-player games on Linux.
 
+If you know Cheat Engine or GameConqueror (scanmem): Ferret is a memory editor in that family, made so you don’t need to know what a memory scan is.
+
 ![Ferret finding SuperTux's coins: click the number, play while the matches drop from 2,132 to 2, Ferret checks which is real, save it, set it to 999 and keep it there](data/screenshots/ferret-supertux.gif)
 
 <sub>The game is [SuperTux](https://www.supertux.org/), free and open source; its artwork is
