@@ -101,18 +101,55 @@ pub fn game_name(pid: u32) -> String {
         let home = std::env::var("HOME").unwrap_or_default();
         return dosbox_game(&argv0, &cwd, &home).map_or(exe, |g| format!("{g} (DOSBox)"));
     }
-    let ending = match lower.as_str() {
-        "ruffle" | "ruffle.exe" => ".swf",
-        "solarus-run" | "solarus-run.exe" => ".solarus",
-        _ => return exe,
-    };
     let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    let file = raw.split(|b| *b == 0).skip(1).map(String::from_utf8_lossy).find_map(|a| {
-        // A path or a URL; a URL's query left out.
-        let file = a.split(['?', '#']).next().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_owned();
-        file.to_ascii_lowercase().ends_with(ending).then_some(file)
-    });
-    file.unwrap_or(exe)
+    let args: Vec<String> = raw.split(|b| *b == 0).skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    let cwd = || fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    run_game(&lower, &args, cwd).unwrap_or(exe)
+}
+
+/// The game a player program was started with (`game_name`): the game file it was given, a
+/// LÖVE game's folder, a Python game's script (its folder when the script has a name every game
+/// uses, like main.py). LÖVE, Java and Python run many games each with the same code: values
+/// saved by code pattern in one would be found in another.
+fn run_game(program: &str, args: &[String], cwd: impl Fn() -> String) -> Option<String> {
+    let program = program.trim_end_matches(".exe");
+    let endings: &[&str] = match program {
+        "ruffle" => &[".swf"],
+        "solarus-run" => &[".solarus"],
+        "love" | "lovec" => &[".love"],
+        "java" | "javaw" => &[".jar"],
+        "mono" | "mono-sgen" => &[".exe"],
+        p if is_python(p) => &[".py", ".pyc", ".pyw", ".pyz"],
+        _ => return None,
+    };
+    // A path or a URL; a URL's query left out.
+    let file = |a: &str| a.split(['?', '#']).next().unwrap_or_default().rsplit(['/', '\\']).next().unwrap_or_default().to_owned();
+    let full = |a: &str| if a.starts_with('/') { a.to_owned() } else { format!("{}/{a}", cwd()) };
+    if let Some(a) = args.iter().find(|a| endings.iter().any(|e| file(a).to_ascii_lowercase().ends_with(e))) {
+        let name = file(a);
+        let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s).to_ascii_lowercase();
+        if !is_python(program) || !["main", "__main__", "game", "run", "run_game", "start", "play", "launcher"].contains(&stem.as_str()) {
+            return Some(name);
+        }
+        let path = full(a);
+        let folder = path.split('/').rev().skip(1).find(|d| !d.is_empty() && *d != "." && !["src", "game", "bin", "data"].contains(d))?;
+        return Some(format!("{folder} (Python)"));
+    }
+    // `python -m <module>`, `love <folder>` (a game kept as a folder; "." is the one it runs in).
+    if is_python(program) {
+        return args.iter().position(|a| a == "-m").and_then(|i| args.get(i + 1)).cloned();
+    }
+    if program.starts_with("love") {
+        let path = full(args.iter().find(|a| !a.starts_with('-'))?);
+        return path.split('/').rev().find(|d| !d.is_empty() && *d != ".").map(|d| format!("{d} (LÖVE)"));
+    }
+    None
+}
+
+/// Python, as a program: python, python3, python3.12, python2.7, pythonw.exe.
+fn is_python(program: &str) -> bool {
+    let p = program.trim_end_matches(".exe").trim_end_matches('w');
+    p.strip_prefix("python").is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
 }
 
 /// DOSBox and its forks, as programs (".exe" left off).
@@ -1322,15 +1359,16 @@ fn cmd_ps(out: &mut impl Write, filter: &str) -> io::Result<()> {
 const NOT_GAMES: &[&str] = &[
     "steam.exe", "services.exe", "winedevice.exe", "explorer.exe", "plugplay.exe", "rpcss.exe", "svchost.exe",
     "conhost.exe", "tabtip.exe", "start.exe", "wineboot.exe", "winemenubuilder.exe", "rundll32.exe",
-    "steamwebhelper.exe", "mscorsvw.exe", "ngen.exe", "reaper", "pressure-vessel-wrap", "pv-adverb", "python3",
+    "steamwebhelper.exe", "mscorsvw.exe", "ngen.exe", "reaper", "pressure-vessel-wrap", "pv-adverb",
     "srt-bwrap", "bwrap", "wineserver", "sh",
     "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep", "umu.exe", "xalia.exe",
     "xwayland", "gamescope", "gamescope-wl", "gamescopereaper", "gpu-screen-recorder", "mpv", "ffplay",
 ];
 
 /// Native games outside Steam: a GPU driver is loaded (the program draws with OpenGL or Vulkan;
-/// the plain libGL/libEGL/libvulkan front ends also load in programs that never draw) and it
-/// isn't a desktop app (GTK, Qt, Chromium/Electron).
+/// the plain libGL/libEGL/libvulkan front ends also load in programs that never draw) or SDL
+/// (pygame and other games drawing without the GPU load no driver at all), and it isn't a
+/// desktop app (GTK, Qt, Chromium/Electron).
 fn draws_like_a_game(pid: u32) -> bool {
     if cmdline(pid).contains(" --type=") {
         return false;
@@ -1342,7 +1380,7 @@ fn draws_like_a_game(pid: u32) -> bool {
         if desktop_toolkit(name) {
             return false;
         }
-        driver |= gpu_driver(name);
+        driver |= gpu_driver(name) || ["libSDL-1.2.", "libSDL2", "libSDL3"].iter().any(|l| name.starts_with(l));
     }
     driver
 }
@@ -1425,6 +1463,11 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
             continue;
         }
         if !(windows || app_id.is_some() || draws_like_a_game(pid)) || windows && windows_non_game(pid) {
+            continue;
+        }
+        // Python also runs Steam's and umu's tools (with the game's app ID): only a Python that
+        // draws is a game (pygame).
+        if is_python(&lower) && !draws_like_a_game(pid) {
             continue;
         }
         let dash = |s: Option<&str>| s.filter(|s| !s.is_empty()).unwrap_or("-").to_owned();
@@ -1621,64 +1664,81 @@ impl MemScan<'_> {
         r
     }
 
-    /// The matches in one chunk of memory, read into `buf`.
+    /// The matches in one chunk of memory, read into `buf`. Pages that can't be read are
+    /// stepped over: glibc 2.43 puts thread stacks' guard pages inside their mappings
+    /// (MADV_GUARD_INSTALL), and a read stopping at one used to lose the rest of the chunk (on
+    /// 32-bit games about 100 MiB of a scan).
     fn chunk(&self, kinds: &[Kind], buf: &mut [u8], addr: u64) -> MemScanned {
-        let (mem, n) = (self.mem, self.n);
         let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0 };
-        match mem.read_at(buf, addr) {
-            Ok(len) if len > 0 => {
-                r.bytes += len as u64;
-                let with_i32 = kinds.contains(&Kind::I32);
-                // The 2-byte number's bytes (none: the number can't be one).
-                let short = (n.scaled.fract() == 0.0 && (0.0..65536.0).contains(&n.scaled)).then(|| (n.scaled as u16).to_le_bytes());
-                for off in (0..len.saturating_sub(1)).step_by(4) {
-                    // Doubles are 8-aligned, 2-byte numbers 2-aligned, the rest 4-aligned.
-                    // Integers and pointers read as floats come out as zero or next to nothing
-                    // (1e-40, 1e-300), never a number on screen.
-                    for &kind in kinds {
-                        if kind == Kind::U16 {
-                            let Some(short) = short else { continue };
-                            for o in [off, off + 2] {
-                                if buf[..len].get(o..o + 2) != Some(&short[..]) {
-                                    continue;
-                                }
-                                // Followed by two zero bytes it's the 4-byte one's match (`next`
-                                // turns that into a 2-byte one if the bytes after it change).
-                                if with_i32 && o == off && buf[..len].get(off + 2..off + 4) == Some(&[0, 0]) {
-                                    continue;
-                                }
-                                self.hit(&mut r, buf, len, addr, o, kind, n.scaled);
-                            }
-                            continue;
-                        }
-                        let b = &buf[off..(off + kind.size()).min(len)];
-                        if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
-                            continue;
-                        }
-                        // A real key is never 0; skipping those also leaves plain integers
-                        // next to a zero to the i32 check.
-                        if kind == Kind::Xor && (b[..4] == [0; 4] || b[4..] == [0; 4]) {
-                            continue;
-                        }
-                        let value = kind.decode(b);
-                        if matches!(kind, Kind::F32 | Kind::F64) && !(value.abs() >= 1e-3) {
-                            continue;
-                        }
-                        // The scan runs after the screen was read: allow for a fraction
-                        // that has moved on by up to 1 since.
-                        let hit = match kind {
-                            Kind::I32 | Kind::Xor | Kind::U16 => value == n.scaled,
-                            Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
-                        };
-                        if hit {
-                            self.hit(&mut r, buf, len, addr, off, kind, value);
-                        }
-                    }
+        let mut at = 0;
+        while at < buf.len() {
+            let here = addr + at as u64;
+            match self.mem.read_at(&mut buf[at..], here) {
+                Ok(len) if len > 0 => {
+                    r.bytes += len as u64;
+                    self.matches_in(kinds, &buf[at..at + len], here, &mut r);
+                    at += len;
+                }
+                _ => {
+                    let next = ((((here | 0xfff) + 1) - addr) as usize).min(buf.len());
+                    r.unreadable += (next - at) as u64;
+                    at = next;
                 }
             }
-            _ => r.unreadable += buf.len() as u64,
         }
         r
+    }
+
+    /// The matches in `buf`, read from `addr`.
+    fn matches_in(&self, kinds: &[Kind], buf: &[u8], addr: u64, r: &mut MemScanned) {
+        let (n, len) = (self.n, buf.len());
+        let with_i32 = kinds.contains(&Kind::I32);
+        // The 2-byte number's bytes (none: the number can't be one).
+        let short = (n.scaled.fract() == 0.0 && (0.0..65536.0).contains(&n.scaled)).then(|| (n.scaled as u16).to_le_bytes());
+        for off in (0..len.saturating_sub(1)).step_by(4) {
+            // Doubles are 8-aligned, 2-byte numbers 2-aligned, the rest 4-aligned.
+            // Integers and pointers read as floats come out as zero or next to nothing
+            // (1e-40, 1e-300), never a number on screen.
+            for &kind in kinds {
+                if kind == Kind::U16 {
+                    let Some(short) = short else { continue };
+                    for o in [off, off + 2] {
+                        if buf.get(o..o + 2) != Some(&short[..]) {
+                            continue;
+                        }
+                        // Followed by two zero bytes it's the 4-byte one's match (`next`
+                        // turns that into a 2-byte one if the bytes after it change).
+                        if with_i32 && o == off && buf.get(off + 2..off + 4) == Some(&[0, 0]) {
+                            continue;
+                        }
+                        self.hit(r, buf, len, addr, o, kind, n.scaled);
+                    }
+                    continue;
+                }
+                let b = &buf[off..(off + kind.size()).min(len)];
+                if b.len() < kind.size() || (kind == Kind::F64 && off % 8 != 0) {
+                    continue;
+                }
+                // A real key is never 0; skipping those also leaves plain integers
+                // next to a zero to the i32 check.
+                if kind == Kind::Xor && (b[..4] == [0; 4] || b[4..] == [0; 4]) {
+                    continue;
+                }
+                let value = kind.decode(b);
+                if matches!(kind, Kind::F32 | Kind::F64) && !(value.abs() >= 1e-3) {
+                    continue;
+                }
+                // The scan runs after the screen was read: allow for a fraction
+                // that has moved on by up to 1 since.
+                let hit = match kind {
+                    Kind::I32 | Kind::Xor | Kind::U16 => value == n.scaled,
+                    Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
+                };
+                if hit {
+                    self.hit(r, buf, len, addr, off, kind, value);
+                }
+            }
+        }
     }
 
     /// Keeps a match found in `buf` (read from `addr`, `len` bytes) at `off`.
@@ -3196,7 +3256,28 @@ pub fn run(as_user: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
-    use super::dosbox_game;
+    use super::{dosbox_game, run_game};
+
+    #[test]
+    fn names_the_game_a_player_program_runs() {
+        let game = |program: &str, args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            run_game(program, &args, || "/home/p/Games/Hyperplasm".into())
+        };
+        assert_eq!(game("ruffle", &["--fullscreen", "https://x.org/age_of_war.swf?v=2"]), Some("age_of_war.swf".into()));
+        assert_eq!(game("love", &["/home/p/Games/itch/in-a-dark-cave/InADarkCave.love"]), Some("InADarkCave.love".into()));
+        assert_eq!(game("love", &["."]), Some("Hyperplasm (LÖVE)".into()));
+        assert_eq!(game("love", &["/home/p/Games/Mari0/"]), Some("Mari0 (LÖVE)".into()));
+        assert_eq!(game("java", &["-Xmx1g", "-jar", "smallshipbigguns.jar"]), Some("smallshipbigguns.jar".into()));
+        assert_eq!(game("mono", &["--debug", "Game.exe"]), Some("Game.exe".into()));
+        assert_eq!(game("python3", &["-u", "frozen_escape.py"]), Some("frozen_escape.py".into()));
+        assert_eq!(game("python3.11", &["/home/p/Games/ppu/src/main.py"]), Some("ppu (Python)".into()));
+        assert_eq!(game("python3", &["main.py"]), Some("Hyperplasm (Python)".into()));
+        assert_eq!(game("python3", &["-m", "gunship"]), Some("gunship".into()));
+        assert_eq!(game("python3", &["/usr/bin/some-tool"]), None);
+        assert_eq!(game("love", &[]), None);
+        assert_eq!(game("SortTheCourt.x86", &["main.py"]), None);
+    }
 
     #[test]
     fn names_a_dosbox_game_by_its_folder() {
