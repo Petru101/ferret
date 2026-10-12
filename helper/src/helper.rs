@@ -117,7 +117,7 @@ fn run_game(program: &str, args: &[String], cwd: impl Fn() -> String) -> Option<
         "ruffle" => &[".swf"],
         "solarus-run" => &[".solarus"],
         "love" | "lovec" => &[".love"],
-        "java" | "javaw" => &[".jar"],
+        "java" | "javaw" => return java_game(args),
         "mono" | "mono-sgen" => &[".exe"],
         p if is_python(p) => &[".py", ".pyc", ".pyw", ".pyz"],
         _ => return None,
@@ -142,6 +142,25 @@ fn run_game(program: &str, args: &[String], cwd: impl Fn() -> String) -> Option<
     if program.starts_with("love") {
         let path = full(args.iter().find(|a| !a.starts_with('-'))?);
         return path.split('/').rev().find(|d| !d.is_empty() && *d != ".").map(|d| format!("{d} (LÖVE)"));
+    }
+    None
+}
+
+/// The game Java runs: the jar of `-jar <file>`, else the main class (`-cp <jars> <class>`), or
+/// the module of `-m <module>/<class>`.
+fn java_game(args: &[String]) -> Option<String> {
+    let mut args = args.iter();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-jar" => return args.next().map(|f| f.rsplit(['/', '\\']).next().unwrap_or_default().to_owned()),
+            "-m" | "--module" => return args.next().cloned(),
+            "-cp" | "-classpath" | "--class-path" | "-p" | "--module-path" | "--add-modules" | "--add-opens" | "--add-exports"
+            | "--add-reads" | "--patch-module" | "--limit-modules" | "--upgrade-module-path" => {
+                args.next();
+            }
+            a if !a.starts_with('-') => return Some(a.to_owned()),
+            _ => {}
+        }
     }
     None
 }
@@ -1366,23 +1385,30 @@ const NOT_GAMES: &[&str] = &[
 ];
 
 /// Native games outside Steam: a GPU driver is loaded (the program draws with OpenGL or Vulkan;
-/// the plain libGL/libEGL/libvulkan front ends also load in programs that never draw) or SDL
-/// (pygame and other games drawing without the GPU load no driver at all), and it isn't a
-/// desktop app (GTK, Qt, Chromium/Electron).
+/// the plain libGL/libEGL/libvulkan front ends also load in programs that never draw), or one
+/// of the ways games draw without the GPU: SDL (pygame), Java's AWT (Java2D games), or any
+/// connection to the display from a program outside the system's folders (old Adventure Game
+/// Studio games draw through plain X11); and it isn't a desktop app (GTK, Qt, Chromium/Electron).
 fn draws_like_a_game(pid: u32) -> bool {
     if cmdline(pid).contains(" --type=") {
         return false;
     }
     let Ok(regions) = maps(pid) else { return false };
-    let mut driver = false;
+    let (mut driver, mut display) = (false, false);
     for r in &regions {
         let name = r.path.rsplit('/').next().unwrap_or_default();
         if desktop_toolkit(name) {
             return false;
         }
-        driver |= gpu_driver(name) || ["libSDL-1.2.", "libSDL2", "libSDL3"].iter().any(|l| name.starts_with(l));
+        driver |= gpu_driver(name)
+            || ["libSDL-1.2.", "libSDL2", "libSDL3", "libawt_xawt.", "libawt_wlawt."].iter().any(|l| name.starts_with(l));
+        display |= ["libX11.", "libxcb.", "libwayland-client."].iter().any(|l| name.starts_with(l));
     }
-    driver
+    let system = || {
+        let exe = fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_default();
+        ["/usr/", "/bin/", "/sbin/", "/lib", "/app/", "/nix/", "/snap/"].iter().any(|d| exe.to_string_lossy().starts_with(d))
+    };
+    driver || display && !system()
 }
 
 /// A GPU driver's library: loaded once a program draws with the GPU.
@@ -3268,7 +3294,11 @@ mod tests {
         assert_eq!(game("love", &["/home/p/Games/itch/in-a-dark-cave/InADarkCave.love"]), Some("InADarkCave.love".into()));
         assert_eq!(game("love", &["."]), Some("Hyperplasm (LÖVE)".into()));
         assert_eq!(game("love", &["/home/p/Games/Mari0/"]), Some("Mari0 (LÖVE)".into()));
-        assert_eq!(game("java", &["-Xmx1g", "-jar", "smallshipbigguns.jar"]), Some("smallshipbigguns.jar".into()));
+        assert_eq!(game("java", &["-Xmx1g", "-jar", "/home/p/Games/small ship/smallshipbigguns.jar"]), Some("smallshipbigguns.jar".into()));
+        let aoc = ["-Xms256M", "-Ddirect=true", "-classpath", "/g/aoc.jar:/g/lib/*", "com.ageofconquest.app.user.aoc.Main", "-x"];
+        assert_eq!(game("java", &aoc), Some("com.ageofconquest.app.user.aoc.Main".into()));
+        assert_eq!(game("java", &["-p", "mods", "-m", "game/net.x.Main"]), Some("game/net.x.Main".into()));
+        assert_eq!(game("java", &["-version"]), None);
         assert_eq!(game("mono", &["--debug", "Game.exe"]), Some("Game.exe".into()));
         assert_eq!(game("python3", &["-u", "frozen_escape.py"]), Some("frozen_escape.py".into()));
         assert_eq!(game("python3.11", &["/home/p/Games/ppu/src/main.py"]), Some("ppu (Python)".into()));
