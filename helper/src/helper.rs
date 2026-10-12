@@ -1389,8 +1389,8 @@ const NOT_GAMES: &[&str] = &[
 /// of the ways games draw without the GPU: SDL (pygame), Java's AWT (Java2D games), or any
 /// connection to the display from a program outside the system's folders (old Adventure Game
 /// Studio games draw through plain X11); and it isn't a desktop app (GTK, Qt, Chromium/Electron),
-/// unless a game library is loaded too: Allegro's dialog add-on brings GTK 3 into every game
-/// using it (Darkness Looming).
+/// unless a library only games load is there too: Allegro's dialog add-on brings GTK 3 into
+/// every game using it (Darkness Looming).
 fn draws_like_a_game(pid: u32) -> bool {
     if cmdline(pid).contains(" --type=") {
         return false;
@@ -1400,10 +1400,11 @@ fn draws_like_a_game(pid: u32) -> bool {
     for r in &regions {
         let name = r.path.rsplit('/').next().unwrap_or_default();
         toolkit |= desktop_toolkit(name);
-        game |= ["libSDL-1.2.", "libSDL2", "libSDL3", "liballeg", "libsfml-graphics", "libraylib", "UnityPlayer.so"]
-            .iter()
-            .any(|l| name.starts_with(l));
-        driver |= gpu_driver(name) || ["libawt_xawt.", "libawt_wlawt."].iter().any(|l| name.starts_with(l));
+        game |= ["liballeg", "libsfml-graphics", "libraylib", "UnityPlayer.so"].iter().any(|l| name.starts_with(l));
+        // Desktop apps load SDL for gamepads (Steam's web helper, QEMU, GTK 4 apps): with a
+        // toolkit it says nothing.
+        driver |= gpu_driver(name)
+            || ["libSDL-1.2.", "libSDL2", "libSDL3", "libawt_xawt.", "libawt_wlawt."].iter().any(|l| name.starts_with(l));
         display |= ["libX11.", "libxcb.", "libwayland-client."].iter().any(|l| name.starts_with(l));
     }
     let system = || {
