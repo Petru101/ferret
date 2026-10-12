@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-08 12:29+0100\n"
+"POT-Creation-Date: 2026-10-12 02:07+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Spanish\n"
 "Language: es\n"
@@ -496,12 +496,29 @@ msgstr ""
 "Mantuvo {n}. Si el juego también lo muestra, pulsa Usar este (algunos juegos "
 "solo redibujan un número cuando lo cambian ellos mismos)."
 
-#: src/core.rs:3442
+#: src/core.rs:3345
+msgid ""
+"The number is 0, like most of the game's memory: change it in the game and "
+"Ferret searches from there."
+msgstr "El número es 0, como casi toda la memoria del juego: cámbialo en el juego y Ferret buscará a partir de ahí."
+
+#: src/core.rs:3348
+msgid "The number stayed at 0. Change it in the game, then search again."
+msgstr "El número se quedó en 0. Cámbialo en el juego y vuelve a buscar."
+
+#: src/core.rs:3380
+#, rust-format
+msgid ""
+"{n} is in too many places in the game's memory to search for: search once "
+"the game shows a bigger number."
+msgstr "{n} está en demasiados sitios de la memoria del juego para buscarlo: busca cuando el juego muestre un número más grande."
+
+#: src/core.rs:3468
 #, rust-format
 msgid "{place} isn't among the matches any more"
 msgstr "{place} ya no está entre las coincidencias"
 
-#: src/core.rs:3679
+#: src/core.rs:3705
 msgid ""
 "Now change the number in the game once (use some or pick some up): Ferret "
 "watches which of the game's code does it, the surest way to find it again. "
@@ -511,7 +528,7 @@ msgstr ""
 "Ferret observa qué código del juego lo hace, la forma más segura de volver a "
 "encontrarlo. Cancelar lo guarda de otra forma."
 
-#: src/core.rs:3711
+#: src/core.rs:3737
 #, rust-format
 msgid ""
 "Now change the number in the game once (pick some up or use some): Ferret "
@@ -530,24 +547,24 @@ msgstr[1] ""
 "Ferret espera y observa desde cuál de los {n} lugares continúa el juego. "
 "Dejar de esperar los lista para probarlos."
 
-#: src/core.rs:3843
+#: src/core.rs:3869
 #, rust-format
 msgid "The one place left holds {held}, not the {n} on screen."
 msgstr "El único lugar que queda tiene {held}, no el {n} de la pantalla."
 
-#: src/core.rs:3867
+#: src/core.rs:3893
 msgid "could not read the number"
 msgstr "no se pudo leer el número"
 
-#: src/core.rs:4082
+#: src/core.rs:4110
 msgid "The icons are all empty, hidden or keep changing."
 msgstr "Los iconos están todos vacíos, ocultos o no dejan de cambiar."
 
-#: src/core.rs:4083
+#: src/core.rs:4111
 msgid "The bar is empty, hidden or keeps moving."
 msgstr "La barra está vacía, oculta o no deja de moverse."
 
-#: src/core.rs:4178
+#: src/core.rs:4206
 msgid ""
 "Stopped before the icons changed. Press Start again and let them change in "
 "the game."
@@ -555,7 +572,7 @@ msgstr ""
 "Detenido antes de que cambiaran los iconos. Pulsa Iniciar de nuevo y deja "
 "que cambien en el juego."
 
-#: src/core.rs:4179
+#: src/core.rs:4207
 msgid ""
 "Stopped before the bar moved. Press Start again and let the bar change in "
 "the game."
@@ -563,30 +580,30 @@ msgstr ""
 "Detenido antes de que se moviera la barra. Pulsa Iniciar de nuevo y deja que "
 "la barra cambie en el juego."
 
-#: src/core.rs:4211
+#: src/core.rs:4239
 msgid "The one place left kept a test value, but the icons didn't show it."
 msgstr ""
 "El único lugar que queda mantuvo un valor de prueba, pero los iconos no lo "
 "mostraron."
 
-#: src/core.rs:4212
+#: src/core.rs:4240
 msgid "The one place left kept a test value, but the bar didn't show it."
 msgstr ""
 "El único lugar que queda mantuvo un valor de prueba, pero la barra no lo "
 "mostró."
 
-#: src/core.rs:4291
+#: src/core.rs:4319
 msgid ""
 "Nothing to narrow down yet: press Start or type the number the game shows."
 msgstr ""
 "Aún no hay nada que reducir: pulsa Iniciar o escribe el número que muestra "
 "el juego."
 
-#: src/core.rs:4294
+#: src/core.rs:4322
 msgid "No number picked: type the number the game shows instead."
 msgstr "No hay ningún número elegido: escribe el número que muestra el juego."
 
-#: src/core.rs:4302
+#: src/core.rs:4330
 msgid ""
 "The icons are all empty, hidden or changing: try again while they show and "
 "stay still."
@@ -594,14 +611,14 @@ msgstr ""
 "Los iconos están todos vacíos, ocultos o cambiando: inténtalo de nuevo "
 "mientras se vean y estén quietos."
 
-#: src/core.rs:4303
+#: src/core.rs:4331
 msgid ""
 "The bar is empty, hidden or moving: try again while it shows and stays still."
 msgstr ""
 "La barra está vacía, oculta o moviéndose: inténtalo de nuevo mientras se vea "
 "y esté quieta."
 
-#: src/core.rs:4307
+#: src/core.rs:4335
 msgid ""
 "Nothing in the game's memory changed like the icons did. Press Start Over "
 "and search again."
@@ -609,7 +626,7 @@ msgstr ""
 "Nada en la memoria del juego cambió como los iconos. Pulsa Empezar de nuevo "
 "y vuelve a buscar."
 
-#: src/core.rs:4308
+#: src/core.rs:4336
 msgid ""
 "Nothing in the game's memory moved like the bar did. Press Start Over and "
 "search again."
@@ -617,12 +634,19 @@ msgstr ""
 "Nada en la memoria del juego se movió como la barra. Pulsa Empezar de nuevo "
 "y vuelve a buscar."
 
-#: src/core.rs:4323
+#: src/core.rs:4351
 msgid "Can't read the number now (is it on screen?). Type it below instead."
 msgstr ""
 "No se puede leer el número ahora (¿está en pantalla?). Escríbelo abajo."
 
-#: src/core.rs:4361
+#: src/core.rs:4377
+#
+msgid ""
+"Almost everything in the game's memory is 0: type the number once the game "
+"shows another one."
+msgstr "Casi toda la memoria del juego es 0: escribe el número cuando el juego muestre otro."
+
+#: src/core.rs:4392
 #, rust-format
 msgid "{n} is nowhere in the game's memory"
 msgstr "{n} no está en ninguna parte de la memoria del juego"
@@ -2245,103 +2269,107 @@ msgstr "No hay juegos en marcha"
 msgid "Start a game and it shows up here."
 msgstr "Inicia un juego y aparecerá aquí."
 
-#: src/gui/mod.rs:994
+#: src/gui/mod.rs:996
 msgid "Values"
 msgstr "Valores"
 
-#: src/gui/mod.rs:995
+#: src/gui/mod.rs:997
 msgid "Find Value"
 msgstr "Buscar valor"
 
-#: src/gui/mod.rs:1004
+#: src/gui/mod.rs:1006
 msgid "A newer version of Ferret is installed"
 msgstr "Hay una versión más nueva de Ferret instalada"
 
-#: src/gui/mod.rs:1004
+#: src/gui/mod.rs:1006
 msgid "Restart"
 msgstr "Reiniciar"
 
-#: src/gui/mod.rs:1028
+#: src/gui/mod.rs:1030
 msgid "Game"
 msgstr "Juego"
 
-#: src/gui/mod.rs:1034
+#: src/gui/mod.rs:1036
 msgid "Ferret Could Not Start"
 msgstr "Ferret no pudo iniciarse"
 
-#: src/gui/mod.rs:1037
+#: src/gui/mod.rs:1039
 msgid "Refresh"
 msgstr "Actualizar"
 
-#: src/gui/mod.rs:1195
+#: src/gui/mod.rs:1197
 #, rust-format
 msgid "{names} and {last}"
 msgstr "{names} y {last}"
 
-#: src/gui/mod.rs:1216
+#: src/gui/mod.rs:1218
 msgid "whole number"
 msgstr "número entero"
 
-#: src/gui/mod.rs:1217
+#: src/gui/mod.rs:1219
 msgid "float"
 msgstr "float"
 
-#: src/gui/mod.rs:1218
+#: src/gui/mod.rs:1220
 msgid "double"
 msgstr "double"
 
-#: src/gui/mod.rs:1219
+#: src/gui/mod.rs:1221
 msgid "encoded whole number"
 msgstr "número entero codificado"
 
-#: src/gui/mod.rs:1220
+#: src/gui/mod.rs:1222
 msgid "2-byte whole number"
 msgstr "número entero de 2 bytes"
 
-#: src/gui/mod.rs:1228
+#: src/gui/mod.rs:1230
 #, rust-format
 msgid "at most {max}"
 msgstr "como máximo {max}"
 
-#: src/gui/mod.rs:1229
+#: src/gui/mod.rs:1231
 #, rust-format
 msgid "at least {min}"
 msgstr "como mínimo {min}"
 
-#: src/gui/mod.rs:1230
+#: src/gui/mod.rs:1232
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "entre {min} y {max}"
 
-#: src/gui/mod.rs:1231
+#: src/gui/mod.rs:1233
 msgid "unlimited"
 msgstr "sin límite"
 
-#: src/gui/mod.rs:1237
+#: src/gui/mod.rs:1239
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
 msgstr[0] "un tipo de lugar"
 msgstr[1] "{n} tipos de lugares"
 
-#: src/gui/mod.rs:1244
+#: src/gui/mod.rs:1246
 msgid "It can be played with other people."
 msgstr "Se puede jugar con otras personas."
 
-#: src/gui/mod.rs:1247
+#: src/gui/mod.rs:1249
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "Viene con {anticheat}, que ahora no está en marcha."
 
-#: src/gui/mod.rs:1251
+#: src/gui/mod.rs:1253
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
-msgstr "Su editor marca las cuentas cuyas partidas guardadas se modificaron: una cuenta marcada puede quedar fuera de las clasificaciones, los eventos o el cooperativo."
+msgstr ""
+"Su editor marca las cuentas cuyas partidas guardadas se modificaron: una "
+"cuenta marcada puede quedar fuera de las clasificaciones, los eventos o el "
+"cooperativo."
 
-#: src/gui/mod.rs:1256
+#: src/gui/mod.rs:1258
 msgid "Its scores go on online leaderboards that other players see."
-msgstr "Sus puntuaciones van a clasificaciones en línea que ven otros jugadores."
+msgstr ""
+"Sus puntuaciones van a clasificaciones en línea que ven otros jugadores."
 
 #: src/gui/notify.rs:148
 msgid "Show Ferret"

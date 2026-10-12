@@ -3334,6 +3334,27 @@ impl Core {
 
     /// A new scan for `n`, of the value types the player picked, in places shaped like earlier
     /// finds when there are any (unless the value turned out not to be in one).
+    /// The number a new search starts from: 0 is in most of a game's memory (hundreds of
+    /// millions of places, gigabytes for the helper to keep: it ran out of memory in an 8 GB
+    /// machine), so while the screen shows 0 this waits for the game to change it.
+    fn past_zero(&mut self, n: Shown, start: Instant, limit: Duration) -> Result<Shown, String> {
+        if n.value() != 0.0 {
+            return Ok(n);
+        }
+        self.say("screen shows 0, like most of the game's memory: waiting for another number to search for");
+        self.status(&tr!("The number is 0, like most of the game's memory: change it in the game and Ferret searches from there."));
+        loop {
+            if start.elapsed() > limit || self.cancel.load(Ordering::Relaxed) {
+                return Err(tr!("The number stayed at 0. Change it in the game, then search again."));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            self.run_side_jobs();
+            if let Some(n) = self.read_stable()?.filter(|n| n.value() != 0.0) {
+                return Ok(n);
+            }
+        }
+    }
+
     fn scan(&mut self, n: &Shown) -> Vec<String> {
         let kinds: Vec<&str> = self.scan_kinds.iter().map(|k| k.name()).collect();
         let mut cmd = format!("scan {}", n.search());
@@ -3354,6 +3375,11 @@ impl Core {
         tell(0.0);
         let reply = self.helper.call_with(&cmd, &mut tell);
         self.shaped = reply.first().is_some_and(|l| l.contains("shaped like"));
+        if let Some(e) = first_error(&reply).filter(|e| e.starts_with("too many matches")) {
+            self.say(&e);
+            let why = tr!("{n} is in too many places in the game's memory to search for: search once the game shows a bigger number.", n);
+            return vec![format!("error: {why}")];
+        }
         reply
     }
 
@@ -3868,6 +3894,7 @@ impl Core {
             }
         };
         let continuing = self.search.is_some();
+        let first = if continuing { first } else { self.past_zero(first, start, limit)? };
         let mut count = match self.search {
             Some((before, _)) => {
                 let reply = self.helper.call(&format!("next {}", first.search()));
@@ -3904,7 +3931,7 @@ impl Core {
             self.run_side_jobs();
             // Values that change while the screen is read may show either end of that change.
             self.helper.call("mark");
-            let Some(now) = self.read_stable()? else { continue };
+            let Some(mut now) = self.read_stable()? else { continue };
             let still = now == last;
             let again = self.scan_now.swap(false, Ordering::Relaxed);
             if still && !again {
@@ -3920,6 +3947,7 @@ impl Core {
                     continue;
                 }
                 self.lost_shape();
+                now = self.past_zero(now, start, limit)?;
                 let reply = self.scan(&now);
                 self.say(&format!("{now} again: lost it, rescanning: {}", reply.join(" ")));
                 count = match_count(&reply).unwrap_or(0);
@@ -4344,6 +4372,9 @@ impl Core {
                     return self.typed_search(n);
                 }
                 (count, if count == before { unchanged + 1 } else { 0 })
+            }
+            None if n.value() == 0.0 => {
+                return Err(tr!("Almost everything in the game's memory is 0: type the number once the game shows another one."));
             }
             None => {
                 let reply = self.scan(&n);

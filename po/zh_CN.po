@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-08 12:29+0100\n"
+"POT-Creation-Date: 2026-10-12 02:07+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -460,12 +460,29 @@ msgstr ""
 "它保持为 {n}。如果游戏也显示这个数字,请点击“就是这个”(有些游戏只有自己修改数"
 "字时才会重绘)。"
 
-#: src/core.rs:3442
+#: src/core.rs:3345
+msgid ""
+"The number is 0, like most of the game's memory: change it in the game and "
+"Ferret searches from there."
+msgstr "这个数字是 0，游戏内存里几乎全是 0：在游戏里改变它，Ferret 会从新的数字开始搜索。"
+
+#: src/core.rs:3348
+msgid "The number stayed at 0. Change it in the game, then search again."
+msgstr "数字一直是 0。请在游戏里改变它，然后再搜索。"
+
+#: src/core.rs:3380
+#, rust-format
+msgid ""
+"{n} is in too many places in the game's memory to search for: search once "
+"the game shows a bigger number."
+msgstr "{n} 在游戏内存里出现的地方太多，无法搜索：等游戏显示更大的数字时再搜索。"
+
+#: src/core.rs:3468
 #, rust-format
 msgid "{place} isn't among the matches any more"
 msgstr "{place} 已不在匹配结果中"
 
-#: src/core.rs:3679
+#: src/core.rs:3705
 msgid ""
 "Now change the number in the game once (use some or pick some up): Ferret "
 "watches which of the game's code does it, the surest way to find it again. "
@@ -474,7 +491,7 @@ msgstr ""
 "现在在游戏中改变一次这个数字(用掉一些或捡起一些):Ferret 会观察是游戏的哪段代"
 "码修改了它,这是之后再次找到它最可靠的方法。“取消”会用其他方式保存它。"
 
-#: src/core.rs:3711
+#: src/core.rs:3737
 #, rust-format
 msgid ""
 "Now change the number in the game once (pick some up or use some): Ferret "
@@ -488,80 +505,87 @@ msgstr[0] ""
 "现在在游戏中改变一次这个数字(捡起一些或用掉一些):Ferret 会等待并观察游戏从 "
 "{n} 个位置中的哪一个继续计数。“停止等待”会改为列出它们供你逐个尝试。"
 
-#: src/core.rs:3843
+#: src/core.rs:3869
 #, rust-format
 msgid "The one place left holds {held}, not the {n} on screen."
 msgstr "最后剩下的位置是 {held},不是屏幕上的 {n}。"
 
-#: src/core.rs:3867
+#: src/core.rs:3893
 msgid "could not read the number"
 msgstr "无法读取数字"
 
-#: src/core.rs:4082
+#: src/core.rs:4110
 msgid "The icons are all empty, hidden or keep changing."
 msgstr "图标全是空的、被遮挡了,或者一直在变。"
 
-#: src/core.rs:4083
+#: src/core.rs:4111
 msgid "The bar is empty, hidden or keeps moving."
 msgstr "进度条是空的、被遮挡了,或者一直在动。"
 
-#: src/core.rs:4178
+#: src/core.rs:4206
 msgid ""
 "Stopped before the icons changed. Press Start again and let them change in "
 "the game."
 msgstr "在图标变化之前停止了。请再次点击“开始”,并让它们在游戏中变化。"
 
-#: src/core.rs:4179
+#: src/core.rs:4207
 msgid ""
 "Stopped before the bar moved. Press Start again and let the bar change in "
 "the game."
 msgstr "在进度条变化之前停止了。请再次点击“开始”,并让进度条在游戏中变化。"
 
-#: src/core.rs:4211
+#: src/core.rs:4239
 msgid "The one place left kept a test value, but the icons didn't show it."
 msgstr "最后剩下的位置保持了测试值,但图标没有显示出来。"
 
-#: src/core.rs:4212
+#: src/core.rs:4240
 msgid "The one place left kept a test value, but the bar didn't show it."
 msgstr "最后剩下的位置保持了测试值,但进度条没有显示出来。"
 
-#: src/core.rs:4291
+#: src/core.rs:4319
 msgid ""
 "Nothing to narrow down yet: press Start or type the number the game shows."
 msgstr "还没有可以缩小的结果:请点击“开始”或输入游戏显示的数字。"
 
-#: src/core.rs:4294
+#: src/core.rs:4322
 msgid "No number picked: type the number the game shows instead."
 msgstr "没有选择数字:请改为输入游戏显示的数字。"
 
-#: src/core.rs:4302
+#: src/core.rs:4330
 msgid ""
 "The icons are all empty, hidden or changing: try again while they show and "
 "stay still."
 msgstr "图标全是空的、被遮挡了或正在变化:请在它们可见且不动时重试。"
 
-#: src/core.rs:4303
+#: src/core.rs:4331
 msgid ""
 "The bar is empty, hidden or moving: try again while it shows and stays still."
 msgstr "进度条是空的、被遮挡了或正在变化:请在它可见且不动时重试。"
 
-#: src/core.rs:4307
+#: src/core.rs:4335
 msgid ""
 "Nothing in the game's memory changed like the icons did. Press Start Over "
 "and search again."
 msgstr "游戏内存中没有任何东西像图标那样变化。请点击“重新开始”再搜索一次。"
 
-#: src/core.rs:4308
+#: src/core.rs:4336
 msgid ""
 "Nothing in the game's memory moved like the bar did. Press Start Over and "
 "search again."
 msgstr "游戏内存中没有任何东西像进度条那样变化。请点击“重新开始”再搜索一次。"
 
-#: src/core.rs:4323
+#: src/core.rs:4351
 msgid "Can't read the number now (is it on screen?). Type it below instead."
 msgstr "现在无法读取数字(它在屏幕上吗?)。请在下方输入它。"
 
-#: src/core.rs:4361
+#: src/core.rs:4377
+#
+msgid ""
+"Almost everything in the game's memory is 0: type the number once the game "
+"shows another one."
+msgstr "游戏内存里几乎全是 0：等游戏显示别的数字时再输入。"
+
+#: src/core.rs:4392
 #, rust-format
 msgid "{n} is nowhere in the game's memory"
 msgstr "游戏内存中找不到 {n}"
@@ -2042,100 +2066,102 @@ msgstr "没有正在运行的游戏"
 msgid "Start a game and it shows up here."
 msgstr "启动一个游戏,它就会显示在这里。"
 
-#: src/gui/mod.rs:994
+#: src/gui/mod.rs:996
 msgid "Values"
 msgstr "数值"
 
-#: src/gui/mod.rs:995
+#: src/gui/mod.rs:997
 msgid "Find Value"
 msgstr "查找数值"
 
-#: src/gui/mod.rs:1004
+#: src/gui/mod.rs:1006
 msgid "A newer version of Ferret is installed"
 msgstr "已安装更新版本的 Ferret"
 
-#: src/gui/mod.rs:1004
+#: src/gui/mod.rs:1006
 msgid "Restart"
 msgstr "重启"
 
-#: src/gui/mod.rs:1028
+#: src/gui/mod.rs:1030
 msgid "Game"
 msgstr "游戏"
 
-#: src/gui/mod.rs:1034
+#: src/gui/mod.rs:1036
 msgid "Ferret Could Not Start"
 msgstr "Ferret 无法启动"
 
-#: src/gui/mod.rs:1037
+#: src/gui/mod.rs:1039
 msgid "Refresh"
 msgstr "刷新"
 
-#: src/gui/mod.rs:1195
+#: src/gui/mod.rs:1197
 #, rust-format
 msgid "{names} and {last}"
 msgstr "{names}和{last}"
 
-#: src/gui/mod.rs:1216
+#: src/gui/mod.rs:1218
 msgid "whole number"
 msgstr "整数"
 
-#: src/gui/mod.rs:1217
+#: src/gui/mod.rs:1219
 msgid "float"
 msgstr "单浮点"
 
-#: src/gui/mod.rs:1218
+#: src/gui/mod.rs:1220
 msgid "double"
 msgstr "双浮点"
 
-#: src/gui/mod.rs:1219
+#: src/gui/mod.rs:1221
 msgid "encoded whole number"
 msgstr "编码整数"
 
-#: src/gui/mod.rs:1220
+#: src/gui/mod.rs:1222
 msgid "2-byte whole number"
 msgstr "2 字节整数"
 
-#: src/gui/mod.rs:1228
+#: src/gui/mod.rs:1230
 #, rust-format
 msgid "at most {max}"
 msgstr "至多 {max}"
 
-#: src/gui/mod.rs:1229
+#: src/gui/mod.rs:1231
 #, rust-format
 msgid "at least {min}"
 msgstr "至少 {min}"
 
-#: src/gui/mod.rs:1230
+#: src/gui/mod.rs:1232
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "在 {min} 到 {max} 之间"
 
-#: src/gui/mod.rs:1231
+#: src/gui/mod.rs:1233
 msgid "unlimited"
 msgstr "无限制"
 
-#: src/gui/mod.rs:1237
+#: src/gui/mod.rs:1239
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
 msgstr[0] "{n} 类位置"
 
-#: src/gui/mod.rs:1244
+#: src/gui/mod.rs:1246
 msgid "It can be played with other people."
 msgstr "可以和其他人一起玩。"
 
-#: src/gui/mod.rs:1247
+#: src/gui/mod.rs:1249
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "它自带 {anticheat},目前没有运行。"
 
-#: src/gui/mod.rs:1251
+#: src/gui/mod.rs:1253
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
-msgstr "发行商会标记存档被修改过的账号：被标记的账号可能会被排除在排行榜、活动或合作模式之外。"
+msgstr ""
+"发行商会标记存档被修改过的账号：被标记的账号可能会被排除在排行榜、活动或合作"
+"模式之外。"
 
-#: src/gui/mod.rs:1256
+#: src/gui/mod.rs:1258
 msgid "Its scores go on online leaderboards that other players see."
 msgstr "它的分数会上传到其他玩家能看到的在线排行榜。"
 

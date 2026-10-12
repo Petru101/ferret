@@ -1625,6 +1625,10 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
         Some(r) => r,
         None => into.run(&kinds, out),
     };
+    if r.over {
+        // The search so far is kept: nothing replaced it.
+        return writeln!(out, "error: too many matches (over {MAX_MATCHES})");
+    }
     let all = r.found.len();
     let step = format!("scan {arg}");
     let within = if r.shaped.is_empty() {
@@ -1661,7 +1665,12 @@ struct MemScanned {
     shaped: Vec<Candidate>,
     bytes: u64,
     unreadable: u64,
+    /// More than `MAX_MATCHES`: given up (0 holds hundreds of millions of places, gigabytes to keep).
+    over: bool,
 }
+
+/// The most matches a scan keeps (16 bytes each).
+const MAX_MATCHES: usize = 16 << 20;
 
 impl MemScan<'_> {
     /// Writes "progress <bytes done> <bytes in all>" lines as it goes (at most ten a second), so
@@ -1676,11 +1685,21 @@ impl MemScan<'_> {
             .filter(|r| scannable(r))
             .flat_map(|r| (r.start..r.end).step_by(CHUNK).map(move |a| (a, ((r.end - a) as usize).min(CHUNK))))
             .collect();
+        let seen = AtomicUsize::new(0);
         let parts = parallel(chunks.len(), |i| chunks[i].1 as u64, CHUNK, out, |i, buf| {
             let (addr, len) = chunks[i];
-            self.chunk(kinds, &mut buf[..len], addr)
+            if seen.load(Ordering::Relaxed) > MAX_MATCHES {
+                return MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0, over: true };
+            }
+            let r = self.chunk(kinds, &mut buf[..len], addr);
+            seen.fetch_add(r.found.len(), Ordering::Relaxed);
+            r
         });
-        let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0 };
+        let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0, over: false };
+        if seen.load(Ordering::Relaxed) > MAX_MATCHES {
+            r.over = true;
+            return r;
+        }
         for p in parts {
             r.found.extend(p.found);
             r.shaped.extend(p.shaped);
@@ -1695,7 +1714,7 @@ impl MemScan<'_> {
     /// (MADV_GUARD_INSTALL), and a read stopping at one used to lose the rest of the chunk (on
     /// 32-bit games about 100 MiB of a scan).
     fn chunk(&self, kinds: &[Kind], buf: &mut [u8], addr: u64) -> MemScanned {
-        let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0 };
+        let mut r = MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0, over: false };
         let mut at = 0;
         while at < buf.len() {
             let here = addr + at as u64;
