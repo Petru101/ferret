@@ -1388,27 +1388,29 @@ const NOT_GAMES: &[&str] = &[
 /// the plain libGL/libEGL/libvulkan front ends also load in programs that never draw), or one
 /// of the ways games draw without the GPU: SDL (pygame), Java's AWT (Java2D games), or any
 /// connection to the display from a program outside the system's folders (old Adventure Game
-/// Studio games draw through plain X11); and it isn't a desktop app (GTK, Qt, Chromium/Electron).
+/// Studio games draw through plain X11); and it isn't a desktop app (GTK, Qt, Chromium/Electron),
+/// unless a game library is loaded too: Allegro's dialog add-on brings GTK 3 into every game
+/// using it (Darkness Looming).
 fn draws_like_a_game(pid: u32) -> bool {
     if cmdline(pid).contains(" --type=") {
         return false;
     }
     let Ok(regions) = maps(pid) else { return false };
-    let (mut driver, mut display) = (false, false);
+    let (mut driver, mut display, mut toolkit, mut game) = (false, false, false, false);
     for r in &regions {
         let name = r.path.rsplit('/').next().unwrap_or_default();
-        if desktop_toolkit(name) {
-            return false;
-        }
-        driver |= gpu_driver(name)
-            || ["libSDL-1.2.", "libSDL2", "libSDL3", "libawt_xawt.", "libawt_wlawt."].iter().any(|l| name.starts_with(l));
+        toolkit |= desktop_toolkit(name);
+        game |= ["libSDL-1.2.", "libSDL2", "libSDL3", "liballeg", "libsfml-graphics", "libraylib", "UnityPlayer.so"]
+            .iter()
+            .any(|l| name.starts_with(l));
+        driver |= gpu_driver(name) || ["libawt_xawt.", "libawt_wlawt."].iter().any(|l| name.starts_with(l));
         display |= ["libX11.", "libxcb.", "libwayland-client."].iter().any(|l| name.starts_with(l));
     }
     let system = || {
         let exe = fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_default();
         ["/usr/", "/bin/", "/sbin/", "/lib", "/app/", "/nix/", "/snap/"].iter().any(|d| exe.to_string_lossy().starts_with(d))
     };
-    driver || display && !system()
+    (driver || game || display && !system()) && (game || !toolkit)
 }
 
 /// A GPU driver's library: loaded once a program draws with the GPU.
