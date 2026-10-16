@@ -66,6 +66,12 @@ fn argv0(pid: u32) -> String {
         .unwrap_or_default()
 }
 
+/// The program's arguments (without the program itself).
+fn args(pid: u32) -> Vec<String> {
+    let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    raw.split(|b| *b == 0).skip(1).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+}
+
 fn cmdline(pid: u32) -> String {
     fs::read(format!("/proc/{pid}/cmdline"))
         .map(|b| {
@@ -169,6 +175,14 @@ fn java_game(args: &[String]) -> Option<String> {
 fn is_python(program: &str) -> bool {
     let p = program.trim_end_matches(".exe").trim_end_matches('w');
     p.strip_prefix("python").is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+}
+
+/// Python running a Wine launcher (Proton's `proton` script, GE-Proton's too, or `umu-run`)
+/// rather than a game. Steam injects its overlay into every process of a launch and the overlay
+/// needs libGL, so Proton's launcher loads the GPU driver and looks like a pygame game.
+fn wine_launcher(args: &[String]) -> bool {
+    let script = args.iter().find(|a| !a.starts_with('-'));
+    script.is_some_and(|a| ["proton", "umu-run", "umu_run.py"].contains(&a.rsplit('/').next().unwrap_or_default()))
 }
 
 /// DOSBox and its forks, as programs (".exe" left off).
@@ -1495,8 +1509,8 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
             continue;
         }
         // Python also runs Steam's and umu's tools (with the game's app ID): only a Python that
-        // draws is a game (pygame).
-        if is_python(&lower) && !draws_like_a_game(pid) {
+        // draws is a game (pygame), and never Proton's launcher (it draws through Steam's overlay).
+        if is_python(&lower) && (!draws_like_a_game(pid) || wine_launcher(&args(pid))) {
             continue;
         }
         let dash = |s: Option<&str>| s.filter(|s| !s.is_empty()).unwrap_or("-").to_owned();
@@ -3304,7 +3318,7 @@ pub fn run(as_user: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dosbox_game, run_game};
+    use super::{dosbox_game, run_game, wine_launcher};
 
     #[test]
     fn names_the_game_a_player_program_runs() {
@@ -3327,6 +3341,11 @@ mod tests {
         assert_eq!(game("python3", &["main.py"]), Some("Hyperplasm (Python)".into()));
         assert_eq!(game("python3", &["-m", "gunship"]), Some("gunship".into()));
         assert_eq!(game("python3", &["/usr/bin/some-tool"]), None);
+        let launcher = |args: &[&str]| wine_launcher(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert!(launcher(&["/home/p/.local/share/Steam/steamapps/common/Proton - Experimental/proton", "waitforexitandrun", "/g/Game.exe"]));
+        assert!(launcher(&["/home/p/.steam/root/compatibilitytools.d/GE-Proton10-1/proton", "run", "/g/Game.exe"]));
+        assert!(launcher(&["-u", "/usr/bin/umu-run", "/g/Game.exe"]));
+        assert!(!launcher(&["/home/p/Games/ppu/src/main.py"]));
         assert_eq!(game("love", &[]), None);
         assert_eq!(game("SortTheCourt.x86", &["main.py"]), None);
     }
