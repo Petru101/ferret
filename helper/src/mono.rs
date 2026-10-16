@@ -336,9 +336,14 @@ fn known_layout(pid: u32) -> Option<Layout> {
 struct Mono<'a> {
     mem: &'a File,
     lay: Layout,
+    heap: &'a Heap<'a>,
 }
 
-impl Mono<'_> {
+impl<'a> Mono<'a> {
+    fn new(heap: &'a Heap<'a>, lay: Layout) -> Self {
+        Mono { mem: heap.file(), lay, heap }
+    }
+
     fn word(&self, at: u64) -> Option<u64> {
         word(self.mem, at, self.lay.w)
     }
@@ -543,12 +548,19 @@ impl Mono<'_> {
     }
 
     /// Whether the object is one, and not a destroyed Unity object. A live Unity object's
-    /// native object points back to it (places in Mono's own tables that point to the class's
-    /// vtable don't: 175 of them for ULTRAKILL's player).
+    /// native object starts with its C++ vtable (in the game's read-only code image) and points
+    /// back to it (places in Mono's own tables that point to the class's vtable don't: 175 of
+    /// them for ULTRAKILL's player). Both: with Particle Fleet modded (BepInEx), a run of
+    /// pointers to their neighbours started with a pointer to a GameSpace "vtable" (one of the
+    /// 2434 things pointing to the class) and so "pointed back" too; its two pointers were shown
+    /// as gems and omni, and a write there would have broken the game.
     fn live(&self, obj: u64, k: u64) -> bool {
         match self.native(obj, k) {
             Some(0) => false,
-            Some(n) => (0..NATIVE_BACK).step_by(self.lay.w as usize).any(|o| self.word(n + o) == Some(obj)),
+            Some(n) => {
+                self.word(n).is_some_and(|v| self.heap.read_only(v))
+                    && (0..NATIVE_BACK).step_by(self.lay.w as usize).any(|o| self.word(n + o) == Some(obj))
+            }
             None => true,
         }
     }
@@ -593,7 +605,7 @@ impl Mono<'_> {
 /// plain C# class gets no path there (it would lead to many places).
 pub fn discover(heap: &Heap, target: u64) -> Option<(MonoPath, Vec<u64>)> {
     let lay = layout_near(heap, target)?;
-    let m = Mono { mem: heap.file(), lay };
+    let m = Mono::new(heap, lay);
     let (obj, k, field) = m.holder(target)?;
     let (namespace, class) = m.name(k)?;
     if !m.live(obj, k) {
@@ -629,7 +641,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(MonoPath, Vec<u64>)> {
 /// None when the memory isn't Mono's.
 pub fn own_fields_along(heap: &Heap, target: u64, value: u64, chain: &[u64]) -> Option<bool> {
     let lay = layout_near(heap, target)?;
-    let m = Mono { mem: heap.file(), lay };
+    let m = Mono::new(heap, lay);
     let own = |obj: u64, off: u64| m.holder(obj + off).is_some_and(|(o, _, _)| o == obj);
     let mut obj = target.checked_sub(value)?;
     if !own(obj, value) {
@@ -778,14 +790,14 @@ fn keep_static(pid: u32, k: u64, data: u64) {
 fn find_static(heap: &Heap, path: &MonoPath) -> Option<(u64, u64)> {
     let pid = heap.pid;
     if let Some(lay) = known_layout(pid) {
-        let m = Mono { mem: heap.file(), lay };
+        let m = Mono::new(heap, lay);
         let known = STATICS.lock().unwrap().iter().filter(|s| s.0 == pid).map(|s| (s.1, s.2)).collect::<Vec<_>>();
         if let Some(found) = known.into_iter().find(|&(k, d)| m.is(k, path) && m.static_start(pid, k, d, path).is_some()) {
             return Some(found);
         }
     }
     let vts = vtables(heap, path);
-    let m = Mono { mem: heap.file(), lay: known_layout(pid)? };
+    let m = Mono::new(heap, known_layout(pid)?);
     let w = m.lay.w;
     let mut b = vec![0u8; MAX_VTABLE as usize];
     for &vt in &vts {
@@ -807,7 +819,7 @@ fn find_static(heap: &Heap, path: &MonoPath) -> Option<(u64, u64)> {
 /// What `addr` is, when it's a field of a Mono object: "hp of NewMovement" (for the matches
 /// list; a destroyed Unity object says so).
 pub fn about(heap: &Heap, addr: u64) -> Option<String> {
-    let m = Mono { mem: heap.file(), lay: layout_near(heap, addr)? };
+    let m = Mono::new(heap, layout_near(heap, addr)?);
     let (obj, k, field) = m.holder(addr)?;
     let (_, class) = m.name(k)?;
     Some(match m.live(obj, k) {
@@ -893,7 +905,7 @@ fn vtables(heap: &Heap, path: &MonoPath) -> Vec<u64> {
     };
     let Some(&(_, lay)) = classes.first() else { return Vec::new() };
     keep_layout(heap.pid, lay);
-    let m = Mono { mem, lay };
+    let m = Mono::new(heap, lay);
     let mut classes: Vec<u64> = classes.into_iter().map(|(k, _)| k).filter(|&k| m.is_class(k) && m.is(k, path)).collect();
     classes.sort_unstable();
     classes.dedup();
@@ -919,7 +931,7 @@ pub fn find_roots(heap: &Heap, path: &MonoPath) -> Vec<u64> {
     }
     let vts = vtables(heap, path);
     let (Some(lay), false) = (known_layout(heap.pid), vts.is_empty()) else { return Vec::new() };
-    let m = Mono { mem: heap.file(), lay };
+    let m = Mono::new(heap, lay);
     heap.referrers(&vts)
         .into_iter()
         .filter(|&obj| m.class_of(obj).is_some_and(|k| m.is(k, path) && m.live(obj, k)))
@@ -932,7 +944,7 @@ pub fn find_roots(heap: &Heap, path: &MonoPath) -> Vec<u64> {
 /// from looking again.
 pub fn walk(heap: &Heap, roots: &[u64], path: &MonoPath) -> Vec<u64> {
     let Some(lay) = known_layout(heap.pid) else { return Vec::new() };
-    let m = Mono { mem: heap.file(), lay };
+    let m = Mono::new(heap, lay);
     // A static path: its root is the class's static data.
     if !path.via.is_empty() {
         let pid = heap.pid;

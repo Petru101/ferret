@@ -139,16 +139,29 @@ pub struct Heap<'a> {
     mem: &'a File,
     width: usize,
     rw: Vec<(u64, u64)>,
+    /// Readable, non-writable mappings (code and constant data), sorted.
+    ro: Vec<(u64, u64)>,
 }
 
 impl<'a> Heap<'a> {
     pub fn new(pid: u32, mem: &'a File, width: usize) -> io::Result<Self> {
-        let rw = maps(pid)?
+        let regions = maps(pid)?;
+        let fits = |r: &&crate::helper::Region| width == 8 || r.end <= 1 << 32;
+        let rw = regions.iter().filter(|r| scannable(r)).filter(fits).map(|r| (r.start, r.end)).collect();
+        let ro = regions
             .iter()
-            .filter(|r| scannable(r) && (width == 8 || r.end <= 1 << 32))
+            .filter(|r| r.perms.starts_with('r') && !r.perms.contains('w'))
+            .filter(fits)
             .map(|r| (r.start, r.end))
             .collect();
-        Ok(Heap { pid, mem, width, rw })
+        Ok(Heap { pid, mem, width, rw, ro })
+    }
+
+    /// Whether `v` is in readable memory the game can't write: code or constant data, where
+    /// C++ vtables are.
+    pub fn read_only(&self, v: u64) -> bool {
+        let i = self.ro.partition_point(|r| r.0 <= v);
+        i > 0 && v < self.ro[i - 1].1
     }
 
     fn w(&self) -> u64 {
