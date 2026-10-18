@@ -218,7 +218,7 @@ impl ValuesView {
             if w.shown_limit.replace((v.min, v.max)) != (v.min, v.max) {
                 (w.fill_limit)(v.min, v.max);
             }
-            w.keep.set_sensitive(v.value.is_some_and(|n| n > 0.0));
+            w.keep.set_sensitive(v.value.is_some_and(|n| n >= 0.0));
             w.group.set_description(Some(&about));
             let shown = v.value.map_or("?".into(), |n| core::number_text(n, v.decimals));
             w.value.set_tooltip_text(Some(&shown));
@@ -338,7 +338,7 @@ impl ValuesView {
         limit.add_row(&min);
         let keep = gtk::Button::builder()
             .label(tr!("Keep It"))
-            .tooltip_text(tr!("Never let it drop below the number it is now"))
+            .tooltip_text(tr!("Never let it drop below the number it is now (at 0: never let it rise above 0)"))
             .valign(gtk::Align::Center)
             .build();
         limit.add_suffix(&keep);
@@ -422,10 +422,21 @@ impl ValuesView {
             let (current, limit, min, max, endless, filling) =
                 (current.clone(), limit.clone(), min.clone(), max.clone(), endless.clone(), filling.clone());
             Rc::new(move || {
-                let Some(n) = current.get().filter(|&n| n > 0.0) else { return };
+                let Some(n) = current.get().filter(|&n| n >= 0.0) else { return };
+                filling.set(true);
+                // At 0 "at least" means nothing: kept at 0 (a timer that ends a power, From
+                // Dust's Jellify water: At Most 0 keeps the power on).
+                if n == 0.0 {
+                    endless.set_active(false);
+                    max.set_value(0.0);
+                    min.set_value(0.0);
+                    limit.set_enable_expansion(true);
+                    filling.set(false);
+                    apply_limit();
+                    return;
+                }
                 // Rounded down to the field's digits: never above what the game has now.
                 let f = 10f64.powi(min.digits() as i32);
-                filling.set(true);
                 endless.set_active(true);
                 min.set_value((n * f).floor() / f);
                 // The unused maximum showed an older, lower number (At Most 104, At Least 200).

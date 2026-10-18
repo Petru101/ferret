@@ -7,7 +7,7 @@ use crate::bar::Kind as GaugeKind;
 use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
-const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
+const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, copy (a value with no number), moving, still, use <addr>, unpick, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
 restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>
 system: allow (the helper with your password, for native games under kernel.yama.ptrace_scope 1 or 2)
 shared library: shared, share, take <id>, unshare <id>";
@@ -112,6 +112,30 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             AutoResult::Several(n) => println!("{n} candidates left"),
             AutoResult::PutBack(n) => println!("{n} candidates left; the game put every test value back"),
             AutoResult::Unsure(why) => println!("{why} Kept: 1 candidate left"),
+        },
+        "copy" => {
+            core.copy_memory()?;
+            println!("copied: now moving or still");
+        }
+        // No Number?'s readings, one at a time (the window takes one every 2 s).
+        "moving" | "still" => {
+            let motion = if cmd == "moving" { core::Motion::Moving } else { core::Motion::Still };
+            println!("{} candidates left", core.phase_step(motion)?);
+        }
+        // Use This One on a listed place, and taking it back as a failed save does.
+        "use" => {
+            let loc = core::parse_loc(arg).ok_or("usage: use <hex addr[:type]>")?;
+            core.choose(loc)?;
+            println!("picked 0x{:x}", loc.addr);
+        }
+        // Tests: a place found another way becomes the only match.
+        "track" => {
+            core.track(core::parse_loc(arg).ok_or("usage: track <hex addr[:type]>")?)?;
+            println!("tracking {arg}");
+        }
+        "unpick" => match core.unpick() {
+            Some(n) => println!("took back the pick: {n} candidates"),
+            None => println!("the last step wasn't a pick: nothing taken back"),
         },
         "try" => {
             let (loc, v) = arg.split_once(' ').ok_or("usage: try <hex addr[:type]> <n>")?;

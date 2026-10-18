@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -357,8 +357,11 @@ pub enum Phase {
     Restoring(String, String, usize, usize),
     /// The watched box stopped showing the number for the third time since the pick.
     BoxChanging,
-    /// Copying the game's memory for a bar's search: how far. The bar mustn't change.
+    /// Copying the game's memory for a bar's search or No Number?: how far. The value mustn't
+    /// change.
     Copying(f64),
+    /// No Number? follows the value: this many places, and whether the player says it's moving.
+    Following(usize, bool),
     /// The copy is taken: the bar has to change in the game before anything narrows down.
     BarReady,
 }
@@ -986,6 +989,26 @@ fn java_write() -> String {
     tr!("Java game: Ferret only shows saved values. Java moves its objects around, so a later write could land in another object and crash the game. Change it from the Find tab while you search instead.")
 }
 
+/// What the player says a value with no number does now (No Number?, `Core::phase_step`):
+/// moving on its own (a ring counting, a bar filling or draining) or still.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Motion {
+    Moving,
+    Still,
+}
+
+impl Motion {
+    fn word(self) -> &'static str {
+        match self {
+            Motion::Moving => "moving",
+            Motion::Still => "still",
+        }
+    }
+}
+
+/// How often No Number? reads the game while the player says what the value does.
+pub const PHASE_EVERY: Duration = Duration::from_secs(2);
+
 pub enum AutoResult {
     /// One address left: the value.
     Found(Loc),
@@ -1223,6 +1246,13 @@ pub struct Core {
     /// How full the bar was when the matches' values were taken (None: the search has a copy
     /// of the game's memory to compare with, or none at all).
     bar_last: Option<(f64, f64)>,
+    /// A copy of the game's memory waits for No Number?'s first steps (`copy_memory`,
+    /// `phase_step`); the phase the last step was in.
+    phase_copy: bool,
+    phase_last: Option<Motion>,
+    /// The shapes before the last place was picked from the matches (`choose`): `unpick`
+    /// puts them back, since a pick that couldn't be saved may be the wrong place.
+    shapes_before_pick: Option<Vec<Shape>>,
     /// The last place tried that kept its test number: where, what it held before, the number
     /// written (`put_back_try`).
     last_try: Option<(Loc, f64, f64)>,
@@ -1278,6 +1308,9 @@ impl Core {
             side_jobs: None,
             bar: None,
             bar_last: None,
+            phase_copy: false,
+            phase_last: None,
+            shapes_before_pick: None,
             last_try: None,
         })
     }
@@ -1461,6 +1494,7 @@ impl Core {
         self.search = None;
         // A bar's copy of memory was the old process's.
         self.bar_last = None;
+        self.phase_copy = false;
         self.font = Font::load(&digits_path(&exe));
         if !self.font.is_empty() {
             self.say(&format!("knows how {exe} draws the digits {}", self.font.known()));
@@ -2102,15 +2136,21 @@ impl Core {
     }
 
     /// The helper may have found a limited value at a new address; use that one.
+    /// The log says when one waiting to be found (address 0) turns up: nothing else did.
     fn sync_addresses(&mut self) {
         let limits = self.limits();
+        let mut found = Vec::new();
         if let Some(game) = self.game.as_mut() {
             for (name, addr, _) in limits {
                 if let Some(e) = game.entries.iter_mut().find(|(n, _)| *n == name) {
+                    if e.1.addr == 0 && addr != 0 {
+                        found.push(format!("{name}: found at 0x{addr:x} (its code ran)"));
+                    }
                     e.1.addr = addr;
                 }
             }
         }
+        found.iter().for_each(|f| self.say(f));
     }
 
     /// Forgets a saved value: out of the profile, no longer followed or kept in range. The
@@ -2982,6 +3022,7 @@ impl Core {
         // Matches go on from the new box's reading (`bar_step` marks them); a copy of memory
         // was taken against the old box.
         self.bar_last = None;
+        self.phase_copy = false;
         Ok(kind)
     }
 
@@ -3019,6 +3060,7 @@ impl Core {
         self.shaped = false;
         self.search = None;
         self.bar_last = None;
+        self.phase_copy = false;
         self.helper.call("track");
         self.say("search cleared");
     }
@@ -3043,6 +3085,8 @@ impl Core {
         // In English for the log, and in the player's language for the window.
         let (what, shown) = match (words.next(), words.next()) {
             (Some("next"), Some("bar")) => ("a move of the bar".to_owned(), tr!("a move of the bar")),
+            (Some("phase"), Some("moving")) => ("a reading while it moved".to_owned(), tr!("a reading while it moved")),
+            (Some("phase"), _) => ("a reading while it stayed still".to_owned(), tr!("a reading while it stayed still")),
             (Some("snap"), _) => ("copying the game's memory".to_owned(), tr!("copying the game's memory")),
             (Some("scan" | "next"), Some(n)) => (format!("the search for {n}"), tr!("the search for {n}", n)),
             (Some("drop"), Some(at)) => (format!("ruling out {}", place(at)), tr!("ruling out {place}", place = place(at))),
@@ -3365,6 +3409,7 @@ impl Core {
             cmd += " all";
         }
         self.bar_last = None;
+        self.phase_copy = false;
         let shown = n.to_string();
         let on_phase = &mut self.on_phase;
         let mut tell = |done| {
@@ -3469,8 +3514,49 @@ impl Core {
         }
         self.search = None;
         self.say(&format!("picked 0x{:x} ({}) as the value", loc.addr, loc.kind.describe()));
+        self.shapes_before_pick = Some(self.shapes.clone());
         self.learn_shape(loc);
         Ok(loc)
+    }
+
+    /// Makes `loc` the only match (tests: a place found another way, to save or try it).
+    pub fn track(&mut self, loc: Loc) -> Result<(), String> {
+        self.game()?;
+        let reply = self.helper.call(&format!("track {loc}"));
+        match match_count(&reply) {
+            Some(1) => {
+                self.search = Some((1, 0));
+                Ok(())
+            }
+            _ => Err(first_error(&reply).unwrap_or_else(|| reply.join(" "))),
+        }
+    }
+
+    /// After a save that failed: takes back the last pick from the matches (`choose`), when
+    /// that was the last step, so the player can try the others; the shape learned from it
+    /// goes too. The places matching again, or None when the last step was something else.
+    pub fn unpick(&mut self) -> Option<usize> {
+        let reply = self.helper.call("undo");
+        if !reply.get(1).is_some_and(|l| l.starts_with("undid keep ")) {
+            if first_error(&reply).is_none() {
+                self.helper.call("redo");
+            }
+            return None;
+        }
+        let count = match_count(&reply).filter(|&n| n > 0)?;
+        self.search = Some((count, 0));
+        if let (Some(before), Some(exe)) = (self.shapes_before_pick.take(), self.game.as_ref().map(|g| g.exe.clone())) {
+            if before != self.shapes {
+                self.shapes = before;
+                if let Err(e) = shapes::save(&shapes_path(&exe), &self.shapes) {
+                    self.say(&format!("could not save the shapes: {e}"));
+                }
+                self.send_shapes();
+                self.say("forgot the shape learned from it");
+            }
+        }
+        self.say(&format!("not saved: took back the pick, {count} places to try again"));
+        Some(count)
     }
 
     /// Current scan candidates (at most 20 are listed by the helper).
@@ -4191,6 +4277,7 @@ impl Core {
             self.helper.call("track");
             self.search = None;
             self.bar_last = None;
+            self.phase_copy = false;
             return self.auto_bar(limit - start.elapsed());
         }
         end
@@ -4223,6 +4310,7 @@ impl Core {
                     self.helper.call(&format!("keep {loc}"));
                     self.search = None;
                     self.bar_last = None;
+                    self.phase_copy = false;
                     self.say(&format!("stored as {}", loc.kind.with_article()));
                     self.learn_shape(loc);
                     return Ok(AutoResult::Found(loc));
@@ -4350,6 +4438,113 @@ impl Core {
                 }
                 None => Err(tr!("Can't read the number now (is it on screen?). Type it below instead.")),
             },
+        }
+    }
+
+    /// A search for a value the game shows no number for (a ring, a bar Ferret can't follow,
+    /// hunger): a copy of the game's memory now; then the player says whether it's moving on
+    /// its own or still, and Ferret reads the game every `PHASE_EVERY` (`follow_motion`).
+    pub fn copy_memory(&mut self) -> Result<(), String> {
+        self.game()?;
+        self.cancel.store(false, Ordering::Relaxed);
+        let mut cmd = format!("snap {}", cache_dir().join("memory.copy").display());
+        let kinds: Vec<&str> = self.scan_kinds.iter().map(|k| k.name()).collect();
+        if !kinds.is_empty() {
+            cmd += &format!(" {}", kinds.join(","));
+        }
+        let on_phase = &mut self.on_phase;
+        let mut tell = |done| {
+            if let Some(f) = on_phase.as_mut() {
+                f(Phase::Copying(done));
+            }
+        };
+        tell(0.0);
+        let reply = self.helper.call_with(&cmd, &mut tell);
+        self.say(&format!("value with no number: {}", reply.join(" ")));
+        if let Some(e) = first_error(&reply) {
+            return Err(e);
+        }
+        self.search = None;
+        self.bar_last = None;
+        self.searched_decimals = 0;
+        self.phase_copy = true;
+        self.phase_last = None;
+        Ok(())
+    }
+
+    /// One reading of No Number?'s search (helper `phase`): the places still doing what the
+    /// player says the value does now. A new phase never compares across the moment it began
+    /// (a power starting or ending jumps). The places left (0 while it's still the copy).
+    pub fn phase_step(&mut self, motion: Motion) -> Result<usize, String> {
+        self.game()?;
+        if self.search.is_none() && !self.phase_copy {
+            return Err(tr!("Nothing to compare with yet. Click No Number? first."));
+        }
+        let left = |core: &Self| core.search.map_or(0, |(n, _)| n);
+        if self.phase_last.is_some_and(|m| m != motion) {
+            let reply = self.helper.call("phase switch");
+            let now = match_count(&reply).filter(|&n| n > 0).unwrap_or(left(self));
+            self.say(&format!("now {}: {} places", motion.word(), now));
+            if now > 0 && self.search.is_some() {
+                self.search = Some((now, 0));
+            }
+        }
+        self.phase_last = Some(motion);
+        let reply = self.helper.call(&format!("phase {}", motion.word()));
+        if let Some(e) = first_error(&reply) {
+            if e.contains("no copy") {
+                self.phase_copy = false;
+                return Err(tr!("The copy of the game's memory is gone. Click No Number? to make a new one."));
+            }
+            return Err(e);
+        }
+        // 0: still the copy, or nothing did that (the places are kept: a step off).
+        if let Some(n) = match_count(&reply).filter(|&n| n > 0) {
+            if self.phase_copy {
+                self.say(&format!("{}: {}", motion.word(), reply.join(" ")));
+            }
+            self.phase_copy = false;
+            self.search = Some((n, 0));
+            self.tell_matches(n);
+        }
+        Ok(left(self))
+    }
+
+    /// No Number?'s readings while the player says what the value does (`motion`: 1 moving, 2
+    /// still, changed by the window's buttons and hotkeys meanwhile), until Stop, or until 20
+    /// places or fewer stayed the same through a whole phase.
+    pub fn follow_motion(&mut self, motion: &AtomicU8) -> Result<AutoResult, String> {
+        self.game()?;
+        self.cancel.store(false, Ordering::Relaxed);
+        let cancelled = |c: &Arc<AtomicBool>| c.load(Ordering::Relaxed);
+        let mut settled: Option<(usize, Motion)> = None;
+        let mut count = self.search.map_or(0, |(n, _)| n);
+        while !cancelled(&self.cancel) {
+            let now = match motion.load(Ordering::Relaxed) {
+                1 => Motion::Moving,
+                _ => Motion::Still,
+            };
+            let switched = self.phase_last.is_some_and(|m| m != now);
+            let new = self.phase_step(now)?;
+            self.phase(Phase::Following(new, now == Motion::Moving));
+            // Few left, and the same ones through a whole phase: what follows the value.
+            match settled {
+                Some((n, m)) if n == new && switched && m != now => break,
+                Some((n, _)) if n == new => {}
+                _ => settled = (1..=20).contains(&new).then_some((new, now)),
+            }
+            count = new;
+            let wait = Instant::now();
+            while wait.elapsed() < PHASE_EVERY && !cancelled(&self.cancel) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            self.run_side_jobs();
+        }
+        self.say(&format!("value with no number: {count} places left"));
+        match count {
+            0 => Err(tr!("Stopped before anything was narrowed down. Press It's Moving while it changes on its own.")),
+            1 => Ok(AutoResult::Unsure(tr!("Ferret only knows that it moved when you said it did."))),
+            n => Ok(AutoResult::Several(n)),
         }
     }
 

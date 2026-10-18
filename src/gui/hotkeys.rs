@@ -18,10 +18,14 @@ const DESKTOP: &str = "/org/freedesktop/portal/desktop";
 const IFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 
 /// Id, what it does, the trigger asked for (the desktop may give another, or none).
-const KEYS: [(&str, &str, &str); 3] = [
+const KEYS: [(&str, &str, &str); 5] = [
     ("limits", n_!("Turn limits off or on"), "CTRL+SHIFT+F9"),
     ("search", n_!("Start or stop the search"), "CTRL+SHIFT+F10"),
     ("again", n_!("Scan again (the number stayed the same)"), "CTRL+SHIFT+F11"),
+    // A value with no number (No Number?): the player says what it does now, from the game.
+    // Not F8: a dropped hotkey used it and Plasma may still hold it for Ferret.
+    ("still", n_!("It's still (No Number?)"), "CTRL+SHIFT+F6"),
+    ("moving", n_!("It's moving (No Number?)"), "CTRL+SHIFT+F7"),
 ];
 
 pub struct Hotkeys {

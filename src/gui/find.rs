@@ -6,7 +6,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,6 +111,13 @@ pub struct FindView {
     typed_go: gtk::Button,
     /// The last number typed: Scan Again offers it when there's no box to read.
     last_typed: RefCell<String>,
+    /// A search for a value the game shows no number for (No Number?): the player says
+    /// whether it's moving or still with these buttons (or the hotkeys), `motion` tells the
+    /// running readings (1 moving, 2 still); Try Them One by One once few are left.
+    moving: Cell<bool>,
+    motion: Arc<AtomicU8>,
+    motion_box: gtk::Box,
+    motion_try: gtk::Button,
     /// How many places matched after the last search, to show how far a search narrowed it.
     last_count: Cell<Option<usize>>,
     digits: gtk::Box,
@@ -396,6 +403,17 @@ impl FindView {
         ask_box.append(&yes);
         guide.actions.append(&ask_box);
 
+        // A value the game shows no number for (a ring, a bar Ferret can't follow, hunger): the
+        // player says whether it's moving on its own or still.
+        let still = gtk::Button::builder().label(tr!("It's Still")).css_classes(["guide-button"]).build();
+        let moving = gtk::Button::builder().label(tr!("It's Moving")).css_classes(["guide-button"]).build();
+        let motion_try = gtk::Button::builder().label(tr!("Try Them One by One")).css_classes(["suggested-action", "guide-button"]).build();
+        let motion_box = gtk::Box::builder().spacing(8).visible(false).build();
+        for b in [&still, &moving, &motion_try] {
+            motion_box.append(b);
+        }
+        guide.actions.append(&motion_box);
+
         let typed_label = gtk::Label::builder().label(tr!("Can't read it?")).build();
         let typed = gtk::Entry::builder()
             .placeholder_text(tr!("Type the number"))
@@ -404,6 +422,13 @@ impl FindView {
             .valign(gtk::Align::Center)
             .build();
         let typed_go = gtk::Button::builder().label(tr!("Search")).valign(gtk::Align::Center).build();
+        let no_number = gtk::Button::builder()
+            .label(tr!("No Number?"))
+            .tooltip_text(tr!(
+                "For a value the game shows no number for, like a ring, a bar or hunger: Ferret copies the game's memory, then you tell it whether the value went up or down"
+            ))
+            .valign(gtk::Align::Center)
+            .build();
         let more_button = gtk::ToggleButton::builder()
             .label(tr!("More"))
             .tooltip_text(tr!("Value types, the game's learned digits and the places of earlier finds"))
@@ -414,7 +439,7 @@ impl FindView {
             tools.append(w);
         }
         tools.append(&gtk::Box::builder().hexpand(true).build());
-        for w in [typed_label.upcast_ref::<gtk::Widget>(), typed.upcast_ref(), typed_go.upcast_ref(), more_button.upcast_ref()] {
+        for w in [typed_label.upcast_ref::<gtk::Widget>(), typed.upcast_ref(), typed_go.upcast_ref(), no_number.upcast_ref(), more_button.upcast_ref()] {
             tools.append(w);
         }
 
@@ -564,6 +589,10 @@ impl FindView {
             typed,
             typed_go: typed_go.clone(),
             last_typed: RefCell::default(),
+            moving: Cell::default(),
+            motion: Arc::default(),
+            motion_box,
+            motion_try: motion_try.clone(),
             last_count: Cell::default(),
             digits,
             digits_hint,
@@ -599,6 +628,18 @@ impl FindView {
             });
             let view_ = view.clone();
             typed_go.connect_clicked(move |_| view_.type_number(&view_.typed.text()));
+            let view_ = view.clone();
+            no_number.connect_clicked(move |_| view_.copy_memory());
+            let view_ = view.clone();
+            still.connect_clicked(move |_| view_.set_motion(core::Motion::Still));
+            let view_ = view.clone();
+            moving.connect_clicked(move |_| view_.set_motion(core::Motion::Moving));
+            let view_ = view.clone();
+            motion_try.connect_clicked(move |_| {
+                // Trying writes to the game: the readings stop first.
+                interrupt(&view_.cancel, &view_.stop);
+                view_.try_one_by_one();
+            });
             let view_ = view.clone();
             view.typed.connect_activate(move |e| view_.type_number(&e.text()));
         }
@@ -1213,6 +1254,7 @@ impl FindView {
             return;
         }
         self.one_by_one.replace(None);
+        self.moving.set(false);
         // Start follows the screen: an older typed number isn't what it shows now.
         self.last_typed.replace(String::new());
         self.result.set_visible(false);
@@ -1356,6 +1398,8 @@ impl FindView {
             core::Phase::SaveTurn => self.guide.save_turn(),
             core::Phase::Restoring(..) => {}
             core::Phase::Copying(done) => self.guide.copying(done),
+            core::Phase::Following(n, moving) if self.stop.is_visible() => self.following(n, moving),
+            core::Phase::Following(..) => {}
             core::Phase::BarReady if start_runs => self.guide.bar_ready(),
             core::Phase::BarReady => {}
             core::Phase::BoxChanging => self.guide.ended(
@@ -1409,6 +1453,7 @@ impl FindView {
         };
         interrupt(&self.cancel, &self.stop);
         self.one_by_one.replace(None);
+        self.moving.set(false);
         self.root.set_visible_child_name("pick");
         self.last_typed.replace(text.trim().to_owned());
         self.nudge(None);
@@ -1507,6 +1552,141 @@ impl FindView {
         }
     }
 
+    /// No Number? (next to the typed number): a copy of the game's memory, then the player says
+    /// which way the value went (`moved`), for one the game shows no number for (From Dust's
+    /// powers charge up behind a ring).
+    pub fn copy_memory(&self) {
+        if self.stop.is_visible() || !self.typed.is_editable() {
+            return;
+        }
+        self.one_by_one.replace(None);
+        self.moving.set(false);
+        self.last_typed.replace(String::new());
+        self.last_count.set(None);
+        self.again.set_visible(false);
+        self.matches.set_visible(false);
+        self.result.set_visible(false);
+        self.nudge(None);
+        self.root.set_visible_child_name("pick");
+        self.typed_searching(true);
+        self.searching(true);
+        // With a bar from the start: `Phase::Copying` only moves it on.
+        self.guide.show(Look::Wait, guide::HANDS_OFF, &tr!("Copying the game's memory"), &tr!("A few seconds."), Some(0.0));
+        self.worker.run(|core| Event::Copied(core.copy_memory()));
+    }
+
+    pub fn copied(&self, r: Result<(), String>) {
+        self.typed_searching(false);
+        self.searching(false);
+        match r {
+            Ok(()) => {
+                self.moving.set(true);
+                self.ask_motion(
+                    &tr!("Is it moving now?"),
+                    &tr!(
+                        "Press It's Moving while it changes on its own (a ring counting, a bar filling or draining), and It's Still while it doesn't. \
+                         Ferret reads the game every 2 seconds. The hotkeys work from inside the game (the keyboard button at the top lists them)."
+                    ),
+                    0,
+                );
+            }
+            Err(e) => self.stopped(&e),
+        }
+    }
+
+    /// The card for No Number? between readings: It's Still, It's Moving, and with 1-20 places
+    /// left Try Them One by One.
+    fn ask_motion(&self, title: &str, hint: &str, left: usize) {
+        self.guide.ended(Look::Go, guide::CHANGE, title, hint, hint);
+        self.offer_motion(left);
+    }
+
+    fn offer_motion(&self, left: usize) {
+        self.motion_try.set_visible((1..=20).contains(&left));
+        self.guide.offer(&self.motion_box);
+    }
+
+    /// It's Moving or It's Still (buttons, hotkeys): starts the readings, or tells the running
+    /// ones what the value does now.
+    pub fn set_motion(&self, m: core::Motion) {
+        if !self.moving.get() {
+            return;
+        }
+        self.motion.store(if m == core::Motion::Moving { 1 } else { 2 }, Ordering::Relaxed);
+        if self.stop.is_visible() {
+            self.following(self.last_count.get().unwrap_or(0), m == core::Motion::Moving);
+            return;
+        }
+        if !self.typed.is_editable() {
+            return;
+        }
+        self.one_by_one.replace(None);
+        self.result.set_visible(false);
+        self.typed_searching(true);
+        self.searching(true);
+        self.stop.set_label(&tr!("Stop"));
+        self.stop.set_visible(true);
+        self.following(self.last_count.get().unwrap_or(0), m == core::Motion::Moving);
+        let motion = self.motion.clone();
+        self.worker.run(move |core| Event::Followed(core.follow_motion(&motion)));
+    }
+
+    /// The readings go on: `n` places follow it so far (0: nothing compared yet).
+    fn following(&self, n: usize, moving: bool) {
+        if n > 0 {
+            self.last_count.set(Some(n));
+        }
+        let title = match n {
+            0 => tr!("Watching the game"),
+            n => ntr!("{n} place follows it", "{n} places follow it", n, n = grouped(n)),
+        };
+        let hint = match moving {
+            true => tr!("It's moving. Press It's Still when it stops."),
+            false => tr!("It's still. Press It's Moving when it starts moving on its own."),
+        };
+        self.guide.show(Look::Go, guide::CHANGE, &title, &hint, None);
+        self.offer_motion(n);
+    }
+
+    /// The readings ended (Stop, or a few places followed it through a whole phase).
+    pub fn followed(&self, r: Result<AutoResult, String>) {
+        self.stop.set_visible(false);
+        self.typed_searching(false);
+        self.searching(false);
+        let n = match r {
+            Ok(AutoResult::Several(n)) => n,
+            Ok(AutoResult::Unsure(_)) => 1,
+            Ok(_) => return,
+            Err(e) => {
+                self.moving.set(false);
+                return self.stopped(&e);
+            }
+        };
+        let text = self.count_text(n);
+        if n <= 20 {
+            self.show_list.set_active(true);
+        }
+        let hint = match n {
+            1 => tr!("Try it: Ferret writes a number there, and you see whether the game changes. Or go on with It's Moving and It's Still."),
+            2..=20 => tr!("Try them one by one, or go on with It's Moving and It's Still."),
+            _ => tr!("Go on with It's Moving and It's Still: every time it starts or stops rules out more."),
+        };
+        self.ask_motion(&text, &hint, n);
+        self.list_matches(n);
+    }
+
+    /// The moving and still hotkeys; why not.
+    pub fn hotkey_motion(&self, m: core::Motion) -> Option<String> {
+        if !self.moving.get() {
+            return Some(tr!("Click No Number? in Ferret's Find Value tab first."));
+        }
+        if !self.stop.is_visible() && !self.typed.is_editable() {
+            return Some(tr!("Ferret is still busy with the last one. Try again in a moment."));
+        }
+        self.set_motion(m);
+        None
+    }
+
     /// Shows the attached game's learned digits (index = digit); click one to forget it.
     pub fn show_digits(&self, shapes: Vec<Vec<DigitShape>>) {
         while let Some(c) = self.digits.first_child() {
@@ -1601,6 +1781,7 @@ impl FindView {
     /// Forgets the matches so far; the picked number and the captured frame stay.
     pub fn start_over(&self) {
         self.one_by_one.replace(None);
+        self.moving.set(false);
         self.last_count.set(None);
         self.last_typed.replace(String::new());
         self.again.set_visible(false);
@@ -1653,7 +1834,11 @@ impl FindView {
                     true => tr!("Redid {step}", step = what),
                     false => tr!("Undid {step}", step = what),
                 };
-                self.guide.pick(&done, &left);
+                if self.moving.get() && n > 0 {
+                    self.ask_motion(&done, &self.count_text(n), n);
+                } else {
+                    self.guide.pick(&done, &left);
+                }
                 self.list_matches(n);
             }
             Err(e) => {
@@ -1700,6 +1885,7 @@ impl FindView {
 
     pub fn new_game(&self) {
         self.one_by_one.replace(None);
+        self.moving.set(false);
         self.last_count.set(None);
         self.again.set_visible(false);
         self.matches.set_visible(false);
@@ -2168,6 +2354,34 @@ impl FindView {
     pub fn save_failed(&self, e: &str) {
         self.result.set_sensitive(true);
         self.guide.show(Look::Found, guide::SAVE, &tr!("Not saved"), e, None);
+        // Picked from several places: the others come back to try (the player's ask, From
+        // Dust: the one they picked had no way back to it, and they had to find Undo).
+        if self.last_list.borrow().len() > 1 {
+            let why = e.to_owned();
+            self.worker.run(move |core| Event::Unpicked(why, core.unpick()));
+        }
+    }
+
+    /// A failed save took back the pick: the places it was picked from, listed again.
+    pub fn unpicked(&self, why: &str, n: Option<usize>) {
+        let Some(n) = n else { return };
+        self.result.set_visible(false);
+        self.nudge(None);
+        self.last_count.set(Some(n));
+        let mut why = why.to_owned();
+        if let Some(c) = why.get(..1) {
+            why.replace_range(..1, &c.to_uppercase());
+        }
+        let hint = tr!("{why} The places it was picked from are listed again: try another one.", why);
+        if self.moving.get() {
+            self.ask_motion(&tr!("Not saved"), &hint, n);
+        } else {
+            self.guide.ended(Look::Call, guide::CHECK, &tr!("Not saved"), &hint, &hint);
+            self.offer_places(true);
+            self.again.set_visible(true);
+        }
+        self.show_list.set_active(true);
+        self.list_matches(n);
     }
 }
 

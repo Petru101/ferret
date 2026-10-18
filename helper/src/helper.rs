@@ -726,6 +726,12 @@ struct Limit {
     checked_at: Instant,
     /// Whether all its code patterns were searched for a static pointer to the object.
     searched_code: bool,
+    /// A thread is finding it by its code patterns now (`limiter_loop`): not started again.
+    finding: bool,
+    /// How long until its code patterns are checked again: `RECHECK_EVERY`, doubled every time
+    /// they find it where it was, up to `RECHECK_MOST` (the check stops every game thread for
+    /// a moment); back to `RECHECK_EVERY` once it moved.
+    recheck_every: Duration,
 }
 
 /// A named path of any kind: through objects the game names (Unity, names.rs), to an entry of
@@ -838,6 +844,7 @@ type SharedLimiter = Arc<Mutex<Limiter>>;
 
 const RETRY_EVERY: Duration = Duration::from_secs(5);
 const RECHECK_EVERY: Duration = Duration::from_secs(10);
+const RECHECK_MOST: Duration = Duration::from_secs(160);
 const RESOLVE_WAIT: Duration = Duration::from_secs(2);
 
 fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
@@ -1010,10 +1017,13 @@ fn limiter_loop(shared: SharedLimiter) {
             }
             let now = Instant::now();
             due = limits
-                .iter()
-                .filter(|l| find && l.paths.is_empty() && l.named.is_none())
-                .filter(|l| if l.paused.is_some() { l.retry_at <= now } else { l.checked_at + RECHECK_EVERY <= now })
-                .map(|l| (l.name.clone(), l.sites.clone(), !l.searched_code))
+                .iter_mut()
+                .filter(|l| find && !l.finding && l.paths.is_empty() && l.named.is_none())
+                .filter(|l| if l.paused.is_some() { l.retry_at <= now } else { l.checked_at + l.recheck_every <= now })
+                .map(|l| {
+                    l.finding = true;
+                    (l.name.clone(), l.sites.clone(), !l.searched_code)
+                })
                 .collect();
             let Ok(mem) = mem.try_clone() else { continue };
             (*pid, mem, *width)
@@ -1033,48 +1043,61 @@ fn limiter_loop(shared: SharedLimiter) {
                 }
             });
         }
-        // Resolving traces the game for a moment, so it runs without holding the lock.
+        // Resolving traces the game for seconds (2 s wait, attaching every thread): on its own
+        // thread, so the values are still written meanwhile. On this one, From Dust's Jellify
+        // timer held at most 0 ran for 4 s of every 14 (the ring jumped back to 59).
         for (name, sites, search_code) in due {
-            let mut found = resolve_values(pid, &mem, std::slice::from_ref(&sites), width, RESOLVE_WAIT)
-                .pop()
-                .and_then(Result::ok)
-                .map(|r| {
-                    let disp = r.disp;
-                    (r, disp)
-                });
-            // The code that ran may not show where the object comes from; another site's may
-            // (searching the code for every site is slow: once per value).
-            if let Some((r, _)) = found.as_mut().filter(|(r, _)| r.holder.is_none() && search_code) {
-                r.holder = holder_in_code(pid, &mem, &sites, r.is_64bit, width, r.addr);
-            }
-            let mut guard = shared.lock().unwrap();
-            if guard.pid != pid {
-                break;
-            }
-            let Some(l) = guard.limits.iter_mut().find(|l| l.name == name) else { continue };
-            l.checked_at = Instant::now();
-            l.searched_code |= search_code && found.is_some();
-            let object = found.and_then(|(r, disp)| {
-                let (object, g) = guard_of(&mem, r.addr.wrapping_sub(disp as u64))?;
-                Some((r, object, g))
-            });
-            match object {
-                Some((r, object, g)) => {
-                    if r.addr != l.addr || l.paused.is_some() {
-                        l.restores += 1;
-                    }
-                    l.addr = r.addr;
-                    l.guard_addr = object;
-                    l.guard = g;
-                    l.paused = None;
-                    // Through the static pointer it is found on every check, without tracing.
-                    l.paths.extend(r.holder);
-                }
-                None if l.paused.is_some() => l.retry_at = Instant::now() + RETRY_EVERY,
-                // The code didn't run meanwhile (a menu?): nothing says the value moved.
-                None => {}
-            }
+            let (Ok(mem), shared) = (mem.try_clone(), shared.clone()) else { continue };
+            std::thread::spawn(move || refind(&shared, pid, &mem, width, &name, &sites, search_code));
         }
+    }
+}
+
+/// Finds a limited value by its code patterns again (`limiter_loop`, on a thread of its own).
+fn refind(shared: &SharedLimiter, pid: u32, mem: &File, width: usize, name: &str, sites: &[Site], search_code: bool) {
+    let mut found = resolve_values(pid, mem, std::slice::from_ref(&sites.to_vec()), width, RESOLVE_WAIT)
+        .pop()
+        .and_then(Result::ok)
+        .map(|r| {
+            let disp = r.disp;
+            (r, disp)
+        });
+    // The code that ran may not show where the object comes from; another site's may
+    // (searching the code for every site is slow: once per value).
+    if let Some((r, _)) = found.as_mut().filter(|(r, _)| r.holder.is_none() && search_code) {
+        r.holder = holder_in_code(pid, mem, sites, r.is_64bit, width, r.addr);
+    }
+    let mut guard = shared.lock().unwrap();
+    if guard.pid != pid {
+        return;
+    }
+    let Some(l) = guard.limits.iter_mut().find(|l| l.name == name) else { return };
+    l.finding = false;
+    l.checked_at = Instant::now();
+    l.searched_code |= search_code && found.is_some();
+    let object = found.and_then(|(r, disp)| {
+        let (object, g) = guard_of(mem, r.addr.wrapping_sub(disp as u64))?;
+        Some((r, object, g))
+    });
+    match object {
+        Some((r, object, g)) => {
+            l.recheck_every = match r.addr == l.addr && l.paused.is_none() {
+                true => (l.recheck_every * 2).min(RECHECK_MOST),
+                false => RECHECK_EVERY,
+            };
+            if r.addr != l.addr || l.paused.is_some() {
+                l.restores += 1;
+            }
+            l.addr = r.addr;
+            l.guard_addr = object;
+            l.guard = g;
+            l.paused = None;
+            // Through the static pointer it is found on every check, without tracing.
+            l.paths.extend(r.holder);
+        }
+        None if l.paused.is_some() => l.retry_at = Instant::now() + RETRY_EVERY,
+        // The code didn't run meanwhile (a menu?): nothing says the value moved.
+        None => {}
     }
 }
 
@@ -1150,6 +1173,8 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         retry_at: Instant::now(),
         checked_at: Instant::now(),
         searched_code: false,
+        finding: false,
+        recheck_every: RECHECK_EVERY,
     });
     writeln!(out, "limiting {name} at 0x{addr:x}")
 }
@@ -1209,13 +1234,24 @@ fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
     Ok(())
 }
 
-/// A scan can keep millions of these: address and type share one word (addresses fit in 61
-/// bits), next to the value at the last scan, mark or next.
+/// A scan can keep millions of these: address, type and the flags (`MIRROR`, `MISSED`,
+/// `MOVED`, `MOVES`) share one word (addresses fit in 56 bits), next to the value at the last scan,
+/// mark or next.
 #[derive(Clone, Copy)]
 struct Candidate {
     tagged: u64,
     value: f64,
 }
+
+/// `phase`: the place moved down in this moving phase (else up).
+const MIRROR: u64 = 1 << 60;
+/// `phase`: the place broke the rule once in this phase (forgiven once: a press a little late
+/// or early puts the game's jump, a power starting or ending, inside the phase).
+const MISSED: u64 = 1 << 59;
+/// `phase`: the place moved in this moving phase; `MIRROR` then says which way.
+const MOVED: u64 = 1 << 58;
+/// `phase`: how many times it moved in this moving phase, up to 3 (two bits).
+const MOVES: u64 = 3 << 56;
 
 impl Candidate {
     fn new(addr: u64, kind: Kind, value: f64) -> Self {
@@ -1223,7 +1259,27 @@ impl Candidate {
     }
 
     fn addr(&self) -> u64 {
-        self.tagged & ((1 << 61) - 1)
+        self.tagged & ((1 << 56) - 1)
+    }
+
+    fn moves(&self) -> u64 {
+        (self.tagged & MOVES) >> 56
+    }
+
+    fn moved_once_more(self) -> Self {
+        Candidate { tagged: (self.tagged & !MOVES) | ((self.moves() + 1).min(3) << 56), ..self }
+    }
+
+    fn has(&self, flag: u64) -> bool {
+        self.tagged & flag != 0
+    }
+
+    fn with(self, flag: u64, on: bool) -> Self {
+        Candidate { tagged: if on { self.tagged | flag } else { self.tagged & !flag }, ..self }
+    }
+
+    fn mirror(&self) -> bool {
+        self.has(MIRROR)
     }
 
     fn kind(&self) -> Kind {
@@ -1294,6 +1350,13 @@ struct Session {
     /// (Isaac: a heart picked up and a hit right after; the real value was dropped and only a
     /// copy the game redraws the hearts from, a frame behind, was left).
     bar_marks: Option<Vec<f64>>,
+    /// `phase`'s phase now: Some(true) moving, Some(false) still, None before its first step;
+    /// and how many steps it took so far.
+    phase_now: Option<bool>,
+    phase_steps: usize,
+    /// When `phase` last read the matches, and how fast each moved then (a second; NaN: it
+    /// didn't), in their order; another step that changes the matches leaves it unmatched.
+    phase_rates: Option<(Instant, Vec<f32>)>,
 }
 
 /// How far back `undo` goes, and how many matches it keeps in all (16 bytes each).
@@ -1870,6 +1933,7 @@ fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     if let Some(bar) = arg.strip_prefix("bar ") {
         return cmd_next_bar(out, s, bar);
     }
+    let moved = matches!(arg, "+" | "-" | "=" | "!");
     let keep: Box<dyn Fn(Kind, f64, f64) -> bool> = match arg {
         "+" => Box::new(|_, old, new| new > old),
         "-" => Box::new(|_, old, new| new < old),
@@ -1892,8 +1956,9 @@ fn cmd_next(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
             }
             // A 4-byte match whose upper two bytes changed may be a 2-byte number with a
             // neighbour that was 0 at the scan (Andromeda's loaded ammo next to the reserve).
+            // Not for a direction: half of any junk went up or down.
             let low = |v: f64| (v as i64 & 0xFFFF) as f64;
-            (c.kind() == Kind::I32 && keep(Kind::U16, low(c.value), low(new)))
+            (!moved && c.kind() == Kind::I32 && keep(Kind::U16, low(c.value), low(new)))
                 .then(|| Candidate::new(c.addr(), Kind::U16, low(new)))
         })
         .collect();
@@ -2066,14 +2131,14 @@ fn cmd_next_bar(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<
     let &[f0, f1, err] = f.as_slice() else {
         return writeln!(out, "error: usage: next bar <full before> <full now> <error> (shares of 1)");
     };
-    let Some(mem) = s.mem.as_ref() else {
+    if s.mem.is_none() {
         return writeln!(out, "error: not attached");
-    };
+    }
     let before = s.candidates.len();
     if s.snap.is_none() && before == 0 {
         return writeln!(out, "error: no copy of the game's memory and no matches to compare with");
     }
-    let Some(snap) = s.snap.as_ref() else {
+    if s.snap.is_none() {
         let marks = s.bar_marks.take().filter(|m| m.len() == before);
         // Kept with the value that fits the bar now: right before the screen was read, if
         // only then.
@@ -2092,11 +2157,23 @@ fn cmd_next_bar(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<
         }
         s.replace(&format!("next bar {arg}"), next);
         return writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates));
-    };
+    }
     // A bar that hasn't moved keeps everything that stayed the same: wait for it to move.
     if bar_fits(1.0, 1.0, f0, f1, err) {
         return writeln!(out, "0 matches (the bar hasn't moved enough yet, kept the copy)");
     }
+    // Integers and pointers read as floats come out next to nothing.
+    let fits = |kind: Kind, v0: f64, v1: f64| ((!matches!(kind, Kind::F32 | Kind::F64) || v0.abs() >= 1e-3) && bar_fits(v0, v1, f0, f1, err)).then_some(false);
+    snap_step(out, s, &format!("next bar {arg}"), &fits, "too many places changed like the bar, kept the copy: let it move more first")
+}
+
+/// The first step after a copy of memory (`snap`): keeps the places whose value went from the
+/// copy's to now as `fits` says (kind, then, now: None, or Some(went down)), then lets the copy
+/// go. `too_many`: the error past `BAR_MOST` matches (the copy stays).
+fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(Kind, f64, f64) -> Option<bool> + Sync), too_many: &str) -> io::Result<()> {
+    let (Some(mem), Some(snap)) = (s.mem.as_ref(), s.snap.as_ref()) else {
+        return writeln!(out, "error: no copy of the game's memory to compare with");
+    };
     let t = Instant::now();
     let file = File::open(&snap.path)?;
     const PER_JOB: usize = 64;
@@ -2135,33 +2212,36 @@ fn cmd_next_bar(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<
                                 continue;
                             }
                             let (v0, v1) = (kind.decode(&old[o..]), kind.decode(&new[o..]));
-                            // Integers and pointers read as floats come out next to nothing.
-                            if matches!(kind, Kind::F32 | Kind::F64) && !(v0.abs() >= 1e-3) {
-                                continue;
-                            }
                             // The key stays; a real one is never 0.
                             if kind == Kind::Xor && (old[o + 4..o + 8] != new[o + 4..o + 8] || old[o + 4..o + 8] == [0; 4]) {
                                 continue;
                             }
-                            if bar_fits(v0, v1, f0, f1, err) {
-                                found.push(Candidate::new(addr + o as u64, kind, v1));
+                            if let Some(mirror) = fits(kind, v0, v1) {
+                                let c = Candidate::new(addr + o as u64, kind, v1);
+                                found.push(match mirror {
+                                    true => Candidate { tagged: c.tagged | MIRROR, ..c },
+                                    false => c,
+                                });
                             }
                         }
                     }
                 }
             }
             count.fetch_add(found.len(), Ordering::Relaxed);
-            found.sort_by_key(|c| (c.addr(), c.kind() as u8));
+            found.sort_by_key(|c| (c.addr(), c.kind() as u8, c.mirror()));
             found
         },
     );
     if count.into_inner() > BAR_MOST {
-        return writeln!(out, "error: too many places changed like the bar, kept the copy: let it move more first");
+        return writeln!(out, "error: {too_many}");
     }
     let next: Vec<Candidate> = parts.into_iter().flatten().collect();
+    if next.is_empty() {
+        return writeln!(out, "0 matches (nothing changed so since the copy, kept it)");
+    }
     let read = snap.blocks.iter().map(|b| b.2).sum::<usize>() >> 20;
     // The copy is gone after this step: there is nothing before it to go back to.
-    s.replace(&format!("next bar {arg}"), next);
+    s.replace(step, next);
     s.history.clear();
     s.history_cut = true;
     s.undone.clear();
@@ -2172,6 +2252,137 @@ fn cmd_next_bar(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<
         kinds_text(&s.candidates),
         t.elapsed().as_millis()
     )
+}
+
+/// phase moving|still|switch: a value with no number, followed by what the player says it does
+/// (Ferret samples every few seconds; `Core::phase_step`). Moving: a place may stay or move,
+/// but only one way in this phase (`MOVED` + `MIRROR` from its first move). Still: it doesn't
+/// change. A place breaking that is forgiven once a phase (`MISSED`). Switch: the phase ends;
+/// after a moving one, places that moved fewer than 3 times go (`MOVES`: what has no number
+/// keeps moving: a timer, a charge, a drain); then every place starts over from its value
+/// now, so the jump between phases (a power starting or ending) is never compared. A place
+/// that hasn't moved within a moving phase's first `PHASE_START` steps goes too: the player says it's
+/// moving when it starts, and junk doesn't start then. A place moving in two steps in a row
+/// must move at about the same rate (`steady`): what has no number is a timer, a charge or a
+/// drain, while a game's simulation moves by fits. The first moving step compares with the
+/// copy of memory (`snap`): every place that changed either way.
+const PHASE_START: usize = 3;
+
+/// Rates (a second) close enough to be one steady movement: within a quarter, as sampling
+/// times wobble.
+fn steady(before: f32, now: f64) -> bool {
+    let before = before as f64;
+    (now - before).abs() <= 0.25 * before.abs() + 1e-6
+}
+
+fn cmd_phase(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let before = s.candidates.len();
+    let arg = arg.trim();
+    if before == 0 && s.snap.is_some() {
+        return match arg {
+            "moving" => {
+                s.phase_now = Some(true);
+                let sane = |kind: Kind, v: f64| !matches!(kind, Kind::F32 | Kind::F64) || v == 0.0 || (1e-3..=1e9).contains(&v.abs());
+                let fits = |kind: Kind, v0: f64, v1: f64| (sane(kind, v0) && sane(kind, v1) && v0 != v1).then_some(v1 < v0);
+                snap_step(out, s, "phase moving", &fits, "too many places changed since the copy, kept it: let it move a little longer")?;
+                // The copy's places all moved: that's this phase's first move.
+                for c in s.candidates.iter_mut() {
+                    *c = c.with(MOVED, true).moved_once_more();
+                }
+                Ok(())
+            }
+            "still" | "switch" => {
+                s.phase_now = Some(arg == "still");
+                writeln!(out, "0 matches (nothing moved since the copy yet, kept the copy)")
+            }
+            _ => writeln!(out, "error: usage: phase moving|still|switch"),
+        };
+    }
+    if s.mem.is_none() || before == 0 {
+        return writeln!(out, "error: no copy of the game's memory and no matches to go on from");
+    }
+    let now = s.read_all();
+    let next: Vec<Candidate> = match arg {
+        "switch" => {
+            let was_moving = s.phase_now == Some(true);
+            s.phase_now = None;
+            s.phase_steps = 0;
+            s.phase_rates = None;
+            s.candidates
+                .iter()
+                .zip(now)
+                .filter(|(c, _)| !was_moving || c.moves() >= 3)
+                .map(|(c, v)| Candidate { value: v.unwrap_or(c.value), ..c.with(MISSED, false).with(MOVED, false).with(MOVES, false) })
+                .collect()
+        }
+        "moving" | "still" => {
+            let moving = arg == "moving";
+            s.phase_now = Some(moving);
+            s.phase_steps += 1;
+            let late = moving && s.phase_steps > PHASE_START;
+            let read_at = Instant::now();
+            let (since, rates) = match s.phase_rates.take() {
+                Some((t, r)) if r.len() == before => (Some(read_at.duration_since(t).as_secs_f64()), r),
+                _ => (None, vec![f32::NAN; before]),
+            };
+            let mut kept_rates = Vec::new();
+            let next = s
+                .candidates
+                .iter()
+                .zip(now)
+                .zip(rates)
+                .filter_map(|((c, v), rate)| {
+                    let v = v?;
+                    let rate_now = since.filter(|&t| t > 0.0 && v != c.value).map_or(f64::NAN, |t| (v - c.value) / t);
+                    let fine = match (moving, c.has(MOVED)) {
+                        (true, false) if late => return None,
+                        _ if v == c.value => true,
+                        (false, _) => false,
+                        // This phase's first move sets the way it goes.
+                        (true, false) => {
+                            kept_rates.push(rate_now as f32);
+                            return Some(Candidate { value: v, ..c.with(MOVED, true).with(MIRROR, v < c.value).moved_once_more() });
+                        }
+                        (true, true) => (v < c.value) == c.mirror() && (rate.is_nan() || rate_now.is_nan() || steady(rate, rate_now)),
+                    };
+                    let kept = match (fine, c.has(MISSED)) {
+                        (true, _) if moving && v != c.value => Candidate { value: v, ..c.moved_once_more() },
+                        (true, _) => Candidate { value: v, ..*c },
+                        (false, false) => Candidate { value: v, ..c.with(MISSED, true) },
+                        (false, true) => return None,
+                    };
+                    // A miss starts the rate over (the jump isn't a rate).
+                    kept_rates.push(if fine { rate_now as f32 } else { f32::NAN });
+                    Some(kept)
+                })
+                .collect();
+            s.phase_rates = Some((read_at, kept_rates));
+            next
+        }
+        _ => return writeln!(out, "error: usage: phase moving|still|switch"),
+    };
+    if next.is_empty() {
+        return writeln!(out, "{before} -> 0 matches (kept the {before} from before)");
+    }
+    s.replace(&format!("phase {arg}"), next);
+    writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))
+}
+
+/// has <hex addr>: the matches at that address, with their flags ("has 0x10:f32 = 2.5 moved"),
+/// or "has none"; for tests that know where the value is.
+fn cmd_has(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let Some(addr) = parse_addr(arg.trim()) else {
+        return writeln!(out, "error: usage: has <hex addr>");
+    };
+    let at: Vec<&Candidate> = s.candidates.iter().filter(|c| c.addr() == addr).collect();
+    if at.is_empty() {
+        return writeln!(out, "has none");
+    }
+    for c in at {
+        let flags: Vec<&str> = [(MIRROR, "mirror"), (MISSED, "missed"), (MOVED, "moved")].iter().filter(|(f, _)| c.has(*f)).map(|(_, n)| *n).collect();
+        writeln!(out, "has 0x{addr:x}:{} = {} {}", c.kind().name(), c.value, flags.join(" "))?;
+    }
+    Ok(())
 }
 
 /// undo: the matches as they were before the last step that changed them ("<before> -> <n>
@@ -3313,6 +3524,8 @@ pub fn run(as_user: Option<&str>) {
             "next" => cmd_next(&mut out, &mut session, arg),
             "mark" => cmd_mark(&mut out, &mut session, arg),
             "snap" => cmd_snap(&mut out, &mut session, arg),
+            "phase" => cmd_phase(&mut out, &mut session, arg),
+            "has" => cmd_has(&mut out, &session, arg),
             "undo" => cmd_undo(&mut out, &mut session),
             "redo" => cmd_redo(&mut out, &mut session),
             "list" => cmd_list(&mut out, &session, arg),

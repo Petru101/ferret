@@ -21,7 +21,7 @@ use std::sync::{mpsc, Arc};
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-use crate::core::{AutoResult, Core, GameProcess, Gone, Refusal, ValueRow};
+use crate::core::{AutoResult, Core, GameProcess, Gone, Motion, Refusal, ValueRow};
 use crate::i18n::{ntr, tr};
 use crate::ocr::Word;
 
@@ -52,6 +52,12 @@ pub enum Event {
     Typed(Result<AutoResult, String>),
     /// Scan Again (the number on screen now, changed or not) while Start wasn't running.
     ScannedAgain(Result<AutoResult, String>),
+    /// No Number?: the copy of the game's memory is taken (or why not).
+    Copied(Result<(), String>),
+    /// No Number?'s readings ended (`Core::follow_motion`).
+    Followed(Result<AutoResult, String>),
+    /// A save failed (why): the pick taken back, with the places matching again (`Core::unpick`).
+    Unpicked(String, Option<usize>),
     /// The name, and whether Ferret is sure to find it again after a restart.
     /// The name and what to tell the player.
     Saved(Result<(String, String), String>),
@@ -371,6 +377,9 @@ impl Ui {
             "search" if self.attached.get().is_none() => Some((tr!("Can't search yet"), tr!("Open the game in Ferret first."))),
             "search" => self.find.hotkey_search().map(|why| (tr!("Can't search yet"), why)),
             "again" => self.find.hotkey_again().map(|why| (tr!("Can't scan again yet"), why)),
+            "moving" | "still" if self.attached.get().is_none() => Some((tr!("Can't search yet"), tr!("Open the game in Ferret first."))),
+            "moving" => self.find.hotkey_motion(Motion::Moving).map(|why| (tr!("Can't search yet"), why)),
+            "still" => self.find.hotkey_motion(Motion::Still).map(|why| (tr!("Can't search yet"), why)),
             _ => None,
         };
         if let Some((title, why)) = refused {
@@ -711,6 +720,9 @@ impl Ui {
             Event::Auto(r) => self.find.auto_done(r),
             Event::Typed(r) => self.find.typed_done(r),
             Event::ScannedAgain(r) => self.find.scanned_again(r),
+            Event::Copied(r) => self.find.copied(r),
+            Event::Followed(r) => self.find.followed(r),
+            Event::Unpicked(why, n) => self.find.unpicked(&why, n),
             Event::Undone(r, done) => self.find.undone(r, done),
             Event::Saved(Ok((name, msg))) => {
                 self.toast(&msg);
@@ -872,6 +884,15 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("find", Box::new(|ui, _| ui.find.start()));
+    // No Number?, then `motion moving|still`.
+    action("copy", Box::new(|ui, _| ui.find.copy_memory()));
+    action(
+        "motion",
+        Box::new(|ui, m| match m.as_str() {
+            "moving" => ui.find.set_motion(Motion::Moving),
+            _ => ui.find.set_motion(Motion::Still),
+        }),
+    );
     action("confirm", Box::new(|ui, yes| ui.find.answer_read(yes == "yes")));
     // Trying the places one at a time: start, try (with the number in the entry), yes, no, skip, stop.
     action("place", Box::new(|ui, step| ui.find.place_step(&step)));
@@ -910,7 +931,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
     action("tip", Box::new(|ui, how| ui.tips.close(how == "never")));
     action("close", Box::new(|ui, _| ui.window.close()));
-    // What a hotkey does, without the portal: `limits`, `search`, `again`.
+    // What a hotkey does, without the portal: `limits`, `search`, `again`, `moving`, `still`.
     action("hotkey", Box::new(|ui, id| ui.hotkey(&id)));
     // Shows the status card in one state, for looking at it (`turn` can't be set up easily).
     action(
