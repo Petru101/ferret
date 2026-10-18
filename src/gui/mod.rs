@@ -230,6 +230,10 @@ struct Ui {
     attaching: Rc<Cell<Option<u32>>>,
     /// The program of a game that quit: attached to again when it starts.
     waiting_for: Rc<RefCell<Option<String>>>,
+    /// The toast saying a game is being opened: closed once it's open (or couldn't be). Left
+    /// to its own 5 s it covered the Find tab's buttons ("Type the Number Instead") long after
+    /// the game had opened.
+    opening: Rc<RefCell<Option<adw::Toast>>>,
     /// The names games go by (Steam's), by program, from the games list.
     game_names: RefCell<std::collections::HashMap<String, String>>,
     /// What the games list knows of each game's online features, by pid: the warning on opening it.
@@ -395,6 +399,13 @@ impl Ui {
         self.toasts.add_toast(adw::Toast::new(msg));
     }
 
+    /// The game is open, or couldn't be: its "Opening" toast goes.
+    fn opened(&self) {
+        if let Some(t) = self.opening.take() {
+            t.dismiss();
+        }
+    }
+
     /// A longer explanation than a toast holds. Lines starting with two spaces are commands,
     /// shown selectable so they can be copied.
     fn explain(&self, heading: &str, text: &str) {
@@ -497,7 +508,11 @@ impl Ui {
         let waiting = self.waiting_for.borrow().clone();
         if let Some(g) = waiting.and_then(|exe| games.iter().find(|g| g.exe == exe && g.refused.is_none())) {
             self.waiting_for.replace(None);
-            self.toast(&tr!("{name} started again: opening it", name = g.name.as_deref().unwrap_or(&g.exe)));
+            let toast = adw::Toast::new(&tr!("{name} started again: opening it", name = g.name.as_deref().unwrap_or(&g.exe)));
+            self.toasts.add_toast(toast.clone());
+            if let Some(old) = self.opening.replace(Some(toast)) {
+                old.dismiss();
+            }
             let pid = g.pid;
             self.attaching.set(Some(pid));
             self.worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
@@ -562,7 +577,7 @@ impl Ui {
                 }
                 row.set_activatable(true);
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                let (worker, find, nav, page, attached, attaching, waiting_for, toasts) = (
+                let (worker, find, nav, page, attached, attaching, waiting_for, toasts, opening_toast) = (
                     self.worker.clone(),
                     self.find.clone(),
                     self.nav.clone(),
@@ -571,6 +586,7 @@ impl Ui {
                     self.attaching.clone(),
                     self.waiting_for.clone(),
                     self.toasts.clone(),
+                    self.opening.clone(),
                 );
                 let pid = g.pid;
                 let opening = tr!("Opening {game}…", game = g.name.as_deref().unwrap_or(&g.exe));
@@ -586,7 +602,11 @@ impl Ui {
                     }
                     attaching.set(Some(pid));
                     // Finding saved values again can take seconds in a big game.
-                    toasts.add_toast(adw::Toast::new(&opening));
+                    let toast = adw::Toast::new(&opening);
+                    toasts.add_toast(toast.clone());
+                    if let Some(old) = opening_toast.replace(Some(toast)) {
+                        old.dismiss();
+                    }
                     find.stop();
                     worker.run(move |core| Event::Attached(core.attach(pid).map(|exe| (pid, exe))));
                 });
@@ -619,6 +639,7 @@ impl Ui {
             Event::Games(games) => self.show_games(games),
             Event::Attached(Ok((pid, exe))) => {
                 self.attaching.set(None);
+                self.opened();
                 self.phase.hide();
                 self.waiting_for.replace(None);
                 if self.attached.replace(Some(pid)) != Some(pid) {
@@ -729,6 +750,7 @@ impl Ui {
             }
             Event::Attached(Err(e)) => {
                 self.attaching.set(None);
+                self.opened();
                 self.phase.hide();
                 let heading = tr!("Ferret Can't Open This Game");
                 if e.password_may_help {
@@ -742,6 +764,7 @@ impl Ui {
             Event::Done(Err(e)) => self.toast(&e),
             Event::Bug(msg) => {
                 self.attaching.set(None);
+                self.opened();
                 self.phase.hide();
                 self.find.bug(&msg);
             }
@@ -1085,6 +1108,7 @@ fn build(app: &adw::Application) {
         attached: Rc::default(),
         attaching: Rc::default(),
         waiting_for: Rc::default(),
+        opening: Rc::default(),
         game_names: RefCell::default(),
         online: RefCell::default(),
         background: Rc::default(),
