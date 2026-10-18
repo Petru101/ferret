@@ -3231,6 +3231,7 @@ pub fn run(as_user: Option<&str>) {
         writeln!(out, "error: cannot drop root: {e}").and_then(|_| writeln!(out, "end")).ok();
         return;
     }
+    trace::block_sigchld();
     end_tracing_on_term();
     let mut session = Session::default();
     let limiter = SharedLimiter::default();

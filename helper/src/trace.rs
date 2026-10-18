@@ -129,7 +129,7 @@ impl Tracer {
     pub fn watch_until(&mut self, mut done: impl FnMut() -> bool, mut on_hit: impl FnMut(&Hit) -> bool) {
         while !done() && !self.tids.is_empty() {
             let Some((tid, st)) = wait(-1, libc::WNOHANG) else {
-                std::thread::sleep(Duration::from_millis(1));
+                child_stopped(Duration::from_millis(5));
                 continue;
             };
             if libc::WIFEXITED(st) || libc::WIFSIGNALED(st) {
@@ -172,6 +172,33 @@ impl Drop for Tracer {
                 ptrace(libc::PTRACE_DETACH, tid, 0, 0);
             }
         }
+    }
+}
+
+/// Waits until a traced thread stops (SIGCHLD) or `most` passes. Every signal the game gets
+/// while traced stops its thread until the helper passes it on: Minecraft Dungeons (Proton)
+/// raises ~900 SIGILL a second on one thread and hundreds of SIGSYS (Wine's system calls) on
+/// others, and polling every 1 ms held each of them up to a millisecond or more, so the thread
+/// barely ran during a 2 s re-check and the game stuttered every 8 s. SIGCHLD is blocked in
+/// every thread of the helper from the start (`block_signals`), so it waits here, pending.
+fn child_stopped(most: Duration) {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+        let ts = libc::timespec { tv_sec: most.as_secs() as libc::time_t, tv_nsec: most.subsec_nanos() as libc::c_long };
+        libc::sigtimedwait(&set, std::ptr::null_mut(), &ts);
+    }
+}
+
+/// Blocks SIGCHLD in the calling thread and every thread it starts later, for `child_stopped`:
+/// call before any other thread starts (a thread not blocking it would take it and drop it).
+pub fn block_sigchld() {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
 }
 
