@@ -3231,6 +3231,7 @@ pub fn run(as_user: Option<&str>) {
         writeln!(out, "error: cannot drop root: {e}").and_then(|_| writeln!(out, "end")).ok();
         return;
     }
+    end_tracing_on_term();
     let mut session = Session::default();
     let limiter = SharedLimiter::default();
     // Anti-cheat that started in the attached game, until `alive` reports it.
@@ -3314,6 +3315,36 @@ pub fn run(as_user: Option<&str>) {
         }
     }
     put_back_tests(&mut session);
+    exit_untraced();
+}
+
+/// Ends the helper once no trace is running, and keeps another from starting. Leaving in the
+/// middle of one leaves its hardware breakpoints on the game's threads (the kernel detaches
+/// them but keeps their debug registers), and the game dies of SIGTRAP the next time it runs
+/// that code: Minecraft Dungeons quit 9 s after a helper was stopped during a limiter
+/// re-check; the stand-in dies the same way, whether the helper is killed or its stdin ends
+/// (Ferret closing).
+fn exit_untraced() -> ! {
+    let _no_more = TRACING.lock().unwrap_or_else(|e| e.into_inner());
+    std::process::exit(0)
+}
+
+/// SIGTERM (systemd stopping the session, `kill`) ends the helper through `exit_untraced`
+/// too: blocked in every thread (they inherit it from this one; the helper starts no
+/// programs, which would inherit it as well) and taken by one thread that waits for it.
+fn end_tracing_on_term() {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        std::thread::spawn(move || {
+            let mut sig = 0;
+            if libc::sigwait(&set, &mut sig) == 0 {
+                exit_untraced();
+            }
+        });
+    }
 }
 
 #[cfg(test)]
