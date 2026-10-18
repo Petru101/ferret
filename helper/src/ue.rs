@@ -21,7 +21,11 @@
 //   key property of a MapProperty (value property @0x80).
 //   From UE 5.4 FField's Owner (FFieldVariant) is one tagged pointer instead of a pointer and a
 //   bool, so everything after it is 8 bytes earlier (Starship Troopers: Ultimate Bug War!, 5.6).
-// The layout is checked on the engine's own Guid struct (A, B, C, D: four ints), in both forms.
+//   Minecraft Dungeons II (a 5.x with Utf8Str/AnsiStr properties) has the 5.4 FField, but its
+//   Offset is at 0x48, its type words at 0x78 (struct, class, map key) and 0x80 (map value),
+//   and an ArrayProperty's inner property at 0x80 (its flags first): `LAYOUTS`.
+// The layout is checked on the engine's own structs: Guid (A, B, C, D: four ints), Transform
+// (Quat, Vector, Vector) and Actor's Tags (an array of names), in each known form.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -40,13 +44,33 @@ const STRUCT_SUPER: u64 = 0x40;
 const STRUCT_PROPS: u64 = 0x50;
 const STRUCT_SIZE: u64 = 0x58;
 const FIELD_CLASS: u64 = 0x8;
-const FIELD_NEXT: u64 = 0x20;
-const FIELD_NAME: u64 = 0x28;
-const PROP_DIM: u64 = 0x38;
-const PROP_SIZE: u64 = 0x3C;
-const PROP_OFFSET: u64 = 0x4C;
-const PROP_EXTRA: u64 = 0x78;
-const PROP_EXTRA2: u64 = 0x80;
+
+/// Where an FField (and FProperty) keeps its fields.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    name: u64,
+    next: u64,
+    dim: u64,
+    size: u64,
+    offset: u64,
+    /// A StructProperty's struct, an ObjectProperty's class, a MapProperty's key property.
+    extra: u64,
+    /// An ArrayProperty's (or SetProperty's) element property.
+    inner: u64,
+    /// A MapProperty's value property.
+    value: u64,
+}
+
+/// Tried in this order at attach (`check_layout` picks the first that reads the engine's own
+/// structs right).
+const LAYOUTS: [Layout; 3] = [
+    // 4.25 to 5.3.
+    Layout { name: 0x28, next: 0x20, dim: 0x38, size: 0x3C, offset: 0x4C, extra: 0x78, inner: 0x78, value: 0x80 },
+    // 5.4 and later: FField's Owner is one tagged pointer, everything after it 8 bytes earlier.
+    Layout { name: 0x20, next: 0x18, dim: 0x30, size: 0x34, offset: 0x44, extra: 0x70, inner: 0x70, value: 0x78 },
+    // Minecraft Dungeons II.
+    Layout { name: 0x20, next: 0x18, dim: 0x30, size: 0x34, offset: 0x48, extra: 0x78, inner: 0x80, value: 0x80 },
+];
 /// Properties per struct followed (a misread link can't make a walk take forever).
 const MAX_PROPS: usize = 2000;
 const MAX_NAME: usize = 1024;
@@ -95,8 +119,8 @@ pub struct Prop {
 pub struct Ue {
     objects: u64,
     blocks: u64,
-    /// How much earlier FField's fields after Owner are (0, or 8 from UE 5.4).
-    shift: u64,
+    /// Where its FFields keep their fields (one of `LAYOUTS`).
+    layout: Layout,
     names: Mutex<HashMap<u32, Option<String>>>,
     props: Mutex<HashMap<u64, Arc<Vec<Prop>>>>,
     containers: Mutex<HashMap<u64, bool>>,
@@ -133,34 +157,61 @@ impl Ue {
         }
         let objects = objects.ok_or("no Unreal object list found")?;
         let blocks = blocks.ok_or("no Unreal name pool found")?;
-        let mut ue = Ue { objects, blocks, shift: 0, names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
-        let mut why = String::new();
-        for shift in [0, 8] {
-            ue.shift = shift;
+        let mut ue = Ue { objects, blocks, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
+        // The first layout that reads all three right; else the first that reads Guid right (all
+        // a layout had to pass before Transform and Tags were checked: no game that worked
+        // then loses it).
+        let (mut why, mut fallback) = (String::new(), None);
+        for layout in LAYOUTS {
+            ue.layout = layout;
             ue.props.lock().unwrap().clear();
             match ue.check_layout(mem) {
-                Ok(()) => return Ok(ue),
+                Ok(true) => return Ok(ue),
+                Ok(false) => fallback = fallback.or(Some(layout)),
                 Err(e) if why.is_empty() => why = e,
                 Err(_) => {}
             }
         }
-        Err(why)
+        match fallback {
+            Some(layout) => {
+                ue.layout = layout;
+                ue.props.lock().unwrap().clear();
+                Ok(ue)
+            }
+            None => Err(why),
+        }
     }
 
-    /// The engine's Guid struct must read as four ints at 0, 4, 8 and 12.
-    fn check_layout(&self, mem: &File) -> Result<(), String> {
-        let guid = self
-            .objects(mem)
-            .into_iter()
-            .find(|&o| self.object_name(mem, o).as_deref() == Some("Guid") && self.class_name(mem, o).as_deref() == Some("ScriptStruct"))
-            .ok_or("no Guid struct among the objects (another engine version?)")?;
+    /// The engine's Guid struct must read as four ints at 0, 4, 8 and 12 (else an error).
+    /// Then whether the types are where the layout says: Transform's fields must lead to the
+    /// Quat and Vector structs, and Actor's Tags to an array of names (checked when the game
+    /// has them).
+    fn check_layout(&self, mem: &File) -> Result<bool, String> {
+        let objects = self.objects(mem);
+        let find = |name: &str, class: &str| {
+            objects.iter().copied().find(|&o| self.object_name(mem, o).as_deref() == Some(name) && self.class_name(mem, o).as_deref() == Some(class))
+        };
+        let guid = find("Guid", "ScriptStruct").ok_or("no Guid struct among the objects (another engine version?)")?;
         let props = self.props(mem, guid);
         let got: Vec<(String, u64)> = props.iter().map(|p| (p.name.clone(), p.offset)).collect();
         let want: Vec<(String, u64)> = ["A", "B", "C", "D"].iter().zip([0, 4, 8, 12]).map(|(n, o)| (n.to_string(), o)).collect();
         if got != want {
             return Err(format!("unknown property layout (Guid reads as {got:?})"));
         }
-        Ok(())
+        if let Some(t) = find("Transform", "ScriptStruct") {
+            let got: Vec<Option<String>> = self.props(mem, t).iter().map(|p| self.object_name(mem, p.extra)).collect();
+            if got != [Some("Quat".to_string()), Some("Vector".into()), Some("Vector".into())] {
+                return Ok(false);
+            }
+        }
+        if let Some(a) = find("Actor", "Class") {
+            let tags = self.props(mem, a).iter().find(|p| p.name == "Tags").cloned();
+            let inner = tags.as_ref().and_then(|p| p.inner.as_ref()).map(|i| i.kind.clone());
+            if tags.is_some() && inner.as_deref() != Some("NameProperty") {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub fn object_count(&self, mem: &File) -> usize {
@@ -270,7 +321,7 @@ impl Ue {
                     }
                     out.push(p);
                 }
-                f = ptr_at(mem, field + FIELD_NEXT - self.shift);
+                f = ptr_at(mem, field + self.layout.next);
             }
         }
         let out = Arc::new(out);
@@ -281,14 +332,16 @@ impl Ue {
     /// The property described by the FField at `field`.
     pub fn prop(&self, mem: &File, field: u64) -> Option<Prop> {
         let kind = self.fname(mem, ptr_at(mem, field + FIELD_CLASS)?)?;
+        let l = self.layout;
+        let extra = if matches!(kind.as_str(), "ArrayProperty" | "SetProperty") { l.inner } else { l.extra };
         Some(Prop {
-            name: self.fname(mem, field + FIELD_NAME - self.shift)?,
+            name: self.fname(mem, field + l.name)?,
+            offset: i32_at(mem, field + l.offset)?.max(0) as u64,
+            size: i32_at(mem, field + l.size)?.max(0) as u64,
+            dim: i32_at(mem, field + l.dim)?.max(1) as u64,
+            extra: u64_at(mem, field + extra).unwrap_or(0),
+            extra2: u64_at(mem, field + l.value).unwrap_or(0),
             kind,
-            offset: i32_at(mem, field + PROP_OFFSET - self.shift)?.max(0) as u64,
-            size: i32_at(mem, field + PROP_SIZE - self.shift)?.max(0) as u64,
-            dim: i32_at(mem, field + PROP_DIM - self.shift)?.max(1) as u64,
-            extra: u64_at(mem, field + PROP_EXTRA - self.shift).unwrap_or(0),
-            extra2: u64_at(mem, field + PROP_EXTRA2 - self.shift).unwrap_or(0),
             inner: None,
             value: None,
         })
@@ -878,13 +931,29 @@ impl Ue {
             Some(Step::Field(f)) => Some(f),
             _ => None,
         };
-        let (Some(class), false) = (self.class_of(mem, root), keys.is_empty()) else { return Vec::new() };
+        // A Gameplay Ability System attribute keeps BaseValue (what the game adds to and saves)
+        // and CurrentValue (with temporary bonuses: what its checks read), equal unless a
+        // bonus runs. Written together: Minecraft Dungeons II adds a pickup to Emeralds'
+        // BaseValue, and a CurrentValue left behind would keep the old amount for buying.
+        let mut out = Vec::new();
+        if let (Some(leaf), Some(class)) = (leaf, self.class_of(mem, root)) {
+            let other = match leaf.as_str() {
+                "BaseValue" => Some("CurrentValue"),
+                "CurrentValue" => Some("BaseValue"),
+                _ => None,
+            };
+            if let (Some(other), true) = (other, self.in_attribute(mem, class, steps)) {
+                let mut twin = steps.to_vec();
+                *twin.last_mut().unwrap() = Step::Field(other.into());
+                out.push(twin);
+            }
+        }
+        let (Some(class), false) = (self.class_of(mem, root), keys.is_empty()) else { return out };
         let same = |at: u64, size: u64| {
             let n = size.clamp(1, 8) as usize;
             let (mut a, mut b) = ([0u8; 8], [0u8; 8]);
             mem.read_exact_at(&mut a[..n], at).is_ok() && mem.read_exact_at(&mut b[..n], target).is_ok() && a == b && a != [0; 8]
         };
-        let mut out = Vec::new();
         for p in self.props(mem, class).iter().filter(|p| p.name != *first) {
             match p.kind.as_str() {
                 "MapProperty" => {
@@ -916,6 +985,28 @@ impl Ue {
         }
         out.dedup();
         out
+    }
+
+    /// Whether `steps` (fields only) end in a field of a GameplayAttributeData struct (or a
+    /// struct made from it).
+    fn in_attribute(&self, mem: &File, class: u64, steps: &[Step]) -> bool {
+        let mut st = class;
+        for s in &steps[..steps.len().saturating_sub(1)] {
+            let Step::Field(name) = s else { return false };
+            match self.find_prop(mem, st, name) {
+                Some(p) if p.kind == "StructProperty" => st = p.extra,
+                _ => return false,
+            }
+        }
+        let mut cur = Some(st);
+        for _ in 0..8 {
+            let Some(s) = cur.filter(|&s| s != 0 && s != class) else { return false };
+            if self.object_name(mem, s).as_deref() == Some("GameplayAttributeData") {
+                return true;
+            }
+            cur = ptr_at(mem, s + STRUCT_SUPER);
+        }
+        false
     }
 
     /// The key that tells element `i` of these apart from the others: one of its properties
