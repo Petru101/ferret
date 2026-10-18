@@ -1526,20 +1526,64 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
             .filter_map(|(on, word)| on.then_some(word))
             .collect();
         let extras = dash(Some(extras.join(",").as_str()));
-        let program = maps(pid).ok().and_then(|m| program_path(pid, &m));
+        let regions = maps(pid).unwrap_or_default();
+        let program = program_path(pid, &regions);
         let name = dash(name.as_deref());
-        rows.push((program, format!("{pid}\t{name_now}\t{id}\t{refused}\t{name}\t{}\t{ships}\t{extras}", dash(play))));
+        let draws = regions.iter().any(|r| gpu_driver(r.path.rsplit('/').next().unwrap_or_default())) || !windows && draws_like_a_game(pid);
+        let size: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
+        let row = format!("{pid}\t{name_now}\t{id}\t{refused}\t{name}\t{}\t{ships}\t{extras}", dash(play));
+        rows.push(Listed { program, launch: launch_of(pid, &env), draws, size, row });
     }
+    // One game per launch: everything a launcher starts for a game carries its ID (Steam gives
+    // its app ID to every process of a launch: Bazzite's tail and grep watching Ubisoft
+    // Connect's log beside From Dust were listed as the game, and so was Ubisoft's osi.exe).
+    // The ones that draw with the GPU are the game; when none does yet (or an old game draws
+    // without it), the one using the most memory.
+    let keep = |c: &Listed| {
+        let launch: Vec<&Listed> = rows.iter().filter(|o| o.launch == c.launch).collect();
+        match launch.iter().any(|o| o.draws) {
+            true => c.draws,
+            false => launch.iter().all(|o| o.size <= c.size),
+        }
+    };
     // An Unreal stub holds none of the game's values (Astro Colony: two entries, a search in
     // the stub found nothing).
-    let stub_folders: Vec<&Path> = rows.iter().filter_map(|(p, _)| unreal_stub_folder(p.as_deref()?)).collect();
-    for (program, row) in &rows {
-        let stub = program.as_deref().is_some_and(|p| p.parent().is_some_and(|dir| stub_folders.contains(&dir)));
+    let stub_folders: Vec<&Path> = rows.iter().filter_map(|c| unreal_stub_folder(c.program.as_deref()?)).collect();
+    for c in rows.iter().filter(|c| keep(c)) {
+        let stub = c.program.as_deref().is_some_and(|p| p.parent().is_some_and(|dir| stub_folders.contains(&dir)));
         if !stub {
-            writeln!(out, "{row}")?;
+            writeln!(out, "{}", c.row)?;
         }
     }
     Ok(())
+}
+
+/// A process in the games list before it's picked out of its launch.
+struct Listed {
+    program: Option<PathBuf>,
+    /// Which launch it belongs to (`launch_of`).
+    launch: String,
+    /// It draws with the GPU (or, outside Wine, the ways games draw without it).
+    draws: bool,
+    /// Its writable memory, in bytes.
+    size: u64,
+    row: String,
+}
+
+/// Which launch a process belongs to: what Steam, Heroic or Lutris start for a game carries
+/// the game's ID, and a Wine game's programs share its prefix; anything else is its own.
+fn launch_of(pid: u32, env: &HashMap<String, String>) -> String {
+    if let Some(id) = steam_id(env) {
+        return format!("steam {id}");
+    }
+    let given = |k: &str| env.get(k).map(|v| v.trim_end_matches('/')).filter(|v| !v.is_empty());
+    if let Some(v) = given("HEROIC_APP_NAME").or_else(|| given("GAME_NAME")) {
+        return format!("game {v}");
+    }
+    match given("WINEPREFIX").or_else(|| given("STEAM_COMPAT_DATA_PATH")) {
+        Some(prefix) => format!("prefix {}", prefix.trim_end_matches("/pfx")),
+        None => format!("pid {pid}"),
+    }
 }
 
 fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
