@@ -30,6 +30,8 @@ pub const APP_ID: &str = "io.github.Petru101.Ferret";
 /// How long a closed window waits for the core to say whether limits run (a search stopping
 /// first, a restore finishing) before Ferret quits anyway.
 const CLOSE_WAIT: u32 = 30;
+/// How long a toast stays when nothing else happens (libadwaita's default is 5 s).
+const TOAST_SECONDS: u32 = 4;
 
 pub enum Event {
     Log(String),
@@ -252,6 +254,8 @@ struct Ui {
     /// to its own 5 s it covered the Find tab's buttons ("Type the Number Instead") long after
     /// the game had opened.
     opening: Rc<RefCell<Option<adw::Toast>>>,
+    /// The toast shown last (`toast`).
+    last_toast: RefCell<Option<adw::Toast>>,
     /// The names games go by (Steam's), by program, from the games list.
     game_names: RefCell<std::collections::HashMap<String, String>>,
     /// What the games list knows of each game's online features, by pid: the warning on opening it.
@@ -416,8 +420,36 @@ impl Ui {
         }
     }
 
+    /// A short message over the window, one at a time: libadwaita queues toasts and shows each
+    /// for its whole time, so a save's message and the next ones stood over the Find tab's
+    /// buttons for 15 s. It goes when the player clicks anything, switches tab or page
+    /// (`dismiss_toast`): the player has moved on.
     fn toast(&self, msg: &str) {
-        self.toasts.add_toast(adw::Toast::new(msg));
+        let toast = adw::Toast::builder().title(msg).timeout(TOAST_SECONDS).build();
+        self.toasts.add_toast(toast.clone());
+        if let Some(old) = self.last_toast.replace(Some(toast)) {
+            old.dismiss();
+        }
+    }
+
+    /// Toasts go above the Find tab's row of tools while it shows (they covered Start Over,
+    /// Search and No Number?), and stay low elsewhere: raised on its first page they covered
+    /// Type the Number Instead.
+    fn place_toasts(&self) {
+        let tools = self.on_game_page()
+            && self.stack.visible_child_name().as_deref() == Some("find")
+            && self.find.root.visible_child_name().as_deref() == Some("pick");
+        if tools {
+            self.toasts.add_css_class("raised");
+        } else {
+            self.toasts.remove_css_class("raised");
+        }
+    }
+
+    fn dismiss_toast(&self) {
+        if let Some(t) = self.last_toast.take() {
+            t.dismiss();
+        }
     }
 
     /// The game is open, or couldn't be: its "Opening" toast goes.
@@ -1052,7 +1084,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
 fn load_css() {
     let css = gtk::CssProvider::new();
     css.load_from_string(
-        "entry.searching { background-color: alpha(@accent_bg_color, 0.3); outline: 2px solid @accent_bg_color; \
+        ".raised toast { margin-bottom: 64px; } \
+         entry.searching { background-color: alpha(@accent_bg_color, 0.3); outline: 2px solid @accent_bg_color; \
          outline-offset: -2px; } \
          .phase-card { padding: 18px 24px; border-radius: 16px; border: 3px solid @accent_bg_color; \
          background-color: mix(@window_bg_color, @accent_bg_color, 0.2); box-shadow: 0 4px 16px alpha(black, 0.3); } \
@@ -1222,6 +1255,7 @@ fn build(app: &adw::Application) {
         attaching: Rc::default(),
         waiting_for: Rc::default(),
         opening: Rc::default(),
+        last_toast: RefCell::default(),
         game_names: RefCell::default(),
         online: RefCell::default(),
         background: Rc::default(),
@@ -1229,6 +1263,25 @@ fn build(app: &adw::Application) {
         portal_answer: RefCell::default(),
     });
 
+    // The player moved on: the last message goes (`Ui::toast`).
+    {
+        let click = gtk::GestureClick::builder().button(0).propagation_phase(gtk::PropagationPhase::Capture).build();
+        let ui_ = ui.clone();
+        click.connect_pressed(move |_, _, _, _| ui_.dismiss_toast());
+        ui.window.add_controller(click);
+        let ui_ = ui.clone();
+        ui.stack.connect_visible_child_name_notify(move |_| {
+            ui_.dismiss_toast();
+            ui_.place_toasts();
+        });
+        let ui_ = ui.clone();
+        ui.nav.connect_visible_page_notify(move |_| {
+            ui_.dismiss_toast();
+            ui_.place_toasts();
+        });
+        let ui_ = ui.clone();
+        ui.find.root.connect_visible_child_name_notify(move |_| ui_.place_toasts());
+    }
     {
         let ui = ui.clone();
         glib::spawn_future_local(async move {
