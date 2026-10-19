@@ -2,6 +2,7 @@
 // (scans, OCR, the window picker, tracing) never blocks the window; the
 // interface sends it jobs and gets events back.
 
+mod browse;
 mod feedback;
 mod find;
 mod hotkeys;
@@ -82,6 +83,14 @@ pub enum Event {
     Imported(Result<crate::core::Imported, String>),
     /// What the shared library knows the open game by (program, Steam id, build).
     Browse(Result<(String, Option<String>, Option<String>), String>),
+    /// The player's numbers by name (the Browse tab), or why there are none.
+    Player(Result<Vec<crate::core::PlayerObject>, String>),
+    /// The saved values and the Browse tab's numbers now, in its order.
+    Peeked(Result<Vec<ValueRow>, String>, Vec<Option<f64>>),
+    /// Whether the game (its pid) has numbers the Browse tab can list.
+    Browsable(u32, bool),
+    /// A number from the Browse tab was saved: its name and what to tell the player.
+    BrowseSaved(Result<(String, String), String>),
     /// The places still matching, with their values (the player tries them out).
     Matches(Result<Vec<crate::core::Match>, String>),
     /// The player picked one of them as the value.
@@ -226,6 +235,7 @@ struct Ui {
     stack: adw::ViewStack,
     values: Rc<values::ValuesView>,
     find: Rc<find::FindView>,
+    browse: Rc<browse::BrowseView>,
     phase: Rc<phase::PhaseCard>,
     guide: Rc<guide::Guide>,
     tips: Rc<tips::Tips>,
@@ -505,6 +515,34 @@ impl Ui {
         self.explain(&tr!("{name} hides its numbers", name), &text);
     }
 
+    /// Another game: the Browse tab shows only once the game is known to have numbers it can
+    /// list (Unreal games).
+    fn new_browse(self: &Rc<Self>, pid: u32) {
+        self.browse.new_game();
+        self.browsable(pid, false);
+        self.worker.run(move |core| Event::Browsable(pid, core.browsable()));
+    }
+
+    fn browsable(self: &Rc<Self>, pid: u32, can: bool) {
+        if self.attached.get() != Some(pid) {
+            return;
+        }
+        let page = self.stack.page(&self.browse.root);
+        if !can && self.stack.visible_child_name().as_deref() == Some("browse") {
+            self.stack.set_visible_child_name("values");
+        }
+        page.set_visible(can);
+        // A game opened as it starts has no objects yet: asked again a while later.
+        if !can {
+            let ui = self.clone();
+            glib::timeout_add_seconds_local_once(30, move || {
+                if ui.attached.get() == Some(pid) && !ui.stack.page(&ui.browse.root).is_visible() {
+                    ui.worker.run(move |core| Event::Browsable(pid, core.browsable()));
+                }
+            });
+        }
+    }
+
     fn on_game_page(&self) -> bool {
         self.nav.visible_page().as_ref() == Some(&self.game_page)
     }
@@ -655,6 +693,7 @@ impl Ui {
                 self.waiting_for.replace(None);
                 if self.attached.replace(Some(pid)) != Some(pid) {
                     self.find.new_game();
+                    self.new_browse(pid);
                     self.tips.show(tips::Tip::SaveFirst);
                     self.warn_online(pid, &exe);
                     self.worker.run(|core| Event::Scrambler(core.scrambler()));
@@ -706,6 +745,21 @@ impl Ui {
                 self.values.update(values);
             }
             Event::Values(Err(_)) => {}
+            Event::Peeked(values, now) => {
+                if let Ok(values) = values {
+                    self.find.saved_values(&values);
+                    self.values.update(values);
+                }
+                self.browse.update(&now);
+            }
+            Event::Player(list) => self.browse.show(list),
+            Event::Browsable(pid, can) => self.browsable(pid, can),
+            Event::BrowseSaved(Ok((_, msg))) => {
+                self.toast(&msg);
+                self.stack.set_visible_child_name("values");
+                self.worker.run(|core| Event::Values(core.values()));
+            }
+            Event::BrowseSaved(Err(e)) => self.toast(&e),
             Event::Numbers(r) => self.find.numbers(r),
             Event::Read(r, area, kept, bar) => self.find.read(r, area, kept, bar),
             Event::Frame(t, area) => self.find.show_frame(t, area),
@@ -969,6 +1023,9 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("remove", Box::new(|ui, name| values::ask_remove(&ui.worker, name.trim(), &ui.stack)));
+    // The Browse tab: `list` (again), `search <text>`, `changed on|off`, `save <row>,<name>`
+    // (the row's number among all listed, without the dialog).
+    action("listed", Box::new(|ui, arg| ui.browse.debug(&arg)));
     // `<name>,<new name>`, without the dialog.
     action(
         "rename",
@@ -1063,6 +1120,16 @@ fn build(app: &adw::Application) {
     }
     stack.add_titled_with_icon(&values.root, Some("values"), &tr!("Values"), "view-list-symbolic");
     stack.add_titled_with_icon(&find.root, Some("find"), &tr!("Find Value"), "edit-find-symbolic");
+    let browse = browse::BrowseView::new(worker.clone());
+    stack.add_titled_with_icon(&browse.root, Some("browse"), &tr!("Browse"), "view-grid-symbolic").set_visible(false);
+    {
+        let browse = browse.clone();
+        stack.connect_visible_child_name_notify(move |s| {
+            if s.visible_child_name().as_deref() == Some("browse") {
+                browse.shown();
+            }
+        });
+    }
 
     let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
     let header = adw::HeaderBar::new();
@@ -1144,6 +1211,7 @@ fn build(app: &adw::Application) {
         stack,
         values,
         find,
+        browse,
         phase,
         guide,
         tips,
@@ -1181,10 +1249,13 @@ fn build(app: &adw::Application) {
                 let values = ui.on_game_page() && ui.attached.get().is_some();
                 // The places still matching a search, with their values as they are now.
                 let matches = values && ui.stack.visible_child_name().as_deref() == Some("find") && ui.find.matches_shown();
+                // The Browse tab's numbers as they are now.
+                let listed = if values && ui.stack.visible_child_name().as_deref() == Some("browse") { ui.browse.locs() } else { Vec::new() };
                 ui.worker.run(move |core| match core.check_game() {
                     Some(Gone::Quit(exe)) => Event::Quit(exe),
                     Some(Gone::AntiCheat(exe, ac)) => Event::AntiCheat(exe, ac),
                     None if matches => Event::Matches(Ok(core.matches())),
+                    None if !listed.is_empty() => Event::Peeked(core.values(), core.peek_values(&listed)),
                     None if values => Event::Values(core.values()),
                     None => Event::Games(core.games()),
                 });

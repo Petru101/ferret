@@ -3,6 +3,7 @@ src/bar.rs
 src/capture.rs
 src/core.rs
 src/feedback.rs
+src/gui/browse.rs
 src/gui/feedback.rs
 src/gui/find.rs
 src/gui/guide.rs

@@ -3684,6 +3684,33 @@ fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     writeln!(out, "in {} ms", t.elapsed().as_millis())
 }
 
+/// player: the player's numbers by name (`Ue::player`, the Browse tab): an "object
+/// <role>\t<owner or ->\t<class>\t<name>" line, then its "field 0x<addr>:<type> = <value>\t<label>"
+/// lines, for each object; "none character" while the player has no character (a menu),
+/// "none unreal <why>" for games whose objects Ferret can't read so.
+fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
+    let t = Instant::now();
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let ue = match unreal(s.pid, mem) {
+        Ok(ue) => ue,
+        Err(e) => return writeln!(out, "none unreal {e}"),
+    };
+    let Ok(list) = ue.player(mem) else {
+        return writeln!(out, "none character");
+    };
+    let mut n = 0;
+    for o in &list {
+        writeln!(out, "object {}\t{}\t{}\t{}", o.role, o.owner.as_deref().unwrap_or("-"), o.class, o.name)?;
+        for f in &o.fields {
+            writeln!(out, "field {}\t{}", s.describe(f.addr, Kind::parse(f.kind).unwrap_or(Kind::I32)), f.label)?;
+            n += 1;
+        }
+    }
+    writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
+}
+
 /// gdtree: a Godot game's scene tree, a node a line with its script (after a script path was
 /// found or followed).
 fn cmd_gdtree(out: &mut impl Write, s: &Session) -> io::Result<()> {
@@ -3801,6 +3828,7 @@ pub fn run(as_user: Option<&str>) {
             "names" => cmd_names(&mut out, &mut session, arg),
             "named" => cmd_named(&mut out, &mut session, arg),
             "ue" => cmd_ue(&mut out, &session, arg),
+            "player" => cmd_player(&mut out, &session),
             "gdtree" => cmd_gdtree(&mut out, &session),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),

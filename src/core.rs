@@ -392,6 +392,43 @@ pub struct Match {
     pub saved: bool,
 }
 
+/// How an object the Browse tab lists belongs to the player.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Belongs {
+    /// The pawn they control.
+    Character,
+    /// Their PlayerState (score, often currencies).
+    State,
+    /// Their PlayerController.
+    Controller,
+    /// The game instance or the game's state.
+    Game,
+    /// An actor one of those owns (a weapon), by the owner's name.
+    Owned(String),
+    /// An object inside one of those (a component, an attribute set).
+    Part(String),
+    /// An object one of their fields points to (an inventory slot).
+    Linked(String),
+}
+
+/// An object of the player's, with its numbers (the Browse tab).
+#[derive(Clone, Debug)]
+pub struct PlayerObject {
+    pub name: String,
+    pub class: String,
+    pub belongs: Belongs,
+    pub fields: Vec<PlayerField>,
+}
+
+/// A number the Browse tab lists: what the game calls it ("Health", "Slots[Item=Arrow].Count")
+/// and where it is.
+#[derive(Clone, Debug)]
+pub struct PlayerField {
+    pub label: String,
+    pub loc: Loc,
+    pub value: Option<f64>,
+}
+
 /// How the game stores a value.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
@@ -1594,12 +1631,32 @@ impl Core {
         if self.game()?.java {
             return self.save_java(name, loc);
         }
+        let decimals = if loc.kind.whole() { self.searched_decimals } else { 0 };
+        self.save_at(name, loc, decimals, false)
+    }
+
+    /// Saves a number the Browse tab lists (no search needed): by its name only, never by
+    /// tracing the game (the player didn't ask for a search, nor its pauses).
+    pub fn save_listed(&mut self, name: &str, loc: Loc) -> Result<bool, String> {
+        let name: String = one_word(name).chars().take(MAX_NAME).collect();
+        if name.is_empty() {
+            return Err(tr!("the value needs a name"));
+        }
+        self.game()?;
+        self.save_at(&name, loc, 0, true)
+    }
+
+    /// `save` of the place `loc`; `by_name`: only by name, else not at all.
+    fn save_at(&mut self, name: &str, loc: Loc, decimals: u32, by_name: bool) -> Result<bool, String> {
         // Unreal and Unity games name their objects' classes and fields: a name holds up
         // across restarts and updates (code patterns break when the game replaces objects), and
         // needs no tracing. Unity's are slow to search for: their code patterns are kept too.
         let mut named = self.named_path(loc, true);
+        if by_name && named.is_none() {
+            return Err(tr!("Ferret can't find this number again by its name, so it isn't saved. Find it with a search instead."));
+        }
         let reply = match &named {
-            Some((text, _, _)) if !backed_by_code(text) => Vec::new(),
+            Some((text, _, _)) if by_name || !backed_by_code(text) => Vec::new(),
             _ => self.helper.call(&format!("sites {loc}")),
         };
         for l in reply.iter().filter(|l| !l.starts_with("site ")) {
@@ -1651,7 +1708,6 @@ impl Core {
                 candidates.len()
             )
         };
-        let decimals = if loc.kind.whole() { self.searched_decimals } else { 0 };
         let last = self.peek_exact(&[loc]).pop().flatten();
         let game = self.game()?;
         let build = game.build.clone();
@@ -3536,6 +3592,68 @@ impl Core {
             }
         }
         list
+    }
+
+    /// Whether the Browse tab can list this game's numbers by name (an Unreal game whose objects
+    /// Ferret reads).
+    pub fn browsable(&mut self) -> bool {
+        self.game.is_some() && first_error(&self.helper.call("ue")).is_none()
+    }
+
+    /// The player's numbers by the names the game gives them, by object (the Browse tab); why
+    /// there are none to list now.
+    pub fn player_values(&mut self) -> Result<Vec<PlayerObject>, String> {
+        self.game()?;
+        let reply = self.helper.call("player");
+        if let Some(e) = first_error(&reply) {
+            return Err(e);
+        }
+        if reply.iter().any(|l| l.starts_with("none character")) {
+            return Err(tr!("Your character isn't in the game right now (a menu or a loading screen?). Try again once you're playing."));
+        }
+        if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none unreal ")) {
+            self.say(&format!("no list by name: {why}"));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine games so far."));
+        }
+        let mut list: Vec<PlayerObject> = Vec::new();
+        for l in &reply {
+            if let Some(o) = l.strip_prefix("object ") {
+                let f: Vec<&str> = o.splitn(4, '\t').collect();
+                let [role, owner, class, name] = f[..] else { continue };
+                let owner = owner.to_owned();
+                let belongs = match role {
+                    "character" => Belongs::Character,
+                    "state" => Belongs::State,
+                    "controller" => Belongs::Controller,
+                    "game" => Belongs::Game,
+                    "owned" => Belongs::Owned(owner),
+                    "part" => Belongs::Part(owner),
+                    _ => Belongs::Linked(owner),
+                };
+                list.push(PlayerObject { name: name.to_owned(), class: class.to_owned(), belongs, fields: Vec::new() });
+            } else if let (Some(f), Some(o)) = (l.strip_prefix("field "), list.last_mut()) {
+                let Some((place, label)) = f.split_once('\t') else { continue };
+                let Some((loc, value)) = parse_exact_values(&[place.to_owned()]).pop() else { continue };
+                o.fields.push(PlayerField { label: label.to_owned(), loc, value });
+            } else if l.contains(" numbers in ") {
+                self.say(&format!("listed the player's {l}"));
+            }
+        }
+        Ok(list)
+    }
+
+    /// The numbers at these places now (the Browse tab's list, once a second).
+    pub fn peek_values(&mut self, locs: &[Loc]) -> Vec<Option<f64>> {
+        if locs.is_empty() {
+            return Vec::new();
+        }
+        let arg: Vec<String> = locs.iter().map(|l| l.to_string()).collect();
+        let values = parse_exact_values(&self.helper.call(&format!("peek {}", arg.join(" "))));
+        // One line per place, in order.
+        if values.len() == locs.len() && values.iter().zip(locs).all(|((a, _), b)| a == b) {
+            return values.into_iter().map(|(_, v)| v).collect();
+        }
+        self.peek_exact(locs)
     }
 
     /// Shows the places still matching while a search runs, once they're few enough to list

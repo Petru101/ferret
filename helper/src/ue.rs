@@ -1161,6 +1161,399 @@ impl Ue {
     }
 }
 
+// --- The player's numbers by name (the Browse tab): what a cheat table lists, found through the
+// engine's own objects instead of a search. Every Unreal game has GameEngine -> GameInstance ->
+// LocalPlayers -> PlayerController -> the pawn it controls and its PlayerState (where Cheat
+// Engine tables start: Minecraft Dungeons' does). Listed: their numbers, those of the objects
+// inside them (components, Gameplay Ability System attribute sets: health, currencies), of the
+// actors they own (a weapon) and of the objects their fields point to (an inventory's slots).
+
+/// Packages of the engine's and its plugins' classes and structs: their thousands of settings
+/// aren't listed, only `ENGINE_FIELDS`.
+const ENGINE_PACKAGES: &[&str] = &[
+    "CoreUObject", "Engine", "GameplayAbilities", "GameplayTasks", "GameplayTags", "AIModule", "NavigationSystem", "UMG", "Slate",
+    "SlateCore", "InputCore", "EnhancedInput", "PhysicsCore", "Chaos", "ChaosSolverEngine", "MovieScene", "MovieSceneTracks",
+    "LevelSequence", "Niagara", "NiagaraCore", "CommonUI", "CommonInput", "ModularGameplay", "GameFeatures", "Paper2D", "AudioMixer",
+    "NetCore", "DeveloperSettings", "AnimGraphRuntime", "CinematicCamera", "MediaAssets", "OnlineSubsystem", "OnlineSubsystemUtils",
+    "Landscape", "Foliage", "AudioExtensions", "ControlRig", "IKRig", "MotionWarping", "GeometryCollectionEngine", "FieldSystemEngine",
+    "StateTreeModule", "SmartObjectsModule", "MassEntity", "ModelViewViewModel", "ClothingSystemRuntimeInterface", "PhysicsControl",
+    "EngineCameras", "GameplayCameras", "TemplateSequence",
+];
+/// The engine's fields worth changing, the same in every game using its classes: movement
+/// (CharacterMovementComponent), jumps (Character), a player's score.
+const ENGINE_FIELDS: &[&str] = &[
+    "MaxWalkSpeed", "MaxWalkSpeedCrouched", "MaxSwimSpeed", "MaxFlySpeed", "MaxAcceleration", "JumpZVelocity", "GravityScale",
+    "AirControl", "JumpMaxCount", "JumpMaxHoldTime", "Score",
+];
+/// The character's own speed (every actor has one: only the character's is listed).
+const TIME_DILATION: &str = "CustomTimeDilation";
+/// Objects left out with what's inside them: parts with a place in the world (meshes, cameras:
+/// hundreds of rendering settings), the HUD's widgets (copies of numbers for the screen: setting
+/// one changes nothing), input, animation, the world itself.
+const LEFT_OUT: &[&str] =
+    &["SceneComponent", "Widget", "InputComponent", "AnimInstance", "Level", "World", "PlayerCameraManager", "CameraModifier"];
+const MAX_GROUPS: usize = 300;
+const MAX_LISTED: usize = 5000;
+/// Elements of one array or map listed at most.
+const LIST_ELEMENTS: usize = 64;
+
+/// A number listed for the player: what it's called ("Health", "Slots[Item=Arrow].Count") and
+/// where it is.
+pub struct Listed {
+    pub label: String,
+    pub addr: u64,
+    /// The helper's value type: i32, f32, f64 or u16.
+    pub kind: &'static str,
+}
+
+/// An object whose numbers are listed, and how it belongs to the player.
+pub struct ListedObject {
+    pub name: String,
+    pub class: String,
+    /// character, state, controller, game (the game instance or state), owned (an actor the
+    /// player's own: a weapon), part (an object inside one of those), linked (one their fields
+    /// point to).
+    pub role: &'static str,
+    /// The object it belongs to, for owned, part and linked.
+    pub owner: Option<String>,
+    pub fields: Vec<Listed>,
+}
+
+/// Why there's no list.
+#[derive(Debug, PartialEq)]
+pub enum NoPlayer {
+    /// No local player, or it controls no pawn now (a menu, a loading screen).
+    NoCharacter,
+}
+
+fn listed_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "IntProperty" | "UInt32Property" => Some("i32"),
+        "FloatProperty" => Some("f32"),
+        "DoubleProperty" => Some("f64"),
+        "Int16Property" | "UInt16Property" => Some("u16"),
+        _ => None,
+    }
+}
+
+/// Walks objects' fields for `Ue::player`.
+struct Lister<'a> {
+    ue: &'a Ue,
+    mem: &'a File,
+    engine: HashMap<u64, bool>,
+    out: Vec<Listed>,
+    /// Objects the fields point to (`links` on).
+    links: Vec<u64>,
+    total: usize,
+    /// The fields are the character's own.
+    character: bool,
+}
+
+impl Lister<'_> {
+    fn push(&mut self, label: String, addr: u64, kind: &'static str) {
+        if self.total < MAX_LISTED {
+            self.total += 1;
+            self.out.push(Listed { label, addr, kind });
+        }
+    }
+
+    fn is_engine(&mut self, st: u64) -> bool {
+        if let Some(&e) = self.engine.get(&st) {
+            return e;
+        }
+        let e = self.ue.package(self.mem, st).and_then(|p| p.strip_prefix("/Script/").map(|m| ENGINE_PACKAGES.contains(&m))).unwrap_or(false);
+        self.engine.insert(st, e);
+        e
+    }
+
+    /// The numbers of the struct or object at `at`, each struct's own properties checked against
+    /// its package.
+    fn fields(&mut self, at: u64, st: u64, prefix: &str, depth: usize, links: bool) {
+        let mut chain = vec![st];
+        while let Some(s) = ptr_at(self.mem, chain[chain.len() - 1] + STRUCT_SUPER).filter(|_| chain.len() < 64) {
+            chain.push(s);
+        }
+        // `props` lists parents' properties first: a struct's own come after its parent's.
+        for i in (0..chain.len()).rev() {
+            let from = chain.get(i + 1).map_or(0, |&s| self.ue.props(self.mem, s).len());
+            let props = self.ue.props(self.mem, chain[i]);
+            let engine = self.is_engine(chain[i]);
+            for p in props.iter().skip(from) {
+                self.field(at, p, prefix, depth, engine, links);
+            }
+        }
+    }
+
+    fn field(&mut self, at: u64, p: &Prop, prefix: &str, depth: usize, engine: bool, links: bool) {
+        let label = if prefix.is_empty() { p.name.clone() } else { format!("{prefix}.{}", p.name) };
+        let start = at + p.offset;
+        let mem = self.mem;
+        if engine {
+            match listed_kind(&p.kind) {
+                Some(kind) if p.dim == 1 && (ENGINE_FIELDS.contains(&p.name.as_str()) || self.character && p.name == TIME_DILATION) => {
+                    self.push(label, start, kind)
+                }
+                // The ability system's attribute sets, when they aren't inside the actor (they
+                // usually are).
+                _ if links && p.name == "SpawnedAttributes" => {
+                    self.links.extend(self.ue.elements(mem, start, p).into_iter().take(LIST_ELEMENTS).map(|(o, _)| o));
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Only the first of a fixed-size array would be found again by name.
+        if p.dim != 1 {
+            return;
+        }
+        if let Some(kind) = listed_kind(&p.kind) {
+            return self.push(label, start, kind);
+        }
+        match p.kind.as_str() {
+            "StructProperty" => self.in_struct(start, p.extra, &label, depth),
+            "ObjectProperty" if links => self.links.extend(ptr_at(mem, start)),
+            "ArrayProperty" => {
+                let Some(inner) = p.inner.as_deref() else { return };
+                let elems = self.ue.elements(mem, start, p);
+                let n = elems.len().min(LIST_ELEMENTS);
+                if let Some(kind) = listed_kind(&inner.kind) {
+                    for (i, &(e, _)) in elems[..n].iter().enumerate() {
+                        self.push(format!("{label} #{i}"), e, kind);
+                    }
+                } else if inner.kind == "StructProperty" {
+                    for i in 0..n {
+                        let l = match self.ue.elem_key(mem, &elems, i) {
+                            Key::Index(i) => format!("{label} #{i}"),
+                            Key::By(k, v) => format!("{label}[{k}={v}]"),
+                        };
+                        self.in_struct(elems[i].0, elems[i].1, &l, depth);
+                    }
+                } else if inner.kind == "ObjectProperty" && links {
+                    self.links.extend(elems[..n].iter().map(|&(o, _)| o));
+                }
+            }
+            "MapProperty" => {
+                let (Some(kp), Some(vp)) = (p.inner.as_deref(), p.value.as_deref()) else { return };
+                for (k, v) in self.ue.map_entries(mem, start, kp, vp).into_iter().take(LIST_ELEMENTS) {
+                    let Some(key) = self.ue.key_text(mem, k, kp) else { continue };
+                    let l = format!("{label}{{{key}}}");
+                    match listed_kind(&vp.kind) {
+                        Some(kind) => self.push(l, v, kind),
+                        None if vp.kind == "StructProperty" => self.in_struct(v, vp.extra, &l, depth),
+                        None => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A struct's numbers; a Gameplay Ability System attribute is one number (CurrentValue:
+    /// what the game goes by; saving pairs BaseValue with it).
+    fn in_struct(&mut self, at: u64, st: u64, label: &str, depth: usize) {
+        if self.ue.is_attribute(self.mem, st) {
+            if let Some(cur) = self.ue.find_prop(self.mem, st, "CurrentValue") {
+                self.push(label.to_owned(), at + cur.offset, "f32");
+            }
+        } else if depth < 2 && !self.is_engine(st) {
+            self.fields(at, st, label, depth + 1, false);
+        }
+    }
+}
+
+impl Ue {
+    /// The name of the package an object (a class, a struct) is in: "/Script/Engine",
+    /// "/Game/Blueprints/BP_Player".
+    fn package(&self, mem: &File, obj: u64) -> Option<String> {
+        let mut cur = obj;
+        for _ in 0..16 {
+            match self.outer(mem, cur) {
+                Some(o) => cur = o,
+                None => break,
+            }
+        }
+        self.object_name(mem, cur)
+    }
+
+    /// Whether a struct is (or is made from) GameplayAttributeData.
+    fn is_attribute(&self, mem: &File, st: u64) -> bool {
+        let mut cur = Some(st);
+        for _ in 0..8 {
+            let Some(s) = cur else { return false };
+            if self.object_name(mem, s).as_deref() == Some("GameplayAttributeData") {
+                return true;
+            }
+            cur = ptr_at(mem, s + STRUCT_SUPER);
+        }
+        false
+    }
+
+    /// The names of a class and its parents.
+    fn lineage(&self, mem: &File, class: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = Some(class);
+        while let Some(c) = cur.filter(|_| out.len() < 64) {
+            out.push(self.object_name(mem, c).unwrap_or_default());
+            cur = ptr_at(mem, c + STRUCT_SUPER);
+        }
+        out
+    }
+
+    /// The live object an object property of `obj` points to.
+    fn object_in(&self, mem: &File, obj: u64, prop: &str) -> Option<u64> {
+        let p = self.find_prop(mem, self.class_of(mem, obj)?, prop).filter(|p| p.kind == "ObjectProperty")?;
+        ptr_at(mem, obj + p.offset).filter(|&o| self.class_of(mem, o).is_some() && !self.is_template(mem, o))
+    }
+
+    /// The player's numbers, by object: their character first, then the actors it owns, the
+    /// player state, the controller, the game, and the objects their fields point to.
+    pub fn player(&self, mem: &File) -> Result<Vec<ListedObject>, NoPlayer> {
+        // Every live object's class and outer, read once.
+        let mut heads: Vec<(u64, u64, u64)> = Vec::new();
+        for obj in self.objects(mem) {
+            let mut head = [0u8; 0x28];
+            if mem.read_exact_at(&mut head, obj).is_err() {
+                continue;
+            }
+            let word = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
+            let flags = u32::from_le_bytes(head[8..12].try_into().unwrap());
+            if flags & TEMPLATE_FLAGS == 0 && word(0x10) != 0 {
+                heads.push((obj, word(0x10), word(0x20)));
+            }
+        }
+        let mut lineages: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut is_a = |class: u64, names: &[&str]| lineages.entry(class).or_insert_with(|| self.lineage(mem, class)).iter().any(|n| names.contains(&n.as_str()));
+        let instance = heads.iter().find(|h| is_a(h.1, &["GameEngine"])).and_then(|h| self.object_in(mem, h.0, "GameInstance"));
+        let from_instance = instance.and_then(|gi| {
+            let class = self.class_of(mem, gi)?;
+            let p = self.find_prop(mem, class, "LocalPlayers").filter(|p| p.kind == "ArrayProperty")?;
+            self.elements(mem, gi + p.offset, &p).into_iter().map(|(o, _)| o).find(|&o| o != 0)
+        });
+        let local = from_instance.or_else(|| heads.iter().find(|h| is_a(h.1, &["LocalPlayer"])).map(|h| h.0));
+        let controller = local.and_then(|l| self.object_in(mem, l, "PlayerController"));
+        let pawn = controller.and_then(|c| self.object_in(mem, c, "AcknowledgedPawn").or_else(|| self.object_in(mem, c, "Pawn")));
+        let (Some(controller), Some(pawn)) = (controller, pawn) else { return Err(NoPlayer::NoCharacter) };
+        let state = self.object_in(mem, controller, "PlayerState").or_else(|| self.object_in(mem, pawn, "PlayerState"));
+        let mut world = self.outer(mem, pawn);
+        for _ in 0..4 {
+            match world {
+                Some(w) if !self.class_of(mem, w).is_some_and(|c| is_a(c, &["World"])) => world = self.outer(mem, w),
+                _ => break,
+            }
+        }
+        let game_state = world.and_then(|w| self.object_in(mem, w, "GameState"));
+
+        // (object, role, the group it belongs to)
+        let mut groups: Vec<(u64, &'static str, Option<usize>)> = vec![(pawn, "character", None)];
+        let roots = [(state, "state"), (Some(controller), "controller"), (instance, "game"), (game_state, "game")];
+        groups.extend(roots.into_iter().filter_map(|(o, role)| Some((o?, role, None))));
+        let mut index: HashMap<u64, usize> = groups.iter().enumerate().map(|(i, g)| (g.0, i)).collect();
+        // Actors the player's character, controller or state own.
+        if let Some(owner) = self.find_prop(mem, self.class_of(mem, pawn).unwrap_or(0), "Owner").filter(|p| p.kind == "ObjectProperty") {
+            for &(obj, class, _) in &heads {
+                if index.contains_key(&obj) || !is_a(class, &["Actor"]) || is_a(class, LEFT_OUT) {
+                    continue;
+                }
+                let by = ptr_at(mem, obj + owner.offset).and_then(|o| index.get(&o).copied()).filter(|&i| groups[i].2.is_none());
+                if let Some(by) = by.filter(|_| groups.len() < MAX_GROUPS) {
+                    index.insert(obj, groups.len());
+                    groups.push((obj, "owned", Some(by)));
+                }
+            }
+        }
+        // Objects inside those (their outer chain reaches one), past no left-out object.
+        let tops = groups.len();
+        let outers: HashMap<u64, (u64, u64)> = heads.iter().map(|&(o, c, out)| (o, (c, out))).collect();
+        for &(obj, class, outer) in &heads {
+            if index.contains_key(&obj) || is_a(class, LEFT_OUT) || groups.len() >= MAX_GROUPS {
+                continue;
+            }
+            let mut cur = outer;
+            for _ in 0..3 {
+                if let Some(&g) = index.get(&cur).filter(|&&g| g < tops) {
+                    index.insert(obj, groups.len());
+                    groups.push((obj, "part", Some(g)));
+                    break;
+                }
+                match outers.get(&cur) {
+                    Some(&(c, out)) if !is_a(c, LEFT_OUT) => cur = out,
+                    _ => break,
+                }
+            }
+        }
+        let mut lister = Lister { ue: self, mem, engine: HashMap::new(), out: Vec::new(), links: Vec::new(), total: 0, character: false };
+        let mut fields: Vec<Vec<Listed>> = Vec::new();
+        let mut i = 0;
+        while i < groups.len() {
+            let (obj, role, _) = groups[i];
+            let links = role != "linked";
+            lister.character = role == "character";
+            if let Some(class) = self.class_of(mem, obj) {
+                lister.fields(obj, class, "", 0, links);
+            }
+            fields.push(std::mem::take(&mut lister.out));
+            for o in std::mem::take(&mut lister.links) {
+                if index.contains_key(&o) || groups.len() >= MAX_GROUPS || !links {
+                    continue;
+                }
+                let Some(class) = self.class_of(mem, o).filter(|_| !self.is_template(mem, o)) else { continue };
+                // Assets (an item's definition) are in a package of their own: the same for
+                // every player, not theirs.
+                let asset = self.outer(mem, o).is_some_and(|out| {
+                    self.class_name(mem, out).as_deref() == Some("Package") && self.object_name(mem, out).as_deref() != Some("/Engine/Transient")
+                });
+                if !asset && !is_a(class, LEFT_OUT) && !is_a(class, &["Actor"]) {
+                    index.insert(o, groups.len());
+                    groups.push((o, "linked", Some(i)));
+                }
+            }
+            i += 1;
+        }
+        let name_of = |obj: u64| {
+            let class = self.class_name(mem, obj).unwrap_or_default();
+            self.object_name(mem, obj).filter(|n| !run_name(n)).unwrap_or(class)
+        };
+        // The group each one comes from at the top, for the order.
+        let top = |mut g: usize| {
+            while let Some(o) = groups[g].2 {
+                g = o;
+            }
+            g
+        };
+        let mut order: Vec<usize> = (0..groups.len()).filter(|&g| !fields[g].is_empty()).collect();
+        order.sort_by_key(|&g| {
+            let (obj, role, owner) = groups[g];
+            let attributes = self.class_of(mem, obj).is_some_and(|c| is_a(c, &["AttributeSet"]));
+            // An owned actor's parts follow it; the top objects' parts follow the top.
+            let near = match owner {
+                _ if role == "owned" => g,
+                Some(o) if groups[o].1 == "owned" => o,
+                _ => top(g),
+            };
+            let kind = match role {
+                "linked" => 3,
+                _ if attributes => 0,
+                "part" => 2,
+                _ => 1,
+            };
+            (top(g), near, kind, g)
+        });
+        Ok(order
+            .into_iter()
+            .map(|g| {
+                let (obj, role, owner) = groups[g];
+                ListedObject {
+                    name: name_of(obj),
+                    class: self.class_name(mem, obj).unwrap_or_default(),
+                    role,
+                    owner: owner.map(|o| name_of(groups[o].0)),
+                    fields: std::mem::take(&mut fields[g]),
+                }
+            })
+            .collect())
+    }
+}
+
 /// The game's Unreal objects (found once per game, shared with the limits' thread); an error
 /// for games that aren't Unreal (asked again after a while: the engine may still be starting).
 pub fn shared(pid: u32, mem: &File, exe: &str, mods: impl FnOnce() -> Vec<Module>) -> Result<Arc<Ue>, String> {

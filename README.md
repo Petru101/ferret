@@ -46,6 +46,9 @@ its menu, or an issue here).
 6. **More like this**: found one power's timer or one unit's health? Find Them on its card
    watches the game's code that changes it while you use the others, and saves each one with
    the same range.
+7. **Browse by name** (Unreal Engine games): the Browse tab lists your character's numbers by
+   the names the game gives them (health, ammo, run speed, jump height), no search needed.
+   Turn on Only What Changes, change one in the game, and save the one that moved.
 
 Notifications tell you what Ferret needs while the game is in front, even in fullscreen.
 
