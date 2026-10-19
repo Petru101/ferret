@@ -110,6 +110,8 @@ export function parse(body) {
         if (++value.ways > MAX_WAYS) throw `${value.name}: too many ways to find it`;
       } else if (key === "type") {
         if (!KINDS.includes(rest)) throw `${value.name}: an unknown value type`;
+      } else if (key === "key") {
+        if (!/^-?\d{1,4} -?\d{1,10}$/.test(rest)) throw `${value.name}: a broken key line`;
       } else if (key === "decimals") {
         if (!/^[0-6]$/.test(rest)) throw `${value.name}: a broken decimals line`;
       } else if (key === "build") {

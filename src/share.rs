@@ -25,6 +25,9 @@ pub struct Shared {
     pub decimals: u32,
     /// Code patterns, as profiles keep them: "<pattern> <instr offset> <base reg> <disp>".
     pub sites: Vec<String>,
+    /// Shared code patterns: the number next to the value that tells it from others like it
+    /// ("<offset> <number>", see `Entry.key` in core.rs).
+    pub key: Option<(i64, i32)>,
     /// The game build the code patterns were traced or checked in.
     pub build: Option<String>,
     /// Confirmed pointer paths starting in the game's own files.
@@ -96,6 +99,9 @@ pub fn write(game: &str, steam: Option<&str>, build: Option<&str>, values: &[Sha
         }
         for s in &v.sites {
             text += &format!("site {s}\n");
+        }
+        if let (Some((off, k)), false) = (v.key, v.sites.is_empty()) {
+            text += &format!("key {off} {k}\n");
         }
         if let (Some(b), false) = (&v.build, v.sites.is_empty()) {
             text += &format!("build {b}\n");
@@ -201,6 +207,7 @@ pub fn read(text: &str) -> Result<File, String> {
                     kind: Kind::I32,
                     decimals: 0,
                     sites: Vec::new(),
+                    key: None,
                     build: None,
                     paths: Vec::new(),
                     named: Vec::new(),
@@ -233,6 +240,10 @@ pub fn read(text: &str) -> Result<File, String> {
                     "named" => problem(&tr!("a broken name line")),
                     "site" => problem(&tr!("a broken code pattern")),
                     "path" => problem(&tr!("a broken pointer path")),
+                    "key" => match crate::core::parse_key(rest) {
+                        Some(k) => v.key = Some(k),
+                        None => problem(&tr!("a broken code pattern")),
+                    },
                     "build" if good_name(rest) => v.build = Some(rest.to_owned()),
                     "build" => problem(&tr!("a broken build line")),
                     "limit" if good_limit(rest) => v.limit = Some(rest.to_owned()),
@@ -263,6 +274,7 @@ mod tests {
             kind: Kind::I32,
             decimals: 0,
             sites: Vec::new(),
+            key: None,
             build: None,
             paths: Vec::new(),
             named: vec![path.into()],
@@ -280,6 +292,7 @@ mod tests {
             kind: Kind::F32,
             decimals: 0,
             sites: vec!["02ffc605????????01488bbb58010000f30f11b35c030000488b0d????????f6 16 ebx 860".into()],
+            key: Some((4, 2)),
             build: Some("6f77dc4f206f317f".into()),
             paths: vec!["CW4.exe+1a2b30 18 -8 20".into()],
             named: vec!["il2cpp:CommandBase._ammo".into()],

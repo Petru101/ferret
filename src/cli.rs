@@ -8,7 +8,7 @@ use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, copy (a value with no number), moving, still, use <addr>, unpick, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
-restarts: save <name>, restore, values, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>
+restarts: save <name>, restore, values, others <name> [seconds] (more like it: use them in the game meanwhile), set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>
 system: allow (the helper with your password, for native games under kernel.yama.ptrace_scope 1 or 2)
 shared library: shared, share, take <id>, unshare <id>";
 
@@ -225,6 +225,11 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             let id = crate::online::parse_id(arg).ok_or("usage: unshare <upload id>")?;
             crate::library::delete(&id)?;
             println!("deleted {id}");
+        }
+        "others" => {
+            let (name, secs) = arg.split_once(' ').unwrap_or((arg, "30"));
+            let secs = secs.trim().parse().map_err(|_| "usage: others <name> [seconds]")?;
+            println!("{}", core.find_others(name, Duration::from_secs(secs))?);
         }
         "remove" => {
             core.remove(arg)?;

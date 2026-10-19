@@ -984,7 +984,9 @@ fn limiter_loop(shared: SharedLimiter) {
                     }
                     continue;
                 }
-                if l.paths.is_empty() && l.guard_addr != 0 && read_guard(mem, l.guard_addr) != Some(l.guard) {
+                // Its key gone: the slot holds another power or unit now.
+                let key_gone = l.paths.is_empty() && !key_holds(mem, l.addr, l.sites.first().and_then(|s| s.key));
+                if key_gone || (l.paths.is_empty() && l.guard_addr != 0 && read_guard(mem, l.guard_addr) != Some(l.guard)) {
                     l.paused = Some("the object holding it changed, finding it again");
                     l.retry_at = Instant::now();
                     continue;
@@ -1045,23 +1047,45 @@ fn limiter_loop(shared: SharedLimiter) {
         }
         // Resolving traces the game for seconds (2 s wait, attaching every thread): on its own
         // thread, so the values are still written meanwhile. On this one, From Dust's Jellify
-        // timer held at most 0 ran for 4 s of every 14 (the ring jumped back to 59).
-        for (name, sites, search_code) in due {
+        // timer held at most 0 ran for 4 s of every 14 (the ring jumped back to 59). Values
+        // found through the same code are looked for in one trace.
+        let mut groups: Vec<Vec<(String, Vec<Site>, bool)>> = Vec::new();
+        for d in due {
+            match groups.iter_mut().find(|g| same_code(&g[0].1, &d.1)) {
+                Some(g) => g.push(d),
+                None => groups.push(vec![d]),
+            }
+        }
+        for group in groups {
             let (Ok(mem), shared) = (mem.try_clone(), shared.clone()) else { continue };
-            std::thread::spawn(move || refind(&shared, pid, &mem, width, &name, &sites, search_code));
+            std::thread::spawn(move || refind(&shared, pid, &mem, width, &group));
         }
     }
 }
 
-/// Finds a limited value by its code patterns again (`limiter_loop`, on a thread of its own).
-fn refind(shared: &SharedLimiter, pid: u32, mem: &File, width: usize, name: &str, sites: &[Site], search_code: bool) {
-    let mut found = resolve_values(pid, mem, std::slice::from_ref(&sites.to_vec()), width, RESOLVE_WAIT)
-        .pop()
-        .and_then(Result::ok)
-        .map(|r| {
-            let disp = r.disp;
-            (r, disp)
-        });
+/// The same code patterns, whatever their keys (others like a value: `cmd_others`).
+fn same_code(a: &[Site], b: &[Site]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.pat == b.pat && a.off == b.off && a.base == b.base && a.disp == b.disp)
+}
+
+/// Finds limited values by their code patterns again (`limiter_loop`, on a thread of its own):
+/// values going through the same code (From Dust's four power timers) in one trace, else
+/// waiting ones kept the game traced nearly all the time.
+fn refind(shared: &SharedLimiter, pid: u32, mem: &File, width: usize, due: &[(String, Vec<Site>, bool)]) {
+    let all: Vec<Vec<Site>> = due.iter().map(|(_, sites, _)| sites.clone()).collect();
+    let results = resolve_values(pid, mem, &all, width, RESOLVE_WAIT);
+    for ((name, sites, search_code), r) in due.iter().zip(results) {
+        refound(shared, pid, mem, width, name, sites, *search_code, r.ok());
+    }
+}
+
+/// What `refind` found for one value (`None`: its code didn't run).
+#[allow(clippy::too_many_arguments)]
+fn refound(shared: &SharedLimiter, pid: u32, mem: &File, width: usize, name: &str, sites: &[Site], search_code: bool, r: Option<Resolved>) {
+    let mut found = r.map(|r| {
+        let disp = r.disp;
+        (r, disp)
+    });
     // The code that ran may not show where the object comes from; another site's may
     // (searching the code for every site is slow: once per value).
     if let Some((r, _)) = found.as_mut().filter(|(r, _)| r.holder.is_none() && search_code) {
@@ -1112,17 +1136,21 @@ fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
 /// limit <name> <hex addr[:type]> <min|-> <max|-> <site or path>... where a site is
 /// "pattern:offset:register:displacement" as saved in the profile, a path
 /// "module+offset,offset,..." ("+static,disp" from resolve), and a named path starts with a
-/// quote (see names.rs; it keeps every place it leads to in range). No bounds: only keeps the address
-/// current (see `limiter_loop`).
+/// quote (see names.rs; it keeps every place it leads to in range); `key=<offset>:<number>`
+/// goes with the sites (see `Site.key`). No bounds: only keeps the address current (see
+/// `limiter_loop`).
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
-    let rest = f.get(4..).unwrap_or_default();
+    let (key, rest) = take_key(f.get(4..).unwrap_or_default());
     let is_named = |s: &&&str| Named::is_named(s);
     let named: Option<Vec<Named>> = rest.iter().filter(is_named).map(|s| Named::parse(s)).collect();
     let rest: Vec<&str> = rest.iter().filter(|s| !is_named(s)).copied().collect();
     let paths: Option<Vec<PtrPath>> = rest.iter().filter(|s| s.contains(',')).map(|s| PtrPath::parse(s)).collect();
-    let sites: Option<Vec<Site>> =
-        rest.iter().filter(|s| !s.contains(',')).map(|s| Site::parse(&s.split(':').collect::<Vec<_>>())).collect();
+    let sites: Option<Vec<Site>> = rest
+        .iter()
+        .filter(|s| !s.contains(','))
+        .map(|s| Site::parse(&s.split(':').collect::<Vec<_>>()).map(|s| Site { key, ..s }))
+        .collect();
     let Some(mut named) = named else {
         return writeln!(out, "error: not a named path");
     };
@@ -2766,25 +2794,67 @@ fn parse_pattern(text: &str) -> Option<Vec<Option<u8>>> {
 
 /// Addresses in executable memory where `pat` matches (up to `limit`).
 fn find_pattern(pid: u32, mem: &File, pat: &[Option<u8>], limit: usize) -> io::Result<Vec<u64>> {
-    let (anchor, first) = pat.iter().enumerate().find_map(|(i, b)| Some((i, (*b)?))).unwrap_or((0, 0));
-    let mut found = Vec::new();
+    Ok(find_patterns(pid, mem, &[pat], limit)?.pop().unwrap_or_default())
+}
+
+/// `find_pattern` for several patterns in one pass over the game's code (see `Patterns`).
+fn find_patterns(pid: u32, mem: &File, pats: &[&[Option<u8>]], limit: usize) -> io::Result<Vec<Vec<u64>>> {
+    let finder = Patterns::new(pats);
+    let mut found = vec![Vec::new(); pats.len()];
     for r in maps(pid)?.iter().filter(|r| r.perms.contains('x')) {
         let mut buf = vec![0u8; (r.end - r.start) as usize];
-        if mem.read_exact_at(&mut buf, r.start).is_err() {
-            continue;
+        if mem.read_exact_at(&mut buf, r.start).is_ok() {
+            finder.search(&buf, r.start, &mut found, limit);
         }
-        for i in 0..buf.len().saturating_sub(pat.len()) {
-            if buf[i + anchor] == first
-                && pat.iter().zip(&buf[i..]).all(|(p, b)| p.map_or(true, |p| p == *b))
-            {
-                found.push(r.start + i as u64);
-                if found.len() >= limit {
-                    return Ok(found);
+    }
+    Ok(found)
+}
+
+/// Code patterns looked for together, by two fixed bytes of each at a time: checking every
+/// pattern at every byte took 1.2 s a pattern on From Dust (638 MiB of code), and a value has
+/// up to 5.
+struct Patterns<'a> {
+    pats: &'a [&'a [Option<u8>]],
+    /// Each pattern's first two fixed bytes in a row: where they are, and as one number.
+    anchors: Vec<(usize, u16)>,
+    /// Those numbers, one bit each.
+    wanted: Vec<u64>,
+}
+
+impl<'a> Patterns<'a> {
+    fn new(pats: &'a [&'a [Option<u8>]]) -> Self {
+        let anchors: Vec<(usize, u16)> = pats
+            .iter()
+            .map(|pat| {
+                let at = (0..pat.len().saturating_sub(1)).find(|&i| pat[i].is_some() && pat[i + 1].is_some()).unwrap_or(0);
+                let byte = |i: usize| pat.get(i).copied().flatten().unwrap_or(0);
+                (at, u16::from_le_bytes([byte(at), byte(at + 1)]))
+            })
+            .collect();
+        let mut wanted = vec![0u64; 1024];
+        for &(_, a) in &anchors {
+            wanted[a as usize >> 6] |= 1 << (a & 63);
+        }
+        Patterns { pats, anchors, wanted }
+    }
+
+    /// Adds where each pattern matches in `buf` (at `start` in the game) to `found`, up to
+    /// `limit` each.
+    fn search(&self, buf: &[u8], start: u64, found: &mut [Vec<u64>], limit: usize) {
+        let matches = |pat: &[Option<u8>], buf: &[u8]| buf.len() >= pat.len() && pat.iter().zip(buf).all(|(p, b)| p.is_none_or(|p| p == *b));
+        for i in 0..buf.len().saturating_sub(1) {
+            let two = u16::from_le_bytes([buf[i], buf[i + 1]]);
+            if self.wanted[two as usize >> 6] & 1 << (two & 63) == 0 {
+                continue;
+            }
+            for (n, &(at, a)) in self.anchors.iter().enumerate() {
+                let Some(from) = i.checked_sub(at).filter(|_| a == two && found[n].len() < limit) else { continue };
+                if matches(self.pats[n], &buf[from..]) {
+                    found[n].push(start + from as u64);
                 }
             }
         }
     }
-    Ok(found)
 }
 
 /// "What accesses this address": watches it with a hardware breakpoint for a
@@ -3026,6 +3096,23 @@ struct Site {
     off: u64,
     base: u8,
     disp: i64,
+    /// Shared code (one routine for every power, unit, slot): the place it reads is the value's
+    /// only when the 4-byte number this far from it holds this (an index or an id).
+    key: Option<Key>,
+}
+
+/// `key=<offset>:<number>` (see `Site.key`).
+type Key = (i64, i32);
+
+fn parse_key(token: &str) -> Option<Key> {
+    let (off, v) = token.strip_prefix("key=")?.split_once(':')?;
+    Some((off.parse().ok()?, v.parse().ok()?))
+}
+
+/// Whether the place a site led to is the value's: its key (if any) is there.
+fn key_holds(mem: &File, addr: u64, key: Option<Key>) -> bool {
+    let Some((off, v)) = key else { return true };
+    read_value(mem, addr.wrapping_add(off as u64), Kind::I32) == Some(v as f64)
 }
 
 impl Site {
@@ -3036,8 +3123,15 @@ impl Site {
             off: f.get(1)?.parse().ok()?,
             base: trace::REG_NAMES.iter().position(|n| n == reg)? as u8,
             disp: f.get(3)?.parse().ok()?,
+            key: None,
         })
     }
+}
+
+/// The key among a value's tokens (`key=...`), and the tokens without it.
+fn take_key<'a>(tokens: &[&'a str]) -> (Option<Key>, Vec<&'a str>) {
+    let key = tokens.iter().find_map(|t| parse_key(t));
+    (key, tokens.iter().filter(|t| !t.starts_with("key=")).copied().collect())
 }
 
 /// Where a code pattern led: the value's address, and when the code loaded the object from a
@@ -3110,6 +3204,9 @@ fn resolve_site(pid: u32, mem: &File, site: &Site, width: usize, timeout: Durati
     tracer.watch(timeout, |hit| {
         // The thread is stopped here, so the static pointer still holds what it loaded.
         let addr = trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64);
+        if !key_holds(mem, addr, site.key) {
+            return true;
+        }
         let is_64bit = trace::is_64bit(&hit.regs);
         resolved = Some(Resolved { addr, disp: site.disp, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
         false
@@ -3123,16 +3220,27 @@ fn resolve_site(pid: u32, mem: &File, site: &Site, width: usize, timeout: Durati
 /// everything else). One result per value: where it led, or why not.
 fn resolve_values(pid: u32, mem: &File, values: &[Vec<Site>], width: usize, timeout: Duration) -> Vec<Result<Resolved, String>> {
     let mut results: Vec<Result<Resolved, String>> = values.iter().map(|_| Err("none of its code ran meanwhile".into())).collect();
-    // (value, site, instruction), first sites of every value first.
+    // (value, site, instruction), first sites of every value first. Values found through the
+    // same code (others like a value: From Dust's four power timers) search the code once.
     let mut pending = Vec::new();
+    let mut pats: Vec<&[Option<u8>]> = Vec::new();
+    for site in values.iter().flatten() {
+        if !pats.contains(&&site.pat[..]) {
+            pats.push(&site.pat);
+        }
+    }
+    let searched = find_patterns(pid, mem, &pats, 2).map_err(|e| e.to_string());
     let most = values.iter().map(Vec::len).max().unwrap_or(0);
     for n in 0..most {
         for (v, sites) in values.iter().enumerate() {
             let Some(site) = sites.get(n) else { continue };
-            match find_pattern(pid, mem, &site.pat, 2) {
-                Ok(found) if found.len() == 1 => pending.push((v, n, found[0] + site.off)),
-                Ok(_) => {}
-                Err(e) => results[v] = Err(e.to_string()),
+            match &searched {
+                Ok(found) => {
+                    if let Some([code]) = pats.iter().position(|p| *p == &site.pat[..]).map(|i| &found[i][..]) {
+                        pending.push((v, n, code + site.off));
+                    }
+                }
+                Err(e) => results[v] = Err(e.clone()),
             }
         }
     }
@@ -3147,8 +3255,16 @@ fn resolve_values(pid: u32, mem: &File, values: &[Vec<Site>], width: usize, time
     let mut done = vec![false; values.len()];
     while pending.iter().any(|(v, _, _)| !done[*v]) {
         pending.retain(|(v, _, _)| !done[*v]);
-        let round: Vec<(usize, usize, u64)> = pending.drain(..pending.len().min(4)).collect();
-        let instrs: Vec<u64> = round.iter().map(|r| r.2).collect();
+        // Up to 4 instructions (the CPU's breakpoints), each with every value that goes through
+        // it: shared code runs for each of them in turn, and its key says whose turn it is.
+        let mut instrs: Vec<u64> = Vec::new();
+        for &(_, _, i) in &pending {
+            if instrs.len() < 4 && !instrs.contains(&i) {
+                instrs.push(i);
+            }
+        }
+        let round: Vec<(usize, usize, u64)> = pending.iter().filter(|p| instrs.contains(&p.2)).copied().collect();
+        pending.retain(|p| !instrs.contains(&p.2));
         let mut tracer = match trace::Tracer::attach(pid) {
             Ok(t) => t,
             Err(e) => {
@@ -3160,13 +3276,16 @@ fn resolve_values(pid: u32, mem: &File, values: &[Vec<Site>], width: usize, time
         };
         tracer.arm_execute(&instrs);
         tracer.watch(timeout, |hit| {
-            let Some(&(v, n, instr)) = round.get(hit.slot) else { return true };
-            if !done[v] {
+            let Some(&instr) = instrs.get(hit.slot) else { return true };
+            for &(v, n, _) in round.iter().filter(|r| r.2 == instr) {
                 let site = &values[v][n];
                 let addr = trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64);
-                let is_64bit = trace::is_64bit(&hit.regs);
-                results[v] = Ok(Resolved { addr, disp: site.disp, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
-                done[v] = true;
+                // Shared code ran for another power, unit or slot: not this value.
+                if !done[v] && key_holds(mem, addr, site.key) {
+                    let is_64bit = trace::is_64bit(&hit.regs);
+                    results[v] = Ok(Resolved { addr, disp: site.disp, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
+                    done[v] = true;
+                }
             }
             round.iter().any(|(v, _, _)| !done[*v])
         });
@@ -3192,7 +3311,8 @@ fn cmd_resolve_all(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Resu
         let (Some(name), Some(kind)) = (f.first(), f.get(1).and_then(|k| Kind::parse(k))) else {
             return writeln!(out, "error: usage: resolve-all <seconds> | <name> <type> <pattern> <offset> <register> <displacement> ... | ...");
         };
-        let sites: Option<Vec<Site>> = f[2..].chunks(4).map(Site::parse).collect();
+        let (key, f) = take_key(&f);
+        let sites: Option<Vec<Site>> = f[2..].chunks(4).map(|c| Site::parse(c).map(|s| Site { key, ..s })).collect();
         let Some(sites) = sites.filter(|s| !s.is_empty()) else {
             return writeln!(out, "error: {name}: bad code pattern");
         };
@@ -3215,6 +3335,135 @@ fn cmd_resolve_all(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Resu
         }
     }
     Ok(())
+}
+
+/// Most other places `others` collects (a game running the code for hundreds of units).
+const OTHERS_MAX: usize = 64;
+/// How far from a value `others` looks for its key, either way.
+const KEY_REACH: i64 = 64;
+
+/// others <seconds> <hex addr[:type]> [key=<offset>:<number>] <pattern:offset:register:displacement>...:
+/// "more like this". Watches the value's own code (its saved sites) until the time is up or
+/// the frontend sends a line, and collects every other place it reaches the same way: the same
+/// field of the game's other powers, units or slots (From Dust runs one routine for each of its
+/// four powers while that power runs). Prints "note others <n>" as they come, then "key
+/// <offset> <number>": a 4-byte number near the value that tells it from the others (an index
+/// or an id: unchanged while watched, 0 to 65535, different in each), or "key none"; then
+/// "other 0x<addr>:<type> = <value> <its key number>" for each, and "<n> others". A key given
+/// (the value was saved with one) is tried first.
+fn cmd_others(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    if s.java {
+        return writeln!(out, "error: {JAVA}");
+    }
+    let usage = "error: usage: others <seconds> <hex addr[:type]> [key=<offset>:<number>] <pattern:offset:register:displacement>... (after attach)";
+    let (given, f) = take_key(&arg.split_whitespace().collect::<Vec<_>>());
+    let (Some(secs), Some((target, kind)), Some(mem)) =
+        (f.first().and_then(|v| v.parse::<f64>().ok()), f.get(1).and_then(|a| parse_loc(a)), s.mem.as_ref())
+    else {
+        return writeln!(out, "{usage}");
+    };
+    let sites: Option<Vec<Site>> = f.get(2..).unwrap_or_default().iter().map(|t| Site::parse(&t.split(':').collect::<Vec<_>>())).collect();
+    let Some(sites) = sites.filter(|s| !s.is_empty()) else {
+        return writeln!(out, "{usage}");
+    };
+    // Each site's instruction once, up to the CPU's 4 breakpoints.
+    let mut armed: Vec<(u64, &Site)> = Vec::new();
+    let found = find_patterns(s.pid, mem, &sites.iter().map(|s| &s.pat[..]).collect::<Vec<_>>(), 2)?;
+    for (site, found) in sites.iter().zip(found) {
+        if let [code] = found[..] {
+            if armed.len() < 4 && !armed.iter().any(|(i, _)| *i == code + site.off) {
+                armed.push((code + site.off, site));
+            }
+        }
+    }
+    if armed.is_empty() {
+        return writeln!(out, "error: its code patterns aren't in the game's code");
+    }
+    let low = |a: u64| a & 0xFFFF_FFFF;
+    // The words around a place (its key is among them).
+    let around = |addr: u64| -> Option<Vec<u8>> {
+        let mut b = vec![0u8; 2 * KEY_REACH as usize + 8];
+        mem.read_exact_at(&mut b, addr.checked_sub(KEY_REACH as u64)?).ok().map(|_| b)
+    };
+    // The value's own words and every other place's, as they were when the code reached them.
+    let mut own: Option<Vec<u8>> = None;
+    let mut places: Vec<(u64, Option<Vec<u8>>)> = Vec::new();
+    {
+        let _tracing = TRACING.lock().unwrap();
+        let mut tracer = match trace::Tracer::attach(s.pid) {
+            Ok(t) => t,
+            Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
+        };
+        let instrs: Vec<u64> = armed.iter().map(|(i, _)| *i).collect();
+        let threads = tracer.arm_execute(&instrs);
+        writeln!(out, "watching {} instructions on {threads} threads for up to {secs} s", instrs.len())?;
+        out.flush()?;
+        let start = Instant::now();
+        let mut noted = Ok(());
+        tracer.watch_until(
+            || start.elapsed().as_secs_f64() >= secs || frontend_spoke(),
+            |hit| {
+                let Some((_, site)) = armed.get(hit.slot) else { return true };
+                let addr = trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64);
+                if low(addr) == low(target) {
+                    if own.is_none() {
+                        own = around(target);
+                    }
+                    return true;
+                }
+                if places.iter().any(|(a, _)| *a == addr) {
+                    return true;
+                }
+                places.push((addr, around(addr)));
+                noted = writeln!(out, "note others {}", places.len()).and_then(|_| out.flush());
+                places.len() < OTHERS_MAX
+            },
+        );
+        noted?;
+    }
+    let plausible = |v: f64| !matches!(kind, Kind::F32 | Kind::F64) || v == 0.0 || (1e-9..1e15).contains(&v.abs());
+    places.retain(|(a, _)| s.read(*a, kind).is_some_and(plausible));
+    // Words as first seen and now, the value's first.
+    let Some(own_now) = around(target) else {
+        return writeln!(out, "error: the value at 0x{target:x} isn't readable");
+    };
+    let mut snaps = vec![(own.unwrap_or_else(|| own_now.clone()), own_now)];
+    places.retain(|(a, seen)| match around(*a) {
+        Some(now) => {
+            snaps.push((seen.clone().unwrap_or_else(|| now.clone()), now));
+            true
+        }
+        None => false,
+    });
+    let word = |b: &[u8], off: i64| {
+        let i = (KEY_REACH + off) as usize;
+        i32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
+    };
+    let size = kind.size() as i64;
+    let mut offsets: Vec<i64> = (-KEY_REACH..=KEY_REACH).step_by(4).filter(|&o| o <= -4 || o >= size).collect();
+    // Nearest first (an index right next to the value), after the key it was saved with.
+    offsets.sort_by_key(|&o| (Some(o) != given.map(|k| k.0), o.abs(), o < 0));
+    let key = (!places.is_empty())
+        .then(|| {
+            offsets.into_iter().find(|&off| {
+                let Some(mut v): Option<Vec<i32>> = snaps.iter().map(|(seen, now)| (word(seen, off) == word(now, off)).then(|| word(now, off))).collect()
+                else {
+                    return false;
+                };
+                let ids = v.iter().all(|n| (0..=0xFFFF).contains(n));
+                v.sort_unstable();
+                ids && v.windows(2).all(|w| w[0] != w[1])
+            })
+        })
+        .flatten();
+    match key {
+        Some(off) => writeln!(out, "key {off} {}", word(&snaps[0].1, off))?,
+        None => writeln!(out, "key none")?,
+    }
+    for ((a, _), (_, now)) in places.iter().zip(&snaps[1..]) {
+        writeln!(out, "other {} {}", s.describe(*a, kind), key.map_or("-".to_owned(), |off| word(now, off).to_string()))?;
+    }
+    writeln!(out, "{} others", places.len())
 }
 
 /// ptrscan <hex addr[:type]> [depth] [max offset, hex] [max paths] [loose]: pointer paths to the
@@ -3454,9 +3703,9 @@ fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<(
     if s.java {
         return writeln!(out, "error: {JAVA}");
     }
-    let f: Vec<&str> = arg.split_whitespace().collect();
-    let (Some(site), Some(mem)) = (Site::parse(&f), s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: resolve <pattern> <offset> <register> <displacement> [type] [seconds]");
+    let (key, f) = take_key(&arg.split_whitespace().collect::<Vec<_>>());
+    let (Some(site), Some(mem)) = (Site::parse(&f).map(|s| Site { key, ..s }), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: resolve <pattern> <offset> <register> <displacement> [type] [seconds] [key=<offset>:<number>]");
     };
     let kind = f.get(4..).unwrap_or_default().iter().find_map(|v| Kind::parse(v)).unwrap_or(Kind::I32);
     let secs = f.get(4..).unwrap_or_default().iter().find_map(|v| v.parse().ok()).unwrap_or(10);
@@ -3500,7 +3749,7 @@ pub fn run(as_user: Option<&str>) {
         let Ok(line) = line else { break };
         let (cmd, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
         let arg = arg.trim();
-        // Ends a `sites ... wait` early; one arriving after it ended on its own changes nothing,
+        // Ends a `sites ... wait` (or `first`, `others`) early; one arriving after it ended on its own changes nothing,
         // and gets no reply (the frontend doesn't wait for one).
         if cmd == "cancel" {
             continue;
@@ -3547,6 +3796,7 @@ pub fn run(as_user: Option<&str>) {
             "build" => cmd_build(&mut out, &session),
             "resolve" => cmd_resolve(&mut out, &mut session, arg),
             "resolve-all" => cmd_resolve_all(&mut out, &mut session, arg),
+            "others" => cmd_others(&mut out, &session, arg),
             "ptrscan" => cmd_ptrscan(&mut out, &mut session, arg),
             "names" => cmd_names(&mut out, &mut session, arg),
             "named" => cmd_named(&mut out, &mut session, arg),
@@ -3559,7 +3809,7 @@ pub fn run(as_user: Option<&str>) {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all], mark, snap <file> [types], next <n>|+|-|=|!|bar <full before> <full now> <error>, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], ptrscan <addr> [depth] [max offset] [max paths] [loose], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all], mark, snap <file> [types], next <n>|+|-|=|!|bar <full before> <full now> <error>, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], others <seconds> <addr> <sites>, ptrscan <addr> [depth] [max offset] [max paths] [loose], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing
@@ -3607,7 +3857,24 @@ fn end_tracing_on_term() {
 
 #[cfg(test)]
 mod tests {
-    use super::{dosbox_game, run_game, wine_launcher};
+    use super::{dosbox_game, parse_pattern, run_game, wine_launcher, Patterns};
+
+    #[test]
+    fn finds_code_patterns_together() {
+        let code = [0x90, 0x8b, 0x45, 0x10, 0xf3, 0x0f, 0x10, 0x85, 0xe8, 0x04, 0x00, 0x00, 0x8b, 0x45, 0x20, 0x8b, 0x45, 0x10];
+        let a = parse_pattern("8b45??f30f").unwrap();
+        let b = parse_pattern("??0f1085e8040000").unwrap();
+        let c = parse_pattern("8b4510").unwrap();
+        let none = parse_pattern("8b4530").unwrap();
+        let pats: Vec<&[Option<u8>]> = vec![&a, &b, &c, &none];
+        let mut found = vec![Vec::new(); pats.len()];
+        Patterns::new(&pats).search(&code, 0x1000, &mut found, 2);
+        assert_eq!(found, vec![vec![0x1001], vec![0x1004], vec![0x1001, 0x100f], vec![]]);
+        // Up to the limit each.
+        let mut found = vec![Vec::new(); pats.len()];
+        Patterns::new(&pats).search(&code, 0x1000, &mut found, 1);
+        assert_eq!(found[2], vec![0x1001]);
+    }
 
     #[test]
     fn names_the_game_a_player_program_runs() {

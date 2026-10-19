@@ -1396,6 +1396,7 @@ impl FindView {
                 self.guide.your_turn(n, secs);
             }
             core::Phase::SaveTurn => self.guide.save_turn(),
+            core::Phase::Others(name, found) => self.guide.others(&name, found),
             core::Phase::Restoring(..) => {}
             core::Phase::Copying(done) => self.guide.copying(done),
             core::Phase::Following(n, moving) if self.stop.is_visible() => self.following(n, moving),

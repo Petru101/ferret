@@ -542,6 +542,34 @@ impl Guide {
         self.blink(shown, |_| {});
     }
 
+    /// "More Like This": the player uses the others in the game (other powers, other units) while
+    /// Ferret watches the value's code reach them; `found` so far. Blinks until Done.
+    pub fn others(self: &Rc<Self>, name: &str, found: usize) {
+        let hint = match found {
+            0 => tr!(
+                "Ferret watches the game's code that changes {name} and picks up every other value it changes. Use your other powers, or let the other units change, then click Done.",
+                name
+            ),
+            n => ntr!("Found {n} more so far. Use the rest too, then click Done.", "Found {n} more so far. Use the rest too, then click Done.", n),
+        };
+        if found > 0 && self.look.get() == Look::Go && self.give_up.is_visible() {
+            self.note(&hint);
+            return;
+        }
+        let shown = self.show(Look::Go, SAVE, &tr!("Your turn: use the others in the game!"), &hint, None);
+        self.give_up.set_label(&tr!("Done"));
+        self.give_up.set_tooltip_text(Some(&tr!("Stop watching and save the others found")));
+        self.give_up.set_visible(true);
+        self.tell(
+            &tr!("Your turn: use the others in the game"),
+            &tr!("Use your other powers, or let the other units change. Ferret picks up each one."),
+            Some(tr!("Done")),
+            None,
+            true,
+        );
+        self.blink(shown, |_| {});
+    }
+
     /// A typed number narrowed the search to `text` ("7 places match"): the player changes the
     /// number in the game next, then types the new one.
     pub fn change_now(&self, text: &str) {

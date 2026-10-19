@@ -24,6 +24,8 @@ struct ValueWidgets {
     set: gtk::Box,
     /// "Keep It": never below the number now.
     keep: gtk::Button,
+    /// "More Like This": only for values found through the game's code.
+    others: adw::ActionRow,
     /// The number now, as the game shows it.
     current: Rc<Cell<Option<f64>>>,
     keep_it: Rc<dyn Fn()>,
@@ -96,6 +98,15 @@ fn limit_subtitle(v: &ValueRow) -> String {
             (min, max) => tr!("Off · the import suggests keeping it {range}", range = super::range_text(min, max)),
         },
     }
+}
+
+/// How long "More Like This" watches at most, when the player doesn't click Done.
+const OTHERS_MOST: Duration = Duration::from_secs(600);
+
+/// "More Like This": the player uses the others in the game until Done (`Core::find_others`).
+pub fn find_others(worker: &Worker, name: &str) {
+    let name = name.to_owned();
+    worker.run(move |core| Event::Others(core.find_others(&name, OTHERS_MOST)));
 }
 
 /// Asks before forgetting a saved value; `parent` is any widget in the window.
@@ -219,6 +230,7 @@ impl ValuesView {
                 (w.fill_limit)(v.min, v.max);
             }
             w.keep.set_sensitive(v.value.is_some_and(|n| n >= 0.0));
+            w.others.set_visible(v.by_code);
             w.group.set_description(Some(&about));
             let shown = v.value.map_or("?".into(), |n| core::number_text(n, v.decimals));
             w.value.set_tooltip_text(Some(&shown));
@@ -469,8 +481,21 @@ impl ValuesView {
                 filling.set(false);
             })
         };
+        let find_them = gtk::Button::builder().label(tr!("Find Them")).valign(gtk::Align::Center).build();
+        let others = adw::ActionRow::builder()
+            .title(tr!("More Like This"))
+            .subtitle(tr!("The game's other values of this kind, like your other powers or other units: Ferret finds them through the code that changes this one while you use them."))
+            .subtitle_lines(3)
+            .visible(v.by_code)
+            .build();
+        others.add_suffix(&find_them);
+        group.add(&others);
+        {
+            let (worker, name) = (self.worker.clone(), v.name.clone());
+            find_them.connect_clicked(move |_| find_others(&worker, &name));
+        }
         let shown_limit = Cell::new((v.min, v.max));
-        ValueWidgets { group, value, limit, confirm, confirm_button, set: set_box, keep, current, keep_it, shown_limit, fill_limit }
+        ValueWidgets { group, value, limit, confirm, confirm_button, set: set_box, keep, others, current, keep_it, shown_limit, fill_limit }
     }
 }
 

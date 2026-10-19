@@ -43,7 +43,7 @@ start)
     w=${size%x*} h=${size#*x}
     set -- $(for e in ${ENV:-}; do printf -- '-E %s ' "$e"; done) gamescope --backend headless -W "$w" -H "$h" -w "$w" -h "$h" -- "$@"
     systemctl --user stop "$unit" 2>/dev/null || true
-    systemd-run --user --quiet --collect --unit="$unit" --working-directory="$PWD" "$@"
+    systemd-run --user --quiet --collect -p NoNewPrivileges=yes --unit="$unit" --working-directory="$PWD" "$@"
     for _ in $(seq 1 40); do
         sleep 0.5
         [ -n "$(node)" ] && break

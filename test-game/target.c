@@ -29,6 +29,11 @@
  * "hurt N" works like Brotato's health: hp is capped at 100 first, then N comes off, and a copy in
  * the run's data (another block) is written right after, so both change at once and the real one
  * doesn't carry on from a test value.
+ * "power N" (1 to 4) starts one of four powers kept side by side in one block, like From Dust's:
+ * a slot each with an id, how long it runs, how long it has run and its index. One routine ticks
+ * whichever runs (30 s), so a power's timer is found again through code the others share: the
+ * index tells them apart. The log line ends with each one's time run, and the first one says
+ * where they are.
  * Usage: target <command file> <log file>. Built for Linux and Windows. */
 #include <stdint.h>
 #include <stdio.h>
@@ -95,6 +100,32 @@ struct hud {
 };
 
 static volatile int *tokens, *shown_tokens;
+
+struct power {
+    int id;
+    float duration;
+    float elapsed;
+    int index;
+    int running;
+};
+
+struct powers {
+    const char *type;
+    int count;
+    struct power slot[4];
+};
+
+static struct powers *powers;
+
+/* The one routine for every power, as in From Dust. */
+__attribute__((noinline, noipa)) static void tick_power(struct power *pw)
+{
+    pw->elapsed += 0.1f;
+    if (pw->elapsed >= pw->duration) {
+        pw->elapsed = 0;
+        pw->running = 0;
+    }
+}
 
 static struct base *new_base(int crystals)
 {
@@ -323,7 +354,8 @@ static void report(const char *log, const struct player *p, const double *coins,
         print_stacks(f, "logs", inv, logs_info);
         print_stacks(f, "stone", inv, stone_info);
         print_stacks(f, "chestlogs", chest, logs_info);
-        fprintf(f, " tokens=%d shown=%d\n", *tokens, *shown_tokens);
+        fprintf(f, " tokens=%d shown=%d powers=%.1f,%.1f,%.1f,%.1f\n", *tokens, *shown_tokens, powers->slot[0].elapsed,
+                powers->slot[1].elapsed, powers->slot[2].elapsed, powers->slot[3].elapsed);
         fclose(f);
     }
 }
@@ -368,6 +400,20 @@ int main(int argc, char **argv)
         shown_tokens = &h->shown;
     }
     *tokens = *shown_tokens = 140;
+    powers = calloc(1, sizeof *powers);
+    powers->type = "powers";
+    powers->count = 4;
+    for (n = 0; n < 4; n++) {
+        powers->slot[n].id = 0x4500448 + 0x80400 * n;
+        powers->slot[n].duration = 30;
+        powers->slot[n].index = (n + 1) % 4;
+    }
+    f = fopen(argv[2], "a");
+    if (f) {
+        fprintf(f, "powers at %p, %p, %p, %p\n", (void *)&powers->slot[0].elapsed, (void *)&powers->slot[1].elapsed,
+                (void *)&powers->slot[2].elapsed, (void *)&powers->slot[3].elapsed);
+        fclose(f);
+    }
     world = malloc(sizeof *world);
     world->type = "world";
     world->room = new_room(77, 40);
@@ -418,6 +464,9 @@ int main(int argc, char **argv)
             most_scrap = scrap(p);
         total = read_real(coins) + read_real(wood) + read_real(&world->room->stats->gems);
         world->ticks++;
+        for (n = 0; n < 4; n++)
+            if (powers->slot[n].running)
+                tick_power(&powers->slot[n]);
         if (*coins > most_coins)
             most_coins = *coins;
         f = fopen(argv[1], "r");
@@ -446,7 +495,10 @@ int main(int argc, char **argv)
             add_scrap(p, n);
         else if (sscanf(line, "coins %d", &n) == 1)
             *coins += n;
-        else if (sscanf(line, "tokens %d", &n) == 1)
+        else if (sscanf(line, "power %d", &n) == 1 && n >= 1 && n <= 4) {
+            powers->slot[n - 1].running = 1;
+            powers->slot[n - 1].elapsed = 0;
+        } else if (sscanf(line, "tokens %d", &n) == 1)
             *tokens += n;
         else if (sscanf(line, "wood %d", &n) == 1)
             *wood += n;

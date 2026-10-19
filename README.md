@@ -43,6 +43,9 @@ its menu, or an issue here).
    them off and on from inside the game.
 
    ![The coins saved in the Values tab, set to 999 and kept at least there](data/screenshots/values-supertux.png)
+6. **More like this**: found one power's timer or one unit's health? Find Them on its card
+   watches the game's code that changes it while you use the others, and saves each one with
+   the same range.
 
 Notifications tell you what Ferret needs while the game is in front, even in fullscreen.
 

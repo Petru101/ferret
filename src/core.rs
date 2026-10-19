@@ -177,6 +177,12 @@ impl Helper {
     /// `call`, sending the helper a `cancel` line once `cancel` is set meanwhile (it ends a
     /// `sites ... wait`; the helper doesn't answer it).
     fn call_cancellable(&mut self, line: &str, cancel: &Arc<AtomicBool>) -> Vec<String> {
+        self.call_noting(line, cancel, &mut |_| {})
+    }
+
+    /// `call_cancellable`, telling `note` each "note ..." line as it comes (what a long wait
+    /// found so far), without the "note ".
+    fn call_noting(&mut self, line: &str, cancel: &Arc<AtomicBool>, note: &mut dyn FnMut(&str)) -> Vec<String> {
         use std::os::fd::AsFd;
         if !self.send(line) {
             return vec!["error: host helper exited".into()];
@@ -195,7 +201,7 @@ impl Helper {
                 }
             })
         });
-        let reply = self.reply(&mut |_| {});
+        let reply = self.reply_noting(&mut |_| {}, note);
         done.store(true, Ordering::Relaxed);
         if let Some(w) = watcher {
             w.join().ok();
@@ -209,6 +215,10 @@ impl Helper {
 
     /// The reply to the line sent last: its lines up to `end`.
     fn reply(&mut self, progress: &mut dyn FnMut(f64)) -> Vec<String> {
+        self.reply_noting(progress, &mut |_| {})
+    }
+
+    fn reply_noting(&mut self, progress: &mut dyn FnMut(f64), note: &mut dyn FnMut(&str)) -> Vec<String> {
         let mut reply = Vec::new();
         loop {
             let mut l = String::new();
@@ -218,6 +228,7 @@ impl Helper {
                     return reply;
                 }
                 Ok(_) if l.trim_end() == "end" => return reply,
+                Ok(_) if l.starts_with("note ") => note(l["note ".len()..].trim_end()),
                 Ok(_) if l.starts_with("progress ") => {
                     let mut n = l.split_whitespace().skip(1).filter_map(|w| w.parse::<f64>().ok());
                     if let (Some(done), Some(total)) = (n.next(), n.next()) {
@@ -352,6 +363,9 @@ pub enum Phase {
     /// Saving: nothing touched the value yet, so the player changes it in the game while Ferret
     /// watches which code does. Until it does or the player cancels.
     SaveTurn,
+    /// "More Like This": the player uses the value's others in the game (other powers, other
+    /// units) while Ferret watches the value's code reach them: the value and how many so far.
+    Others(String, usize),
     /// Finding saved values again on attach: the game's program, the value, its number and how
     /// many there are.
     Restoring(String, String, usize, usize),
@@ -574,6 +588,10 @@ struct Entry {
     name: String,
     kind: Kind,
     sites: Vec<String>,
+    /// Code patterns the game runs for other values of its kind too (one routine for every
+    /// power or unit): the 4-byte number this far from the value (an index or an id) that
+    /// tells it from the others ("More Like This", `Core::find_others`).
+    key: Option<(i64, i32)>,
     /// Pointer paths that led to the value in more than one run of the game,
     /// "<module>+<offset> <offset>...".
     paths: Vec<String>,
@@ -625,7 +643,7 @@ pub fn one_word(name: &str) -> String {
 }
 
 /// Profile format: "entry <name>" followed by an optional "type f32|f64|xor" line (i32 when
-/// missing), its "site ...", "path ...", "named ..." and "candidate ..." lines, "run <pid>" (where the
+/// missing), its "site ...", "key <offset> <number>", "path ...", "named ..." and "candidate ..." lines, "run <pid>" (where the
 /// candidates came from), an optional "limit <min|-> <max|->" line and "decimals <n>" for a
 /// whole number shown with decimals, "last <value>" while its pointer paths are unconfirmed,
 /// "build <stamp>" with code patterns, "untraced <stamp>", "imported", "suggest <min|-> <max|->"
@@ -643,6 +661,7 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 name,
                 kind: Kind::I32,
                 sites: Vec::new(),
+                key: None,
                 paths: Vec::new(),
                 candidates: Vec::new(),
                 run: None,
@@ -661,6 +680,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.kind = kind;
         } else if let (Some(site), Some(e)) = (line.strip_prefix("site "), entries.last_mut()) {
             e.sites.push(site.trim().to_owned());
+        } else if let (Some(key), Some(e)) = (line.strip_prefix("key ").and_then(parse_key), entries.last_mut()) {
+            e.key = Some(key);
         } else if let (Some(path), Some(e)) = (line.strip_prefix("path "), entries.last_mut()) {
             e.paths.push(path.trim().to_owned());
         } else if let (Some(path), Some(e)) = (line.strip_prefix("candidate "), entries.last_mut()) {
@@ -692,6 +713,13 @@ fn read_profile(exe: &str) -> Vec<Entry> {
     entries
 }
 
+/// "<offset> <number>": a value's key (see `Entry.key`).
+pub fn parse_key(text: &str) -> Option<(i64, i32)> {
+    let mut f = text.split_whitespace();
+    let key = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
+    f.next().is_none().then_some(key)
+}
+
 fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
     let path = profile_path(exe);
     fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -703,6 +731,9 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         for s in &e.sites {
             text.push_str(&format!("site {s}\n"));
+        }
+        if let Some((off, v)) = e.key {
+            text.push_str(&format!("key {off} {v}\n"));
         }
         for p in &e.paths {
             text.push_str(&format!("path {p}\n"));
@@ -760,6 +791,11 @@ fn shared_start(path: &str, known: &[&String]) -> usize {
 const SHARED_START: usize = 3;
 
 impl Entry {
+    /// Its key as the helper takes it, next to its code patterns.
+    fn key_arg(&self) -> Option<String> {
+        self.key.map(|(off, v)| format!("key={off}:{v}"))
+    }
+
     /// Confirmed paths of the game's other values.
     fn known<'a>(&self, all: &'a [Entry]) -> Vec<&'a String> {
         all.iter().filter(|e| e.name != self.name).flat_map(|e| &e.paths).collect()
@@ -963,6 +999,9 @@ pub struct ValueRow {
     pub imported: bool,
     /// A range the import suggested (as the game shows it), for the fields only.
     pub suggested: (Option<f64>, Option<f64>),
+    /// Found through the game's code (code patterns): others like it can be found through that
+    /// code too (`Core::find_others`).
+    pub by_code: bool,
 }
 
 /// A game's saved values as a `.ferret` file.
@@ -1614,14 +1653,17 @@ impl Core {
         let game = self.game()?;
         let build = game.build.clone();
         let mut entries = read_profile(&game.exe);
-        // Saving a value again (to find it a better way) keeps its limit.
+        // Saving a value again (to find it a better way) keeps its limit, and its key while its
+        // code is the same (shared with other values of its kind).
         let limit = entries.iter().find(|e| e.name == name).and_then(|e| e.limit.clone());
+        let key = entries.iter().find(|e| e.name == name && e.sites.iter().any(|s| sites.contains(s))).and_then(|e| e.key);
         entries.retain(|e| e.name != name);
         let named_text: Vec<String> = named.iter().map(|(t, _, _)| t.clone()).collect();
         let mut entry = Entry {
             name: name.to_owned(),
             kind: loc.kind,
             sites,
+            key,
             paths,
             candidates,
             run: Some(pid),
@@ -1692,6 +1734,7 @@ impl Core {
             name: name.to_owned(),
             kind: loc.kind,
             sites: Vec::new(),
+            key: None,
             paths: Vec::new(),
             candidates: Vec::new(),
             run: Some(pid),
@@ -2081,6 +2124,7 @@ impl Core {
             .sites
             .iter()
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(":"))
+            .chain(entry.key_arg().filter(|_| !entry.sites.is_empty()))
             .chain(via)
             .chain(followed)
             .chain(entry.named.iter().cloned())
@@ -2181,6 +2225,144 @@ impl Core {
         Ok(())
     }
 
+    /// "More Like This": watches the code that changes a saved value (its code patterns) while
+    /// the player uses the others like it in the game, and saves each other place that code
+    /// reaches as `<name>_2`, `<name>_3`... with the value's limit. From Dust runs one routine
+    /// for each of its four powers while that power runs, so finding one power's timer used to
+    /// leave the other three to find by hand. Shared code, so the value and each other one get
+    /// a key (a number next to them that tells them apart: the power's index) and are only
+    /// taken where it holds. Ends when the player says so (`cancel`) or after `most`. What to
+    /// tell the player.
+    pub fn find_others(&mut self, name: &str, most: Duration) -> Result<String, String> {
+        let name = one_word(name);
+        let name = name.as_str();
+        let game = self.game()?;
+        let (exe, pid) = (game.exe.clone(), game.pid);
+        let loc = game.entries.iter().find(|(n, _)| n == name).map(|(_, l)| *l);
+        let entry = read_profile(&exe).into_iter().find(|e| e.name == name);
+        let (Some(loc), Some(entry)) = (loc, entry) else {
+            return Err(tr!("no saved value called {name}", name));
+        };
+        if entry.sites.is_empty() {
+            return Err(tr!(
+                "Ferret finds others like {name} through the game's code that changes it, and doesn't know that code: find {name} again and save it while it changes in the game",
+                name
+            ));
+        }
+        if loc.addr == 0 {
+            return Err(tr!("{name} isn't found in this run yet: let it change in the game once, then try again", name));
+        }
+        let sites: Vec<String> = entry.sites.iter().map(|s| s.split_whitespace().collect::<Vec<_>>().join(":")).collect();
+        let key = entry.key_arg().map_or(String::new(), |k| format!("{k} "));
+        self.cancel.store(false, Ordering::Relaxed);
+        self.phase(Phase::Others(name.to_owned(), 0));
+        let cancel = self.cancel.clone();
+        let line = format!("others {} {loc} {key}{}", most.as_secs(), sites.join(" "));
+        let (helper, on_phase) = (&mut self.helper, &mut self.on_phase);
+        let reply = helper.call_noting(&line, &cancel, &mut |note| {
+            if let (Some(n), Some(f)) = (note.strip_prefix("others ").and_then(|n| n.parse().ok()), on_phase.as_mut()) {
+                f(Phase::Others(name.to_owned(), n));
+            }
+        });
+        self.cancel.store(false, Ordering::Relaxed);
+        for l in reply.iter().filter(|l| l.starts_with("watching ") || l.ends_with(" others")) {
+            self.say(&format!("{name}: {l}"));
+        }
+        if let Some(e) = first_error(&reply) {
+            return Err(e);
+        }
+        let key = reply.iter().find_map(|l| l.strip_prefix("key ")).and_then(parse_key);
+        let mut others: Vec<(Loc, Option<i32>)> = reply
+            .iter()
+            .filter_map(|l| l.strip_prefix("other "))
+            .filter_map(|l| {
+                let (place, key) = l.rsplit_once(' ')?;
+                let (loc, _) = parse_exact_values(&[place.to_owned()]).pop()?;
+                Some((loc, key.parse().ok()))
+            })
+            .collect();
+        if others.is_empty() {
+            return Ok(tr!(
+                "Nothing else ran the code that changes {name} while Ferret watched. Use the others in the game while it watches (your other powers, other units), then click Done.",
+                name
+            ));
+        }
+        let Some((off, own)) = key else {
+            self.say(&format!("{name}: nothing near the places tells them apart (no key): not saved"));
+            return Err(ntr!(
+                "Ferret found {n} more like {name}, but nothing next to the two tells them apart, so it couldn't find each again: not saved",
+                "Ferret found {n} more like {name}, but nothing next to them tells them apart, so it couldn't find each one again: not saved",
+                others.len(),
+                name
+            ));
+        };
+        self.say(&format!("{name}: told apart by the number at {off:+} (its own: {own})"));
+        // Others saved already: the same code with a key there, or the same place.
+        let mut entries = read_profile(&exe);
+        let saved_keys: Vec<i32> =
+            entries.iter().filter(|e| e.sites == entry.sites).filter_map(|e| e.key.filter(|k| k.0 == off).map(|k| k.1)).collect();
+        let places: Vec<u64> = self.game()?.entries.iter().map(|(_, l)| l.addr).collect();
+        others.sort_by_key(|(_, k)| *k);
+        let base: String = name.chars().take(MAX_NAME - 3).collect();
+        let mut added: Vec<(String, Loc)> = Vec::new();
+        for (other, k) in others {
+            let Some(k) = k.filter(|k| *k != own && !saved_keys.contains(k)) else { continue };
+            if places.contains(&other.addr) {
+                continue;
+            }
+            let Some(new) = (2..100).map(|i| format!("{base}_{i}")).find(|n| !entries.iter().any(|e| e.name == *n)) else { break };
+            entries.push(Entry {
+                name: new.clone(),
+                key: Some((off, k)),
+                paths: Vec::new(),
+                candidates: Vec::new(),
+                run: Some(pid),
+                named: Vec::new(),
+                last: None,
+                untraced: None,
+                imported: false,
+                suggested: None,
+                from: None,
+                other: Vec::new(),
+                ..entry.clone()
+            });
+            added.push((new, other));
+        }
+        // The value itself is told apart from them the same way from now on.
+        if let Some(e) = entries.iter_mut().find(|e| e.name == name) {
+            e.key = Some((off, own));
+        }
+        write_profile(&exe, &entries)?;
+        let game = self.game()?;
+        for (n, l) in &added {
+            game.entries.push((n.clone(), *l));
+        }
+        for e in entries.iter().filter(|e| e.name == name || added.iter().any(|(n, _)| *n == e.name)) {
+            if let Err(err) = self.apply_limit(e) {
+                self.say(&format!("{}: limit not applied: {err}", e.name));
+            }
+        }
+        let names: Vec<&str> = added.iter().map(|(n, _)| n.as_str()).collect();
+        self.say(&format!("{name}: saved {} like it: {}", added.len(), names.join(", ")));
+        Ok(match (added.len(), &entry.limit) {
+            (0, _) => tr!("The others like {name} are saved already", name),
+            (n, Some(_)) => ntr!(
+                "Found {n} more like {name}: {names}. It's kept in range like {name}.",
+                "Found {n} more like {name}: {names}. Each is kept in range like {name}.",
+                n,
+                name,
+                names = names.join(", ")
+            ),
+            (n, None) => ntr!(
+                "Found {n} more like {name}: {names}. It's in the Values tab.",
+                "Found {n} more like {name}: {names}. They're in the Values tab.",
+                n,
+                name,
+                names = names.join(", ")
+            ),
+        })
+    }
+
     /// The attached game's saved values as a `.ferret` file (share.rs): only the ways of finding
     /// them that work on other computers. Values with none are left out, with the reason.
     pub fn export(&mut self) -> Result<Export, String> {
@@ -2221,6 +2403,7 @@ impl Core {
                 kind: e.kind,
                 decimals: e.decimals,
                 sites: e.sites,
+                key: e.key,
                 build: e.build,
                 paths,
                 named: e.named,
@@ -2283,6 +2466,7 @@ impl Core {
                 name: v.name,
                 kind: v.kind,
                 sites: v.sites,
+                key: v.key,
                 paths: v.paths,
                 candidates: Vec::new(),
                 run: None,
@@ -2546,7 +2730,8 @@ impl Core {
         }
         let mut cmd = format!("resolve-all {}", wait.as_secs_f64());
         for e in entries {
-            cmd += &format!(" | {} {} {}", e.name, e.kind.name(), e.sites.join(" "));
+            let key = e.key_arg().map_or(String::new(), |k| format!("{k} "));
+            cmd += &format!(" | {} {} {key}{}", e.name, e.kind.name(), e.sites.join(" "));
         }
         let reply = self.helper.call(&cmd);
         if let Some(e) = reply.first().filter(|l| l.starts_with("error:")) {
@@ -2876,6 +3061,7 @@ impl Core {
                     read_only: java,
                     imported,
                     suggested,
+                    by_code: !java && entry.is_some_and(|e| !e.sites.is_empty()),
                 }
             })
             .collect())
@@ -4636,6 +4822,7 @@ mod tests {
             name: "gems".into(),
             kind,
             sites: Vec::new(),
+            key: None,
             paths: Vec::new(),
             candidates: Vec::new(),
             run: None,

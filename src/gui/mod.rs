@@ -61,6 +61,8 @@ pub enum Event {
     /// The name, and whether Ferret is sure to find it again after a restart.
     /// The name and what to tell the player.
     Saved(Result<(String, String), String>),
+    /// "More Like This" ended: what it found and saved.
+    Others(Result<String, String>),
     /// The search was cleared (the Find tab already shows it).
     Reset,
     /// A step of the search was taken back (Undo) or again (Redo): the places matching now and
@@ -732,6 +734,16 @@ impl Ui {
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));
             }
+            Event::Others(r) => {
+                let (title, text) = match &r {
+                    Ok(msg) => (tr!("More like this"), msg.clone()),
+                    Err(e) => (tr!("Nothing saved"), e.clone()),
+                };
+                self.toast(&text);
+                self.notify.send(&title, &text, None, Some(10));
+                self.guide.pick(&tr!("Click the number you want to find"), &tr!("In the picture of your game below, or drag a box around it."));
+                self.worker.run(|core| Event::Values(core.values()));
+            }
             // Opened again meanwhile.
             Event::Closing(_) if self.window.is_visible() => {}
             Event::Closing(names) if names.is_empty() => self.quit(),
@@ -918,6 +930,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("name", Box::new(|ui, name| ui.find.type_name(&name)));
     action("confirm-value", Box::new(|ui, name| values::confirm_value(&ui.worker, &name)));
     action("keep", Box::new(|ui, name| ui.values.keep(name.trim())));
+    // "More Like This" on a value, as its Find Them button (then `stop` = Done).
+    action("others", Box::new(|ui, name| values::find_others(&ui.worker, name.trim())));
     action("forget-shapes", Box::new(|ui, _| find::forget_shapes(&ui.worker)));
     action("again", Box::new(|ui, _| ui.find.scan_again()));
     action(
@@ -943,6 +957,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
             "check" => ui.guide.checking(3, 0.5),
             "turn" => ui.guide.your_turn(3, 180),
             "save" => ui.guide.save_turn(),
+            "others" => ui.guide.others("jellify", 2),
             "restore" => ui.phase.restoring("Lumencraft", "lumen", 2, 5),
             "found" => ui.guide.ended(guide::Look::Found, guide::SAVE, "Found it!", "Give it a name and save it.", "Give it a name."),
             "several" => ui.guide.ended(guide::Look::Call, guide::CHECK, "7 places match: Ferret can't tell which one it is", "Try them below.", "Try them."),
