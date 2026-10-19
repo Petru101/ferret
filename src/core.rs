@@ -374,8 +374,8 @@ pub enum Phase {
     /// Copying the game's memory for a bar's search or No Number?: how far. The value mustn't
     /// change.
     Copying(f64),
-    /// No Number? follows the value: this many places, and whether the player says it's moving.
-    Following(usize, bool),
+    /// No Number? follows the value: this many places (the window shows what the player said).
+    Following(usize),
     /// The copy is taken: the bar has to change in the game before anything narrows down.
     BarReady,
 }
@@ -1289,6 +1289,8 @@ pub struct Core {
     /// `phase_step`); the phase the last step was in.
     phase_copy: bool,
     phase_last: Option<Motion>,
+    /// When the copy was taken: the log says when each press came after it.
+    phase_started: Option<Instant>,
     /// The shapes before the last place was picked from the matches (`choose`): `unpick`
     /// puts them back, since a pick that couldn't be saved may be the wrong place.
     shapes_before_pick: Option<Vec<Shape>>,
@@ -1349,6 +1351,7 @@ impl Core {
             bar_last: None,
             phase_copy: false,
             phase_last: None,
+            phase_started: None,
             shapes_before_pick: None,
             last_try: None,
         })
@@ -4655,6 +4658,7 @@ impl Core {
         self.searched_decimals = 0;
         self.phase_copy = true;
         self.phase_last = None;
+        self.phase_started = Some(Instant::now());
         Ok(())
     }
 
@@ -4670,7 +4674,8 @@ impl Core {
         if self.phase_last.is_some_and(|m| m != motion) {
             let reply = self.helper.call("phase switch");
             let now = match_count(&reply).filter(|&n| n > 0).unwrap_or(left(self));
-            self.say(&format!("now {}: {} places", motion.word(), now));
+            let at = self.phase_started.map_or(String::new(), |t| format!(" at {} s", t.elapsed().as_secs()));
+            self.say(&format!("now {}{at}: {} places", motion.word(), now));
             if now > 0 && self.search.is_some() {
                 self.search = Some((now, 0));
             }
@@ -4712,7 +4717,7 @@ impl Core {
             };
             let switched = self.phase_last.is_some_and(|m| m != now);
             let new = self.phase_step(now)?;
-            self.phase(Phase::Following(new, now == Motion::Moving));
+            self.phase(Phase::Following(new));
             // Few left, and the same ones through a whole phase: what follows the value.
             match settled {
                 Some((n, m)) if n == new && switched && m != now => break,
@@ -4727,6 +4732,12 @@ impl Core {
             self.run_side_jobs();
         }
         self.say(&format!("value with no number: {count} places left"));
+        // Which ones, for a bug report: the log said only how many.
+        if (1..=20).contains(&count) {
+            for l in self.helper.call("list 20") {
+                self.say(&format!("  {l}"));
+            }
+        }
         match count {
             0 => Err(tr!("Stopped before anything was narrowed down. Press It's Moving while it changes on its own.")),
             1 => Ok(AutoResult::Unsure(tr!("Ferret only knows that it moved when you said it did."))),

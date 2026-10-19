@@ -75,6 +75,11 @@ pub struct FindView {
     saved_grid: RefCell<gtk::Grid>,
     /// The saved values as listed (name, value, limit), to redraw only on a change.
     saved_rows: RefCell<Vec<(String, String, String)>>,
+    /// Where the saved values are now (name, address): a search ending on one says so.
+    saved_addrs: RefCell<Vec<(String, u64)>>,
+    /// A search just ended on one place it isn't sure of: once the list says what it is, a
+    /// saved value is named on the bar (`show_matches`).
+    name_saved: Cell<bool>,
     replaces: gtk::Label,
     /// "Searches look first in places shaped like earlier finds" + Forget Them: a shape kept
     /// pointing Prey's shotgun searches at the pistol's kind of place.
@@ -569,6 +574,8 @@ impl FindView {
             saved_box,
             saved_grid: RefCell::new(saved_grid),
             saved_rows: RefCell::default(),
+            saved_addrs: RefCell::default(),
+            name_saved: Cell::new(false),
             replaces,
             shapes_row,
             shapes_label,
@@ -1325,6 +1332,7 @@ impl FindView {
     /// player may know it's the value (the screen showed it another way).
     fn unsure(&self, why: &str) {
         self.last_count.set(Some(1));
+        self.name_saved.set(true);
         self.guide.ended(
             Look::Call,
             guide::CHECK,
@@ -1334,6 +1342,28 @@ impl FindView {
         );
         self.offer_places(true);
         self.list_matches(1);
+    }
+
+    /// The saved values at `addr`, by name.
+    fn saved_name(&self, addr: u64) -> Option<String> {
+        let names: Vec<String> = self.saved_addrs.borrow().iter().filter(|(_, a)| *a == addr).map(|(n, _)| n.clone()).collect();
+        (!names.is_empty()).then(|| names.join(", "))
+    }
+
+    /// A search ended on a value saved already: said on the bar (the list under it said "Ferret
+    /// can't tell which of these is the value").
+    fn already_saved(&self, name: &str) {
+        self.show_list.set_active(false);
+        self.guide.ended(
+            Look::Found,
+            guide::SAVE,
+            &tr!("It's {name}, saved already", name),
+            &tr!(
+                "The place Ferret found is the value you saved as {name}: set it or keep it in range in the Values tab. Save it again only if Ferret lost it after a restart.",
+                name
+            ),
+            &tr!("It's {name}, which you saved already.", name),
+        );
     }
 
     /// Several places follow the number and the game put every test value back at once: most
@@ -1399,7 +1429,8 @@ impl FindView {
             core::Phase::Others(name, found) => self.guide.others(&name, found),
             core::Phase::Restoring(..) => {}
             core::Phase::Copying(done) => self.guide.copying(done),
-            core::Phase::Following(n, moving) if self.stop.is_visible() => self.following(n, moving),
+            // As the player last said: a reading taken just before a press says the old one.
+            core::Phase::Following(n) if self.stop.is_visible() => self.following(n, self.motion.load(Ordering::Relaxed) == 1),
             core::Phase::Following(..) => {}
             core::Phase::BarReady if start_runs => self.guide.bar_ready(),
             core::Phase::BarReady => {}
@@ -1427,13 +1458,22 @@ impl FindView {
         self.again.set_visible(false);
         let at = format!("0x{:x} ({})", loc.addr, super::kind_text(loc.kind));
         self.last_count.set(None);
-        self.guide.ended(
-            Look::Found,
-            guide::SAVE,
-            &tr!("Found it!"),
-            &tr!("It's at {place}. Give it a name and save it, so Ferret finds it again next time.", place = at),
-            &tr!("Switch to Ferret to give it a name and keep it."),
-        );
+        match self.saved_name(loc.addr) {
+            // The player searched again for a value they have: nothing told them (From Dust:
+            // No Number? found the saved Jellify timer, and Try showed nothing while the power
+            // was idle).
+            Some(name) => {
+                self.already_saved(&name);
+                self.name.set_text(&name);
+            }
+            None => self.guide.ended(
+                Look::Found,
+                guide::SAVE,
+                &tr!("Found it!"),
+                &tr!("It's at {place}. Give it a name and save it, so Ferret finds it again next time.", place = at),
+                &tr!("Switch to Ferret to give it a name and keep it."),
+            ),
+        }
         self.log_found(&format!("Found it: {at}"));
         self.result.set_visible(true);
         self.name.grab_focus();
@@ -1637,15 +1677,7 @@ impl FindView {
         if n > 0 {
             self.last_count.set(Some(n));
         }
-        let title = match n {
-            0 => tr!("Watching the game"),
-            n => ntr!("{n} place follows it", "{n} places follow it", n, n = grouped(n)),
-        };
-        let hint = match moving {
-            true => tr!("It's moving. Press It's Still when it stops."),
-            false => tr!("It's still. Press It's Moving when it starts moving on its own."),
-        };
-        self.guide.show(Look::Go, guide::CHANGE, &title, &hint, None);
+        self.guide.following(n, moving);
         self.offer_motion(n);
     }
 
@@ -1667,6 +1699,7 @@ impl FindView {
         if n <= 20 {
             self.show_list.set_active(true);
         }
+        self.name_saved.set(n == 1);
         let hint = match n {
             1 => tr!("Try it: Ferret writes a number there, and you see whether the game changes. Or go on with It's Moving and It's Still."),
             2..=20 => tr!("Try them one by one, or go on with It's Moving and It's Still."),
@@ -1916,6 +1949,11 @@ impl FindView {
 
     pub fn show_matches(&self, list: Vec<core::Match>) {
         self.last_list.replace(list.clone());
+        if let ([m], true) = (&list[..], self.name_saved.take()) {
+            if let Some(name) = self.saved_name(m.loc.addr) {
+                self.already_saved(&name);
+            }
+        }
         // Found: a late list (the probe re-sends it while it waits) mustn't bring it back.
         if self.result.is_visible() {
             return;
@@ -2299,6 +2337,7 @@ impl FindView {
                 (v.name.clone(), value, limit)
             })
             .collect();
+        self.saved_addrs.replace(values.iter().filter(|v| v.addr != 0).map(|v| (v.name.clone(), v.addr)).collect());
         if *self.saved_rows.borrow() == rows {
             return;
         }

@@ -115,6 +115,10 @@ pub struct Guide {
     /// A "Hands off" notification is out: the next hands-off step (Start, then the scan) keeps
     /// it instead of closing and sending it again.
     hands_off: Cell<bool>,
+    /// No Number? is reading the game, and whether the player said it's moving (`following`).
+    following: Cell<Option<bool>>,
+    /// The count No Number?'s last notification gave.
+    told: Cell<usize>,
 }
 
 fn hands_off_notice() -> String {
@@ -193,6 +197,8 @@ impl Guide {
             got_it: Cell::new(None),
             got_it_next: Rc::default(),
             hands_off: Cell::new(false),
+            following: Cell::new(None),
+            told: Cell::new(0),
         });
         guide.pick(&tr!("Click the number you want to find"), &tr!("In the picture of your game below, or drag a box around it."));
         guide
@@ -210,6 +216,7 @@ impl Guide {
             self.hands_off.set(false);
         }
         self.away.take();
+        self.following.set(None);
         self.look.set(look);
         for l in Look::ALL {
             self.root.remove_css_class(l.class());
@@ -427,6 +434,62 @@ impl Guide {
         }
         self.away.replace(Some((self.keep_changing(), format!("{}.", places(n)), None, Some(6))));
         self.reminded.set(true);
+    }
+
+    /// No Number? reads the game every 2 s: `n` places still follow it (0: nothing compared
+    /// yet), and whether the player says it's moving. The player said nothing came back: a press
+    /// of It's Moving or It's Still from inside the game went unanswered, the count only changed
+    /// in the window, and the bar looked the same moving or still. Now each press is answered
+    /// with a notification while the game is in front, and so is the count each time it halves
+    /// or gets to 20 or fewer ("Got it"; one every 2 s reading was 120 in five minutes), and the
+    /// bar pulses when it drops.
+    pub fn following(self: &Rc<Self>, n: usize, moving: bool) {
+        let before = self.count.replace(n);
+        let title = match (moving, n) {
+            (true, 0) => tr!("It's moving: Ferret watches the game"),
+            (false, 0) => tr!("It's still: Ferret watches the game"),
+            (true, n) => ntr!("It's moving: {n} place follows it", "It's moving: {n} places follow it", n, n = grouped(n)),
+            (false, n) => ntr!("It's still: {n} place follows it", "It's still: {n} places follow it", n, n = grouped(n)),
+        };
+        let hint = match moving {
+            true => tr!("Press It's Still the moment it stops. Ferret reads the game every 2 seconds."),
+            false => tr!("Press It's Moving the moment it starts moving on its own. Ferret reads the game every 2 seconds."),
+        };
+        let pressed = self.following.get() != Some(moving);
+        if pressed {
+            self.show(Look::Go, CHANGE, &title, &hint, None);
+            self.following.set(Some(moving));
+            // The press is taken: said at once in the game (a hotkey).
+            self.notify.send(&title, &hint, None, Some(4));
+            self.reminded.set(true);
+            self.told.set(n);
+        } else {
+            self.title.set_label(&title);
+            self.note(&hint);
+        }
+        self.away.replace(Some((title.clone(), hint, None, Some(4))));
+        if before > n && n > 0 {
+            self.pulse();
+            let told = self.told.get();
+            if !pressed && (n * 2 <= told || (n <= 20 && n < told)) {
+                let got = ntr!(
+                    "Got it: {before} \u{2192} {n} place follows it",
+                    "Got it: {before} \u{2192} {n} places follow it",
+                    n,
+                    before = grouped(told),
+                    n = grouped(n)
+                );
+                self.got_it(got, title);
+                self.told.set(n);
+            }
+        }
+    }
+
+    /// One flash of the bar: something it counts changed.
+    fn pulse(&self) {
+        self.root.add_css_class("flash");
+        let root = self.root.clone();
+        glib::timeout_add_local_once(Duration::from_millis(500), move || root.remove_css_class("flash"));
     }
 
     /// Sends a "Got it" notification, or holds it back until `GOT_IT_GAP` after the last one

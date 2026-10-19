@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 00:00+0100\n"
+"POT-Creation-Date: 2026-10-19 04:27+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Russian\n"
 "Language: ru\n"
@@ -142,24 +142,24 @@ msgstr ""
 "рисует свой экран; возможно, игра хранит значение в виде, который Ferret "
 "пока не умеет искать (2-байтовое или закодированное число)."
 
-#: src/core.rs:1387
+#: src/core.rs:1390
 msgid "attach to a game first"
 msgstr "сначала подключитесь к игре"
 
-#: src/core.rs:1466 src/core.rs:1479
+#: src/core.rs:1469 src/core.rs:1482
 #, rust-format
 msgid "Ferret couldn't get permission: {why}"
 msgstr "Ferret не получил разрешения: {why}"
 
-#: src/core.rs:1473
+#: src/core.rs:1476
 msgid "The password dialog was closed before Ferret got permission."
 msgstr "Окно пароля закрыли до того, как Ferret получил разрешение."
 
-#: src/core.rs:1476
+#: src/core.rs:1479
 msgid "Ferret didn't get permission."
 msgstr "Ferret не получил разрешения."
 
-#: src/core.rs:1477
+#: src/core.rs:1480
 msgid ""
 "On a Steam Deck, set a password first: open Konsole in desktop mode and run "
 "this, then try again."
@@ -167,43 +167,43 @@ msgstr ""
 "На Steam Deck сначала задайте пароль: откройте Konsole в режиме рабочего "
 "стола, выполните это и попробуйте снова."
 
-#: src/core.rs:1585
+#: src/core.rs:1588
 msgid "the value needs a name"
 msgstr "значению нужно имя"
 
-#: src/core.rs:1589
+#: src/core.rs:1592
 msgid "narrow down to exactly one address first"
 msgstr "сначала сузьте до одного адреса"
 
-#: src/core.rs:1634
+#: src/core.rs:1637
 #, rust-format
 msgid "Ferret can't find it again by code or by name, and {why}"
 msgstr "Ferret не может найти его снова ни по коду, ни по имени, а {why}"
 
-#: src/core.rs:1771
+#: src/core.rs:1774
 msgid "no pointer from the game's own memory leads to it"
 msgstr "ни один указатель из собственной памяти игры не ведёт к нему"
 
-#: src/core.rs:1780
+#: src/core.rs:1783
 msgid "every pointer path to it changed within seconds"
 msgstr "все пути указателей к нему изменились за несколько секунд"
 
-#: src/core.rs:1791
+#: src/core.rs:1794
 #, rust-format
 msgid "the pointer scan failed: {e}"
 msgstr "поиск указателей не удался: {e}"
 
-#: src/core.rs:1883 src/core.rs:1947
+#: src/core.rs:1886 src/core.rs:1950
 #, rust-format
 msgid "{name} isn't saved"
 msgstr "{name} не сохранено"
 
-#: src/core.rs:1888
+#: src/core.rs:1891
 #, rust-format
 msgid "{name} is confirmed already"
 msgstr "{name} уже подтверждено"
 
-#: src/core.rs:1892
+#: src/core.rs:1895
 #, rust-format
 msgid ""
 "{name} was saved in this run of the game, where all its pointer paths lead "
@@ -212,32 +212,32 @@ msgstr ""
 "{name} сохранено в этом запуске игры, где все его пути указателей ведут к "
 "нему: это пока ничего не доказывает. Подтвердите его после перезапуска игры"
 
-#: src/core.rs:1907
+#: src/core.rs:1910
 #, rust-format
 msgid "none of {name}'s pointer paths lead anywhere now"
 msgstr "ни один из путей указателей {name} сейчас никуда не ведёт"
 
-#: src/core.rs:1910 src/core.rs:1945
+#: src/core.rs:1913 src/core.rs:1948
 #, rust-format
 msgid "{name} can't be confirmed: {why}"
 msgstr "{name} нельзя подтвердить: {why}"
 
-#: src/core.rs:1930
+#: src/core.rs:1933
 #, rust-format
 msgid "{name} confirmed: Ferret finds it this way from now on"
 msgstr "{name} подтверждено: теперь Ferret находит его так"
 
-#: src/core.rs:1939
+#: src/core.rs:1942
 #, rust-format
 msgid "{name} isn't in the game right now: load a save, then check it again"
 msgstr "{name} сейчас нет в игре: загрузите сохранение, затем проверьте снова"
 
-#: src/core.rs:1942
+#: src/core.rs:1945
 #, rust-format
 msgid "{name} can't be confirmed: its name doesn't lead to one value ({why})"
 msgstr "{name} нельзя подтвердить: его имя не ведёт к одному значению ({why})"
 
-#: src/core.rs:2010
+#: src/core.rs:2013
 msgid ""
 "it was imported and isn't checked yet. If the game shows the number Ferret "
 "reads, say so in the Values tab"
@@ -245,18 +245,18 @@ msgstr ""
 "оно импортировано и ещё не проверено. Если игра показывает число, которое "
 "читает Ferret, скажите об этом во вкладке «Значения»"
 
-#: src/core.rs:2013
+#: src/core.rs:2016
 #, rust-format
 msgid "its name doesn't lead to one value ({why})"
 msgstr "его имя не ведёт к одному значению ({why})"
 
-#: src/core.rs:2017
+#: src/core.rs:2020
 msgid ""
 "its pointer paths are guesses until a later run of the game confirms them"
 msgstr ""
 "его пути указателей — догадки, пока следующий запуск игры их не подтвердит"
 
-#: src/core.rs:2112
+#: src/core.rs:2115
 #, rust-format
 msgid ""
 "{name}: it was imported and isn't checked yet. If the game shows the number "
@@ -265,7 +265,7 @@ msgstr ""
 "{name}: оно импортировано и ещё не проверено. Если игра показывает число, "
 "которое читает Ferret, скажите об этом во вкладке «Значения»"
 
-#: src/core.rs:2118
+#: src/core.rs:2121
 #, rust-format
 msgid ""
 "its pointer paths aren't confirmed yet: confirm it in the Values tab if the "
@@ -275,39 +275,47 @@ msgstr ""
 "«Значения», если игра показывает его число, или найдите его снова и "
 "сохраните как {name}"
 
-#: src/core.rs:2157
+#: src/core.rs:2160
 msgid "Nothing is kept in range in this game"
 msgstr "В этой игре ничего не удерживается в диапазоне"
 
-#: src/core.rs:2214 src/core.rs:2244 src/core.rs:2520 src/core.rs:3122
+#: src/core.rs:2217 src/core.rs:2247 src/core.rs:2523 src/core.rs:3125
 #, rust-format
 msgid "no saved value called {name}"
 msgstr "нет сохранённого значения с именем {name}"
 
-#: src/core.rs:2248
+#: src/core.rs:2251
 #, rust-format
 msgid ""
 "Ferret finds others like {name} through the game's code that changes it, and "
 "doesn't know that code: find {name} again and save it while it changes in "
 "the game"
-msgstr "Ferret находит другие значения вроде {name} через код игры, который его меняет, а этот код ему неизвестен: найдите {name} заново и сохраните, пока оно меняется в игре"
+msgstr ""
+"Ferret находит другие значения вроде {name} через код игры, который его "
+"меняет, а этот код ему неизвестен: найдите {name} заново и сохраните, пока "
+"оно меняется в игре"
 
-#: src/core.rs:2253
+#: src/core.rs:2256
 #, rust-format
 msgid ""
 "{name} isn't found in this run yet: let it change in the game once, then try "
 "again"
-msgstr "{name} ещё не найдено в этом запуске: дайте значению измениться в игре один раз, затем попробуйте снова"
+msgstr ""
+"{name} ещё не найдено в этом запуске: дайте значению измениться в игре один "
+"раз, затем попробуйте снова"
 
-#: src/core.rs:2286
+#: src/core.rs:2289
 #, rust-format
 msgid ""
 "Nothing else ran the code that changes {name} while Ferret watched. Use the "
 "others in the game while it watches (your other powers, other units), then "
 "click Done."
-msgstr "Пока Ferret наблюдал, код, меняющий {name}, больше ни для чего не выполнялся. Используйте остальные в игре, пока он наблюдает (другие силы, другие отряды), затем нажмите «Готово»."
+msgstr ""
+"Пока Ferret наблюдал, код, меняющий {name}, больше ни для чего не "
+"выполнялся. Используйте остальные в игре, пока он наблюдает (другие силы, "
+"другие отряды), затем нажмите «Готово»."
 
-#: src/core.rs:2293
+#: src/core.rs:2296
 #, rust-format
 msgid ""
 "Ferret found {n} more like {name}, but nothing next to the two tells them "
@@ -315,33 +323,48 @@ msgid ""
 msgid_plural ""
 "Ferret found {n} more like {name}, but nothing next to them tells them "
 "apart, so it couldn't find each one again: not saved"
-msgstr[0] "Ferret нашёл ещё {n} значение вроде {name}, но рядом нет ничего, что различало бы их, поэтому найти каждое снова не выйдет: не сохранено"
-msgstr[1] "Ferret нашёл ещё {n} значения вроде {name}, но рядом нет ничего, что различало бы их, поэтому найти каждое снова не выйдет: не сохранено"
-msgstr[2] "Ferret нашёл ещё {n} значений вроде {name}, но рядом нет ничего, что различало бы их, поэтому найти каждое снова не выйдет: не сохранено"
+msgstr[0] ""
+"Ferret нашёл ещё {n} значение вроде {name}, но рядом нет ничего, что "
+"различало бы их, поэтому найти каждое снова не выйдет: не сохранено"
+msgstr[1] ""
+"Ferret нашёл ещё {n} значения вроде {name}, но рядом нет ничего, что "
+"различало бы их, поэтому найти каждое снова не выйдет: не сохранено"
+msgstr[2] ""
+"Ferret нашёл ещё {n} значений вроде {name}, но рядом нет ничего, что "
+"различало бы их, поэтому найти каждое снова не выйдет: не сохранено"
 
-#: src/core.rs:2348
+#: src/core.rs:2351
 #, rust-format
 msgid "The others like {name} are saved already"
 msgstr "Остальные значения вроде {name} уже сохранены"
 
-#: src/core.rs:2350
+#: src/core.rs:2353
 #, rust-format
 msgid "Found {n} more like {name}: {names}. It's kept in range like {name}."
 msgid_plural ""
 "Found {n} more like {name}: {names}. Each is kept in range like {name}."
-msgstr[0] "Найдено ещё {n} значение вроде {name}: {names}. Оно удерживается в диапазоне, как {name}."
-msgstr[1] "Найдено ещё {n} значения вроде {name}: {names}. Каждое удерживается в диапазоне, как {name}."
-msgstr[2] "Найдено ещё {n} значений вроде {name}: {names}. Каждое удерживается в диапазоне, как {name}."
+msgstr[0] ""
+"Найдено ещё {n} значение вроде {name}: {names}. Оно удерживается в "
+"диапазоне, как {name}."
+msgstr[1] ""
+"Найдено ещё {n} значения вроде {name}: {names}. Каждое удерживается в "
+"диапазоне, как {name}."
+msgstr[2] ""
+"Найдено ещё {n} значений вроде {name}: {names}. Каждое удерживается в "
+"диапазоне, как {name}."
 
-#: src/core.rs:2357
+#: src/core.rs:2360
 #, rust-format
 msgid "Found {n} more like {name}: {names}. It's in the Values tab."
 msgid_plural "Found {n} more like {name}: {names}. They're in the Values tab."
-msgstr[0] "Найдено ещё {n} значение вроде {name}: {names}. Оно во вкладке «Значения»."
-msgstr[1] "Найдено ещё {n} значения вроде {name}: {names}. Они во вкладке «Значения»."
-msgstr[2] "Найдено ещё {n} значений вроде {name}: {names}. Они во вкладке «Значения»."
+msgstr[0] ""
+"Найдено ещё {n} значение вроде {name}: {names}. Оно во вкладке «Значения»."
+msgstr[1] ""
+"Найдено ещё {n} значения вроде {name}: {names}. Они во вкладке «Значения»."
+msgstr[2] ""
+"Найдено ещё {n} значений вроде {name}: {names}. Они во вкладке «Значения»."
 
-#: src/core.rs:2377
+#: src/core.rs:2380
 #, rust-format
 msgid ""
 "{name}: imported and not checked yet. On its card in the Values tab, click "
@@ -350,14 +373,14 @@ msgstr ""
 "{name}: импортировано и ещё не проверено. На его карточке во вкладке "
 "«Значения» нажмите «Да, показывает…», если игра показывает это число"
 
-#: src/core.rs:2384
+#: src/core.rs:2387
 #, rust-format
 msgid ""
 "{name}: its name is longer than 32 letters (save it again with a shorter one)"
 msgstr ""
 "{name}: имя длиннее 32 символов (сохраните его снова с более коротким именем)"
 
-#: src/core.rs:2391
+#: src/core.rs:2394
 #, rust-format
 msgid ""
 "{name}: its pointer paths start in files that differ between computers "
@@ -366,7 +389,7 @@ msgstr ""
 "{name}: его пути указателей начинаются в файлах, которые отличаются на "
 "разных компьютерах (графический драйвер, Wine, Steam)"
 
-#: src/core.rs:2395
+#: src/core.rs:2398
 #, rust-format
 msgid ""
 "{name}: its pointer paths aren't confirmed yet (restart the game and check "
@@ -375,27 +398,27 @@ msgstr ""
 "{name}: его пути указателей ещё не подтверждены (перезапустите игру и "
 "проверьте его)"
 
-#: src/core.rs:2397
+#: src/core.rs:2400
 #, rust-format
 msgid "{name}: Ferret has no way to find it that works on other computers"
 msgstr ""
 "{name}: у Ferret нет способа найти его, который работает на других "
 "компьютерах"
 
-#: src/core.rs:2415
+#: src/core.rs:2418
 msgid "Nothing is saved for this game yet"
 msgstr "Для этой игры пока ничего не сохранено"
 
-#: src/core.rs:2416
+#: src/core.rs:2419
 msgid "Nothing to export."
 msgstr "Нечего экспортировать."
 
-#: src/core.rs:2445
+#: src/core.rs:2448
 #, rust-format
 msgid "These values are for {theirs}, not {exe}"
 msgstr "Эти значения для {theirs}, а не для {exe}"
 
-#: src/core.rs:2450
+#: src/core.rs:2453
 #, rust-format
 msgid ""
 "These values are for another game with a program called {exe} (Steam app "
@@ -404,7 +427,7 @@ msgstr ""
 "Эти значения для другой игры с программой {exe} (приложение Steam {theirs}, "
 "а у этой {ours})"
 
-#: src/core.rs:2461
+#: src/core.rs:2464
 #, rust-format
 msgid ""
 "{name}: you have a value with this name already (remove yours to import it)"
@@ -412,17 +435,17 @@ msgstr ""
 "{name}: у вас уже есть значение с таким именем (удалите своё, чтобы "
 "импортировать)"
 
-#: src/core.rs:2489
+#: src/core.rs:2492
 msgid "Nothing imported."
 msgstr "Ничего не импортировано."
 
-#: src/core.rs:2512
+#: src/core.rs:2515
 #, rust-format
 msgid "At most ({max}) is lower than at least ({min}): nothing changed"
 msgstr ""
 "«Не больше» ({max}) меньше, чем «не меньше» ({min}): ничего не изменено"
 
-#: src/core.rs:3081
+#: src/core.rs:3084
 #, rust-format
 msgid ""
 "{name} not written: it was imported and isn't checked yet. If the game shows "
@@ -432,12 +455,12 @@ msgstr ""
 "показывает число, которое читает Ferret, скажите об этом во вкладке "
 "«Значения»"
 
-#: src/core.rs:3103
+#: src/core.rs:3106
 #, rust-format
 msgid "{name} isn't in the game right now (is a save loaded?)"
 msgstr "{name} сейчас нет в игре (сохранение загружено?)"
 
-#: src/core.rs:3106
+#: src/core.rs:3109
 #, rust-format
 msgid ""
 "{name} not written: its name doesn't lead to one value ({why}). Find it "
@@ -446,12 +469,12 @@ msgstr ""
 "{name} не записано: его имя не ведёт к одному значению ({why}). Найдите его "
 "снова и сохраните как {name}."
 
-#: src/core.rs:3124
+#: src/core.rs:3127
 #, rust-format
 msgid "{name} can't be found right now (is a save loaded?)"
 msgstr "{name} сейчас не найти (сохранение загружено?)"
 
-#: src/core.rs:3128
+#: src/core.rs:3131
 #, rust-format
 msgid ""
 "not written: {why}, so it could land in the wrong place. Find it again and "
@@ -460,46 +483,46 @@ msgstr ""
 "не записано: {why}, поэтому запись может попасть не туда. Найдите его снова "
 "и сохраните как {name}: это подтвердит правильный путь"
 
-#: src/core.rs:3273
+#: src/core.rs:3276
 msgid "a move of the bar"
 msgstr "движение полосы"
 
-#: src/core.rs:3274
+#: src/core.rs:3277
 msgid "a reading while it moved"
 msgstr "замер, пока оно менялось"
 
-#: src/core.rs:3275
+#: src/core.rs:3278
 msgid "a reading while it stayed still"
 msgstr "замер, пока оно стояло на месте"
 
-#: src/core.rs:3276
+#: src/core.rs:3279
 msgid "copying the game's memory"
 msgstr "копирование памяти игры"
 
-#: src/core.rs:3277
+#: src/core.rs:3280
 #, rust-format
 msgid "the search for {n}"
 msgstr "поиск {n}"
 
-#: src/core.rs:3278
+#: src/core.rs:3281
 #, rust-format
 msgid "ruling out {place}"
 msgstr "исключение {place}"
 
-#: src/core.rs:3279
+#: src/core.rs:3282
 #, rust-format
 msgid "picking {place}"
 msgstr "выбор {place}"
 
-#: src/core.rs:3280
+#: src/core.rs:3283
 msgid "starting over"
 msgstr "начало заново"
 
-#: src/core.rs:3334
+#: src/core.rs:3337
 msgid "The number is back in the box."
 msgstr "Число снова в рамке."
 
-#: src/core.rs:3337
+#: src/core.rs:3340
 msgid ""
 "The box keeps changing: it may take in something that moves or blinks around "
 "the number. Pick the number again with a box around its digits only."
@@ -507,7 +530,7 @@ msgstr ""
 "Рамка постоянно меняется: возможно, в неё попадает что-то, что движется или "
 "мигает рядом с числом. Выберите число заново, обведя только его цифры."
 
-#: src/core.rs:3342
+#: src/core.rs:3345
 msgid ""
 "The box doesn't show the number now (it looks different from when you picked "
 "it: a menu or the inventory closed?). Ferret waits until it's back."
@@ -515,7 +538,7 @@ msgstr ""
 "Рамка сейчас не показывает число (она выглядит иначе, чем при выборе: "
 "закрылось меню или инвентарь?). Ferret ждёт, пока оно вернётся."
 
-#: src/core.rs:3368
+#: src/core.rs:3371
 msgid ""
 "The box is outside the game picture now (the window got smaller?): capture "
 "again and pick it again."
@@ -523,17 +546,17 @@ msgstr ""
 "Рамка теперь вне изображения игры (окно стало меньше?): захватите "
 "изображение снова и выберите её заново."
 
-#: src/core.rs:3478
+#: src/core.rs:3481
 #, rust-format
 msgid "saved as {names}"
 msgstr "сохранено как {names}"
 
-#: src/core.rs:3502
+#: src/core.rs:3505
 #, rust-format
 msgid "not a number: {value}"
 msgstr "не число: {value}"
 
-#: src/core.rs:3521
+#: src/core.rs:3524
 #, rust-format
 msgid ""
 "The game put {n} back at once, so that place isn't where it keeps the value: "
@@ -541,11 +564,11 @@ msgid ""
 msgstr ""
 "Игра сразу вернула {n}, значит, значение хранится не там: место убрано."
 
-#: src/core.rs:3526
+#: src/core.rs:3529
 msgid "No places are left: press Start Over and search again."
 msgstr "Мест не осталось: нажмите «Начать заново» и ищите снова."
 
-#: src/core.rs:3533
+#: src/core.rs:3536
 #, rust-format
 msgid ""
 "It kept {n}. If the game shows it too, press Use This One (some games only "
@@ -554,7 +577,7 @@ msgstr ""
 "Значение {n} осталось. Если игра тоже его показывает, нажмите «Использовать "
 "это» (некоторые игры перерисовывают число, только когда сами его меняют)."
 
-#: src/core.rs:3575
+#: src/core.rs:3578
 msgid ""
 "The number is 0, like most of the game's memory: change it in the game and "
 "Ferret searches from there."
@@ -562,12 +585,12 @@ msgstr ""
 "Число равно 0, как почти вся память игры: измените его в игре, и Ferret "
 "начнёт поиск оттуда."
 
-#: src/core.rs:3578
+#: src/core.rs:3581
 msgid "The number stayed at 0. Change it in the game, then search again."
 msgstr ""
 "Число осталось равным 0. Измените его в игре, затем начните поиск снова."
 
-#: src/core.rs:3611
+#: src/core.rs:3614
 #, rust-format
 msgid ""
 "{n} is in too many places in the game's memory to search for: search once "
@@ -576,12 +599,12 @@ msgstr ""
 "{n} встречается в памяти игры в слишком многих местах, чтобы его искать: "
 "ищите, когда игра покажет число побольше."
 
-#: src/core.rs:3699
+#: src/core.rs:3702
 #, rust-format
 msgid "{place} isn't among the matches any more"
 msgstr "{place} больше нет среди совпадений"
 
-#: src/core.rs:3977
+#: src/core.rs:3980
 msgid ""
 "Now change the number in the game once (use some or pick some up): Ferret "
 "watches which of the game's code does it, the surest way to find it again. "
@@ -591,7 +614,7 @@ msgstr ""
 "Ferret смотрит, какой код игры это делает — самый надёжный способ найти его "
 "снова. «Отмена» сохраняет его иначе."
 
-#: src/core.rs:4009
+#: src/core.rs:4012
 #, rust-format
 msgid ""
 "Now change the number in the game once (pick some up or use some): Ferret "
@@ -614,24 +637,24 @@ msgstr[2] ""
 "Ferret ждёт и смотрит, с какого из {n} мест игра продолжает счёт. «Хватит "
 "ждать» вместо этого покажет их список, чтобы попробовать."
 
-#: src/core.rs:4141
+#: src/core.rs:4144
 #, rust-format
 msgid "The one place left holds {held}, not the {n} on screen."
 msgstr "В последнем месте {held}, а не {n}, как на экране."
 
-#: src/core.rs:4165
+#: src/core.rs:4168
 msgid "could not read the number"
 msgstr "не удалось прочитать число"
 
-#: src/core.rs:4382
+#: src/core.rs:4385
 msgid "The icons are all empty, hidden or keep changing."
 msgstr "Все значки пустые, скрыты или постоянно меняются."
 
-#: src/core.rs:4383
+#: src/core.rs:4386
 msgid "The bar is empty, hidden or keeps moving."
 msgstr "Полоса пустая, скрыта или постоянно движется."
 
-#: src/core.rs:4479
+#: src/core.rs:4482
 msgid ""
 "Stopped before the icons changed. Press Start again and let them change in "
 "the game."
@@ -639,7 +662,7 @@ msgstr ""
 "Остановлено до того, как значки изменились. Снова нажмите «Старт» и дайте им "
 "измениться в игре."
 
-#: src/core.rs:4480
+#: src/core.rs:4483
 msgid ""
 "Stopped before the bar moved. Press Start again and let the bar change in "
 "the game."
@@ -647,28 +670,28 @@ msgstr ""
 "Остановлено до того, как полоса сдвинулась. Снова нажмите «Старт» и дайте "
 "полосе измениться в игре."
 
-#: src/core.rs:4513
+#: src/core.rs:4516
 msgid "The one place left kept a test value, but the icons didn't show it."
 msgstr ""
 "Последнее место сохранило тестовое значение, но значки его не показали."
 
-#: src/core.rs:4514
+#: src/core.rs:4517
 msgid "The one place left kept a test value, but the bar didn't show it."
 msgstr ""
 "Последнее место сохранило тестовое значение, но полоса его не показала."
 
-#: src/core.rs:4593
+#: src/core.rs:4596
 msgid ""
 "Nothing to narrow down yet: press Start or type the number the game shows."
 msgstr ""
 "Пока нечего сужать: нажмите «Старт» или введите число, которое показывает "
 "игра."
 
-#: src/core.rs:4596
+#: src/core.rs:4599
 msgid "No number picked: type the number the game shows instead."
 msgstr "Число не выбрано: введите вместо этого число, которое показывает игра."
 
-#: src/core.rs:4604
+#: src/core.rs:4607
 msgid ""
 "The icons are all empty, hidden or changing: try again while they show and "
 "stay still."
@@ -676,14 +699,14 @@ msgstr ""
 "Все значки пустые, скрыты или меняются: попробуйте снова, когда они видны и "
 "не двигаются."
 
-#: src/core.rs:4605
+#: src/core.rs:4608
 msgid ""
 "The bar is empty, hidden or moving: try again while it shows and stays still."
 msgstr ""
 "Полоса пустая, скрыта или движется: попробуйте снова, когда она видна и не "
 "двигается."
 
-#: src/core.rs:4609
+#: src/core.rs:4612
 msgid ""
 "Nothing in the game's memory changed like the icons did. Press Start Over "
 "and search again."
@@ -691,7 +714,7 @@ msgstr ""
 "Ничто в памяти игры не изменилось так, как значки. Нажмите «Начать заново» и "
 "ищите снова."
 
-#: src/core.rs:4610
+#: src/core.rs:4613
 msgid ""
 "Nothing in the game's memory moved like the bar did. Press Start Over and "
 "search again."
@@ -699,21 +722,21 @@ msgstr ""
 "Ничто в памяти игры не сдвинулось так, как полоса. Нажмите «Начать заново» и "
 "ищите снова."
 
-#: src/core.rs:4625
+#: src/core.rs:4628
 msgid "Can't read the number now (is it on screen?). Type it below instead."
 msgstr "Сейчас не удаётся прочитать число (оно на экране?). Введите его ниже."
 
-#: src/core.rs:4667
+#: src/core.rs:4671
 msgid "Nothing to compare with yet. Click No Number? first."
 msgstr "Пока не с чем сравнивать. Сначала нажмите «Нет числа?»."
 
-#: src/core.rs:4683
+#: src/core.rs:4688
 msgid ""
 "The copy of the game's memory is gone. Click No Number? to make a new one."
 msgstr ""
 "Копии памяти игры больше нет. Нажмите «Нет числа?», чтобы сделать новую."
 
-#: src/core.rs:4731
+#: src/core.rs:4742
 msgid ""
 "Stopped before anything was narrowed down. Press It's Moving while it "
 "changes on its own."
@@ -721,19 +744,19 @@ msgstr ""
 "Остановлено, пока ничего не сужено. Нажмите «Меняется», пока оно меняется "
 "само."
 
-#: src/core.rs:4732
+#: src/core.rs:4743
 msgid "Ferret only knows that it moved when you said it did."
 msgstr "Ferret знает только, что оно менялось, когда вы так сказали."
 
 #
-#: src/core.rs:4758
+#: src/core.rs:4769
 msgid ""
 "Almost everything in the game's memory is 0: type the number once the game "
 "shows another one."
 msgstr ""
 "Почти вся память игры — нули: введите число, когда игра покажет другое."
 
-#: src/core.rs:4773
+#: src/core.rs:4784
 #, rust-format
 msgid "{n} is nowhere in the game's memory"
 msgstr "{n} нигде нет в памяти игры"
@@ -794,8 +817,8 @@ msgstr ""
 msgid "Send"
 msgstr "Отправить"
 
-#: src/gui/feedback.rs:69 src/gui/find.rs:231 src/gui/find.rs:2271
-#: src/gui/guide.rs:154 src/gui/guide.rs:532 src/gui/guide.rs:538
+#: src/gui/feedback.rs:69 src/gui/find.rs:236 src/gui/find.rs:2307
+#: src/gui/guide.rs:158 src/gui/guide.rs:595 src/gui/guide.rs:601
 #: src/gui/share.rs:249 src/gui/share.rs:440 src/gui/share.rs:468
 #: src/gui/values.rs:118
 msgid "Cancel"
@@ -822,40 +845,40 @@ msgid "What's Sent"
 msgstr "Что отправляется"
 
 #. Translators: the value types a search looks for, named as in Cheat Engine.
-#: src/gui/find.rs:199
+#: src/gui/find.rs:204
 msgid "All Types"
 msgstr "Все типы"
 
-#: src/gui/find.rs:200
+#: src/gui/find.rs:205
 msgid "2 Bytes"
 msgstr "2 байта"
 
-#: src/gui/find.rs:201
+#: src/gui/find.rs:206
 msgid "4 Bytes"
 msgstr "4 байта"
 
-#: src/gui/find.rs:202
+#: src/gui/find.rs:207
 msgid "Float"
 msgstr "Float"
 
-#: src/gui/find.rs:203
+#: src/gui/find.rs:208
 msgid "Double"
 msgstr "Double"
 
-#: src/gui/find.rs:204
+#: src/gui/find.rs:209
 msgid "Encoded 4 Bytes"
 msgstr "Закодированные 4 байта"
 
-#: src/gui/find.rs:215
+#: src/gui/find.rs:220
 #, rust-format
 msgid "Forgot {places}: searches look everywhere"
 msgstr "Забыто: {places}. Поиск теперь идёт везде"
 
-#: src/gui/find.rs:223
+#: src/gui/find.rs:228
 msgid "Rule Out This Place?"
 msgstr "Исключить это место?"
 
-#: src/gui/find.rs:225
+#: src/gui/find.rs:230
 #, rust-format
 msgid ""
 "{place} ({kind}, now {value}) is dropped from the matches. Undo brings it "
@@ -864,27 +887,27 @@ msgstr ""
 "{place} ({kind}, сейчас {value}) убирается из совпадений. «Отменить» вернёт "
 "его."
 
-#: src/gui/find.rs:231
+#: src/gui/find.rs:236
 msgid "Rule Out"
 msgstr "Исключить"
 
-#: src/gui/find.rs:253
+#: src/gui/find.rs:258
 msgid "Click the number you want to change, or drag a box around it"
 msgstr "Нажмите на число, которое хотите изменить, или обведите его рамкой"
 
-#: src/gui/find.rs:271
+#: src/gui/find.rs:276
 msgid "Pick Another Window…"
 msgstr "Выбрать другое окно…"
 
-#: src/gui/find.rs:276
+#: src/gui/find.rs:281
 msgid "Capture again"
 msgstr "Захватить снова"
 
-#: src/gui/find.rs:277
+#: src/gui/find.rs:282
 msgid "Watch another window"
 msgstr "Следить за другим окном"
 
-#: src/gui/find.rs:282
+#: src/gui/find.rs:287
 msgid ""
 "Fit the picture in the window (scroll over it to zoom, drag with the right "
 "button to move it)"
@@ -892,11 +915,11 @@ msgstr ""
 "Вписать изображение в окно (прокрутите над ним для масштаба, тяните правой "
 "кнопкой, чтобы двигать)"
 
-#: src/gui/find.rs:288
+#: src/gui/find.rs:293
 msgid "What Ferret reads"
 msgstr "Что читает Ferret"
 
-#: src/gui/find.rs:300
+#: src/gui/find.rs:305
 msgid ""
 "Forget the picked box, to search for a number the game doesn't show by "
 "typing it"
@@ -904,28 +927,28 @@ msgstr ""
 "Забыть выбранную рамку, чтобы искать число, которое игра не показывает, "
 "вводя его вручную"
 
-#: src/gui/find.rs:306 src/gui/find.rs:1266 src/gui/find.rs:1289
-#: src/gui/find.rs:1524 src/gui/find.rs:1628
+#: src/gui/find.rs:311 src/gui/find.rs:1273 src/gui/find.rs:1296
+#: src/gui/find.rs:1562 src/gui/find.rs:1666
 msgid "Stop"
 msgstr "Стоп"
 
-#: src/gui/find.rs:307
+#: src/gui/find.rs:312
 msgid "Start"
 msgstr "Старт"
 
-#: src/gui/find.rs:309 src/gui/find.rs:1227
+#: src/gui/find.rs:314 src/gui/find.rs:1234
 msgid "Start Over"
 msgstr "Начать заново"
 
-#: src/gui/find.rs:310
+#: src/gui/find.rs:315
 msgid "Forget the matches so far and search from scratch"
 msgstr "Забыть найденные совпадения и искать с нуля"
 
-#: src/gui/find.rs:313
+#: src/gui/find.rs:318
 msgid "Scan Again"
 msgstr "Сканировать снова"
 
-#: src/gui/find.rs:314
+#: src/gui/find.rs:319
 msgid ""
 "Keep only the places that hold the number the game shows now, even if it "
 "didn't change"
@@ -933,99 +956,99 @@ msgstr ""
 "Оставить только места с числом, которое игра показывает сейчас, даже если "
 "оно не изменилось"
 
-#: src/gui/find.rs:319
+#: src/gui/find.rs:324
 msgid ""
 "Undo the last step of the search: a number, a ruled-out place or Start Over"
 msgstr ""
 "Отменить последний шаг поиска: число, исключённое место или «Начать заново»"
 
-#: src/gui/find.rs:323
+#: src/gui/find.rs:328
 msgid "Redo the last step Undo took back"
 msgstr "Повторить последний отменённый шаг"
 
-#: src/gui/find.rs:328
+#: src/gui/find.rs:333
 msgid ""
 "What new searches look for. Fewer types leave fewer places to narrow down."
 msgstr ""
 "Что ищут новые поиски. Меньше типов — меньше мест, которые нужно сузить."
 
-#: src/gui/find.rs:346
+#: src/gui/find.rs:351
 msgid "What Ferret is doing"
 msgstr "Что делает Ferret"
 
-#: src/gui/find.rs:356
+#: src/gui/find.rs:361
 msgid "Name it, for example gems"
 msgstr "Назовите его, например gems"
 
-#: src/gui/find.rs:357 src/gui/guide.rs:77
+#: src/gui/find.rs:362 src/gui/guide.rs:77
 msgid "Save"
 msgstr "Сохранить"
 
-#: src/gui/find.rs:370 src/gui/find.rs:410
+#: src/gui/find.rs:375 src/gui/find.rs:415
 msgid "Try Them One by One"
 msgstr "Пробовать по одному"
 
-#: src/gui/find.rs:372
+#: src/gui/find.rs:377
 msgid "Keep Going"
 msgstr "Продолжить"
 
-#: src/gui/find.rs:373
+#: src/gui/find.rs:378
 msgid "Change the number in the game again: often the quicker way"
 msgstr "Измените число в игре ещё раз: часто так быстрее"
 
-#: src/gui/find.rs:376
+#: src/gui/find.rs:381
 msgid "Show the List"
 msgstr "Показать список"
 
-#: src/gui/find.rs:387
+#: src/gui/find.rs:392
 msgid "The number to write there"
 msgstr "Число, которое будет туда записано"
 
-#: src/gui/find.rs:389
+#: src/gui/find.rs:394
 msgid "Try It"
 msgstr "Попробовать"
 
-#: src/gui/find.rs:390
+#: src/gui/find.rs:395
 msgid "Skip"
 msgstr "Пропустить"
 
-#: src/gui/find.rs:391
+#: src/gui/find.rs:396
 msgid "Stop Trying"
 msgstr "Хватит пробовать"
 
-#: src/gui/find.rs:399
+#: src/gui/find.rs:404
 msgid "No, Next Place"
 msgstr "Нет, следующее место"
 
-#: src/gui/find.rs:400
+#: src/gui/find.rs:405
 msgid "Yes, That's It"
 msgstr "Да, это оно"
 
-#: src/gui/find.rs:408
+#: src/gui/find.rs:413
 msgid "It's Still"
 msgstr "Не меняется"
 
-#: src/gui/find.rs:409
+#: src/gui/find.rs:414
 msgid "It's Moving"
 msgstr "Меняется"
 
-#: src/gui/find.rs:417
+#: src/gui/find.rs:422
 msgid "Can't read it?"
 msgstr "Не читается?"
 
-#: src/gui/find.rs:419
+#: src/gui/find.rs:424
 msgid "Type the number"
 msgstr "Введите число"
 
-#: src/gui/find.rs:424
+#: src/gui/find.rs:429
 msgid "Search"
 msgstr "Искать"
 
-#: src/gui/find.rs:426
+#: src/gui/find.rs:431
 msgid "No Number?"
 msgstr "Нет числа?"
 
-#: src/gui/find.rs:428
+#: src/gui/find.rs:433
 msgid ""
 "For a value the game shows no number for, like a ring, a bar or hunger: "
 "Ferret copies the game's memory, then you tell it whether the value went up "
@@ -1035,47 +1058,47 @@ msgstr ""
 "или голода: Ferret копирует память игры, а вы говорите, выросло значение или "
 "уменьшилось"
 
-#: src/gui/find.rs:433
+#: src/gui/find.rs:438
 msgid "More"
 msgstr "Ещё"
 
-#: src/gui/find.rs:434
+#: src/gui/find.rs:439
 msgid "Value types, the game's learned digits and the places of earlier finds"
 msgstr "Типы значений, выученные цифры игры и места прошлых находок"
 
-#: src/gui/find.rs:448
+#: src/gui/find.rs:453
 msgid "Value types new searches look for:"
 msgstr "Типы значений для новых поисков:"
 
-#: src/gui/find.rs:454
+#: src/gui/find.rs:459
 msgid "Learned digits:"
 msgstr "Выученные цифры:"
 
-#: src/gui/find.rs:460
+#: src/gui/find.rs:465
 msgid "Forget Them"
 msgstr "Забыть их"
 
-#: src/gui/find.rs:461
+#: src/gui/find.rs:466
 msgid "Search everywhere instead, until the next value found"
 msgstr "Вместо этого искать везде, до следующего найденного значения"
 
-#: src/gui/find.rs:491
+#: src/gui/find.rs:496
 msgid "Already saved for this game:"
 msgstr "Уже сохранено для этой игры:"
 
-#: src/gui/find.rs:496
+#: src/gui/find.rs:501
 msgid "Show the Game Window"
 msgstr "Показать окно игры"
 
-#: src/gui/find.rs:501
+#: src/gui/find.rs:506
 msgid "Type the Number Instead"
 msgstr "Ввести число вручную"
 
-#: src/gui/find.rs:507 src/gui/values.rs:134
+#: src/gui/find.rs:512 src/gui/values.rs:134
 msgid "Find a Value"
 msgstr "Найти значение"
 
-#: src/gui/find.rs:508
+#: src/gui/find.rs:513
 msgid ""
 "Ferret looks at the game window, you pick the number, and then you just "
 "play. Only the game window is captured; the first time, your desktop asks "
@@ -1085,7 +1108,7 @@ msgstr ""
 "Захватывается только окно игры; в первый раз ваше рабочее окружение спросит, "
 "каким окном поделиться."
 
-#: src/gui/find.rs:526
+#: src/gui/find.rs:531
 msgid ""
 "Ferret can't tell which of these is the value. Type a new value into one and "
 "press Try, then look at the game: if it shows that value, press Use This One."
@@ -1094,12 +1117,12 @@ msgstr ""
 "значение в одно из них и нажмите «Попробовать», затем посмотрите в игру: "
 "если она показывает это значение, нажмите «Использовать это»."
 
-#: src/gui/find.rs:619 src/gui/find.rs:623 src/gui/find.rs:1206
-#: src/gui/find.rs:1496
+#: src/gui/find.rs:626 src/gui/find.rs:630 src/gui/find.rs:1213
+#: src/gui/find.rs:1534
 msgid "Type the number the game shows"
 msgstr "Введите число, которое показывает игра"
 
-#: src/gui/find.rs:620
+#: src/gui/find.rs:627
 msgid ""
 "Below the picture. Then change it in the game and type the new one. Ferret "
 "learns the game's digits from it."
@@ -1107,7 +1130,7 @@ msgstr ""
 "Под изображением. Затем измените его в игре и введите новое. Так Ferret "
 "выучит цифры игры."
 
-#: src/gui/find.rs:624
+#: src/gui/find.rs:631
 msgid ""
 "Below the picture. Then change it in the game and type the new one. Click "
 "the number in the picture first, and Ferret learns the game's digits from it."
@@ -1115,16 +1138,16 @@ msgstr ""
 "Под изображением. Затем измените его в игре и введите новое. Сначала нажмите "
 "на число на изображении, и Ferret выучит по нему цифры игры."
 
-#: src/gui/find.rs:896
+#: src/gui/find.rs:903
 msgid "no number"
 msgstr "нет числа"
 
-#: src/gui/find.rs:896
+#: src/gui/find.rs:903
 #, rust-format
 msgid "reads {n}"
 msgstr "читает {n}"
 
-#: src/gui/find.rs:1000
+#: src/gui/find.rs:1007
 #, rust-format
 msgid "{before} → {n} place matches"
 msgid_plural "{before} → {n} places match"
@@ -1132,7 +1155,7 @@ msgstr[0] "{before} → подходит {n} место"
 msgstr[1] "{before} → подходят {n} места"
 msgstr[2] "{before} → подходят {n} мест"
 
-#: src/gui/find.rs:1006
+#: src/gui/find.rs:1013
 #, rust-format
 msgid "Still {n} place matches"
 msgid_plural "Still {n} places match"
@@ -1140,7 +1163,7 @@ msgstr[0] "По-прежнему подходит {n} место"
 msgstr[1] "По-прежнему подходят {n} места"
 msgstr[2] "По-прежнему подходят {n} мест"
 
-#: src/gui/find.rs:1007 src/gui/guide.rs:128
+#: src/gui/find.rs:1014 src/gui/guide.rs:132
 #, rust-format
 msgid "{n} place matches"
 msgid_plural "{n} places match"
@@ -1148,20 +1171,20 @@ msgstr[0] "Подходит {n} место"
 msgstr[1] "Подходят {n} места"
 msgstr[2] "Подходят {n} мест"
 
-#: src/gui/find.rs:1025
+#: src/gui/find.rs:1032
 msgid "Capturing the game window…"
 msgstr "Захват окна игры…"
 
-#: src/gui/find.rs:1025
+#: src/gui/find.rs:1032
 msgid "The first time, your desktop asks which window to share."
 msgstr "В первый раз ваше рабочее окружение спросит, каким окном поделиться."
 
-#: src/gui/find.rs:1041 src/gui/find.rs:1907 src/gui/guide.rs:197
+#: src/gui/find.rs:1048 src/gui/find.rs:1938 src/gui/guide.rs:203
 #: src/gui/mod.rs:744
 msgid "Click the number you want to find"
 msgstr "Нажмите на число, которое хотите найти"
 
-#: src/gui/find.rs:1042
+#: src/gui/find.rs:1049
 msgid ""
 "In the picture of your game below. Or drag a box around it, around a bar, or "
 "around a row of icons such as hearts."
@@ -1169,28 +1192,28 @@ msgstr ""
 "На изображении вашей игры ниже. Или обведите рамкой его, полосу или ряд "
 "значков, например сердечек."
 
-#: src/gui/find.rs:1048
+#: src/gui/find.rs:1055
 msgid "Could not capture the game window"
 msgstr "Не удалось захватить окно игры"
 
-#: src/gui/find.rs:1061
+#: src/gui/find.rs:1068
 msgid "Reading the number…"
 msgstr "Чтение числа…"
 
-#: src/gui/find.rs:1098
+#: src/gui/find.rs:1105
 #, rust-format
 msgid "Reads {n}?"
 msgstr "Тут {n}?"
 
-#: src/gui/find.rs:1098
+#: src/gui/find.rs:1105
 msgid "Answer the question first."
 msgstr "Сначала ответьте на вопрос."
 
-#: src/gui/find.rs:1107
+#: src/gui/find.rs:1114
 msgid "Those are icons: click Start when you're ready"
 msgstr "Это значки: нажмите «Старт», когда будете готовы"
 
-#: src/gui/find.rs:1108
+#: src/gui/find.rs:1115
 msgid ""
 "Ferret counts the full ones (halves too). Leave them alone until this turns "
 "green, then play until the count goes down or up a couple of times."
@@ -1198,11 +1221,11 @@ msgstr ""
 "Ferret считает полные (и половинки тоже). Не трогайте их, пока это не станет "
 "зелёным, затем играйте, пока счёт пару раз не уменьшится или не увеличится."
 
-#: src/gui/find.rs:1111
+#: src/gui/find.rs:1118
 msgid "That's a bar: click Start when you're ready"
 msgstr "Это полоса: нажмите «Старт», когда будете готовы"
 
-#: src/gui/find.rs:1112
+#: src/gui/find.rs:1119
 msgid ""
 "Ferret goes by how full it is. Leave it alone until this turns green, then "
 "play until it goes down or up a couple of times."
@@ -1210,16 +1233,16 @@ msgstr ""
 "Ferret ориентируется на её заполненность. Не трогайте её, пока это не станет "
 "зелёным, затем играйте, пока она пару раз не уменьшится или не увеличится."
 
-#: src/gui/find.rs:1121 src/gui/find.rs:1128
+#: src/gui/find.rs:1128 src/gui/find.rs:1135
 msgid "Can't read a number there"
 msgstr "Здесь не читается число"
 
-#: src/gui/find.rs:1122
+#: src/gui/find.rs:1129
 #, rust-format
 msgid "Can't measure it as a bar either: {why}"
 msgstr "Измерить это как полосу тоже не получается: {why}"
 
-#: src/gui/find.rs:1129
+#: src/gui/find.rs:1136
 msgid ""
 "Type the number the game shows below; Ferret learns the game's digits from "
 "it. Or try a tighter box."
@@ -1227,16 +1250,16 @@ msgstr ""
 "Введите ниже число, которое показывает игра; так Ferret выучит цифры игры. "
 "Или попробуйте рамку поуже."
 
-#: src/gui/find.rs:1134
+#: src/gui/find.rs:1141
 msgid "Can't read it"
 msgstr "Не читается"
 
-#: src/gui/find.rs:1144
+#: src/gui/find.rs:1151
 #, rust-format
 msgid "Reads {n}: click Start when you're ready"
 msgstr "Тут {n}: нажмите «Старт», когда будете готовы"
 
-#: src/gui/find.rs:1145
+#: src/gui/find.rs:1152
 msgid ""
 "Leave the number alone until this turns green. Then play until it changes a "
 "couple of times."
@@ -1244,11 +1267,11 @@ msgstr ""
 "Не трогайте число, пока это не станет зелёным. Затем играйте, пока оно не "
 "изменится пару раз."
 
-#: src/gui/find.rs:1154
+#: src/gui/find.rs:1161
 msgid "Is This the Number?"
 msgstr "Это то число?"
 
-#: src/gui/find.rs:1155
+#: src/gui/find.rs:1162
 msgid ""
 "Compare the picture of your box with what Ferret read. Ferret learns how the "
 "game draws its digits from your answer."
@@ -1256,35 +1279,35 @@ msgstr ""
 "Сравните изображение своей рамки с тем, что прочитал Ferret. По вашему "
 "ответу Ferret учится, как игра рисует свои цифры."
 
-#: src/gui/find.rs:1173
+#: src/gui/find.rs:1180
 msgid "Your box in the game"
 msgstr "Ваша рамка в игре"
 
-#: src/gui/find.rs:1174
+#: src/gui/find.rs:1181
 msgid "Ferret reads"
 msgstr "Ferret читает"
 
-#: src/gui/find.rs:1176
+#: src/gui/find.rs:1183
 msgid "No, I'll Type It"
 msgstr "Нет, я введу его"
 
-#: src/gui/find.rs:1176 src/gui/values.rs:243
+#: src/gui/find.rs:1183 src/gui/values.rs:243
 #, rust-format
 msgid "Yes, It Shows {n}"
 msgstr "Да, показывает {n}"
 
-#: src/gui/find.rs:1207
+#: src/gui/find.rs:1214
 msgid ""
 "Below the picture; Ferret learns the game's digits from it. Or try a tighter "
 "box."
 msgstr ""
 "Под изображением; так Ferret выучит цифры игры. Или попробуйте рамку поуже."
 
-#: src/gui/find.rs:1217
+#: src/gui/find.rs:1224
 msgid "Keep the Matches?"
 msgstr "Оставить совпадения?"
 
-#: src/gui/find.rs:1219
+#: src/gui/find.rs:1226
 #, rust-format
 msgid ""
 "You picked a different number while {n} place still matches the last one. "
@@ -1307,35 +1330,35 @@ msgstr[2] ""
 "если это число показывает то же значение (например, сумму и стопку); начните "
 "заново, если это другое значение."
 
-#: src/gui/find.rs:1227
+#: src/gui/find.rs:1234
 msgid "Keep the Match"
 msgid_plural "Keep the Matches"
 msgstr[0] "Оставить совпадения"
 msgstr[1] "Оставить совпадения"
 msgstr[2] "Оставить совпадения"
 
-#: src/gui/find.rs:1273
+#: src/gui/find.rs:1280
 msgid "Reading the number on screen…"
 msgstr "Чтение числа на экране…"
 
-#: src/gui/find.rs:1274 src/gui/find.rs:1468 src/gui/guide.rs:349
+#: src/gui/find.rs:1281 src/gui/find.rs:1506 src/gui/guide.rs:356
 msgid ""
 "Don't change the number in the game yet. This turns green when it's your "
 "turn."
 msgstr "Пока не меняйте число в игре. Это станет зелёным, когда будет ваш ход."
 
-#: src/gui/find.rs:1303
+#: src/gui/find.rs:1310
 #, rust-format
 msgid "{count}: Ferret can't tell which one it is"
 msgstr "{count}: Ferret не может определить, какое из них"
 
-#: src/gui/find.rs:1304 src/gui/find.rs:2143
+#: src/gui/find.rs:1311 src/gui/find.rs:2179
 msgid ""
 "Try them one by one, or Keep Going: let the number change in the game again."
 msgstr ""
 "Попробуйте их по одному или продолжите: дайте числу снова измениться в игре."
 
-#: src/gui/find.rs:1305
+#: src/gui/find.rs:1312
 msgid ""
 "Switch to Ferret to try them, or press Start there and let the number change "
 "again."
@@ -1343,24 +1366,24 @@ msgstr ""
 "Переключитесь на Ferret, чтобы попробовать их, или нажмите там «Старт» и "
 "дайте числу снова измениться."
 
-#: src/gui/find.rs:1313
+#: src/gui/find.rs:1320
 msgid "Click Start to go on, and let the number change a few more times."
 msgstr ""
 "Нажмите «Старт», чтобы продолжить, и дайте числу измениться ещё несколько "
 "раз."
 
-#: src/gui/find.rs:1314
+#: src/gui/find.rs:1321
 msgid ""
 "Press Start in Ferret to go on, and let the number change a few more times."
 msgstr ""
 "Нажмите «Старт» в Ferret, чтобы продолжить, и дайте числу измениться ещё "
 "несколько раз."
 
-#: src/gui/find.rs:1331
+#: src/gui/find.rs:1339
 msgid "One place left, but Ferret isn't sure"
 msgstr "Осталось одно место, но Ferret не уверен"
 
-#: src/gui/find.rs:1332
+#: src/gui/find.rs:1340
 #, rust-format
 msgid ""
 "{why} Try it: Ferret writes a number there and asks whether the game shows "
@@ -1369,12 +1392,30 @@ msgstr ""
 "{why} Попробуйте его: Ferret запишет туда число и спросит, показывает ли его "
 "игра."
 
-#: src/gui/find.rs:1333
+#: src/gui/find.rs:1341
 #, rust-format
 msgid "{why} Switch to Ferret to try it."
 msgstr "{why} Переключитесь на Ferret, чтобы попробовать."
 
-#: src/gui/find.rs:1346
+#: src/gui/find.rs:1358
+#, rust-format
+msgid "It's {name}, saved already"
+msgstr "Это {name}, уже сохранено"
+
+#: src/gui/find.rs:1360
+#, rust-format
+msgid ""
+"The place Ferret found is the value you saved as {name}: set it or keep it "
+"in range in the Values tab. Save it again only if Ferret lost it after a "
+"restart."
+msgstr "Найденное место — это значение, которое вы сохранили как {name}: задайте его или удерживайте в диапазоне во вкладке «Значения». Сохраняйте заново, только если Ferret потерял его после перезапуска."
+
+#: src/gui/find.rs:1363
+#, rust-format
+msgid "It's {name}, which you saved already."
+msgstr "Это {name}, вы его уже сохранили."
+
+#: src/gui/find.rs:1374
 msgid ""
 "Ferret changed every place that follows it, and the game changed each one "
 "back at once. It probably works this number out from other things (like a "
@@ -1388,29 +1429,29 @@ msgstr ""
 "игра хранит, например запас. Если это число на максимуме, потратьте немного "
 "и попробуйте эти места."
 
-#: src/gui/find.rs:1354
+#: src/gui/find.rs:1382
 msgid "The game puts this number back"
 msgstr "Игра возвращает это число"
 
-#: src/gui/find.rs:1356
+#: src/gui/find.rs:1384
 msgid "Changing this number probably won't last. Switch to Ferret to see why."
 msgstr ""
 "Изменение этого числа, скорее всего, не продержится. Переключитесь на "
 "Ferret, чтобы узнать почему."
 
-#: src/gui/find.rs:1369
+#: src/gui/find.rs:1397
 msgid "The search stopped"
 msgstr "Поиск остановлен"
 
-#: src/gui/find.rs:1395 src/gui/guide.rs:507
+#: src/gui/find.rs:1423 src/gui/guide.rs:570
 msgid "Stop Waiting"
 msgstr "Хватит ждать"
 
-#: src/gui/find.rs:1409
+#: src/gui/find.rs:1438
 msgid "The box keeps changing"
 msgstr "Рамка постоянно меняется"
 
-#: src/gui/find.rs:1410 src/gui/find.rs:1411
+#: src/gui/find.rs:1439 src/gui/find.rs:1440
 msgid ""
 "It may take in something that moves or blinks. Pick the number again with a "
 "box around its digits only."
@@ -1418,15 +1459,15 @@ msgstr ""
 "Возможно, в неё попадает что-то, что движется или мигает. Выберите число "
 "заново, обведя только его цифры."
 
-#: src/gui/find.rs:1422
+#: src/gui/find.rs:1451
 msgid "Ferret hit a bug"
 msgstr "Ferret столкнулся с ошибкой"
 
-#: src/gui/find.rs:1433
+#: src/gui/find.rs:1470
 msgid "Found it!"
 msgstr "Найдено!"
 
-#: src/gui/find.rs:1434
+#: src/gui/find.rs:1471
 #, rust-format
 msgid ""
 "It's at {place}. Give it a name and save it, so Ferret finds it again next "
@@ -1435,41 +1476,41 @@ msgstr ""
 "Оно по адресу {place}. Дайте ему имя и сохраните, чтобы Ferret нашёл его в "
 "следующий раз."
 
-#: src/gui/find.rs:1435
+#: src/gui/find.rs:1472
 msgid "Switch to Ferret to give it a name and keep it."
 msgstr "Переключитесь на Ferret, чтобы дать ему имя и сохранить."
 
-#: src/gui/find.rs:1452
+#: src/gui/find.rs:1490
 msgid "Type the number as the game shows it"
 msgstr "Введите число так, как его показывает игра"
 
-#: src/gui/find.rs:1452
+#: src/gui/find.rs:1490
 msgid "For example 1250, 1.5 or 3:17."
 msgstr "Например 1250, 1.5 или 3:17."
 
-#: src/gui/find.rs:1467
+#: src/gui/find.rs:1505
 #, rust-format
 msgid "Looking for {n}…"
 msgstr "Поиск {n}…"
 
-#: src/gui/find.rs:1475
+#: src/gui/find.rs:1513
 msgid "Change the number in the game, then type the new one."
 msgstr "Измените число в игре, затем введите новое."
 
-#: src/gui/find.rs:1487
+#: src/gui/find.rs:1525
 msgid "Scanning again with the number on screen…"
 msgstr "Повторное сканирование с числом на экране…"
 
-#: src/gui/find.rs:1496
+#: src/gui/find.rs:1534
 msgid "No number is picked in the picture, so Ferret can't read it."
 msgstr ""
 "На изображении не выбрано число, поэтому Ferret не может его прочитать."
 
-#: src/gui/find.rs:1508
+#: src/gui/find.rs:1546
 msgid "Scanning again…"
 msgstr "Повторное сканирование…"
 
-#: src/gui/find.rs:1509
+#: src/gui/find.rs:1547
 msgid ""
 "Ferret keeps the places that hold the number on screen now. Don't change it "
 "in the game yet."
@@ -1477,7 +1518,7 @@ msgstr ""
 "Ferret оставляет места с числом, которое сейчас на экране. Пока не меняйте "
 "его в игре."
 
-#: src/gui/find.rs:1516
+#: src/gui/find.rs:1554
 msgid ""
 "Press Scan Again whenever the number stays the same, or Start to follow its "
 "changes."
@@ -1485,19 +1526,19 @@ msgstr ""
 "Нажимайте «Сканировать снова», когда число не меняется, или «Старт», чтобы "
 "следить за его изменениями."
 
-#: src/gui/find.rs:1575 src/gui/guide.rs:364
+#: src/gui/find.rs:1613 src/gui/guide.rs:371
 msgid "Copying the game's memory"
 msgstr "Копирование памяти игры"
 
-#: src/gui/find.rs:1575
+#: src/gui/find.rs:1613
 msgid "A few seconds."
 msgstr "Несколько секунд."
 
-#: src/gui/find.rs:1586
+#: src/gui/find.rs:1624
 msgid "Is it moving now?"
 msgstr "Оно сейчас меняется?"
 
-#: src/gui/find.rs:1588
+#: src/gui/find.rs:1626
 msgid ""
 "Press It's Moving while it changes on its own (a ring counting, a bar "
 "filling or draining), and It's Still while it doesn't. Ferret reads the game "
@@ -1509,27 +1550,7 @@ msgstr ""
 "каждые 2 секунды. Горячие клавиши работают прямо в игре (кнопка с "
 "клавиатурой вверху показывает их)."
 
-#: src/gui/find.rs:1641
-msgid "Watching the game"
-msgstr "Слежу за игрой"
-
-#: src/gui/find.rs:1642
-#, rust-format
-msgid "{n} place follows it"
-msgid_plural "{n} places follow it"
-msgstr[0] "{n} место следует за ним"
-msgstr[1] "{n} места следуют за ним"
-msgstr[2] "{n} мест следуют за ним"
-
-#: src/gui/find.rs:1645
-msgid "It's moving. Press It's Still when it stops."
-msgstr "Меняется. Нажмите «Не меняется», когда остановится."
-
-#: src/gui/find.rs:1646
-msgid "It's still. Press It's Moving when it starts moving on its own."
-msgstr "Не меняется. Нажмите «Меняется», когда оно начнёт меняться само."
-
-#: src/gui/find.rs:1671
+#: src/gui/find.rs:1702
 msgid ""
 "Try it: Ferret writes a number there, and you see whether the game changes. "
 "Or go on with It's Moving and It's Still."
@@ -1537,11 +1558,11 @@ msgstr ""
 "Попробуйте его: Ferret запишет туда число, а вы посмотрите, изменится ли что-"
 "то в игре. Или продолжайте с «Меняется» и «Не меняется»."
 
-#: src/gui/find.rs:1672
+#: src/gui/find.rs:1703
 msgid "Try them one by one, or go on with It's Moving and It's Still."
 msgstr "Попробуйте их по одному или продолжайте с «Меняется» и «Не меняется»."
 
-#: src/gui/find.rs:1673
+#: src/gui/find.rs:1704
 msgid ""
 "Go on with It's Moving and It's Still: every time it starts or stops rules "
 "out more."
@@ -1549,20 +1570,20 @@ msgstr ""
 "Продолжайте с «Меняется» и «Не меняется»: каждый старт или остановка "
 "отсеивает больше."
 
-#: src/gui/find.rs:1682
+#: src/gui/find.rs:1713
 msgid "Click No Number? in Ferret's Find Value tab first."
 msgstr "Сначала нажмите «Нет числа?» во вкладке «Найти значение» в Ferret."
 
-#: src/gui/find.rs:1685
+#: src/gui/find.rs:1716
 msgid "Ferret is still busy with the last one. Try again in a moment."
 msgstr "Ferret ещё занят предыдущим шагом. Попробуйте через минуту."
 
-#: src/gui/find.rs:1703
+#: src/gui/find.rs:1734
 #, rust-format
 msgid "{d} isn't learned yet"
 msgstr "Цифра {d} ещё не выучена"
 
-#: src/gui/find.rs:1711
+#: src/gui/find.rs:1742
 #, rust-format
 msgid "{n} learned shape of {d}"
 msgid_plural "{n} learned shapes of {d}"
@@ -1570,12 +1591,12 @@ msgstr[0] "{n} выученная форма цифры {d}"
 msgstr[1] "{n} выученные формы цифры {d}"
 msgstr[2] "{n} выученных форм цифры {d}"
 
-#: src/gui/find.rs:1712
+#: src/gui/find.rs:1743
 #, rust-format
 msgid "Forget {d}"
 msgstr "Забыть {d}"
 
-#: src/gui/find.rs:1722
+#: src/gui/find.rs:1753
 #, rust-format
 msgid ""
 "{n} learned shape of {d}.\n"
@@ -1598,7 +1619,7 @@ msgstr[2] ""
 "Забудьте их, если они неправильно читают числа,\n"
 "затем введите число с {d}, чтобы выучить заново."
 
-#: src/gui/find.rs:1741
+#: src/gui/find.rs:1772
 msgid ""
 "None yet: the general reader reads the numbers. Confirming or typing the "
 "number the game shows teaches Ferret its digits."
@@ -1606,11 +1627,11 @@ msgstr ""
 "Пока нет: числа читает общий распознаватель. Подтверждая или вводя число, "
 "которое показывает игра, вы учите Ferret её цифрам."
 
-#: src/gui/find.rs:1742
+#: src/gui/find.rs:1773
 msgid "All ten: Ferret reads the game's numbers with these first."
 msgstr "Все десять: Ferret сначала читает числа игры по ним."
 
-#: src/gui/find.rs:1744
+#: src/gui/find.rs:1775
 #, rust-format
 msgid ""
 "Missing {digits}: the general reader fills in. Type a number that has it "
@@ -1628,19 +1649,19 @@ msgstr[2] ""
 "Не хватает {digits}: их заменяет общий распознаватель. Введите число, где "
 "они встречаются по одному разу."
 
-#: src/gui/find.rs:1755
+#: src/gui/find.rs:1786
 msgid "Stopping…"
 msgstr "Остановка…"
 
-#: src/gui/find.rs:1755
+#: src/gui/find.rs:1786
 msgid "Ferret puts back any test values it wrote first."
 msgstr "Ferret сначала вернёт все записанные им тестовые значения."
 
-#: src/gui/find.rs:1768
+#: src/gui/find.rs:1799
 msgid "Pick the number in Ferret's Find Value tab first."
 msgstr "Сначала выберите число во вкладке «Найти значение» в Ferret."
 
-#: src/gui/find.rs:1776
+#: src/gui/find.rs:1807
 msgid ""
 "Scan Again works once a search has places to check and a number is picked or "
 "typed."
@@ -1648,26 +1669,26 @@ msgstr ""
 "«Сканировать снова» работает, когда у поиска есть места для проверки и число "
 "выбрано или введено."
 
-#: src/gui/find.rs:1793 src/gui/find.rs:1794
+#: src/gui/find.rs:1824 src/gui/find.rs:1825
 msgid "Starting over"
 msgstr "Начинаем заново"
 
-#: src/gui/find.rs:1793
+#: src/gui/find.rs:1824
 msgid "Click Start, or type the number the game shows."
 msgstr "Нажмите «Старт» или введите число, которое показывает игра."
 
-#: src/gui/find.rs:1794
+#: src/gui/find.rs:1825
 msgid "Click a number in the picture, or type the number the game shows."
 msgstr ""
 "Нажмите на число на изображении или введите число, которое показывает игра."
 
-#: src/gui/find.rs:1826
+#: src/gui/find.rs:1857
 msgid "No matches yet. Click Start, or type the number the game shows."
 msgstr ""
 "Совпадений пока нет. Нажмите «Старт» или введите число, которое показывает "
 "игра."
 
-#: src/gui/find.rs:1828
+#: src/gui/find.rs:1859
 #, rust-format
 msgid "{n} place matches. Click Start, or type the number the game shows."
 msgid_plural ""
@@ -1682,55 +1703,55 @@ msgstr[2] ""
 "Подходят {n} мест. Нажмите «Старт» или введите число, которое показывает "
 "игра."
 
-#: src/gui/find.rs:1835
+#: src/gui/find.rs:1866
 #, rust-format
 msgid "Redid {step}"
 msgstr "Повторено: {step}"
 
-#: src/gui/find.rs:1836
+#: src/gui/find.rs:1867
 #, rust-format
 msgid "Undid {step}"
 msgstr "Отменено: {step}"
 
-#: src/gui/find.rs:1864
+#: src/gui/find.rs:1895
 msgid "Pick the game window in your desktop's window picker…"
 msgstr "Выберите окно игры в окне выбора вашего рабочего окружения…"
 
-#: src/gui/find.rs:1880
+#: src/gui/find.rs:1911
 msgid "No box picked"
 msgstr "Рамка не выбрана"
 
-#: src/gui/find.rs:1880
+#: src/gui/find.rs:1911
 msgid "Type the number the game holds below, or click one in the picture."
 msgstr ""
 "Введите ниже число, которое хранит игра, или нажмите на число на изображении."
 
-#: src/gui/find.rs:1907 src/gui/guide.rs:197 src/gui/mod.rs:744
+#: src/gui/find.rs:1938 src/gui/guide.rs:203 src/gui/mod.rs:744
 msgid "In the picture of your game below, or drag a box around it."
 msgstr "На изображении вашей игры ниже, или обведите его рамкой."
 
-#: src/gui/find.rs:1947 src/gui/values.rs:275
+#: src/gui/find.rs:1983 src/gui/values.rs:275
 msgid "New value"
 msgstr "Новое значение"
 
-#: src/gui/find.rs:1948
+#: src/gui/find.rs:1984
 msgid "Try"
 msgstr "Попробовать"
 
-#: src/gui/find.rs:1949
+#: src/gui/find.rs:1985
 msgid "Use This One"
 msgstr "Использовать это"
 
-#: src/gui/find.rs:1970
+#: src/gui/find.rs:2006
 msgid "Not this one"
 msgstr "Не это"
 
-#: src/gui/find.rs:2012
+#: src/gui/find.rs:2048
 #, rust-format
 msgid "Does the game show {v} now?"
 msgstr "Игра теперь показывает {v}?"
 
-#: src/gui/find.rs:2014
+#: src/gui/find.rs:2050
 msgid ""
 "Look at it in the game. Some games only redraw a number when they change it "
 "themselves: if it still shows the old number, change it in the game once and "
@@ -1740,7 +1761,7 @@ msgstr ""
 "его меняют: если там всё ещё старое число, измените его в игре один раз и "
 "посмотрите снова."
 
-#: src/gui/find.rs:2053
+#: src/gui/find.rs:2089
 #, rust-format
 msgid "The place didn't show it"
 msgid_plural "None of the {n} places showed it"
@@ -1748,7 +1769,7 @@ msgstr[0] "Ни одно из {n} места этого не показало"
 msgstr[1] "Ни одно из {n} мест этого не показало"
 msgstr[2] "Ни одно из {n} мест этого не показало"
 
-#: src/gui/find.rs:2057
+#: src/gui/find.rs:2093
 #, rust-format
 msgid ""
 "{n} place still matches. Some games only redraw a number when they change it "
@@ -1771,12 +1792,12 @@ msgstr[2] ""
 "когда сами его меняют: попробуйте снова или продолжите и дайте числу снова "
 "измениться в игре."
 
-#: src/gui/find.rs:2073
+#: src/gui/find.rs:2109
 #, rust-format
 msgid "Place {i} of {n}: try a number there"
 msgstr "Место {i} из {n}: попробуйте туда число"
 
-#: src/gui/find.rs:2077
+#: src/gui/find.rs:2113
 #, rust-format
 msgid ""
 "It holds {value} now ({what}). Ferret writes the number you try there and "
@@ -1785,16 +1806,16 @@ msgstr ""
 "Сейчас там {value} ({what}). Ferret запишет туда число, которое вы пробуете, "
 "и спросит, показывает ли его игра."
 
-#: src/gui/find.rs:2101
+#: src/gui/find.rs:2137
 msgid "Type the number to write there, for example 500."
 msgstr "Введите число, которое будет туда записано, например 500."
 
-#: src/gui/find.rs:2107
+#: src/gui/find.rs:2143
 #, rust-format
 msgid "Trying {v} at place {i}"
 msgstr "Пробуем {v} в месте {i}"
 
-#: src/gui/find.rs:2108
+#: src/gui/find.rs:2144
 msgid ""
 "Ferret checks that the game keeps it. If the game puts its own number back "
 "at once, that place isn't it."
@@ -1802,15 +1823,15 @@ msgstr ""
 "Ferret проверяет, что игра его сохраняет. Если игра сразу возвращает своё "
 "число, это не то место."
 
-#: src/gui/find.rs:2122
+#: src/gui/find.rs:2158
 msgid "Taking it…"
 msgstr "Выбираем…"
 
-#: src/gui/find.rs:2127
+#: src/gui/find.rs:2163
 msgid "Putting its old number back…"
 msgstr "Возвращаем старое число…"
 
-#: src/gui/find.rs:2142
+#: src/gui/find.rs:2178
 #, rust-format
 msgid "{n} place left: Ferret can't tell which one it is"
 msgid_plural "{n} places left: Ferret can't tell which one it is"
@@ -1818,21 +1839,21 @@ msgstr[0] "Осталось {n} место: Ferret не может опреде�
 msgstr[1] "Осталось {n} места: Ferret не может определить, какое"
 msgstr[2] "Осталось {n} мест: Ferret не может определить, какое"
 
-#: src/gui/find.rs:2168 src/gui/guide.rs:393 src/gui/guide.rs:579
-#: src/gui/guide.rs:584
+#: src/gui/find.rs:2204 src/gui/guide.rs:400 src/gui/guide.rs:642
+#: src/gui/guide.rs:647
 msgid "Now change the number in the game"
 msgstr "Теперь измените число в игре"
 
-#: src/gui/find.rs:2168
+#: src/gui/find.rs:2204
 msgid "Then type the new number below."
 msgstr "Затем введите ниже новое число."
 
-#: src/gui/find.rs:2228
+#: src/gui/find.rs:2264
 #, rust-format
 msgid "Saving {name}"
 msgstr "Сохранение {name}"
 
-#: src/gui/find.rs:2229
+#: src/gui/find.rs:2265
 msgid ""
 "Ferret is working out how the game gets to it (about 10 seconds). Don't "
 "change it in the game yet."
@@ -1840,7 +1861,7 @@ msgstr ""
 "Ferret выясняет, как игра добирается до него (около 10 секунд). Пока не "
 "меняйте его в игре."
 
-#: src/gui/find.rs:2235
+#: src/gui/find.rs:2271
 #, rust-format
 msgid ""
 "Saved {name} for this run. Java game: Ferret only shows it, and can't find "
@@ -1849,14 +1870,14 @@ msgstr ""
 "{name} сохранено на этот запуск. Игра на Java: Ferret только показывает его "
 "и пока не может найти его после перезапуска."
 
-#: src/gui/find.rs:2237
+#: src/gui/find.rs:2273
 #, rust-format
 msgid "Saved {name}. Ferret finds it again every time you attach."
 msgstr ""
 "{name} сохранено. Ferret будет находить его каждый раз, когда вы "
 "подключаетесь."
 
-#: src/gui/find.rs:2239
+#: src/gui/find.rs:2275
 #, rust-format
 msgid ""
 "Saved {name}. If it's wrong after restarting the game, find it again and "
@@ -1865,12 +1886,12 @@ msgstr ""
 "{name} сохранено. Если после перезапуска игры оно окажется неверным, найдите "
 "его снова и сохраните как {name}."
 
-#: src/gui/find.rs:2253
+#: src/gui/find.rs:2289
 #, rust-format
 msgid "Saved {name}"
 msgstr "{name} сохранено"
 
-#: src/gui/find.rs:2254
+#: src/gui/find.rs:2290
 msgid ""
 "It's in the Values tab: set it or keep it in a range there. Click another "
 "number here to find more."
@@ -1878,7 +1899,7 @@ msgstr ""
 "Оно во вкладке «Значения»: там его можно задать или удерживать в диапазоне. "
 "Нажмите здесь на другое число, чтобы найти ещё."
 
-#: src/gui/find.rs:2261
+#: src/gui/find.rs:2297
 #, rust-format
 msgid ""
 "New searches look first in places shaped like earlier finds ({places}). If "
@@ -1887,11 +1908,11 @@ msgstr ""
 "Новые поиски сначала смотрят в местах, похожих на прошлые находки "
 "({places}). Если они раз за разом попадают не туда, забудьте их."
 
-#: src/gui/find.rs:2268
+#: src/gui/find.rs:2304
 msgid "Forget Where Earlier Finds Were?"
 msgstr "Забыть, где были прошлые находки?"
 
-#: src/gui/find.rs:2269
+#: src/gui/find.rs:2305
 msgid ""
 "New searches then look everywhere. Ferret learns again from the next values "
 "it finds. Saved values aren't affected."
@@ -1899,40 +1920,40 @@ msgstr ""
 "Тогда новые поиски будут искать везде. Ferret снова научится на следующих "
 "найденных значениях. Сохранённые значения не затрагиваются."
 
-#: src/gui/find.rs:2271
+#: src/gui/find.rs:2307
 msgid "Forget"
 msgstr "Забыть"
 
-#: src/gui/find.rs:2291
+#: src/gui/find.rs:2327
 msgid "not found now"
 msgstr "сейчас не найдено"
 
-#: src/gui/find.rs:2293
+#: src/gui/find.rs:2329
 #, rust-format
 msgid "kept at {n}"
 msgstr "удерживается на {n}"
 
-#: src/gui/find.rs:2294
+#: src/gui/find.rs:2330
 #, rust-format
 msgid "kept between {min} and {max}"
 msgstr "удерживается между {min} и {max}"
 
-#: src/gui/find.rs:2295
+#: src/gui/find.rs:2331
 #, rust-format
 msgid "kept at least {n}"
 msgstr "удерживается не меньше {n}"
 
-#: src/gui/find.rs:2296
+#: src/gui/find.rs:2332
 #, rust-format
 msgid "kept at most {n}"
 msgstr "удерживается не больше {n}"
 
-#: src/gui/find.rs:2344
+#: src/gui/find.rs:2381
 #, rust-format
 msgid "“{name}” is already saved (now {value}): saving replaces it."
 msgstr "«{name}» уже сохранено (сейчас {value}): сохранение заменит его."
 
-#: src/gui/find.rs:2346
+#: src/gui/find.rs:2383
 #, rust-format
 msgid ""
 "“{name}” is already saved (now {value}): saving replaces it. Its limit stays "
@@ -1941,11 +1962,11 @@ msgstr ""
 "«{name}» уже сохранено (сейчас {value}): сохранение заменит его. Его "
 "ограничение останется и будет действовать для этого ({limit})."
 
-#: src/gui/find.rs:2357 src/gui/find.rs:2378 src/gui/find.rs:2380
+#: src/gui/find.rs:2394 src/gui/find.rs:2415 src/gui/find.rs:2417
 msgid "Not saved"
 msgstr "Не сохранено"
 
-#: src/gui/find.rs:2376
+#: src/gui/find.rs:2413
 #, rust-format
 msgid "{why} The places it was picked from are listed again: try another one."
 msgstr ""
@@ -1989,21 +2010,21 @@ msgstr "Изменение"
 msgid "Checking"
 msgstr "Проверка"
 
-#: src/gui/guide.rs:121
+#: src/gui/guide.rs:125
 msgid "Hands off: don't change anything in the game yet"
 msgstr "Руки прочь: пока ничего не меняйте в игре"
 
-#: src/gui/guide.rs:246
+#: src/gui/guide.rs:253
 #, rust-format
 msgid "{step}. Ferret tells you when it's your turn."
 msgstr "{step}. Ferret скажет, когда будет ваш ход."
 
-#: src/gui/guide.rs:348
+#: src/gui/guide.rs:355
 #, rust-format
 msgid "Scanning the game's memory for {n}"
 msgstr "Поиск {n} в памяти игры"
 
-#: src/gui/guide.rs:361
+#: src/gui/guide.rs:368
 msgid ""
 "Don't let the icons change in the game yet. This turns green when it's your "
 "turn."
@@ -2011,7 +2032,7 @@ msgstr ""
 "Пока не давайте значкам меняться в игре. Это станет зелёным, когда будет ваш "
 "ход."
 
-#: src/gui/guide.rs:362
+#: src/gui/guide.rs:369
 msgid ""
 "Don't let the bar change in the game yet. This turns green when it's your "
 "turn."
@@ -2019,51 +2040,51 @@ msgstr ""
 "Пока не давайте полосе меняться в игре. Это станет зелёным, когда будет ваш "
 "ход."
 
-#: src/gui/guide.rs:370 src/gui/guide.rs:392
+#: src/gui/guide.rs:377 src/gui/guide.rs:399
 msgid "Now let the icons change in the game"
 msgstr "Теперь дайте значкам измениться в игре"
 
-#: src/gui/guide.rs:370
+#: src/gui/guide.rs:377
 msgid "Ready: let the icons change in the game"
 msgstr "Готово: дайте значкам измениться в игре"
 
-#: src/gui/guide.rs:371 src/gui/guide.rs:391
+#: src/gui/guide.rs:378 src/gui/guide.rs:398
 msgid "Now let the bar change in the game"
 msgstr "Теперь дайте полосе измениться в игре"
 
-#: src/gui/guide.rs:371
+#: src/gui/guide.rs:378
 msgid "Ready: let the bar change in the game"
 msgstr "Готово: дайте полосе измениться в игре"
 
-#: src/gui/guide.rs:373
+#: src/gui/guide.rs:380
 msgid "Take a hit, or use some. Every change narrows it down."
 msgstr "Получите удар или потратьте немного. Каждое изменение сужает поиск."
 
-#: src/gui/guide.rs:381
+#: src/gui/guide.rs:388
 msgid "Keep the bar changing in the game"
 msgstr "Продолжайте менять полосу в игре"
 
-#: src/gui/guide.rs:382
+#: src/gui/guide.rs:389
 msgid "Keep the icons changing in the game"
 msgstr "Продолжайте менять значки в игре"
 
-#: src/gui/guide.rs:383
+#: src/gui/guide.rs:390
 msgid "Keep changing the number in the game"
 msgstr "Продолжайте менять число в игре"
 
-#: src/gui/guide.rs:391
+#: src/gui/guide.rs:398
 msgid "Ready: keep the bar changing in the game"
 msgstr "Готово: продолжайте менять полосу в игре"
 
-#: src/gui/guide.rs:392
+#: src/gui/guide.rs:399
 msgid "Ready: keep the icons changing in the game"
 msgstr "Готово: продолжайте менять значки в игре"
 
-#: src/gui/guide.rs:393
+#: src/gui/guide.rs:400
 msgid "Ready: change the number in the game"
 msgstr "Готово: измените число в игре"
 
-#: src/gui/guide.rs:395 src/gui/guide.rs:411
+#: src/gui/guide.rs:402 src/gui/guide.rs:418
 #, rust-format
 msgid "{n} place matches. Every change narrows it down."
 msgid_plural "{n} places match. Every change narrows it down."
@@ -2071,7 +2092,7 @@ msgstr[0] "Подходит {n} место. Каждое изменение су
 msgstr[1] "Подходят {n} места. Каждое изменение сужает поиск."
 msgstr[2] "Подходят {n} мест. Каждое изменение сужает поиск."
 
-#: src/gui/guide.rs:405
+#: src/gui/guide.rs:412
 #, rust-format
 msgid "{before} → {n} place matches. Every change narrows it down."
 msgid_plural "{before} → {n} places match. Every change narrows it down."
@@ -2079,7 +2100,7 @@ msgstr[0] "{before} → подходит {n} место. Каждое измен
 msgstr[1] "{before} → подходят {n} места. Каждое изменение сужает поиск."
 msgstr[2] "{before} → подходят {n} мест. Каждое изменение сужает поиск."
 
-#: src/gui/guide.rs:424
+#: src/gui/guide.rs:431
 #, rust-format
 msgid "Got it: {before} → {n} place matches"
 msgid_plural "Got it: {before} → {n} places match"
@@ -2087,7 +2108,54 @@ msgstr[0] "Принято: {before} → подходит {n} место"
 msgstr[1] "Принято: {before} → подходят {n} места"
 msgstr[2] "Принято: {before} → подходят {n} мест"
 
-#: src/gui/guide.rs:460
+#: src/gui/guide.rs:449
+msgid "It's moving: Ferret watches the game"
+msgstr "Меняется: Ferret следит за игрой"
+
+#: src/gui/guide.rs:450
+msgid "It's still: Ferret watches the game"
+msgstr "Не меняется: Ferret следит за игрой"
+
+#: src/gui/guide.rs:451
+#, rust-format
+msgid "It's moving: {n} place follows it"
+msgid_plural "It's moving: {n} places follow it"
+msgstr[0] "Меняется: {n} место следует за ним"
+msgstr[1] "Меняется: {n} места следуют за ним"
+msgstr[2] "Меняется: {n} мест следуют за ним"
+
+#: src/gui/guide.rs:452
+#, rust-format
+msgid "It's still: {n} place follows it"
+msgid_plural "It's still: {n} places follow it"
+msgstr[0] "Не меняется: {n} место следует за ним"
+msgstr[1] "Не меняется: {n} места следуют за ним"
+msgstr[2] "Не меняется: {n} мест следуют за ним"
+
+#: src/gui/guide.rs:455
+msgid ""
+"Press It's Still the moment it stops. Ferret reads the game every 2 seconds."
+msgstr ""
+"Нажмите «Не меняется», как только остановится. Ferret читает игру каждые 2 "
+"секунды."
+
+#: src/gui/guide.rs:456
+msgid ""
+"Press It's Moving the moment it starts moving on its own. Ferret reads the "
+"game every 2 seconds."
+msgstr ""
+"Нажмите «Меняется», как только оно начнёт меняться само. Ferret читает игру "
+"каждые 2 секунды."
+
+#: src/gui/guide.rs:476
+#, rust-format
+msgid "Got it: {before} → {n} place follows it"
+msgid_plural "Got it: {before} → {n} places follow it"
+msgstr[0] "Принято: {before} → {n} место следует за ним"
+msgstr[1] "Принято: {before} → {n} места следуют за ним"
+msgstr[2] "Принято: {before} → {n} мест следуют за ним"
+
+#: src/gui/guide.rs:523
 #, rust-format
 msgid ""
 "Scanned again: still {n} place matches. Keep changing it, or press Scan "
@@ -2105,7 +2173,7 @@ msgstr[2] ""
 "Повторное сканирование: по-прежнему подходят {n} мест. Продолжайте менять "
 "число или нажимайте «Сканировать снова», пока оно не меняется."
 
-#: src/gui/guide.rs:466
+#: src/gui/guide.rs:529
 #, rust-format
 msgid ""
 "Scanned again: {before} → {n} place matches. Keep changing it, or press Scan "
@@ -2123,15 +2191,15 @@ msgstr[2] ""
 "Повторное сканирование: {before} → подходят {n} мест. Продолжайте менять "
 "число или нажимайте «Сканировать снова», пока оно не меняется."
 
-#: src/gui/guide.rs:474
+#: src/gui/guide.rs:537
 msgid "Scanned again"
 msgstr "Отсканировано снова"
 
-#: src/gui/guide.rs:483
+#: src/gui/guide.rs:546
 msgid "Checking the place found"
 msgstr "Проверка найденного места"
 
-#: src/gui/guide.rs:484
+#: src/gui/guide.rs:547
 #, rust-format
 msgid "Checking which of the {n} place it is"
 msgid_plural "Checking which of the {n} places it is"
@@ -2139,11 +2207,11 @@ msgstr[0] "Проверка, какое из {n} места нужное"
 msgstr[1] "Проверка, какое из {n} мест нужное"
 msgstr[2] "Проверка, какое из {n} мест нужное"
 
-#: src/gui/guide.rs:486
+#: src/gui/guide.rs:549
 msgid "A few seconds. Don't change anything in the game."
 msgstr "Несколько секунд. Ничего не меняйте в игре."
 
-#: src/gui/guide.rs:493
+#: src/gui/guide.rs:556
 #, rust-format
 msgid ""
 "Pick some up or use some, once. Ferret watches which of the {n} place the "
@@ -2161,15 +2229,15 @@ msgstr[2] ""
 "Подберите или потратьте немного, один раз. Ferret смотрит, с какого из {n} "
 "мест игра продолжает счёт. Осталось {time}."
 
-#: src/gui/guide.rs:499 src/gui/guide.rs:525
+#: src/gui/guide.rs:562 src/gui/guide.rs:588
 msgid "Your turn: change the number in the game!"
 msgstr "Ваш ход: измените число в игре!"
 
-#: src/gui/guide.rs:501 src/gui/guide.rs:536
+#: src/gui/guide.rs:564 src/gui/guide.rs:599
 msgid "Your turn: change the number in the game"
 msgstr "Ваш ход: измените число в игре"
 
-#: src/gui/guide.rs:503
+#: src/gui/guide.rs:566
 #, rust-format
 msgid ""
 "Pick some up or use some. Ferret watches which of the {n} place the game "
@@ -2187,7 +2255,7 @@ msgstr[2] ""
 "Подберите или потратьте немного. Ferret смотрит, с какого из {n} мест игра "
 "продолжает счёт."
 
-#: src/gui/guide.rs:527
+#: src/gui/guide.rs:590
 msgid ""
 "Use some or pick some up, once. Ferret watches which of the game's code "
 "changes it, the surest way to find it again after a restart."
@@ -2195,11 +2263,11 @@ msgstr ""
 "Потратьте немного или подберите, один раз. Ferret смотрит, какой код игры "
 "его меняет, — самый надёжный способ найти его снова после перезапуска."
 
-#: src/gui/guide.rs:533
+#: src/gui/guide.rs:596
 msgid "Stop waiting and save it another way, which may not last a restart"
 msgstr "Хватит ждать — сохранить иначе, что может не пережить перезапуск"
 
-#: src/gui/guide.rs:537
+#: src/gui/guide.rs:600
 msgid ""
 "Use some or pick some up, once. Ferret watches which of the game's code "
 "changes it."
@@ -2207,50 +2275,58 @@ msgstr ""
 "Потратьте немного или подберите, один раз. Ferret смотрит, какой код игры "
 "его меняет."
 
-#: src/gui/guide.rs:550
+#: src/gui/guide.rs:613
 #, rust-format
 msgid ""
 "Ferret watches the game's code that changes {name} and picks up every other "
 "value it changes. Use your other powers, or let the other units change, then "
 "click Done."
-msgstr "Ferret следит за кодом игры, который меняет {name}, и подхватывает каждое другое значение, которое этот код меняет. Используйте другие силы или дайте измениться другим отрядам, затем нажмите «Готово»."
+msgstr ""
+"Ferret следит за кодом игры, который меняет {name}, и подхватывает каждое "
+"другое значение, которое этот код меняет. Используйте другие силы или дайте "
+"измениться другим отрядам, затем нажмите «Готово»."
 
-#: src/gui/guide.rs:553
+#: src/gui/guide.rs:616
 #, rust-format
 msgid "Found {n} more so far. Use the rest too, then click Done."
 msgid_plural "Found {n} more so far. Use the rest too, then click Done."
-msgstr[0] "Пока найдено ещё {n}. Используйте и остальные, затем нажмите «Готово»."
-msgstr[1] "Пока найдено ещё {n}. Используйте и остальные, затем нажмите «Готово»."
-msgstr[2] "Пока найдено ещё {n}. Используйте и остальные, затем нажмите «Готово»."
+msgstr[0] ""
+"Пока найдено ещё {n}. Используйте и остальные, затем нажмите «Готово»."
+msgstr[1] ""
+"Пока найдено ещё {n}. Используйте и остальные, затем нажмите «Готово»."
+msgstr[2] ""
+"Пока найдено ещё {n}. Используйте и остальные, затем нажмите «Готово»."
 
-#: src/gui/guide.rs:559
+#: src/gui/guide.rs:622
 msgid "Your turn: use the others in the game!"
 msgstr "Ваш ход: используйте остальные в игре!"
 
-#: src/gui/guide.rs:560 src/gui/guide.rs:566
+#: src/gui/guide.rs:623 src/gui/guide.rs:629
 msgid "Done"
 msgstr "Готово"
 
-#: src/gui/guide.rs:561
+#: src/gui/guide.rs:624
 msgid "Stop watching and save the others found"
 msgstr "Перестать наблюдать и сохранить найденные"
 
-#: src/gui/guide.rs:564
+#: src/gui/guide.rs:627
 msgid "Your turn: use the others in the game"
 msgstr "Ваш ход: используйте остальные в игре"
 
-#: src/gui/guide.rs:565
+#: src/gui/guide.rs:628
 msgid ""
 "Use your other powers, or let the other units change. Ferret picks up each "
 "one."
-msgstr "Используйте другие силы или дайте измениться другим отрядам. Ferret подхватит каждое."
+msgstr ""
+"Используйте другие силы или дайте измениться другим отрядам. Ferret "
+"подхватит каждое."
 
-#: src/gui/guide.rs:580
+#: src/gui/guide.rs:643
 #, rust-format
 msgid "{count}. Then type the new number below."
 msgstr "{count}. Затем введите ниже новое число."
 
-#: src/gui/guide.rs:585
+#: src/gui/guide.rs:648
 #, rust-format
 msgid "{count}. Then type the new number in Ferret."
 msgstr "{count}. Затем введите новое число в Ferret."
@@ -3235,7 +3311,10 @@ msgstr "Ещё такие же"
 msgid ""
 "The game's other values of this kind, like your other powers or other units: "
 "Ferret finds them through the code that changes this one while you use them."
-msgstr "Другие значения этого вида в игре, например другие ваши силы или другие отряды: Ferret находит их через код, который меняет это значение, пока вы их используете."
+msgstr ""
+"Другие значения этого вида в игре, например другие ваши силы или другие "
+"отряды: Ferret находит их через код, который меняет это значение, пока вы их "
+"используете."
 
 #: src/library.rs:74
 #, rust-format
@@ -3343,6 +3422,12 @@ msgstr "В этом файле Ferret не сказано, для какой о�
 #: src/share.rs:262
 msgid "This Ferret file has no values in it."
 msgstr "В этом файле Ferret нет значений."
+
+#~ msgid "Watching the game"
+#~ msgstr "Слежу за игрой"
+
+#~ msgid "It's moving. Press It's Still when it stops."
+#~ msgstr "Меняется. Нажмите «Не меняется», когда остановится."
 
 #~ msgid "a step where it went up"
 #~ msgstr "шаг, где оно выросло"
