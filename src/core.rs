@@ -500,6 +500,43 @@ pub fn parse_loc(a: &str) -> Option<Loc> {
     Some(Loc { addr: u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok()?, kind: kind? })
 }
 
+/// `name`, or the first of `name_2`, `name_3`... that isn't `taken` (within `MAX_NAME`).
+fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(name) {
+        return name.to_owned();
+    }
+    (2..)
+        .map(|i| {
+            let tail = format!("_{i}");
+            let base: String = name.chars().take(MAX_NAME.saturating_sub(tail.len())).collect();
+            base + &tail
+        })
+        .find(|n| !taken(n))
+        .unwrap()
+}
+
+/// Moves a profile's build stamps of the old kind (path, size and time: one computer's) to the
+/// new one the helper gives for the same files (name, size, contents: every computer's);
+/// how many values had one.
+fn restamp(exe: &str, old: &str, new: &str) -> Result<usize, String> {
+    let mut entries = read_profile(exe);
+    let mut moved = 0;
+    for e in &mut entries {
+        let mut hit = false;
+        for b in [&mut e.build, &mut e.untraced] {
+            if b.as_deref() == Some(old) {
+                *b = Some(new.to_owned());
+                hit = true;
+            }
+        }
+        moved += hit as usize;
+    }
+    if moved > 0 {
+        write_profile(exe, &entries)?;
+    }
+    Ok(moved)
+}
+
 /// Parses helper lines of the form "0x00003795366c:f32 = 96.5".
 fn parse_exact_values(lines: &[String]) -> Vec<(Loc, Option<f64>)> {
     lines
@@ -1059,6 +1096,8 @@ pub struct Imported {
     pub added: Vec<String>,
     /// Values not taken, and why.
     pub skipped: Vec<String>,
+    /// Values imported under another name, since one of the player's has theirs: (theirs, now).
+    pub renamed: Vec<(String, String)>,
     /// The file was made with another build of the game: some may not be found.
     pub other_build: bool,
 }
@@ -1454,6 +1493,15 @@ impl Core {
             .collect()
     }
 
+    /// Games running now with anti-cheat that may look at the whole computer (any anti-cheat
+    /// Ferret refuses, and Valve's), other than the one Ferret is attached to.
+    pub fn risky_games(&mut self) -> Vec<GameProcess> {
+        let attached = self.game.as_ref().map(|g| g.pid);
+        let mut games = self.games();
+        games.retain(|g| Some(g.pid) != attached && matches!(g.refused, Some(Refusal::AntiCheat(_) | Refusal::Vac)));
+        games
+    }
+
     /// The attached game's program and the memory scrambler it uses.
     pub fn scrambler(&self) -> Option<(String, String)> {
         let g = self.game.as_ref()?;
@@ -1548,7 +1596,16 @@ impl Core {
         if self.game.as_ref().map(|g| g.pid) != Some(pid) {
             self.capture = None;
         }
-        let build = self.helper.call("build").iter().find_map(|l| l.strip_prefix("build ")).map(str::to_owned);
+        let stamps = self.helper.call("build");
+        let build = stamps.iter().find_map(|l| l.strip_prefix("build ")).map(str::to_owned);
+        // Saved before stamps were the same on every computer: moved over once.
+        if let (Some(new), Some(old)) = (&build, stamps.iter().find_map(|l| l.strip_prefix("was "))) {
+            match restamp(&exe, old, new) {
+                Ok(0) => {}
+                Ok(n) => self.say(&format!("{n} saved values moved to the new kind of build stamp")),
+                Err(e) => self.say(&format!("could not move the saved values to the new build stamp: {e}")),
+            }
+        }
         let steam = self
             .games()
             .into_iter()
@@ -2568,15 +2625,25 @@ impl Core {
             }
         }
         let mut entries = read_profile(&exe);
-        let (mut skipped, mut added) = (file.skipped, Vec::new());
+        let (mut skipped, mut added, mut renamed) = (file.skipped, Vec::new(), Vec::new());
         for v in file.values {
-            if entries.iter().any(|e| e.name == v.name) {
-                skipped.push(tr!("{name}: you have a value with this name already (remove yours to import it)", name = v.name));
+            // The same value found the same way: nothing new.
+            let same = entries.iter().find(|e| {
+                (!v.named.is_empty() && e.named == v.named) || (!v.sites.is_empty() && e.sites == v.sites && e.key == v.key)
+            });
+            if let Some(mine) = same {
+                skipped.push(tr!("{name}: you have it already, as {mine}", name = v.name, mine = mine.name));
                 continue;
             }
-            added.push(v.name.clone());
+            // A name taken by another value: the import comes in as gold_2 (the player's own
+            // stays, and both can be compared in the Values tab).
+            let name = free_name(&v.name, |n| entries.iter().any(|e| e.name == n));
+            if name != v.name {
+                renamed.push((v.name.clone(), name.clone()));
+            }
+            added.push(name.clone());
             entries.push(Entry {
-                name: v.name,
+                name,
                 kind: v.kind,
                 sites: v.sites,
                 key: v.key,
@@ -2598,6 +2665,9 @@ impl Core {
         for s in &skipped {
             self.say(&format!("import skipped {s}"));
         }
+        for (from, to) in &renamed {
+            self.say(&format!("import: {from} is taken, imported as {to}"));
+        }
         if added.is_empty() {
             return Err(format!("{} {}", tr!("Nothing imported."), skipped.join("; ")));
         }
@@ -2608,7 +2678,7 @@ impl Core {
             self.say("import: made with another build of the game");
         }
         self.restore_some(Some(&added))?;
-        Ok(Imported { added, skipped, other_build })
+        Ok(Imported { added, skipped, renamed, other_build })
     }
 
     /// Keeps a saved value within a range (as the game shows it); `None` on both sides turns
@@ -4999,6 +5069,15 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_names() {
+        let taken = ["gold", "gold_2", &"g".repeat(MAX_NAME)];
+        let is_taken = |n: &str| taken.contains(&n);
+        assert_eq!(free_name("ammo", is_taken), "ammo");
+        assert_eq!(free_name("gold", is_taken), "gold_3");
+        assert_eq!(free_name(&"g".repeat(MAX_NAME), is_taken), "g".repeat(MAX_NAME - 2) + "_2");
+    }
 
     fn entry(kind: Kind, decimals: u32) -> Entry {
         Entry {

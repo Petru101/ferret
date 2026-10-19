@@ -26,6 +26,8 @@ pub struct Notifier {
     sent: Cell<u32>,
     /// What the notification's button does (Stop Waiting, Cancel).
     on_button: RefCell<Option<Rc<dyn Fn()>>>,
+    /// What the button of the one on screen does instead (`send_action`).
+    this_button: RefCell<Option<Rc<dyn Fn()>>>,
     /// The activation token the server sends before a click, to bring the window to the front.
     token: RefCell<Option<String>>,
     signals: RefCell<Vec<gio::SignalSubscription>>,
@@ -52,6 +54,7 @@ impl Notifier {
             waiting: Cell::new(false),
             sent: Cell::new(0),
             on_button: RefCell::default(),
+            this_button: RefCell::default(),
             token: RefCell::default(),
             signals: RefCell::default(),
         });
@@ -103,7 +106,7 @@ impl Notifier {
                     let action = p.try_child_value(1).and_then(|v| v.get::<String>()).unwrap_or_default();
                     n.forget();
                     if action == "button" {
-                        let f = n.on_button.borrow().clone();
+                        let f = n.this_button.borrow().clone().or_else(|| n.on_button.borrow().clone());
                         if let Some(f) = f {
                             f();
                         }
@@ -137,6 +140,21 @@ impl Notifier {
     /// Tells the player, unless Ferret's window is in front. `button`: a button that does
     /// `on_button`. `secs`: how long it stays; none = until it's replaced or withdrawn.
     pub fn send(self: &Rc<Self>, title: &str, body: &str, button: Option<&str>, secs: Option<u32>) {
+        if self.away() {
+            self.this_button.replace(None);
+        }
+        self.notify(title, body, button, secs);
+    }
+
+    /// `send` with a button of its own (Quit Ferret), not `on_button`.
+    pub fn send_action(self: &Rc<Self>, title: &str, body: &str, button: &str, action: impl Fn() + 'static, secs: Option<u32>) {
+        if self.away() {
+            self.this_button.replace(Some(Rc::new(action)));
+        }
+        self.notify(title, body, Some(button), secs);
+    }
+
+    fn notify(self: &Rc<Self>, title: &str, body: &str, button: Option<&str>, secs: Option<u32>) {
         let Some(bus) = &self.bus else { return };
         if !self.away() {
             return;

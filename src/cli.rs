@@ -17,6 +17,9 @@ fn imported(done: core::Imported) {
     for s in &done.skipped {
         println!("skipped {s}");
     }
+    for (theirs, now) in &done.renamed {
+        println!("renamed {theirs} to {now} (taken)");
+    }
     if done.other_build {
         println!("made with another build of the game: some may not be found");
     }

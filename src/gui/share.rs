@@ -205,6 +205,10 @@ pub fn imported(ui: &Rc<Ui>, result: Result<Imported, String>) {
             n
         );
     }
+    for (theirs, now) in &done.renamed {
+        text += "\n";
+        text += &tr!("You have a value called {theirs} already: the imported one is {now}.", theirs, now);
+    }
     if !done.skipped.is_empty() {
         text += &format!("\n{}\n{}", tr!("Not imported:"), done.skipped.join("\n"));
     }

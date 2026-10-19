@@ -2875,21 +2875,40 @@ fn cmd_build(out: &mut impl Write, s: &Session) -> io::Result<()> {
     }
     files.sort();
     files.dedup();
-    // FNV-1a over each file's path, size and time.
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    // FNV-1a over each file's name, size and the start and end of its contents: the same on
+    // every computer with this version (a PE program's header holds its build time), so shared
+    // values can tell "your version". The stamp before it (path, size, time) differed on every
+    // computer; it comes on a "was" line, so saved values can be moved over.
+    let fnv = |hash: &mut u64, bytes: &[u8]| {
+        for &b in bytes {
+            *hash = (*hash ^ b as u64).wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    let (mut hash, mut was) = (0xcbf2_9ce4_8422_2325u64, 0xcbf2_9ce4_8422_2325u64);
     let mut stamped = 0;
     for f in &files {
-        let Ok(m) = fs::metadata(format!("/proc/{}/root{f}", s.pid)) else { continue };
-        for b in format!("{f} {} {}", m.len(), m.mtime()).bytes() {
-            hash = (hash ^ b as u64).wrapping_mul(0x100_0000_01b3);
+        let at = format!("/proc/{}/root{f}", s.pid);
+        let Ok(m) = fs::metadata(&at) else { continue };
+        fnv(&mut was, format!("{f} {} {}", m.len(), m.mtime()).as_bytes());
+        let Ok(file) = File::open(&at) else { continue };
+        let n = BUILD_SAMPLE.min(m.len());
+        let (mut start, mut end) = (vec![0u8; n as usize], vec![0u8; n as usize]);
+        if file.read_exact_at(&mut start, 0).is_err() || file.read_exact_at(&mut end, m.len() - n).is_err() {
+            continue;
         }
+        fnv(&mut hash, format!("{} {} ", file_name(f), m.len()).as_bytes());
+        fnv(&mut hash, &start);
+        fnv(&mut hash, &end);
         stamped += 1;
     }
     match stamped {
         0 => writeln!(out, "error: the game's program file isn't readable"),
-        _ => writeln!(out, "build {hash:016x}"),
+        _ => writeln!(out, "build {hash:016x}").and_then(|_| writeln!(out, "was {was:016x}")),
     }
 }
+
+/// Bytes read from each end of a program file for its build stamp.
+const BUILD_SAMPLE: u64 = 64 * 1024;
 
 const JAVA: &str = "Java game: it moves its objects around and shares its code between values, so saved values can't be found again yet";
 

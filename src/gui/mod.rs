@@ -30,6 +30,8 @@ pub const APP_ID: &str = "io.github.Petru101.Ferret";
 /// How long a closed window waits for the core to say whether limits run (a search stopping
 /// first, a restore finishing) before Ferret quits anyway.
 const CLOSE_WAIT: u32 = 30;
+/// Seconds between looks for games with anti-cheat while a game is open (`Ui::warn_risky`).
+const RISKY_EVERY: u32 = 5;
 /// How long a toast stays when nothing else happens (libadwaita's default is 5 s).
 const TOAST_SECONDS: u32 = 4;
 
@@ -89,6 +91,8 @@ pub enum Event {
     Player(Result<Vec<crate::core::PlayerObject>, String>),
     /// The saved values and the Browse tab's numbers now, in its order.
     Peeked(Result<Vec<ValueRow>, String>, Vec<Option<f64>>),
+    /// Games running with anti-cheat that may look at the whole computer (`Core::risky_games`).
+    Risky(Vec<GameProcess>),
     /// Whether the game (its pid) has numbers the Browse tab can list.
     Browsable(u32, bool),
     /// A number from the Browse tab was saved: its name and what to tell the player.
@@ -256,6 +260,8 @@ struct Ui {
     opening: Rc<RefCell<Option<adw::Toast>>>,
     /// The toast shown last (`toast`).
     last_toast: RefCell<Option<adw::Toast>>,
+    /// Games with anti-cheat the player was told to quit Ferret for, by pid (`warn_risky`).
+    warned_risky: RefCell<std::collections::HashSet<u32>>,
     /// The names games go by (Steam's), by program, from the games list.
     game_names: RefCell<std::collections::HashMap<String, String>>,
     /// What the games list knows of each game's online features, by pid: the warning on opening it.
@@ -579,7 +585,53 @@ impl Ui {
         self.nav.visible_page().as_ref() == Some(&self.game_page)
     }
 
-    fn show_games(&self, games: Vec<GameProcess>) {
+    /// A game with anti-cheat started while Ferret runs (open or hidden, keeping limits): Ferret
+    /// won't open it, but some anti-cheat looks for cheat tools anywhere on the computer (the
+    /// user's call: offer to quit, don't quit by itself). Once per game launch.
+    fn warn_risky<'a>(self: &Rc<Self>, games: impl IntoIterator<Item = &'a GameProcess>) {
+        for g in games {
+            if !matches!(g.refused, Some(Refusal::AntiCheat(_) | Refusal::Vac)) {
+                continue;
+            }
+            if !self.warned_risky.borrow_mut().insert(g.pid) {
+                continue;
+            }
+            let game = g.name.clone().unwrap_or_else(|| g.exe.clone());
+            let anticheat = match &g.refused {
+                Some(Refusal::AntiCheat(ac)) => ac.clone(),
+                _ => tr!("Valve Anti-Cheat"),
+            };
+            let ui = self.clone();
+            self.notify.send_action(
+                &tr!("{game} has anti-cheat", game),
+                &tr!("Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret while you play it."),
+                &tr!("Quit Ferret"),
+                move || ui.quit(),
+                None,
+            );
+            if !self.window.is_visible() {
+                continue;
+            }
+            let dialog = adw::AlertDialog::new(
+                Some(&tr!("Quit Ferret While You Play {game}?", game)),
+                Some(&tr!(
+                    "{game} runs {anticheat}. Some anti-cheat looks for cheat tools anywhere on your computer, even ones that don't touch the game, and may ban for them. Ferret won't open this game, but it's safest to quit Ferret while you play it.",
+                    game,
+                    anticheat
+                )),
+            );
+            dialog.add_responses(&[("keep", &tr!("Keep Ferret Open")), ("quit", &tr!("Quit Ferret"))]);
+            dialog.set_response_appearance("quit", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("quit"));
+            dialog.set_close_response("keep");
+            let ui = self.clone();
+            dialog.connect_response(Some("quit"), move |_, _| ui.quit());
+            dialog.present(Some(&self.nav));
+        }
+    }
+
+    fn show_games(self: &Rc<Self>, games: Vec<GameProcess>) {
+        self.warn_risky(&games);
         for g in &games {
             if let Some(name) = &g.name {
                 self.game_names.borrow_mut().insert(g.exe.clone(), name.clone());
@@ -786,6 +838,7 @@ impl Ui {
             }
             Event::Player(list) => self.browse.show(list),
             Event::Browsable(pid, can) => self.browsable(pid, can),
+            Event::Risky(games) => self.warn_risky(&games),
             Event::BrowseSaved(Ok((_, msg))) => {
                 self.toast(&msg);
                 self.stack.set_visible_child_name("values");
@@ -1257,6 +1310,7 @@ fn build(app: &adw::Application) {
         waiting_for: Rc::default(),
         opening: Rc::default(),
         last_toast: RefCell::default(),
+        warned_risky: RefCell::default(),
         game_names: RefCell::default(),
         online: RefCell::default(),
         background: Rc::default(),
@@ -1298,7 +1352,15 @@ fn build(app: &adw::Application) {
     // Keep the games list, the values and the matches list fresh while nothing else is running.
     {
         let ui = ui.clone();
+        let ticks = Cell::new(0u32);
         glib::timeout_add_seconds_local(1, move || {
+            ticks.set(ticks.get().wrapping_add(1));
+            // With a game open the games list isn't refreshed: games with anti-cheat started
+            // meanwhile are looked for every 5 s.
+            if ui.worker.idle() && ui.attached.get().is_some() && ticks.get() % RISKY_EVERY == 0 {
+                ui.worker.run(|core| Event::Risky(core.risky_games()));
+                return glib::ControlFlow::Continue;
+            }
             if ui.worker.idle() {
                 let values = ui.on_game_page() && ui.attached.get().is_some();
                 // The places still matching a search, with their values as they are now.
