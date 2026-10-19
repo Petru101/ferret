@@ -2228,6 +2228,57 @@ impl Core {
         Ok(())
     }
 
+    /// Gives a saved value another name (More Like This names what it finds `jellify_2`,
+    /// `jellify_3`...: the player knows them as Engulf and Amplify). Everything Ferret keeps
+    /// about it goes along, its limit too.
+    pub fn rename(&mut self, name: &str, to: &str) -> Result<String, String> {
+        let (name, to) = (one_word(name), one_word(to).chars().take(MAX_NAME).collect::<String>());
+        if to.is_empty() {
+            return Err(tr!("the value needs a name"));
+        }
+        let exe = self.game()?.exe.clone();
+        let mut entries = read_profile(&exe);
+        if !entries.iter().any(|e| e.name == name) {
+            return Err(tr!("no saved value called {name}", name));
+        }
+        if to == name {
+            return Ok(to);
+        }
+        if entries.iter().any(|e| e.name == to) {
+            return Err(tr!("{name} is the name of another saved value already", name = to));
+        }
+        for e in entries.iter_mut().filter(|e| e.name == name) {
+            e.name = to.clone();
+        }
+        write_profile(&exe, &entries)?;
+        let game = self.game()?;
+        let rename = |n: &mut String| {
+            if *n == name {
+                n.clone_from(&to);
+            }
+        };
+        game.entries.iter_mut().for_each(|(n, _)| rename(n));
+        game.paths.iter_mut().for_each(|(n, _)| rename(n));
+        game.votes.iter_mut().for_each(|(n, _)| rename(n));
+        game.steady.iter_mut().for_each(|(n, _)| rename(n));
+        game.via.iter_mut().for_each(|(n, _)| rename(n));
+        game.named.iter_mut().for_each(|(n, _, _)| rename(n));
+        game.named_doubt.iter_mut().for_each(|(n, _)| rename(n));
+        game.upgrade_asked.iter_mut().for_each(rename);
+        // The helper keeps it in range by name: registered again under the new one, turned off
+        // as it was (the limits hotkey).
+        let off = self.limits().iter().any(|(n, _, rest)| *n == name && rest.ends_with("turned off"));
+        self.helper.call(&format!("unlimit {name}"));
+        if let Some(entry) = entries.iter().find(|e| e.name == to) {
+            let registered = entry.limit.is_some() || !entry.sites.is_empty();
+            if registered && self.apply_limit(entry).is_ok() && off {
+                self.helper.call(&format!("switch {to} off"));
+            }
+        }
+        self.say(&format!("renamed {name} to {to}"));
+        Ok(to)
+    }
+
     /// "More Like This": watches the code that changes a saved value (its code patterns) while
     /// the player uses the others like it in the game, and saves each other place that code
     /// reaches as `<name>_2`, `<name>_3`... with the value's limit. From Dust runs one routine

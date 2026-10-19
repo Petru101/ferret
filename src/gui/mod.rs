@@ -969,6 +969,15 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
         }),
     );
     action("remove", Box::new(|ui, name| values::ask_remove(&ui.worker, name.trim(), &ui.stack)));
+    // `<name>,<new name>`, without the dialog.
+    action(
+        "rename",
+        Box::new(|ui, arg| {
+            if let Some((name, to)) = arg.split_once(',') {
+                values::rename(&ui.worker, name.trim(), to.trim());
+            }
+        }),
+    );
     action(
         "forget",
         Box::new(|ui, d| {

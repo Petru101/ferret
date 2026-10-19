@@ -109,6 +109,39 @@ pub fn find_others(worker: &Worker, name: &str) {
     worker.run(move |core| Event::Others(core.find_others(&name, OTHERS_MOST)));
 }
 
+/// Asks for a saved value's new name (More Like This names the others `jellify_2`...).
+pub fn ask_rename(worker: &Worker, name: &str, parent: &impl IsA<gtk::Widget>) {
+    let dialog = adw::AlertDialog::new(Some(&tr!("Rename {name}", name)), None);
+    // Empty, the name now as its placeholder: what the player types is the new name. With the
+    // name in the field, typing went in front of it ("engulf_alljellify_3"): its selection was
+    // lost while the dialog opened.
+    let entry = gtk::Entry::builder().placeholder_text(name).activates_default(true).max_length(core::MAX_NAME as i32).build();
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_responses(&[("cancel", &tr!("Cancel")), ("rename", &tr!("Rename"))]);
+    dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("rename"));
+    dialog.set_close_response("cancel");
+    {
+        let (worker, name, entry) = (worker.clone(), name.to_owned(), entry.clone());
+        dialog.connect_response(Some("rename"), move |_, _| {
+            let to = core::one_word(&entry.text());
+            if !to.is_empty() && to != name {
+                rename(&worker, &name, &entry.text());
+            }
+        });
+    }
+    // The Rename button had the focus: typing went nowhere.
+    dialog.set_focus(Some(&entry));
+    dialog.present(Some(parent));
+}
+
+/// Renames a saved value (the rename dialog, the D-Bus `rename` action).
+pub fn rename(worker: &Worker, name: &str, to: &str) {
+    let (name, to) = (name.to_owned(), to.to_owned());
+    worker.run_now(move |core| Event::Done(core.rename(&name, &to).map(|to| tr!("Renamed {name} to {to}", name, to))));
+    worker.run(|core| Event::Values(core.values()));
+}
+
 /// Asks before forgetting a saved value; `parent` is any widget in the window.
 pub fn ask_remove(worker: &Worker, name: &str, parent: &impl IsA<gtk::Widget>) {
     let dialog = adw::AlertDialog::new(
@@ -262,7 +295,20 @@ impl ValuesView {
             let (worker, name) = (self.worker.clone(), name.clone());
             remove.connect_clicked(move |button| ask_remove(&worker, &name, button));
         }
-        group.set_header_suffix(Some(&remove));
+        let rename = gtk::Button::builder()
+            .icon_name("document-edit-symbolic")
+            .tooltip_text(tr!("Rename"))
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        {
+            let (worker, name) = (self.worker.clone(), name.clone());
+            rename.connect_clicked(move |button| ask_rename(&worker, &name, button));
+        }
+        let header = gtk::Box::builder().spacing(4).build();
+        header.append(&rename);
+        header.append(&remove);
+        group.set_header_suffix(Some(&header));
 
         // A huge number (Age of War's coins at 5555554545654 and up) cut short, whole in the
         // tooltip: it stretched the window before.

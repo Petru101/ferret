@@ -8,7 +8,7 @@ use crate::core::{self, AutoResult, Core};
 use crate::ocr::{Rect, Shown};
 
 const HELP: &str = "vision: window, shot, numbers, watch <n>|<x y w h>, read, auto [seconds], type <n>, copy (a value with no number), moving, still, use <addr>, unpick, matches, reset, undo, redo, confirm-value <name>, forget-shapes, probe <n>, learn-shape <addr>
-restarts: save <name>, restore, values, others <name> [seconds] (more like it: use them in the game meanwhile), set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>
+restarts: save <name>, restore, values, others <name> [seconds] (more like it: use them in the game meanwhile), rename <name> <new name>, set <name> <n>, limit <name> [min] <max>|off, switch (all limits off/on), remove <name>, export [file], import <file>, feedback <message>
 system: allow (the helper with your password, for native games under kernel.yama.ptrace_scope 1 or 2)
 shared library: shared, share, take <id>, unshare <id>";
 
@@ -230,6 +230,10 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
             let (name, secs) = arg.split_once(' ').unwrap_or((arg, "30"));
             let secs = secs.trim().parse().map_err(|_| "usage: others <name> [seconds]")?;
             println!("{}", core.find_others(name, Duration::from_secs(secs))?);
+        }
+        "rename" => {
+            let (name, to) = arg.split_once(' ').ok_or("usage: rename <name> <new name>")?;
+            println!("renamed {name} to {}", core.rename(name, to)?);
         }
         "remove" => {
             core.remove(arg)?;

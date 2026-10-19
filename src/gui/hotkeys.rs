@@ -74,7 +74,9 @@ impl Hotkeys {
         let button = gtk::MenuButton::builder()
             .icon_name("input-keyboard-symbolic")
             .tooltip_text(tr!("Hotkeys"))
-            .popover(&gtk::Popover::builder().child(&content).build())
+            // Opens toward the window from the button near its corner: centred under it, the
+            // keys ran past the window's edge and were cut off ("Ctrl+Shif").
+            .popover(&gtk::Popover::builder().child(&content).halign(gtk::Align::End).build())
             .build();
         let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).ok();
         let h = Rc::new(Self {
@@ -114,16 +116,24 @@ impl Hotkeys {
     /// Fills the popover in. `error`: the portal can't give hotkeys.
     fn show_state(&self, error: Option<&str>) {
         let bound = self.bound.borrow();
+        let mut keyless = false;
         for ((id, _, _), label) in KEYS.iter().zip(&self.keys) {
-            let key = bound.iter().find(|(b, _)| b == id).map(|(_, k)| k.as_str());
+            let key = bound.iter().find(|(b, _)| b == id).map(|(_, k)| k.as_str()).filter(|k| !k.is_empty());
+            // Bound but given no key: the desktop gives none when another shortcut has the
+            // one asked for (an older Ferret's held Ctrl+Shift+F6 and F7 on the user's KDE).
+            keyless |= key.is_none() && self.active.get();
             label.set_label(&match key {
-                Some("") => tr!("None"),
                 Some(k) => k.to_owned(),
+                None if self.active.get() => tr!("None"),
                 None => String::new(),
             });
         }
         let (note, setup) = match (error, self.active.get()) {
             (Some(_), _) => (tr!("This desktop doesn't offer hotkeys to apps."), None),
+            (None, true) if keyless => (
+                tr!("Your desktop gave some of them no key, likely because another shortcut has it already: pick one in Change Hotkeys."),
+                Some(tr!("Change Hotkeys…")),
+            ),
             (None, true) => (tr!("They work while the game is in front. A notification says what they did."), Some(tr!("Change Hotkeys…"))),
             (None, false) => (
                 tr!("Turn limits off or on, and search, without leaving the game. They aren't set up: your desktop asks you to accept them."),
