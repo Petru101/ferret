@@ -123,6 +123,9 @@ pub struct FindView {
     motion: Arc<AtomicU8>,
     motion_box: gtk::Box,
     motion_try: gtk::Button,
+    /// It's Still and It's Moving: the one the player said last is lit while the readings run.
+    motion_still: gtk::Button,
+    motion_moving: gtk::Button,
     /// How many places matched after the last search, to show how far a search narrowed it.
     last_count: Cell<Option<usize>>,
     digits: gtk::Box,
@@ -414,7 +417,9 @@ impl FindView {
         let moving = gtk::Button::builder().label(tr!("It's Moving")).css_classes(["guide-button"]).build();
         let motion_try = gtk::Button::builder().label(tr!("Try Them One by One")).css_classes(["suggested-action", "guide-button"]).build();
         let motion_box = gtk::Box::builder().spacing(8).visible(false).build();
-        for b in [&still, &moving, &motion_try] {
+        // Try first: coming and going as the count crosses 20, it doesn't move the other two
+        // (the bar's buttons sit at its right end).
+        for b in [&motion_try, &still, &moving] {
             motion_box.append(b);
         }
         guide.actions.append(&motion_box);
@@ -600,6 +605,8 @@ impl FindView {
             motion: Arc::default(),
             motion_box,
             motion_try: motion_try.clone(),
+            motion_still: still.clone(),
+            motion_moving: moving.clone(),
             last_count: Cell::default(),
             digits,
             digits_hint,
@@ -1617,6 +1624,7 @@ impl FindView {
     }
 
     pub fn copied(&self, r: Result<(), String>) {
+        self.mark_motion(None);
         self.typed_searching(false);
         self.searching(false);
         match r {
@@ -1672,17 +1680,30 @@ impl FindView {
         self.worker.run(move |core| Event::Followed(core.follow_motion(&motion)));
     }
 
+    /// Lights It's Moving or It's Still (None: neither, nothing is being read).
+    fn mark_motion(&self, moving: Option<bool>) {
+        for (b, m) in [(&self.motion_moving, true), (&self.motion_still, false)] {
+            if moving == Some(m) {
+                b.add_css_class("chosen");
+            } else {
+                b.remove_css_class("chosen");
+            }
+        }
+    }
+
     /// The readings go on: `n` places follow it so far (0: nothing compared yet).
     fn following(&self, n: usize, moving: bool) {
         if n > 0 {
             self.last_count.set(Some(n));
         }
+        self.mark_motion(Some(moving));
         self.guide.following(n, moving);
         self.offer_motion(n);
     }
 
     /// The readings ended (Stop, or a few places followed it through a whole phase).
     pub fn followed(&self, r: Result<AutoResult, String>) {
+        self.mark_motion(None);
         self.stop.set_visible(false);
         self.typed_searching(false);
         self.searching(false);

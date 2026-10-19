@@ -269,8 +269,11 @@ impl Guide {
     }
 
     /// Shows `w` (in `actions`) until the bar changes: the buttons for what it says now.
+    /// Offering the buttons already shown leaves them be: No Number? offers its own again with
+    /// every reading (2 s), and hiding them for a moment lost the clicks that came then.
     pub fn offer(&self, w: &impl IsA<gtk::Widget>) {
-        if let Some(old) = self.offered.replace(Some(w.clone().upcast())) {
+        let w: gtk::Widget = w.clone().upcast();
+        if let Some(old) = self.offered.replace(Some(w.clone())).filter(|old| *old != w) {
             old.set_visible(false);
         }
         w.set_visible(true);

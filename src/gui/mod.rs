@@ -1115,6 +1115,7 @@ fn load_css() {
          font-size: 0.9em; font-weight: 600; opacity: 0.6; } \
          .guide-step.past { opacity: 0.85; } \
          .guide-step.now { opacity: 1; color: white; background-color: #3a4a5e; border-color: transparent; font-weight: 800; } \
+         button.guide-button.chosen { background-color: #26a269; color: white; box-shadow: 0 0 0 3px alpha(#26a269, 0.35); } \
          button.guide-button { min-height: 40px; padding-left: 20px; padding-right: 20px; font-weight: 800; } \
          @keyframes nudge { from { box-shadow: 0 0 0 0 alpha(@accent_bg_color, 0.9); } \
          to { box-shadow: 0 0 0 12px alpha(@accent_bg_color, 0); } } \
