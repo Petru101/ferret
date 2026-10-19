@@ -169,7 +169,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         // The Browse tab's list: the player's numbers by name (Unreal games).
         "player" => {
             for o in core.player_values()? {
-                println!("{} ({}, {:?})", o.name, o.class, o.belongs);
+                println!("{} ({}, {:?}{})", o.name, o.class, o.belongs, if o.more { ", more" } else { "" });
                 for f in o.fields {
                     println!("  {}  {} = {}", f.loc, f.label, f.value.map_or("?".into(), |v| core::number_text(v, None)));
                 }

@@ -3685,7 +3685,7 @@ fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 }
 
 /// player: the player's numbers by name (`Ue::player`, the Browse tab): an "object
-/// <role>\t<owner or ->\t<class>\t<name>" line, then its "field 0x<addr>:<type> = <value>\t<label>"
+/// <role>\t<owner or ->\t<class>\t<main|more>\t<name>" line (more: shown on asking for everything), then its "field 0x<addr>:<type> = <value>\t<label>"
 /// lines, for each object; "none character" while the player has no character (a menu),
 /// "none unreal <why>" for games whose objects Ferret can't read so.
 fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
@@ -3702,7 +3702,8 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
     };
     let mut n = 0;
     for o in &list {
-        writeln!(out, "object {}\t{}\t{}\t{}", o.role, o.owner.as_deref().unwrap_or("-"), o.class, o.name)?;
+        let shown = if o.more { "more" } else { "main" };
+        writeln!(out, "object {}\t{}\t{}\t{}\t{}", o.role, o.owner.as_deref().unwrap_or("-"), o.class, shown, o.name)?;
         for f in &o.fields {
             writeln!(out, "field {}\t{}", s.describe(f.addr, Kind::parse(f.kind).unwrap_or(Kind::I32)), f.label)?;
             n += 1;

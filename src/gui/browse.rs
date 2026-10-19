@@ -20,6 +20,8 @@ struct Row {
     /// What the search box looks in: the number's name and its object's, lowercased.
     hay: String,
     group: usize,
+    /// Shown only with Show Everything (`PlayerObject.more`).
+    more: bool,
     /// The number when the list was made or Only What Changes was turned on.
     since: Cell<Option<f64>>,
     now: Cell<Option<f64>>,
@@ -32,6 +34,7 @@ pub struct BrowseView {
     none: adw::StatusPage,
     search: gtk::SearchEntry,
     changed: gtk::ToggleButton,
+    everything: gtk::ToggleButton,
     count: gtk::Label,
     rows: RefCell<Vec<Row>>,
     groups: RefCell<Vec<adw::PreferencesGroup>>,
@@ -70,10 +73,16 @@ impl BrowseView {
             .label(tr!("Only What Changes"))
             .tooltip_text(tr!("Turn this on, then change the number in the game: only the numbers that moved stay in the list."))
             .build();
+        // Minecraft Dungeons II lists 2377 numbers, 248 of them the player's own.
+        let everything = gtk::ToggleButton::builder()
+            .label(tr!("Show Everything"))
+            .tooltip_text(tr!("Also the game's inner workings: each ability's settings, the game's own systems, the controller and the settings."))
+            .build();
         let again = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text(tr!("List Again")).build();
         let tools = gtk::Box::builder().spacing(6).build();
         tools.append(&search);
         tools.append(&changed);
+        tools.append(&everything);
         tools.append(&again);
         let hint = gtk::Label::builder()
             .label(tr!(
@@ -131,6 +140,7 @@ impl BrowseView {
             none,
             search,
             changed,
+            everything,
             count,
             rows: RefCell::default(),
             groups: RefCell::default(),
@@ -144,6 +154,10 @@ impl BrowseView {
         {
             let v = view.clone();
             view.search.connect_search_changed(move |_| v.filter());
+        }
+        {
+            let v = view.clone();
+            view.everything.connect_toggled(move |_| v.filter());
         }
         {
             let v = view.clone();
@@ -227,6 +241,7 @@ impl BrowseView {
                     loc: f.loc,
                     hay: format!("{} {}", f.label, o.name).to_lowercase(),
                     group: groups.len(),
+                    more: o.more,
                     since: Cell::new(f.value),
                     now: Cell::new(f.value),
                 });
@@ -275,12 +290,14 @@ impl BrowseView {
         }
     }
 
-    /// The D-Bus `listed` action: `list`, `search <text>`, `changed on|off`, `save <row>,<name>`.
+    /// The D-Bus `listed` action: `list`, `search <text>`, `changed on|off`, `everything on|off`,
+    /// `save <row>,<name>`.
     pub fn debug(&self, arg: &str) {
         let (what, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         match what {
             "search" => self.search.set_text(rest),
             "changed" => self.changed.set_active(rest == "on"),
+            "everything" => self.everything.set_active(rest == "on"),
             "save" => {
                 let Some((i, name)) = rest.split_once(',') else { return };
                 let loc = i.trim().parse::<usize>().ok().and_then(|i| self.rows.borrow().get(i).map(|r| r.loc));
@@ -295,12 +312,18 @@ impl BrowseView {
     fn filter(&self) {
         let words: Vec<String> = self.search.text().to_lowercase().split_whitespace().map(str::to_owned).collect();
         let only_changed = self.changed.is_active();
+        let everything = self.everything.is_active();
         let rows = self.rows.borrow();
         let groups = self.groups.borrow();
         let mut shown_in = vec![false; groups.len()];
-        let mut shown = 0;
+        let (mut shown, mut held_back) = (0, 0);
         for r in rows.iter() {
             let show = words.iter().all(|w| r.hay.contains(w.as_str())) && (!only_changed || r.now.get() != r.since.get());
+            if show && r.more && !everything {
+                held_back += 1;
+                r.widget.set_visible(false);
+                continue;
+            }
             r.widget.set_visible(show);
             if show {
                 shown_in[r.group] = true;
@@ -311,9 +334,16 @@ impl BrowseView {
             g.set_visible(s);
         }
         self.count.set_label(&match (shown, only_changed) {
-            (0, true) => tr!("Nothing changed yet: change the number in the game."),
-            (0, false) => tr!("No names match."),
-            (n, _) => ntr!("{n} number", "{n} numbers", n),
+            (0, true) if held_back == 0 => tr!("Nothing changed yet: change the number in the game."),
+            (0, false) if held_back == 0 => tr!("No names match."),
+            (n, _) if held_back > 0 => ntr!(
+                "{n} number shown, {more} more with Show Everything",
+                "{n} numbers shown, {more} more with Show Everything",
+                n,
+                n = super::find::grouped(n),
+                more = super::find::grouped(held_back)
+            ),
+            (n, _) => ntr!("{n} number", "{n} numbers", n, n = super::find::grouped(n)),
         });
     }
 }

@@ -417,6 +417,9 @@ pub struct PlayerObject {
     pub name: String,
     pub class: String,
     pub belongs: Belongs,
+    /// The game's inner workings (abilities, its own systems, the controller's and the game's
+    /// objects): listed only when the player asks for everything.
+    pub more: bool,
     pub fields: Vec<PlayerField>,
 }
 
@@ -3618,8 +3621,8 @@ impl Core {
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {
             if let Some(o) = l.strip_prefix("object ") {
-                let f: Vec<&str> = o.splitn(4, '\t').collect();
-                let [role, owner, class, name] = f[..] else { continue };
+                let f: Vec<&str> = o.splitn(5, '\t').collect();
+                let [role, owner, class, shown, name] = f[..] else { continue };
                 let owner = owner.to_owned();
                 let belongs = match role {
                     "character" => Belongs::Character,
@@ -3630,7 +3633,7 @@ impl Core {
                     "part" => Belongs::Part(owner),
                     _ => Belongs::Linked(owner),
                 };
-                list.push(PlayerObject { name: name.to_owned(), class: class.to_owned(), belongs, fields: Vec::new() });
+                list.push(PlayerObject { name: name.to_owned(), class: class.to_owned(), belongs, more: shown == "more", fields: Vec::new() });
             } else if let (Some(f), Some(o)) = (l.strip_prefix("field "), list.last_mut()) {
                 let Some((place, label)) = f.split_once('\t') else { continue };
                 let Some((loc, value)) = parse_exact_values(&[place.to_owned()]).pop() else { continue };

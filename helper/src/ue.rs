@@ -1192,6 +1192,12 @@ const TIME_DILATION: &str = "CustomTimeDilation";
 /// one changes nothing), input, animation, the world itself.
 const LEFT_OUT: &[&str] =
     &["SceneComponent", "Widget", "InputComponent", "AnimInstance", "Level", "World", "PlayerCameraManager", "CameraModifier"];
+/// The game's inner workings, listed only when the player asks for everything (`ListedObject.more`):
+/// abilities (Minecraft Dungeons II has ~90 on the character, ~1900 of its 2377 numbers, each
+/// an action's settings), gameplay cues and effects, subsystems (telemetry, audio, tutorials),
+/// the settings file.
+const MACHINERY: &[&str] =
+    &["GameplayAbility", "AbilityTask", "GameplayCueNotify_Actor", "GameplayCueNotify_Static", "GameplayEffect", "Subsystem", "GameUserSettings"];
 const MAX_GROUPS: usize = 300;
 const MAX_LISTED: usize = 5000;
 /// Elements of one array or map listed at most.
@@ -1216,6 +1222,9 @@ pub struct ListedObject {
     pub role: &'static str,
     /// The object it belongs to, for owned, part and linked.
     pub owner: Option<String>,
+    /// Not the player's own: the controller's and the game's objects and what's in them, and
+    /// `MACHINERY` (attribute sets never are).
+    pub more: bool,
     pub fields: Vec<Listed>,
 }
 
@@ -1509,6 +1518,14 @@ impl Ue {
             }
             i += 1;
         }
+        // Owners come before what they own: their mark is known first.
+        let mut more = vec![false; groups.len()];
+        for g in 0..groups.len() {
+            let (obj, role, owner) = groups[g];
+            let class = self.class_of(mem, obj).unwrap_or(0);
+            let (attributes, machinery) = (is_a(class, &["AttributeSet"]), is_a(class, MACHINERY));
+            more[g] = !attributes && (machinery || matches!(role, "controller" | "game") || owner.is_some_and(|o| more[o]));
+        }
         let name_of = |obj: u64| {
             let class = self.class_name(mem, obj).unwrap_or_default();
             self.object_name(mem, obj).filter(|n| !run_name(n)).unwrap_or(class)
@@ -1547,6 +1564,7 @@ impl Ue {
                     class: self.class_name(mem, obj).unwrap_or_default(),
                     role,
                     owner: owner.map(|o| name_of(groups[o].0)),
+                    more: more[g],
                     fields: std::mem::take(&mut fields[g]),
                 }
             })

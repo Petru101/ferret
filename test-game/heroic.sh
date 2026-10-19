@@ -6,7 +6,8 @@
 #   heroic.sh epic <app name> <install folder>
 #   heroic.sh <gog|epic> <id> <install folder> <exe>   run the exe with umu directly (no store
 #                                                    login; for games that run offline)
-# Extra environment for the game: GAME_ENV="A=1 B=2". A game with its own prefix: PREFIX=<dir>.
+# Extra environment for the game: GAME_ENV="A=1 B=2". A game with its own prefix: PREFIX=<dir>,
+# and the Proton it was made with: PROTON=<dir> (else the newest GE-Proton).
 # Arguments for the exe (direct mode; split on spaces): GAME_ARGS="-a -b".
 set -eu
 H=/home/Petru/.var/app/com.heroicgameslauncher.hgl/config/heroic
@@ -14,7 +15,7 @@ B=/app/bin/heroic/resources/app.asar.unpacked/build/bin/x64/linux
 store=$1 id=$2 dir=$3 EXE=${4:-}
 runner=$store
 [ "$store" = epic ] && runner=legendary
-proton=$(ls -d /var/home/Petru/.local/share/Steam/compatibilitytools.d/GE-Proton* | sort -V | tail -1)
+proton=${PROTON:-$(ls -d /var/home/Petru/.local/share/Steam/compatibilitytools.d/GE-Proton* | sort -V | tail -1)}
 PREFIX=${PREFIX:-/home/Petru/Games/Heroic/Prefixes/shared}
 set -- --env=HEROIC_APP_NAME="$id" --env=HEROIC_APP_RUNNER="$runner" --env=HEROIC_APP_SOURCE="$runner" \
     --env=GAMEID=umu-0 --env=STORE="$store" --env=STEAM_COMPAT_INSTALL_PATH="$dir" \
@@ -23,6 +24,8 @@ set -- --env=HEROIC_APP_NAME="$id" --env=HEROIC_APP_RUNNER="$runner" --env=HEROI
     --env=PROTONPATH="$proton" --env=PROTON_ENABLE_NVAPI=1 --env=DXVK_NVAPI_ALLOW_OTHER_DRIVERS=1 \
     --env=STEAM_COMPAT_APP_ID=0 --env=SteamAppId=0 --env=SteamGameId=heroic- \
     $(for e in ${GAME_ENV:-}; do printf -- '--env=%s ' "$e"; done)
+# A prefix outside Heroic's folders (another launcher's: Faugus) needs opening to Heroic's flatpak.
+case $PREFIX in /home/Petru/Games/Heroic/*) ;; *) set -- "$@" --filesystem="$PREFIX" ;; esac
 wrapper=$H/tools/runtimes/umu/umu_run.py
 if [ -n "${EXE:-}" ]; then
     # shellcheck disable=SC2086
