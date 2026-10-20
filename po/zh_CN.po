@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-20 09:50+0100\n"
+"POT-Creation-Date: 2026-10-21 00:30+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -147,15 +147,15 @@ msgid "To allow it, run this in a terminal and restart:"
 msgstr "要允许,请在终端中运行以下命令并重启:"
 
 #: src/core.rs:1142
+#
 msgid ""
-"Java game: Ferret only shows saved values. Java moves its objects around, so "
-"a later write could land in another object and crash the game. Change it "
-"from the Find tab while you search instead."
-msgstr ""
-"Java 游戏:Ferret 只显示已保存的数值。Java 会移动它的对象,之后的写入可能落到另"
-"一个对象上并导致游戏崩溃。请改为在搜索时从“查找数值”标签页修改它。"
+"Java game: Ferret only shows this value. Java moves its objects around, so a "
+"later write could land in another object and crash the game. Save it from "
+"the Browse tab, or find it again and save it: values the game names are "
+"changed safely."
+msgstr "Java 游戏：Ferret 只显示这个值。Java 会移动它的对象，之后的写入可能落到另一个对象里，导致游戏崩溃。请从“浏览”标签页保存它，或者重新找到它并保存：游戏有名称的值可以安全地修改。"
 
-#: src/core.rs:1269
+#: src/core.rs:1275
 #, rust-format
 msgid ""
 "its pointer paths disagree ({agree} of {total} lead to one place, "
@@ -164,13 +164,13 @@ msgstr ""
 "它的指针路径不一致({total} 条中有 {agree} 条指向一个位置,{elsewhere} 条指向另"
 "一个位置)"
 
-#: src/core.rs:1276
+#: src/core.rs:1282
 #, rust-format
 msgid "only {agree} of its {n} pointer path leads anywhere"
 msgid_plural "only {agree} of its {n} pointer paths leads anywhere"
 msgstr[0] "它的 {n} 条指针路径中只有 {agree} 条能指向某处"
 
-#: src/core.rs:1313
+#: src/core.rs:1319
 msgid ""
 "The one place left put a test value back at once, like a copy the game "
 "redraws its display from; the game may keep the value in a form Ferret can't "
@@ -179,24 +179,24 @@ msgstr ""
 "最后剩下的位置立刻把测试值改了回去,像是游戏用来绘制显示的副本;游戏可能以 "
 "Ferret 还不会搜索的形式保存这个数值(2 字节数或编码过的数)。"
 
-#: src/core.rs:1504
+#: src/core.rs:1510
 msgid "attach to a game first"
 msgstr "请先连接一个游戏"
 
-#: src/core.rs:1592 src/core.rs:1605
+#: src/core.rs:1598 src/core.rs:1611
 #, rust-format
 msgid "Ferret couldn't get permission: {why}"
 msgstr "Ferret 未能获得权限：{why}"
 
-#: src/core.rs:1599
+#: src/core.rs:1605
 msgid "The password dialog was closed before Ferret got permission."
 msgstr "密码对话框在 Ferret 获得权限前被关闭了。"
 
-#: src/core.rs:1602
+#: src/core.rs:1608
 msgid "Ferret didn't get permission."
 msgstr "Ferret 未能获得权限。"
 
-#: src/core.rs:1603
+#: src/core.rs:1609
 msgid ""
 "On a Steam Deck, set a password first: open Konsole in desktop mode and run "
 "this, then try again."
@@ -204,49 +204,49 @@ msgstr ""
 "在 Steam Deck 上，请先设置密码：在桌面模式打开 Konsole，运行下面这条命令，然"
 "后重试。"
 
-#: src/core.rs:1720 src/core.rs:1738 src/core.rs:2400
+#: src/core.rs:1735 src/core.rs:1757 src/core.rs:2425
 msgid "the value needs a name"
 msgstr "这个数值需要一个名字"
 
-#: src/core.rs:1724
+#: src/core.rs:1739
 msgid "narrow down to exactly one address first"
 msgstr "请先缩小到唯一一个地址"
 
-#: src/core.rs:1755
+#: src/core.rs:1774
 msgid ""
 "Ferret can't find this number again by its name, so it isn't saved. Find it "
 "with a search instead."
 msgstr "Ferret 无法按名称再次找到这个数字，因此没有保存。请改用搜索来找到它。"
 
-#: src/core.rs:1801
+#: src/core.rs:1820
 #, rust-format
 msgid "Ferret can't find it again by code or by name, and {why}"
 msgstr "Ferret 无法通过代码或名称再次找到它,而且{why}"
 
-#: src/core.rs:1937
+#: src/core.rs:1962
 msgid "no pointer from the game's own memory leads to it"
 msgstr "游戏自身内存中没有指针指向它"
 
-#: src/core.rs:1946
+#: src/core.rs:1971
 msgid "every pointer path to it changed within seconds"
 msgstr "指向它的所有指针路径都在几秒内变了"
 
-#: src/core.rs:1957
+#: src/core.rs:1982
 #, rust-format
 msgid "the pointer scan failed: {e}"
 msgstr "指针扫描失败:{e}"
 
-#: src/core.rs:2049 src/core.rs:2113
+#: src/core.rs:2074 src/core.rs:2138
 #, rust-format
 msgid "{name} isn't saved"
 msgstr "{name} 没有保存"
 
-#: src/core.rs:2054
+#: src/core.rs:2079
 #, rust-format
 msgid "{name} is confirmed already"
 msgstr "{name} 已经确认过了"
 
-#: src/core.rs:2058
+#: src/core.rs:2083
 #, rust-format
 msgid ""
 "{name} was saved in this run of the game, where all its pointer paths lead "
@@ -255,32 +255,32 @@ msgstr ""
 "{name} 是在游戏的这次运行中保存的,这次运行中它的所有指针路径都指向它:这还证明"
 "不了什么。请在重启游戏后再确认"
 
-#: src/core.rs:2073
+#: src/core.rs:2098
 #, rust-format
 msgid "none of {name}'s pointer paths lead anywhere now"
 msgstr "{name} 的指针路径现在都不指向任何地方"
 
-#: src/core.rs:2076 src/core.rs:2111
+#: src/core.rs:2101 src/core.rs:2136
 #, rust-format
 msgid "{name} can't be confirmed: {why}"
 msgstr "无法确认 {name}:{why}"
 
-#: src/core.rs:2096
+#: src/core.rs:2121
 #, rust-format
 msgid "{name} confirmed: Ferret finds it this way from now on"
 msgstr "已确认 {name}:从现在起 Ferret 会这样找到它"
 
-#: src/core.rs:2105
+#: src/core.rs:2130
 #, rust-format
 msgid "{name} isn't in the game right now: load a save, then check it again"
 msgstr "{name} 现在不在游戏中:请加载存档,然后再检查一次"
 
-#: src/core.rs:2108
+#: src/core.rs:2133
 #, rust-format
 msgid "{name} can't be confirmed: its name doesn't lead to one value ({why})"
 msgstr "无法确认 {name}:它的名称没有指向唯一的数值({why})"
 
-#: src/core.rs:2176
+#: src/core.rs:2201
 msgid ""
 "it was imported and isn't checked yet. If the game shows the number Ferret "
 "reads, say so in the Values tab"
@@ -288,17 +288,17 @@ msgstr ""
 "它是导入的,还没有检查。如果游戏显示的数字和 Ferret 读到的一样,请在“数值”标签"
 "页中说明"
 
-#: src/core.rs:2179
+#: src/core.rs:2204
 #, rust-format
 msgid "its name doesn't lead to one value ({why})"
 msgstr "它的名称没有指向唯一的数值({why})"
 
-#: src/core.rs:2183
+#: src/core.rs:2208
 msgid ""
 "its pointer paths are guesses until a later run of the game confirms them"
 msgstr "在游戏之后的某次运行确认之前,它的指针路径都只是猜测"
 
-#: src/core.rs:2278
+#: src/core.rs:2303
 #, rust-format
 msgid ""
 "{name}: it was imported and isn't checked yet. If the game shows the number "
@@ -307,7 +307,7 @@ msgstr ""
 "{name}:它是导入的,还没有检查。如果游戏显示的数字和 Ferret 读到的一样,请在“数"
 "值”标签页中说明"
 
-#: src/core.rs:2284
+#: src/core.rs:2309
 #, rust-format
 msgid ""
 "its pointer paths aren't confirmed yet: confirm it in the Values tab if the "
@@ -316,22 +316,22 @@ msgstr ""
 "它的指针路径还没有确认:如果游戏显示了它的数字,请在“数值”标签页中确认,或者重新"
 "找到它并保存为 {name}"
 
-#: src/core.rs:2323
+#: src/core.rs:2348
 msgid "Nothing is kept in range in this game"
 msgstr "这个游戏中没有保持在范围内的数值"
 
-#: src/core.rs:2380 src/core.rs:2405 src/core.rs:2461 src/core.rs:2750
-#: src/core.rs:3352
+#: src/core.rs:2405 src/core.rs:2430 src/core.rs:2486 src/core.rs:2775
+#: src/core.rs:3377
 #, rust-format
 msgid "no saved value called {name}"
 msgstr "没有名为 {name} 的已保存数值"
 
-#: src/core.rs:2411
+#: src/core.rs:2436
 #, rust-format
 msgid "{name} is the name of another saved value already"
 msgstr "{name} 已经是另一个已保存数值的名字了"
 
-#: src/core.rs:2465
+#: src/core.rs:2490
 #, rust-format
 msgid ""
 "Ferret finds others like {name} through the game's code that changes it, and "
@@ -341,14 +341,14 @@ msgstr ""
 "Ferret 通过游戏中改变 {name} 的代码来找到同类的其他数值,但还不知道这段代码:请"
 "重新找到 {name},并在它于游戏中变化时保存"
 
-#: src/core.rs:2470
+#: src/core.rs:2495
 #, rust-format
 msgid ""
 "{name} isn't found in this run yet: let it change in the game once, then try "
 "again"
 msgstr "本次运行中还没找到 {name}:先让它在游戏里变化一次,再试一次"
 
-#: src/core.rs:2503
+#: src/core.rs:2528
 #, rust-format
 msgid ""
 "Nothing else ran the code that changes {name} while Ferret watched. Use the "
@@ -358,7 +358,7 @@ msgstr ""
 "Ferret 观察期间,没有别的数值运行改变 {name} 的代码。请在它观察时在游戏里使用"
 "其他的(你的其他能力、其他单位),然后点击“完成”。"
 
-#: src/core.rs:2510
+#: src/core.rs:2535
 #, rust-format
 msgid ""
 "Ferret found {n} more like {name}, but nothing next to the two tells them "
@@ -370,12 +370,12 @@ msgstr[0] ""
 "Ferret 又找到了 {n} 个和 {name} 同类的数值,但它们旁边没有能区分彼此的东西,所"
 "以无法分别再次找到它们:未保存"
 
-#: src/core.rs:2565
+#: src/core.rs:2590
 #, rust-format
 msgid "The others like {name} are saved already"
 msgstr "和 {name} 同类的其他数值已经保存过了"
 
-#: src/core.rs:2567
+#: src/core.rs:2592
 #, rust-format
 msgid "Found {n} more like {name}: {names}. It's kept in range like {name}."
 msgid_plural ""
@@ -384,13 +384,13 @@ msgstr[0] ""
 "又找到了 {n} 个和 {name} 同类的数值:{names}。每个都像 {name} 一样保持在范围"
 "内。"
 
-#: src/core.rs:2574
+#: src/core.rs:2599
 #, rust-format
 msgid "Found {n} more like {name}: {names}. It's in the Values tab."
 msgid_plural "Found {n} more like {name}: {names}. They're in the Values tab."
 msgstr[0] "又找到了 {n} 个和 {name} 同类的数值:{names}。它们在“数值”标签页中。"
 
-#: src/core.rs:2594
+#: src/core.rs:2619
 #, rust-format
 msgid ""
 "{name}: imported and not checked yet. On its card in the Values tab, click "
@@ -399,45 +399,45 @@ msgstr ""
 "{name}:已导入但还没有检查。如果游戏显示那个数字,请在“数值”标签页中它的卡片上"
 "点击“是,显示了……”"
 
-#: src/core.rs:2601
+#: src/core.rs:2626
 #, rust-format
 msgid ""
 "{name}: its name is longer than 32 letters (save it again with a shorter one)"
 msgstr "{name}:它的名称超过 32 个字符(请用更短的名称重新保存)"
 
-#: src/core.rs:2608
+#: src/core.rs:2633
 #, rust-format
 msgid ""
 "{name}: its pointer paths start in files that differ between computers "
 "(graphics driver, Wine, Steam)"
 msgstr "{name}:它的指针路径起始于不同电脑上会不同的文件(显卡驱动、Wine、Steam)"
 
-#: src/core.rs:2612
+#: src/core.rs:2637
 #, rust-format
 msgid ""
 "{name}: its pointer paths aren't confirmed yet (restart the game and check "
 "it)"
 msgstr "{name}:它的指针路径还没有确认(请重启游戏并检查)"
 
-#: src/core.rs:2614
+#: src/core.rs:2639
 #, rust-format
 msgid "{name}: Ferret has no way to find it that works on other computers"
 msgstr "{name}:Ferret 没有能在其他电脑上找到它的方法"
 
-#: src/core.rs:2632
+#: src/core.rs:2657
 msgid "Nothing is saved for this game yet"
 msgstr "这个游戏还没有保存任何数值"
 
-#: src/core.rs:2633
+#: src/core.rs:2658
 msgid "Nothing to export."
 msgstr "没有可导出的内容。"
 
-#: src/core.rs:2662
+#: src/core.rs:2687
 #, rust-format
 msgid "These values are for {theirs}, not {exe}"
 msgstr "这些数值属于 {theirs},不是 {exe}"
 
-#: src/core.rs:2667
+#: src/core.rs:2692
 #, rust-format
 msgid ""
 "These values are for another game with a program called {exe} (Steam app "
@@ -446,21 +446,21 @@ msgstr ""
 "这些数值属于另一个程序名同为 {exe} 的游戏(Steam 应用 {theirs},而这个是 "
 "{ours})"
 
-#: src/core.rs:2682
+#: src/core.rs:2707
 #, rust-format
 msgid "{name}: you have it already, as {mine}"
 msgstr "{name}：你已经有了，名为 {mine}"
 
-#: src/core.rs:2719
+#: src/core.rs:2744
 msgid "Nothing imported."
 msgstr "没有导入任何内容。"
 
-#: src/core.rs:2742
+#: src/core.rs:2767
 #, rust-format
 msgid "At most ({max}) is lower than at least ({min}): nothing changed"
 msgstr "最多({max})小于最少({min}):没有任何更改"
 
-#: src/core.rs:3311
+#: src/core.rs:3336
 #, rust-format
 msgid ""
 "{name} not written: it was imported and isn't checked yet. If the game shows "
@@ -469,12 +469,12 @@ msgstr ""
 "未写入 {name}:它是导入的,还没有检查。如果游戏显示的数字和 Ferret 读到的一样,"
 "请在“数值”标签页中说明"
 
-#: src/core.rs:3333
+#: src/core.rs:3358
 #, rust-format
 msgid "{name} isn't in the game right now (is a save loaded?)"
 msgstr "{name} 现在不在游戏中(加载存档了吗?)"
 
-#: src/core.rs:3336
+#: src/core.rs:3361
 #, rust-format
 msgid ""
 "{name} not written: its name doesn't lead to one value ({why}). Find it "
@@ -483,12 +483,12 @@ msgstr ""
 "未写入 {name}:它的名称没有指向唯一的数值({why})。请重新找到它并保存为 "
 "{name}。"
 
-#: src/core.rs:3354
+#: src/core.rs:3379
 #, rust-format
 msgid "{name} can't be found right now (is a save loaded?)"
 msgstr "现在找不到 {name}(加载存档了吗?)"
 
-#: src/core.rs:3358
+#: src/core.rs:3383
 #, rust-format
 msgid ""
 "not written: {why}, so it could land in the wrong place. Find it again and "
@@ -497,46 +497,46 @@ msgstr ""
 "未写入:{why},所以可能写到错误的位置。请重新找到它并保存为 {name}:这样能确认正"
 "确的路径"
 
-#: src/core.rs:3503
+#: src/core.rs:3528
 msgid "a move of the bar"
 msgstr "一次进度条变化"
 
-#: src/core.rs:3504
+#: src/core.rs:3529
 msgid "a reading while it moved"
 msgstr "一次变化中的读取"
 
-#: src/core.rs:3505
+#: src/core.rs:3530
 msgid "a reading while it stayed still"
 msgstr "一次静止时的读取"
 
-#: src/core.rs:3506
+#: src/core.rs:3531
 msgid "copying the game's memory"
 msgstr "复制游戏内存"
 
-#: src/core.rs:3507
+#: src/core.rs:3532
 #, rust-format
 msgid "the search for {n}"
 msgstr "搜索 {n}"
 
-#: src/core.rs:3508
+#: src/core.rs:3533
 #, rust-format
 msgid "ruling out {place}"
 msgstr "排除 {place}"
 
-#: src/core.rs:3509
+#: src/core.rs:3534
 #, rust-format
 msgid "picking {place}"
 msgstr "选择 {place}"
 
-#: src/core.rs:3510
+#: src/core.rs:3535
 msgid "starting over"
 msgstr "重新开始"
 
-#: src/core.rs:3564
+#: src/core.rs:3589
 msgid "The number is back in the box."
 msgstr "数字回到框里了。"
 
-#: src/core.rs:3567
+#: src/core.rs:3592
 msgid ""
 "The box keeps changing: it may take in something that moves or blinks around "
 "the number. Pick the number again with a box around its digits only."
@@ -544,7 +544,7 @@ msgstr ""
 "框里的内容一直在变:可能包含了数字周围会动或闪烁的东西。请重新选择数字,框只框"
 "住数字本身。"
 
-#: src/core.rs:3572
+#: src/core.rs:3597
 msgid ""
 "The box doesn't show the number now (it looks different from when you picked "
 "it: a menu or the inventory closed?). Ferret waits until it's back."
@@ -552,18 +552,18 @@ msgstr ""
 "框里现在没有显示数字(和你选择时看起来不一样:菜单或背包关了?)。Ferret 会等它回"
 "来。"
 
-#: src/core.rs:3598
+#: src/core.rs:3623
 msgid ""
 "The box is outside the game picture now (the window got smaller?): capture "
 "again and pick it again."
 msgstr "框现在在游戏画面之外(窗口变小了?):请重新截取画面并重新选择。"
 
-#: src/core.rs:3708
+#: src/core.rs:3733
 #, rust-format
 msgid "saved as {names}"
 msgstr "已保存为 {names}"
 
-#: src/core.rs:3732
+#: src/core.rs:3757
 msgid ""
 "Your character isn't in the game right now (a menu or a loading screen?). "
 "Try again once you're playing."
@@ -573,30 +573,31 @@ msgstr "你的角色现在不在游戏中（菜单或加载画面？）。开始
 #
 #
 #
-#: src/core.rs:3736
+#
+#: src/core.rs:3761
 #
 msgid ""
 "Ferret can list a game's numbers by name only in Unreal Engine, Unity, "
-"Godot, GameMaker, RPG Maker MV and Lua (LuaJIT) games so far."
-msgstr "目前 Ferret 只能在 Unreal Engine、Unity、Godot、GameMaker、RPG Maker MV 和 Lua（LuaJIT）游戏中按名称列出游戏的数字。"
+"Godot, GameMaker, RPG Maker MV, Lua (LuaJIT) and Java games so far."
+msgstr "目前 Ferret 只能在 Unreal Engine、Unity、Godot、GameMaker、RPG Maker MV、Lua（LuaJIT）和 Java 游戏中按名称列出游戏的数字。"
 
-#: src/core.rs:3795
+#: src/core.rs:3820
 #, rust-format
 msgid "not a number: {value}"
 msgstr "不是数字:{value}"
 
-#: src/core.rs:3814
+#: src/core.rs:3839
 #, rust-format
 msgid ""
 "The game put {n} back at once, so that place isn't where it keeps the value: "
 "removed it."
 msgstr "游戏立刻把 {n} 改了回去,所以数值不在那个位置:已移除。"
 
-#: src/core.rs:3819
+#: src/core.rs:3844
 msgid "No places are left: press Start Over and search again."
 msgstr "没有剩余的位置了:请点击“重新开始”再搜索一次。"
 
-#: src/core.rs:3826
+#: src/core.rs:3851
 #, rust-format
 msgid ""
 "It kept {n}. If the game shows it too, press Use This One (some games only "
@@ -605,7 +606,7 @@ msgstr ""
 "它保持为 {n}。如果游戏也显示这个数字,请点击“就是这个”(有些游戏只有自己修改数"
 "字时才会重绘)。"
 
-#: src/core.rs:3868
+#: src/core.rs:3893
 msgid ""
 "The number is 0, like most of the game's memory: change it in the game and "
 "Ferret searches from there."
@@ -613,11 +614,11 @@ msgstr ""
 "这个数字是 0，游戏内存里几乎全是 0：在游戏里改变它，Ferret 会从新的数字开始搜"
 "索。"
 
-#: src/core.rs:3871
+#: src/core.rs:3896
 msgid "The number stayed at 0. Change it in the game, then search again."
 msgstr "数字一直是 0。请在游戏里改变它，然后再搜索。"
 
-#: src/core.rs:3904
+#: src/core.rs:3929
 #, rust-format
 msgid ""
 "{n} is in too many places in the game's memory to search for: search once "
@@ -625,12 +626,12 @@ msgid ""
 msgstr ""
 "{n} 在游戏内存里出现的地方太多，无法搜索：等游戏显示更大的数字时再搜索。"
 
-#: src/core.rs:3992
+#: src/core.rs:4017
 #, rust-format
 msgid "{place} isn't among the matches any more"
 msgstr "{place} 已不在匹配结果中"
 
-#: src/core.rs:4270
+#: src/core.rs:4295
 msgid ""
 "Now change the number in the game once (use some or pick some up): Ferret "
 "watches which of the game's code does it, the surest way to find it again. "
@@ -639,7 +640,7 @@ msgstr ""
 "现在在游戏中改变一次这个数字(用掉一些或捡起一些):Ferret 会观察是游戏的哪段代"
 "码修改了它,这是之后再次找到它最可靠的方法。“取消”会用其他方式保存它。"
 
-#: src/core.rs:4302
+#: src/core.rs:4327
 #, rust-format
 msgid ""
 "Now change the number in the game once (pick some up or use some): Ferret "
@@ -653,106 +654,106 @@ msgstr[0] ""
 "现在在游戏中改变一次这个数字(捡起一些或用掉一些):Ferret 会等待并观察游戏从 "
 "{n} 个位置中的哪一个继续计数。“停止等待”会改为列出它们供你逐个尝试。"
 
-#: src/core.rs:4434
+#: src/core.rs:4459
 #, rust-format
 msgid "The one place left holds {held}, not the {n} on screen."
 msgstr "最后剩下的位置是 {held},不是屏幕上的 {n}。"
 
-#: src/core.rs:4458
+#: src/core.rs:4483
 msgid "could not read the number"
 msgstr "无法读取数字"
 
-#: src/core.rs:4675
+#: src/core.rs:4700
 msgid "The icons are all empty, hidden or keep changing."
 msgstr "图标全是空的、被遮挡了,或者一直在变。"
 
-#: src/core.rs:4676
+#: src/core.rs:4701
 msgid "The bar is empty, hidden or keeps moving."
 msgstr "进度条是空的、被遮挡了,或者一直在动。"
 
-#: src/core.rs:4772
+#: src/core.rs:4797
 msgid ""
 "Stopped before the icons changed. Press Start again and let them change in "
 "the game."
 msgstr "在图标变化之前停止了。请再次点击“开始”,并让它们在游戏中变化。"
 
-#: src/core.rs:4773
+#: src/core.rs:4798
 msgid ""
 "Stopped before the bar moved. Press Start again and let the bar change in "
 "the game."
 msgstr "在进度条变化之前停止了。请再次点击“开始”,并让进度条在游戏中变化。"
 
-#: src/core.rs:4806
+#: src/core.rs:4831
 msgid "The one place left kept a test value, but the icons didn't show it."
 msgstr "最后剩下的位置保持了测试值,但图标没有显示出来。"
 
-#: src/core.rs:4807
+#: src/core.rs:4832
 msgid "The one place left kept a test value, but the bar didn't show it."
 msgstr "最后剩下的位置保持了测试值,但进度条没有显示出来。"
 
-#: src/core.rs:4886
+#: src/core.rs:4911
 msgid ""
 "Nothing to narrow down yet: press Start or type the number the game shows."
 msgstr "还没有可以缩小的结果:请点击“开始”或输入游戏显示的数字。"
 
-#: src/core.rs:4889
+#: src/core.rs:4914
 msgid "No number picked: type the number the game shows instead."
 msgstr "没有选择数字:请改为输入游戏显示的数字。"
 
-#: src/core.rs:4897
+#: src/core.rs:4922
 msgid ""
 "The icons are all empty, hidden or changing: try again while they show and "
 "stay still."
 msgstr "图标全是空的、被遮挡了或正在变化:请在它们可见且不动时重试。"
 
-#: src/core.rs:4898
+#: src/core.rs:4923
 msgid ""
 "The bar is empty, hidden or moving: try again while it shows and stays still."
 msgstr "进度条是空的、被遮挡了或正在变化:请在它可见且不动时重试。"
 
-#: src/core.rs:4902
+#: src/core.rs:4927
 msgid ""
 "Nothing in the game's memory changed like the icons did. Press Start Over "
 "and search again."
 msgstr "游戏内存中没有任何东西像图标那样变化。请点击“重新开始”再搜索一次。"
 
-#: src/core.rs:4903
+#: src/core.rs:4928
 msgid ""
 "Nothing in the game's memory moved like the bar did. Press Start Over and "
 "search again."
 msgstr "游戏内存中没有任何东西像进度条那样变化。请点击“重新开始”再搜索一次。"
 
-#: src/core.rs:4918
+#: src/core.rs:4943
 msgid "Can't read the number now (is it on screen?). Type it below instead."
 msgstr "现在无法读取数字(它在屏幕上吗?)。请在下方输入它。"
 
-#: src/core.rs:4961
+#: src/core.rs:4986
 msgid "Nothing to compare with yet. Click No Number? first."
 msgstr "还没有可比较的内容。请先点击“没有数字?”。"
 
-#: src/core.rs:4978
+#: src/core.rs:5003
 msgid ""
 "The copy of the game's memory is gone. Click No Number? to make a new one."
 msgstr "游戏内存的副本已经没有了。点击“没有数字?”重新复制一份。"
 
-#: src/core.rs:5032
+#: src/core.rs:5057
 msgid ""
 "Stopped before anything was narrowed down. Press It's Moving while it "
 "changes on its own."
 msgstr "在缩小范围前就停止了。在它自己变化时按“在变化”。"
 
-#: src/core.rs:5033
+#: src/core.rs:5058
 msgid "Ferret only knows that it moved when you said it did."
 msgstr "Ferret 只知道它在你说的时候变化了。"
 
 #
-#: src/core.rs:5059
+#: src/core.rs:5084
 msgid ""
 "Almost everything in the game's memory is 0: type the number once the game "
 "shows another one."
 msgstr "游戏内存里几乎全是 0：等游戏显示别的数字时再输入。"
 
-#: src/core.rs:5074
+#: src/core.rs:5099
 #, rust-format
 msgid "{n} is nowhere in the game's memory"
 msgstr "游戏内存中找不到 {n}"
@@ -2651,8 +2652,8 @@ msgstr "2 字节整数"
 msgid "GameMaker number"
 msgstr "GameMaker 数字"
 
-#: src/gui/mod.rs:1480
 #
+#: src/gui/mod.rs:1480
 msgid "Lua number"
 msgstr "Lua 数字"
 

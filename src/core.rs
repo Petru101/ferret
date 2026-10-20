@@ -245,7 +245,7 @@ impl Helper {
 /// dictionaries, RPG Maker's globals, GameMaker's variables, Lua tables): nothing better to
 /// upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "java:", "{"].iter().any(|p| text.starts_with(p))
 }
 
 /// A name the helper lists in Ferret's words rather than the game's ("@gold": RPG Maker's
@@ -1139,7 +1139,13 @@ pub struct Imported {
 
 /// Why saved values of Java games are only shown.
 fn java_write() -> String {
-    tr!("Java game: Ferret only shows saved values. Java moves its objects around, so a later write could land in another object and crash the game. Change it from the Find tab while you search instead.")
+    tr!("Java game: Ferret only shows this value. Java moves its objects around, so a later write could land in another object and crash the game. Save it from the Browse tab, or find it again and save it: values the game names are changed safely.")
+}
+
+/// A Java game's value saved by name (a path from a class's static field): found again and
+/// written.
+fn java_named(e: &Entry) -> bool {
+    e.named.first().is_some_and(|t| t.starts_with("java:"))
 }
 
 /// What the player says a value with no number does now (No Number?, `Core::phase_step`):
@@ -1684,10 +1690,19 @@ impl Core {
             self.say(&format!("knows how {exe} keeps {kinds}: searches look there first"));
         }
         if !read_profile(&exe).is_empty() && self.game()?.java {
-            // Listed, not looked for: nothing finds them again in Java yet.
-            let names: Vec<(String, Loc)> = read_profile(&exe).into_iter().map(|e| (e.name, Loc { addr: 0, kind: e.kind })).collect();
-            self.say(&format!("saved values for {exe} aren't looked for: Java games can't be found again yet (find them again and save them with the same name)"));
-            self.game.as_mut().ok_or("no game")?.entries = names;
+            // Saved by name (a Java path): found again. The rest are listed, not looked for:
+            // nothing else finds a Java value again.
+            let saved = read_profile(&exe);
+            let (by_name, rest): (Vec<Entry>, Vec<Entry>) = saved.into_iter().partition(java_named);
+            self.game.as_mut().ok_or("no game")?.entries = rest.iter().map(|e| (e.name.clone(), Loc { addr: 0, kind: e.kind })).collect();
+            if !rest.is_empty() {
+                self.say(&format!("{} saved values for {exe} aren't looked for: Java values are found again only by name (find them again and save them with the same name)", rest.len()));
+            }
+            if !by_name.is_empty() {
+                self.say(&format!("found saved values for {exe}, restoring:"));
+                let names: Vec<String> = by_name.into_iter().map(|e| e.name).collect();
+                self.restore_some(Some(&names))?;
+            }
         } else if !read_profile(&exe).is_empty() {
             self.say(&format!("found saved values for {exe}, restoring:"));
             self.restore()?;
@@ -1723,10 +1738,14 @@ impl Core {
         let [(loc, _)] = parse_values(&listed)[..] else {
             return Err(tr!("narrow down to exactly one address first"));
         };
-        if self.game()?.java {
-            return self.save_java(name, loc);
-        }
         let decimals = if loc.kind.whole() { self.searched_decimals } else { 0 };
+        // Java: by name (a path from a class's static field), else shown only.
+        if self.game()?.java {
+            return match self.save_at(name, loc, decimals, true) {
+                Ok(confirmed) => Ok(confirmed),
+                Err(_) => self.save_java(name, loc),
+            };
+        }
         self.save_at(name, loc, decimals, false)
     }
 
@@ -1880,7 +1899,13 @@ impl Core {
         Ok(confirmed)
     }
 
-    /// Whether the attached game runs on Java (saved values are only shown).
+    /// Whether a Java game's saved value can be written: saved by name, walked again before
+    /// every write.
+    pub fn java_writable(&self, name: &str) -> bool {
+        self.game.as_ref().is_some_and(|g| !g.java || g.named.iter().any(|(n, t, _)| n == name && t.starts_with("java:")))
+    }
+
+    /// Whether the attached game runs on Java (values not saved by name are only shown).
     pub fn java(&self) -> bool {
         self.game.as_ref().is_some_and(|g| g.java)
     }
@@ -2733,7 +2758,7 @@ impl Core {
     pub fn limit(&mut self, name: &str, min: Option<f64>, max: Option<f64>) -> Result<(), String> {
         let name = one_word(name);
         let name = name.as_str();
-        if self.game()?.java && (min.is_some() || max.is_some()) {
+        if !self.java_writable(name) && (min.is_some() || max.is_some()) {
             return Err(java_write());
         }
         if let (Some(lo), Some(hi)) = (min, max) {
@@ -3288,7 +3313,7 @@ impl Core {
                     doubtful,
                     places,
                     confirmable,
-                    read_only: java,
+                    read_only: java && !entry.is_some_and(java_named),
                     imported,
                     suggested,
                     by_code: !java && entry.is_some_and(|e| !e.sites.is_empty()),
@@ -3301,7 +3326,7 @@ impl Core {
     pub fn set(&mut self, name: &str, value: f64) -> Result<(), String> {
         let name = one_word(name);
         let name = name.as_str();
-        if self.game()?.java {
+        if !self.java_writable(name) {
             return Err(java_write());
         }
         let exe = self.game()?.exe.clone();
@@ -3733,7 +3758,7 @@ impl Core {
         }
         if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV and Lua (LuaJIT) games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Lua (LuaJIT) and Java games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {

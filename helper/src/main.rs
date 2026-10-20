@@ -4,6 +4,7 @@ mod anticheat;
 mod gdscript;
 mod gml;
 mod lua;
+mod java;
 mod godot;
 mod helper;
 mod js;

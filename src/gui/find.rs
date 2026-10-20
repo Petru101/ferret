@@ -2290,7 +2290,7 @@ impl FindView {
         self.worker.run(move |core| {
             let saved = core.save(&name);
             Event::Saved(saved.map(|confirmed| {
-                let msg = if core.java() {
+                let msg = if core.java() && !core.java_writable(&name) {
                     tr!("Saved {name} for this run. Java game: Ferret only shows it, and can't find it again after a restart yet.", name)
                 } else if confirmed {
                     tr!("Saved {name}. Ferret finds it again every time you attach.", name)

@@ -22,6 +22,7 @@ use crate::mono::{self, MonoPath};
 use crate::js::{self, JsPath};
 use crate::gml::{self, GmlPath};
 use crate::lua::{self, LuaPath};
+use crate::java::{self, JavaPath};
 use crate::trace;
 
 pub struct Region {
@@ -837,6 +838,7 @@ enum Named {
     Js(JsPath),
     Gml(GmlPath),
     Lua(LuaPath),
+    Java(JavaPath),
 }
 
 impl Named {
@@ -859,6 +861,9 @@ impl Named {
         if text.starts_with("lua:") {
             return LuaPath::parse(text).map(Named::Lua);
         }
+        if text.starts_with("java:") {
+            return JavaPath::parse(text).map(Named::Java);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -866,7 +871,13 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:")
+    }
+
+    /// Walked again right before every write (not only every `LIMIT_FIND_EVERY`): Java moves
+    /// its objects, and the old copy's memory is reused.
+    fn fresh(&self) -> bool {
+        matches!(self, Named::Java(_))
     }
 
     /// Where it leads from the roots found before (no search).
@@ -879,6 +890,7 @@ impl Named {
             Named::Js(p) => js::walk(heap, roots, p),
             Named::Gml(p) => gml::walk(heap, program_of(heap.pid).as_deref(), roots, p),
             Named::Lua(p) => lua::walk(heap, roots, p),
+            Named::Java(p) => java::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
@@ -893,6 +905,7 @@ impl Named {
             Named::Js(p) => js::find_roots(heap, p),
             Named::Gml(p) => gml::find_roots(heap, program_of(heap.pid).as_deref(), p),
             Named::Lua(p) => lua::find_roots(heap, p),
+            Named::Java(p) => java::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
@@ -1040,9 +1053,13 @@ fn limiter_loop(shared: SharedLimiter) {
                     }
                 }
             }
-            let heap = (find && limits.iter().any(|l| l.named.is_some())).then(|| Heap::new(*pid, mem, *width).ok()).flatten();
+            let fresh = limits.iter().any(|l| l.named.as_ref().is_some_and(|n| n.path.fresh()));
+            let heap = ((find || fresh) && limits.iter().any(|l| l.named.is_some())).then(|| Heap::new(*pid, mem, *width).ok()).flatten();
             for l in limits.iter_mut() {
                 let (Some(n), Some(heap)) = (l.named.as_mut(), heap.as_ref()) else { continue };
+                if !find && !n.path.fresh() {
+                    continue;
+                }
                 // Searching memory for its objects again takes seconds: done without the lock.
                 let leads = n.path.walk(heap, &n.roots);
                 if leads.is_empty() && n.found_at.is_none() && !l.sites.is_empty() && l.addr != 0 {
@@ -3028,7 +3045,7 @@ fn cmd_build(out: &mut impl Write, s: &Session) -> io::Result<()> {
 /// Bytes read from each end of a program file for its build stamp.
 const BUILD_SAMPLE: u64 = 64 * 1024;
 
-const JAVA: &str = "Java game: it moves its objects around and shares its code between values, so saved values can't be found again yet";
+const JAVA: &str = "Java game: it moves its objects around and shares its code between values, so values are found again by name only";
 
 fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     if s.java {
@@ -3726,6 +3743,14 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
             return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
         }
     }
+    // A field of a Java game's objects, by its path from a class's static field.
+    if s.java {
+        if let Some((p, leads)) = java::discover(&heap, target) {
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        }
+        return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
+    }
     // A number in a Lua game's tables, by its path from the globals table.
     if is_lua(s.pid) {
         if let Some((p, leads)) = lua::discover(&heap, target) {
@@ -3873,6 +3898,12 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
                     None => writeln!(out, "none character"),
                 };
             }
+            if s.java {
+                return match java::player(&heap) {
+                    Some(list) => print_player(out, s, &list, t),
+                    None => writeln!(out, "none engine Java classes not found (only HotSpot JVMs are read)"),
+                };
+            }
             if is_lua(s.pid) && !mono::runs_csharp(s.pid) && !is_godot(s.pid) {
                 return match lua::player(&heap) {
                     Some(list) => print_player(out, s, &list, t),
@@ -3905,7 +3936,7 @@ fn print_player(out: &mut impl Write, s: &Session, list: &[ue::ListedObject], t:
     writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
 }
 
-/// browsable: "browsable unreal|unity|godot|rpgmaker|gamemaker|lua" when `player` can list the game's numbers, else "browsable no".
+/// browsable: "browsable unreal|unity|godot|rpgmaker|gamemaker|lua|java" when `player` can list the game's numbers, else "browsable no".
 fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -3917,9 +3948,23 @@ fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
         Err(_) if s.doubles_only && gml::data_file(s.pid, program_of(s.pid).as_deref()).is_some() => "gamemaker",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
         Err(_) if is_lua(s.pid) => "lua",
+        Err(_) if s.java && java::shared(s.pid, mem).is_some() => "java",
         Err(_) => "no",
     };
     writeln!(out, "browsable {engine}")
+}
+
+/// jvm [class]: a Java game's JVM as Ferret reads it, or a class's fields (`java::diagnose`).
+fn cmd_jvm(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let t = Instant::now();
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    for l in java::diagnose(&heap, arg.trim()) {
+        writeln!(out, "{l}")?;
+    }
+    writeln!(out, "in {} ms", t.elapsed().as_millis())
 }
 
 /// luadump [path]: a Lua game's layout and globals table, or the table (or a function's
@@ -4071,6 +4116,7 @@ pub fn run(as_user: Option<&str>) {
             "gdtree" => cmd_gdtree(&mut out, &session),
             "gml" => cmd_gml(&mut out, &session),
             "luadump" => cmd_luadump(&mut out, &session, arg),
+            "jvm" => cmd_jvm(&mut out, &session, arg),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),
