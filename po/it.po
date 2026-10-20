@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 16:34+0100\n"
+"POT-Creation-Date: 2026-10-20 04:12+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Italian\n"
 "Language: it\n"
@@ -572,11 +572,11 @@ msgstr ""
 "schermata di caricamento?). Riprova quando stai giocando."
 
 #: src/core.rs:3689
+#
 msgid ""
-"Ferret can list a game's numbers by name only in Unreal Engine games so far."
-msgstr ""
-"Per ora Ferret può elencare per nome i numeri di un gioco solo nei giochi "
-"Unreal Engine."
+"Ferret can list a game's numbers by name only in Unreal Engine and Unity "
+"games so far."
+msgstr "Per ora Ferret può elencare per nome i numeri di un gioco solo nei giochi Unreal Engine e Unity."
 
 #: src/core.rs:3747
 #, rust-format
@@ -2618,7 +2618,9 @@ msgstr "{game} ha un anti-cheat"
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
-msgstr "Alcuni anti-cheat cercano strumenti per barare in tutto il computer. Chiudi Ferret mentre ci giochi."
+msgstr ""
+"Alcuni anti-cheat cercano strumenti per barare in tutto il computer. Chiudi "
+"Ferret mentre ci giochi."
 
 #: src/gui/mod.rs:616
 #, rust-format
@@ -2632,7 +2634,11 @@ msgid ""
 "your computer, even ones that don't touch the game, and may ban for them. "
 "Ferret won't open this game, but it's safest to quit Ferret while you play "
 "it."
-msgstr "{game} usa {anticheat}. Alcuni anti-cheat cercano strumenti per barare in tutto il computer, anche quelli che non toccano il gioco, e possono bannare per questo. Ferret non aprirà questo gioco, ma la cosa più sicura è chiudere Ferret mentre ci giochi."
+msgstr ""
+"{game} usa {anticheat}. Alcuni anti-cheat cercano strumenti per barare in "
+"tutto il computer, anche quelli che non toccano il gioco, e possono bannare "
+"per questo. Ferret non aprirà questo gioco, ma la cosa più sicura è chiudere "
+"Ferret mentre ci giochi."
 
 #: src/gui/mod.rs:623
 msgid "Keep Ferret Open"

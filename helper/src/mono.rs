@@ -548,7 +548,8 @@ impl<'a> Mono<'a> {
     }
 
     /// Whether the object is one, and not a destroyed Unity object. A live Unity object's
-    /// native object starts with its C++ vtable (in the game's read-only code image) and points
+    /// native object starts with its C++ vtable (in the game's code image: read-only, or the
+    /// program file's own data in older non-PIE builds like ULTRAKILL Prelude's) and points
     /// back to it (places in Mono's own tables that point to the class's vtable don't: 175 of
     /// them for ULTRAKILL's player). Both: with Particle Fleet modded (BepInEx), a run of
     /// pointers to their neighbours started with a pointer to a GameSpace "vtable" (one of the
@@ -878,6 +879,25 @@ fn vtables(heap: &Heap, path: &MonoPath) -> Vec<u64> {
     if let Some((_, _, v)) = VTABLES.lock().unwrap().iter().find(|(p, t, _)| *p == heap.pid && *t == key) {
         return v.clone();
     }
+    let classes = classes_named(heap, path);
+    if classes.is_empty() {
+        return Vec::new();
+    }
+    let vts = match path.runtime {
+        Runtime::Mono => heap.referrers(&classes),
+        Runtime::Il2cpp => classes,
+    };
+    if !vts.is_empty() {
+        let mut cache = VTABLES.lock().unwrap();
+        cache.retain(|(p, _, _)| *p == heap.pid);
+        cache.push((heap.pid, key, vts.clone()));
+    }
+    vts
+}
+
+/// The classes named like the path's (sorted), found by their name (a pass over memory, two on
+/// a new run, which also finds the layout).
+fn classes_named(heap: &Heap, path: &MonoPath) -> Vec<u64> {
     let (mem, w) = (heap.file(), heap.width() as u64);
     // An assembly's names share endings: Terraria.exe keeps "Player" only as the end of
     // "DeadPlayer" and others, where Mono points. The classes found are checked by name.
@@ -909,19 +929,7 @@ fn vtables(heap: &Heap, path: &MonoPath) -> Vec<u64> {
     let mut classes: Vec<u64> = classes.into_iter().map(|(k, _)| k).filter(|&k| m.is_class(k) && m.is(k, path)).collect();
     classes.sort_unstable();
     classes.dedup();
-    if classes.is_empty() {
-        return Vec::new();
-    }
-    let vts = match path.runtime {
-        Runtime::Mono => heap.referrers(&classes),
-        Runtime::Il2cpp => classes,
-    };
-    if !vts.is_empty() {
-        let mut cache = VTABLES.lock().unwrap();
-        cache.retain(|(p, _, _)| *p == heap.pid);
-        cache.push((heap.pid, key, vts.clone()));
-    }
-    vts
+    classes
 }
 
 /// The live objects of the path's class (a pass over memory, three on a new run).
@@ -964,9 +972,280 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &MonoPath) -> Vec<u64> {
     leads.into_iter().map(|(_, a)| a).collect()
 }
 
+// --- The player's numbers by name (the Browse tab), Unity's way. Unity has nothing like
+// Unreal's engine-wide local player, so every live object of the game's own MonoBehaviour
+// classes is listed by class; the ones on a GameObject named like the player's, or of a class
+// named so (player, health, inventory, gold...), come first, with the other components of
+// that GameObject. Classes with more than `MAX_PLACES` live objects are left out: they're many
+// things (enemies), and a saved path couldn't tell them apart.
+
+/// Words in a class's or a GameObject's name that mark the player's things.
+const PLAYER_WORDS: &[&str] = &[
+    "player", "hero", "character", "health", "stats", "inventory", "wallet", "money", "gold", "coin", "ammo", "weapon", "gun", "mana",
+    "stamina", "energy", "currency", "resource", "score", "lives",
+];
+/// Namespaces of the engine's and common packages' classes: not the game's.
+const ENGINE_NAMESPACES: &[&str] = &[
+    "UnityEngine", "Unity", "TMPro", "System", "Cinemachine", "Rewired", "DG", "Steamworks", "FMOD", "FMODUnity", "AK", "Photon", "Mirror",
+    "Sirenix", "I2", "Doozy", "UnityStandardAssets", "Febucci", "Kino", "Obi", "Pathfinding", "Rewired_", "MoreMountains",
+];
+/// Levels of subclasses below MonoBehaviour looked for.
+const MAX_DEPTH: usize = 10;
+/// MonoTypeEnum: 2-byte, 4-byte ints, floats, doubles.
+const TYPE_I2: u8 = 0x06;
+const TYPE_U2: u8 = 0x07;
+const TYPE_U4: u8 = 0x09;
+const TYPE_R4: u8 = 0x0c;
+const TYPE_R8: u8 = 0x0d;
+/// Where a native Component keeps its GameObject, and a native GameObject its name (found on
+/// the game, `game_object_layout`).
+static GAME_OBJECT: Mutex<Option<(u32, Option<(u64, u64)>)>> = Mutex::new(None);
+
+/// Whether the game is a Unity game running C# (Mono with Unity's player or its
+/// `<Game>_Data/Managed` assemblies, or IL2CPP): its MonoBehaviours can be listed. Not Mono
+/// alone (Terraria's has no MonoBehaviour).
+pub fn runs_csharp(pid: u32) -> bool {
+    let unity = crate::helper::maps(pid).unwrap_or_default().iter().any(|r| {
+        let p = r.path.to_lowercase();
+        p.contains("unityplayer") || p.contains("_data/managed/") || p.ends_with("/gameassembly.dll") || p.ends_with("/gameassembly.so")
+    });
+    unity && runtime(pid).is_some()
+}
+
+fn engine_namespace(ns: &str) -> bool {
+    ENGINE_NAMESPACES.iter().any(|e| ns == *e || ns.strip_prefix(e).is_some_and(|r| r.starts_with('.')))
+}
+
+/// Whether a name has one of `PLAYER_WORDS` as a word, or at a word's end ("Nailgun"), in
+/// CamelCase, snake_case or spaced names: not inside another ("mana" in "BloodsplatterManager").
+fn player_like(name: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if !c.is_ascii_alphabetic() {
+            prev_lower = false;
+            words.push(String::new());
+            continue;
+        }
+        if c.is_ascii_uppercase() && prev_lower || words.is_empty() {
+            words.push(String::new());
+        }
+        prev_lower = c.is_ascii_lowercase();
+        words.last_mut().unwrap().push(c.to_ascii_lowercase());
+    }
+    words.iter().any(|w| {
+        let w = w.strip_suffix('s').filter(|s| s.len() > 2).unwrap_or(w);
+        PLAYER_WORDS.iter().any(|p| w == *p || w.ends_with(p) && w.len() > p.len() + 3)
+    })
+}
+
+/// A GameObject's name: printable text, spaces and brackets too ("Player(Clone)").
+fn object_name(mem: &File, at: u64) -> Option<String> {
+    if at < 0x10000 {
+        return None;
+    }
+    let mut b = [0u8; 64];
+    let n = mem.read_at(&mut b, at).ok()?;
+    let end = b[..n].iter().position(|&c| c == 0).filter(|&e| e > 0)?;
+    let s = std::str::from_utf8(&b[..end]).ok()?;
+    (s.chars().all(|c| c == ' ' || c.is_ascii_graphic()) && s.chars().any(|c| c.is_ascii_alphabetic())).then(|| s.to_owned())
+}
+
+impl Mono<'_> {
+    /// A field's name as shown: a property's backing field by the property's
+    /// ("<Gold>k__BackingField" -> "Gold").
+    fn shown_name(field: &str) -> String {
+        field.strip_prefix('<').and_then(|f| f.split_once(">k__BackingField")).map_or(field.to_owned(), |(n, _)| n.to_owned())
+    }
+
+    /// The numbers an object of class `k` holds in fields of the game's own classes (not
+    /// MonoBehaviour's and the engine's): label, offset, helper type.
+    fn numbers(&self, k: u64, stop: &[u64]) -> Vec<(String, u64, &'static str)> {
+        let mut chain: Vec<u64> = self.chain(k).into_iter().take_while(|c| !stop.contains(c)).collect();
+        chain.retain(|&c| self.name(c).is_some_and(|(ns, _)| !engine_namespace(&ns)));
+        chain.reverse();
+        let mut out = Vec::new();
+        for c in chain {
+            for (name, off, attrs, t) in self.declared(c) {
+                if attrs & NOT_IN_OBJECT != 0 {
+                    continue;
+                }
+                let kind = match self.kind(t) {
+                    Some(TYPE_I4 | TYPE_U4) => "i32",
+                    Some(TYPE_R4) => "f32",
+                    Some(TYPE_R8) => "f64",
+                    Some(TYPE_I2 | TYPE_U2) => "u16",
+                    _ => continue,
+                };
+                out.push((Self::shown_name(&name), off, kind));
+            }
+        }
+        out
+    }
+
+    /// The native GameObject of a live Unity component and its name.
+    fn game_object(&self, pid: u32, obj: u64, k: u64) -> Option<(u64, String)> {
+        let n = self.native(obj, k).filter(|&n| n != 0)?;
+        let (go, name) = game_object_layout(pid, self, &[n])?;
+        let g = self.word(n + go).filter(|&g| g >= 0x10000)?;
+        Some((g, object_name(self.mem, self.word(g + name)?)?))
+    }
+}
+
+/// Where native Components keep their GameObject and GameObjects their name: the offsets that
+/// fit most of these components (a GameObject's component list holds the component, and its
+/// name is text). Found once per game.
+fn game_object_layout(pid: u32, m: &Mono, natives: &[u64]) -> Option<(u64, u64)> {
+    let mut known = GAME_OBJECT.lock().unwrap();
+    if let Some((p, found)) = *known {
+        if p == pid && (found.is_some() || natives.len() == 1) {
+            return found;
+        }
+    }
+    let w = m.lay.w;
+    let mut votes: Vec<((u64, u64), usize)> = Vec::new();
+    for &n in natives.iter().take(16) {
+        for go in (w..0x80).step_by(w as usize) {
+            let Some(g) = m.word(n + go).filter(|&g| g >= 0x10000 && g != n) else { continue };
+            // Its component list: an array of {type, component} or of components.
+            let lists = (w..0x100).step_by(w as usize).any(|off| {
+                m.word(g + off).filter(|&a| a >= 0x10000).is_some_and(|a| (0..64).any(|i| m.word(a + i * w) == Some(n)))
+            });
+            if !lists {
+                continue;
+            }
+            for name in (w..0x100).step_by(w as usize) {
+                if m.word(g + name).and_then(|p| object_name(m.mem, p)).is_some_and(|n| n.len() >= 2) {
+                    match votes.iter_mut().find(|v| v.0 == (go, name)) {
+                        Some(v) => v.1 += 1,
+                        None => votes.push(((go, name), 1)),
+                    }
+                }
+            }
+        }
+    }
+    // The most votes; of those, the earliest name (ULTRAKILL Prelude: GameObject at +0x30 of
+    // the component, its name at +0x60; later words point to other objects' names).
+    votes.sort_by_key(|v| (std::cmp::Reverse(v.1), v.0 .1, v.0 .0));
+    let found = votes.first().filter(|v| natives.len() < 3 || v.1 * 2 >= natives.len().min(16)).map(|v| v.0);
+    *known = Some((pid, found));
+    found
+}
+
+/// The player's numbers, by object (see above); None when the game doesn't run Unity's C#.
+pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
+    let runtime = runtime(heap.pid)?;
+    let pid = heap.pid;
+    let unity = |class: &str| MonoPath { runtime, namespace: "UnityEngine".into(), class: class.into(), via: Vec::new(), field: String::new() };
+    // The class layout is learned from a class's fields: MonoBehaviour declares none,
+    // UnityEngine.Object has m_CachedPtr.
+    if known_layout(pid).is_none() {
+        classes_named(heap, &unity("Object"));
+    }
+    let base = classes_named(heap, &unity("MonoBehaviour"));
+    let lay = known_layout(pid)?;
+    let m = Mono::new(heap, lay);
+    let parent = lay.parent?;
+    // The classes below MonoBehaviour, a level a pass: a class points to its parent.
+    let (mut all, mut level) = (Vec::new(), base.clone());
+    for _ in 0..MAX_DEPTH {
+        if level.is_empty() {
+            break;
+        }
+        let mut next: Vec<u64> = heap
+            .referrers(&level)
+            .into_iter()
+            .filter_map(|at| at.checked_sub(parent))
+            .filter(|&k| m.is_class(k) && m.parent(k).is_some_and(|p| level.contains(&p)))
+            .collect();
+        next.sort_unstable();
+        next.dedup();
+        next.retain(|k| !all.contains(k));
+        all.extend(&next);
+        level = next;
+    }
+    let mut games: Vec<u64> = all.into_iter().filter(|&k| m.name(k).is_some_and(|(ns, _)| !engine_namespace(&ns))).collect();
+    games.sort_unstable();
+    // Their objects: Mono's point to a vtable, whose first word is the class; IL2CPP's to the class.
+    let firsts = match runtime {
+        Runtime::Mono => heap.referrers(&games).into_iter().filter(|&vt| m.word(vt).is_some_and(|k| games.binary_search(&k).is_ok()) && !m.is_class(vt)).collect(),
+        Runtime::Il2cpp => games.clone(),
+    };
+    let mut by_class: Vec<(u64, Vec<u64>)> = Vec::new();
+    for obj in heap.referrers(&firsts) {
+        let Some(k) = m.class_of(obj).filter(|k| games.binary_search(k).is_ok() && m.live(obj, *k)) else { continue };
+        match by_class.iter_mut().find(|(c, _)| *c == k) {
+            Some((_, objs)) => objs.push(obj),
+            None => by_class.push((k, vec![obj])),
+        }
+    }
+    by_class.retain(|(_, objs)| {
+        let mut o = objs.clone();
+        o.sort_unstable();
+        o.dedup();
+        o.len() <= MAX_PLACES
+    });
+    // The newest object of each class (a prefab, loaded with the level, comes last).
+    let shown: Vec<(u64, u64)> = by_class
+        .into_iter()
+        .map(|(k, mut objs)| {
+            objs.sort_by_key(|&o| std::cmp::Reverse(m.age(o, k)));
+            (k, objs[0])
+        })
+        .collect();
+    let all_natives: Vec<u64> = shown.iter().filter_map(|&(k, o)| m.native(o, k).filter(|&n| n != 0)).collect();
+    game_object_layout(pid, &m, &all_natives);
+    // (class, object, GameObject, its name)
+    let mut items: Vec<(u64, u64, Option<(u64, String)>)> = shown.iter().map(|&(k, o)| (k, o, m.game_object(pid, o, k))).collect();
+    // On a GameObject named like the player's ("Player 1": ULTRAKILL's NewMovement), or of a
+    // class named so (its GameObject's other components aren't: StatsManager's are options).
+    let main = |k: u64, g: &Option<(u64, String)>| g.as_ref().is_some_and(|(_, n)| player_like(n)) || m.name(k).is_some_and(|(_, n)| player_like(&n));
+    // The player's GameObject first, then the rest of theirs, then the game's.
+    items.sort_by_key(|(k, _, g)| {
+        let (_, class) = m.name(*k).unwrap_or_default();
+        let player = g.as_ref().is_some_and(|(_, n)| player_like(n));
+        (!main(*k, g), !player, g.as_ref().map(|(_, n)| n.clone()).unwrap_or_default(), class)
+    });
+    // At most `ue::MAX_LISTED` numbers (Creeper World 4 has ~8000 in a mission): the game's
+    // are cut, never the player's (they come first).
+    let mut total = 0;
+    let list = items
+        .into_iter()
+        .filter_map(|(k, obj, g)| {
+            let (ns, class) = m.name(k)?;
+            let fields: Vec<crate::ue::Listed> =
+                m.numbers(k, &base).into_iter().map(|(label, off, kind)| crate::ue::Listed { label, addr: obj + off, kind }).collect();
+            let more = !main(k, &g);
+            if fields.is_empty() || more && total + fields.len() > crate::ue::MAX_LISTED {
+                return None;
+            }
+            total += fields.len();
+            Some(crate::ue::ListedObject {
+                more,
+                role: if g.is_some() { "part" } else { "game" },
+                owner: g.map(|(_, n)| n),
+                class: if ns.is_empty() { class.clone() } else { format!("{ns}.{class}") },
+                name: class,
+                fields,
+            })
+        })
+        .collect();
+    Some(list)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_names() {
+        for yes in ["PlayerPosInfo", "Player 1", "GunControl", "Nailgun", "player_health", "WeaponCharges", "CoinPurse", "HeroStats"] {
+            assert!(player_like(yes), "{yes}");
+        }
+        for no in ["BloodsplatterManager", "MusicManager", "Envirokills", "Canvas", "Shogun", "StylePlayerless"] {
+            assert!(!player_like(no), "{no}");
+        }
+    }
 
     #[test]
     fn text_round_trip() {

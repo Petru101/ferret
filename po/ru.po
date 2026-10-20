@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 16:34+0100\n"
+"POT-Creation-Date: 2026-10-20 04:12+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Russian\n"
 "Language: ru\n"
@@ -571,11 +571,11 @@ msgstr ""
 "снова, когда будете играть."
 
 #: src/core.rs:3689
+#
 msgid ""
-"Ferret can list a game's numbers by name only in Unreal Engine games so far."
-msgstr ""
-"Пока Ferret умеет показывать числа игры по именам только в играх на Unreal "
-"Engine."
+"Ferret can list a game's numbers by name only in Unreal Engine and Unity "
+"games so far."
+msgstr "Пока Ferret умеет показывать числа игры по именам только в играх на Unreal Engine и Unity."
 
 #: src/core.rs:3747
 #, rust-format
@@ -2653,7 +2653,9 @@ msgstr "В {game} есть античит"
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
-msgstr "Некоторые античиты ищут программы для читов на всём компьютере. Закройте Ferret, пока играете."
+msgstr ""
+"Некоторые античиты ищут программы для читов на всём компьютере. Закройте "
+"Ferret, пока играете."
 
 #: src/gui/mod.rs:616
 #, rust-format
@@ -2667,7 +2669,11 @@ msgid ""
 "your computer, even ones that don't touch the game, and may ban for them. "
 "Ferret won't open this game, but it's safest to quit Ferret while you play "
 "it."
-msgstr "{game} использует {anticheat}. Некоторые античиты ищут программы для читов на всём компьютере, даже те, что не трогают игру, и могут за них банить. Ferret не откроет эту игру, но безопаснее всего закрыть Ferret, пока вы в неё играете."
+msgstr ""
+"{game} использует {anticheat}. Некоторые античиты ищут программы для читов "
+"на всём компьютере, даже те, что не трогают игру, и могут за них банить. "
+"Ferret не откроет эту игру, но безопаснее всего закрыть Ferret, пока вы в "
+"неё играете."
 
 #: src/gui/mod.rs:623
 msgid "Keep Ferret Open"

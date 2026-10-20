@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 16:34+0100\n"
+"POT-Creation-Date: 2026-10-20 04:12+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -520,9 +520,11 @@ msgid ""
 msgstr "你的角色现在不在游戏中（菜单或加载画面？）。开始游戏后再试一次。"
 
 #: src/core.rs:3689
+#
 msgid ""
-"Ferret can list a game's numbers by name only in Unreal Engine games so far."
-msgstr "目前 Ferret 只能在虚幻引擎（Unreal Engine）游戏中按名称列出数字。"
+"Ferret can list a game's numbers by name only in Unreal Engine and Unity "
+"games so far."
+msgstr "目前 Ferret 只能在虚幻引擎（Unreal Engine）和 Unity 游戏中按名称列出数字。"
 
 #: src/core.rs:3747
 #, rust-format
@@ -2383,7 +2385,10 @@ msgid ""
 "your computer, even ones that don't touch the game, and may ban for them. "
 "Ferret won't open this game, but it's safest to quit Ferret while you play "
 "it."
-msgstr "{game} 使用 {anticheat}。有些反作弊会在整台电脑上查找作弊工具，即使是不碰游戏的工具，并可能因此封号。Ferret 不会打开这个游戏，但最安全的做法是在玩它时退出 Ferret。"
+msgstr ""
+"{game} 使用 {anticheat}。有些反作弊会在整台电脑上查找作弊工具，即使是不碰游戏"
+"的工具，并可能因此封号。Ferret 不会打开这个游戏，但最安全的做法是在玩它时退"
+"出 Ferret。"
 
 #: src/gui/mod.rs:623
 msgid "Keep Ferret Open"

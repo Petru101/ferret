@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 16:34+0100\n"
+"POT-Creation-Date: 2026-10-20 04:12+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Spanish\n"
 "Language: es\n"
@@ -569,11 +569,11 @@ msgstr ""
 "carga?). Vuelve a intentarlo cuando estés jugando."
 
 #: src/core.rs:3689
+#
 msgid ""
-"Ferret can list a game's numbers by name only in Unreal Engine games so far."
-msgstr ""
-"Por ahora, Ferret solo puede listar por nombre los números de juegos de "
-"Unreal Engine."
+"Ferret can list a game's numbers by name only in Unreal Engine and Unity "
+"games so far."
+msgstr "Por ahora, Ferret solo puede listar por nombre los números de juegos de Unreal Engine y Unity."
 
 #: src/core.rs:3747
 #, rust-format
@@ -2618,7 +2618,9 @@ msgstr "{game} tiene anti-trampas"
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
-msgstr "Algunos anti-trampas buscan herramientas de trampas en todo el ordenador. Cierra Ferret mientras juegas."
+msgstr ""
+"Algunos anti-trampas buscan herramientas de trampas en todo el ordenador. "
+"Cierra Ferret mientras juegas."
 
 #: src/gui/mod.rs:616
 #, rust-format
@@ -2632,7 +2634,11 @@ msgid ""
 "your computer, even ones that don't touch the game, and may ban for them. "
 "Ferret won't open this game, but it's safest to quit Ferret while you play "
 "it."
-msgstr "{game} usa {anticheat}. Algunos anti-trampas buscan herramientas de trampas en todo el ordenador, incluso las que no tocan el juego, y pueden banear por ellas. Ferret no abrirá este juego, pero lo más seguro es cerrar Ferret mientras juegas."
+msgstr ""
+"{game} usa {anticheat}. Algunos anti-trampas buscan herramientas de trampas "
+"en todo el ordenador, incluso las que no tocan el juego, y pueden banear por "
+"ellas. Ferret no abrirá este juego, pero lo más seguro es cerrar Ferret "
+"mientras juegas."
 
 #: src/gui/mod.rs:623
 msgid "Keep Ferret Open"

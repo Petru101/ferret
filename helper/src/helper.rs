@@ -3706,18 +3706,22 @@ fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 /// player: the player's numbers by name (`Ue::player`, the Browse tab): an "object
 /// <role>\t<owner or ->\t<class>\t<main|more>\t<name>" line (more: shown on asking for everything), then its "field 0x<addr>:<type> = <value>\t<label>"
 /// lines, for each object; "none character" while the player has no character (a menu),
-/// "none unreal <why>" for games whose objects Ferret can't read so.
+/// "none engine <why>" for games whose objects Ferret can't read so (not Unreal or Unity).
 fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let t = Instant::now();
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
-    let ue = match unreal(s.pid, mem) {
-        Ok(ue) => ue,
-        Err(e) => return writeln!(out, "none unreal {e}"),
-    };
-    let Ok(list) = ue.player(mem) else {
-        return writeln!(out, "none character");
+    let list = match unreal(s.pid, mem) {
+        Ok(ue) => match ue.player(mem) {
+            Ok(list) => list,
+            Err(_) => return writeln!(out, "none character"),
+        },
+        // Unity: every live object of the game's own classes, the player's first.
+        Err(e) => match mono::player(&Heap::new(s.pid, mem, s.width)?) {
+            Some(list) => list,
+            None => return writeln!(out, "none engine {e}"),
+        },
     };
     let mut n = 0;
     for o in &list {
@@ -3729,6 +3733,19 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
         }
     }
     writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
+}
+
+/// browsable: "browsable unreal|unity" when `player` can list the game's numbers, else "browsable no".
+fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let engine = match unreal(s.pid, mem) {
+        Ok(_) => "unreal",
+        Err(_) if mono::runs_csharp(s.pid) => "unity",
+        Err(_) => "no",
+    };
+    writeln!(out, "browsable {engine}")
 }
 
 /// gdtree: a Godot game's scene tree, a node a line with its script (after a script path was
@@ -3849,6 +3866,7 @@ pub fn run(as_user: Option<&str>) {
             "named" => cmd_named(&mut out, &mut session, arg),
             "ue" => cmd_ue(&mut out, &session, arg),
             "player" => cmd_player(&mut out, &session),
+            "browsable" => cmd_browsable(&mut out, &session),
             "gdtree" => cmd_gdtree(&mut out, &session),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),

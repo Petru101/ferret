@@ -3668,9 +3668,9 @@ impl Core {
     }
 
     /// Whether the Browse tab can list this game's numbers by name (an Unreal game whose objects
-    /// Ferret reads).
+    /// Ferret reads, or a Unity game).
     pub fn browsable(&mut self) -> bool {
-        self.game.is_some() && first_error(&self.helper.call("ue")).is_none()
+        self.game.is_some() && self.helper.call("browsable").iter().any(|l| l.starts_with("browsable ") && l != "browsable no")
     }
 
     /// The player's numbers by the names the game gives them, by object (the Browse tab); why
@@ -3684,9 +3684,9 @@ impl Core {
         if reply.iter().any(|l| l.starts_with("none character")) {
             return Err(tr!("Your character isn't in the game right now (a menu or a loading screen?). Try again once you're playing."));
         }
-        if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none unreal ")) {
+        if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine and Unity games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {

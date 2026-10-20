@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 16:34+0100\n"
+"POT-Creation-Date: 2026-10-20 04:12+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: German\n"
 "Language: de\n"
@@ -576,11 +576,11 @@ msgstr ""
 "Versuch es noch mal, sobald du spielst."
 
 #: src/core.rs:3689
+#
 msgid ""
-"Ferret can list a game's numbers by name only in Unreal Engine games so far."
-msgstr ""
-"Ferret kann die Zahlen eines Spiels bisher nur in Unreal-Engine-Spielen nach "
-"Namen auflisten."
+"Ferret can list a game's numbers by name only in Unreal Engine and Unity "
+"games so far."
+msgstr "Ferret kann die Zahlen eines Spiels bisher nur in Unreal-Engine- und Unity-Spielen nach Namen auflisten."
 
 #: src/core.rs:3747
 #, rust-format
@@ -2638,7 +2638,9 @@ msgstr "{game} hat Anti-Cheat"
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
-msgstr "Manche Anti-Cheat-Programme suchen auf dem ganzen Computer nach Cheat-Tools. Beende Ferret, während du es spielst."
+msgstr ""
+"Manche Anti-Cheat-Programme suchen auf dem ganzen Computer nach Cheat-Tools. "
+"Beende Ferret, während du es spielst."
 
 #: src/gui/mod.rs:616
 #, rust-format
@@ -2652,7 +2654,11 @@ msgid ""
 "your computer, even ones that don't touch the game, and may ban for them. "
 "Ferret won't open this game, but it's safest to quit Ferret while you play "
 "it."
-msgstr "{game} nutzt {anticheat}. Manche Anti-Cheat-Programme suchen auf dem ganzen Computer nach Cheat-Tools, auch nach solchen, die das Spiel nicht berühren, und sperren dafür womöglich. Ferret öffnet dieses Spiel nicht, aber am sichersten ist es, Ferret zu beenden, während du es spielst."
+msgstr ""
+"{game} nutzt {anticheat}. Manche Anti-Cheat-Programme suchen auf dem ganzen "
+"Computer nach Cheat-Tools, auch nach solchen, die das Spiel nicht berühren, "
+"und sperren dafür womöglich. Ferret öffnet dieses Spiel nicht, aber am "
+"sichersten ist es, Ferret zu beenden, während du es spielst."
 
 #: src/gui/mod.rs:623
 msgid "Keep Ferret Open"

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 16:34+0100\n"
+"POT-Creation-Date: 2026-10-20 04:12+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Brazilian Portuguese\n"
 "Language: pt_BR\n"
@@ -565,11 +565,11 @@ msgstr ""
 "carregamento?). Tente de novo quando estiver jogando."
 
 #: src/core.rs:3689
+#
 msgid ""
-"Ferret can list a game's numbers by name only in Unreal Engine games so far."
-msgstr ""
-"Por enquanto, o Ferret só consegue listar os números de um jogo por nome em "
-"jogos da Unreal Engine."
+"Ferret can list a game's numbers by name only in Unreal Engine and Unity "
+"games so far."
+msgstr "Por enquanto, o Ferret só consegue listar os números de um jogo por nome em jogos da Unreal Engine e da Unity."
 
 #: src/core.rs:3747
 #, rust-format
@@ -2604,7 +2604,9 @@ msgstr "{game} tem anti-cheat"
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
-msgstr "Alguns anti-cheats procuram ferramentas de trapaça no computador inteiro. Feche o Ferret enquanto joga."
+msgstr ""
+"Alguns anti-cheats procuram ferramentas de trapaça no computador inteiro. "
+"Feche o Ferret enquanto joga."
 
 #: src/gui/mod.rs:616
 #, rust-format
@@ -2618,7 +2620,11 @@ msgid ""
 "your computer, even ones that don't touch the game, and may ban for them. "
 "Ferret won't open this game, but it's safest to quit Ferret while you play "
 "it."
-msgstr "{game} usa {anticheat}. Alguns anti-cheats procuram ferramentas de trapaça no computador inteiro, mesmo as que não mexem no jogo, e podem banir por isso. O Ferret não vai abrir este jogo, mas o mais seguro é fechar o Ferret enquanto você joga."
+msgstr ""
+"{game} usa {anticheat}. Alguns anti-cheats procuram ferramentas de trapaça "
+"no computador inteiro, mesmo as que não mexem no jogo, e podem banir por "
+"isso. O Ferret não vai abrir este jogo, mas o mais seguro é fechar o Ferret "
+"enquanto você joga."
 
 #: src/gui/mod.rs:623
 msgid "Keep Ferret Open"

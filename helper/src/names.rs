@@ -139,7 +139,8 @@ pub struct Heap<'a> {
     mem: &'a File,
     width: usize,
     rw: Vec<(u64, u64)>,
-    /// Readable, non-writable mappings (code and constant data), sorted.
+    /// The program's and libraries' own mappings (code, constant data, and their data
+    /// sections), and other non-writable ones: where C++ vtables are. Sorted.
     ro: Vec<(u64, u64)>,
 }
 
@@ -148,17 +149,24 @@ impl<'a> Heap<'a> {
         let regions = maps(pid)?;
         let fits = |r: &&crate::helper::Region| width == 8 || r.end <= 1 << 32;
         let rw = regions.iter().filter(|r| scannable(r)).filter(fits).map(|r| (r.start, r.end)).collect();
+        // A file's own data section counts: older Unity builds (ULTRAKILL Prelude, non-PIE, no
+        // RELRO) keep their C++ vtables in the program's writable data, and live objects there
+        // were all taken for destroyed ones (2026-10-20).
+        let image = |r: &crate::helper::Region| {
+            r.path.starts_with('/') && !r.path.starts_with("/dev/") && !r.path.starts_with("/memfd:") && !r.path.ends_with("(deleted)")
+        };
         let ro = regions
             .iter()
-            .filter(|r| r.perms.starts_with('r') && !r.perms.contains('w'))
+            .filter(|r| r.perms.starts_with('r') && (!r.perms.contains('w') || image(r)))
             .filter(fits)
             .map(|r| (r.start, r.end))
             .collect();
         Ok(Heap { pid, mem, width, rw, ro })
     }
 
-    /// Whether `v` is in readable memory the game can't write: code or constant data, where
-    /// C++ vtables are.
+    /// Whether `v` is in the game's program or a library (code, constant data or the file's
+    /// own data section) or other memory the game can't write: where C++ vtables are, not the
+    /// heap.
     pub fn read_only(&self, v: u64) -> bool {
         let i = self.ro.partition_point(|r| r.0 <= v);
         i > 0 && v < self.ro[i - 1].1

@@ -1199,7 +1199,7 @@ const LEFT_OUT: &[&str] =
 const MACHINERY: &[&str] =
     &["GameplayAbility", "AbilityTask", "GameplayCueNotify_Actor", "GameplayCueNotify_Static", "GameplayEffect", "Subsystem", "GameUserSettings"];
 const MAX_GROUPS: usize = 300;
-const MAX_LISTED: usize = 5000;
+pub const MAX_LISTED: usize = 5000;
 /// Elements of one array or map listed at most.
 const LIST_ELEMENTS: usize = 64;
 

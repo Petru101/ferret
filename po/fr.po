@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 16:34+0100\n"
+"POT-Creation-Date: 2026-10-20 04:12+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -582,11 +582,11 @@ msgstr ""
 "de chargement ?). Réessayez une fois en jeu."
 
 #: src/core.rs:3689
+#
 msgid ""
-"Ferret can list a game's numbers by name only in Unreal Engine games so far."
-msgstr ""
-"Pour l'instant, Ferret ne peut lister les nombres d'un jeu par leur nom que "
-"dans les jeux Unreal Engine."
+"Ferret can list a game's numbers by name only in Unreal Engine and Unity "
+"games so far."
+msgstr "Pour l'instant, Ferret ne peut lister les nombres d'un jeu par leur nom que dans les jeux Unreal Engine et Unity."
 
 #: src/core.rs:3747
 #, rust-format
@@ -2656,7 +2656,9 @@ msgstr "{game} a un anti-triche"
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
-msgstr "Certains anti-triche cherchent des outils de triche sur tout l'ordinateur. Quittez Ferret pendant que vous y jouez."
+msgstr ""
+"Certains anti-triche cherchent des outils de triche sur tout l'ordinateur. "
+"Quittez Ferret pendant que vous y jouez."
 
 #: src/gui/mod.rs:616
 #, rust-format
@@ -2670,7 +2672,11 @@ msgid ""
 "your computer, even ones that don't touch the game, and may ban for them. "
 "Ferret won't open this game, but it's safest to quit Ferret while you play "
 "it."
-msgstr "{game} utilise {anticheat}. Certains anti-triche cherchent des outils de triche sur tout l'ordinateur, même ceux qui ne touchent pas au jeu, et peuvent bannir pour cela. Ferret n'ouvrira pas ce jeu, mais le plus sûr est de quitter Ferret pendant que vous y jouez."
+msgstr ""
+"{game} utilise {anticheat}. Certains anti-triche cherchent des outils de "
+"triche sur tout l'ordinateur, même ceux qui ne touchent pas au jeu, et "
+"peuvent bannir pour cela. Ferret n'ouvrira pas ce jeu, mais le plus sûr est "
+"de quitter Ferret pendant que vous y jouez."
 
 #: src/gui/mod.rs:623
 msgid "Keep Ferret Open"
@@ -3063,7 +3069,8 @@ msgstr[1] ""
 #: src/gui/share.rs:210
 #, rust-format
 msgid "You have a value called {theirs} already: the imported one is {now}."
-msgstr "Vous avez déjà une valeur nommée {theirs} : celle importée s'appelle {now}."
+msgstr ""
+"Vous avez déjà une valeur nommée {theirs} : celle importée s'appelle {now}."
 
 #: src/gui/share.rs:213
 msgid "Not imported:"
