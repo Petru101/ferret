@@ -21,6 +21,7 @@ use crate::launchers;
 use crate::mono::{self, MonoPath};
 use crate::js::{self, JsPath};
 use crate::gml::{self, GmlPath};
+use crate::lua::{self, LuaPath};
 use crate::trace;
 
 pub struct Region {
@@ -308,6 +309,12 @@ fn scrambler(pid: u32, regions: &[Region]) -> Option<&'static str> {
 /// The program a process runs (`program_path`).
 fn program_of(pid: u32) -> Option<PathBuf> {
     maps(pid).ok().and_then(|m| program_path(pid, &m))
+}
+
+/// Lua games (lua.rs): a Lua library mapped (LÖVE's LuaJIT), or Defold's engine.
+fn is_lua(pid: u32) -> bool {
+    let Ok(regions) = maps(pid) else { return false };
+    lua::runs_lua(pid, &regions, program_path(pid, &regions).as_deref())
 }
 
 /// RPG Maker MV games (js.rs): NW.js running `www/js/rpg_core.js` from next to the program.
@@ -620,10 +627,14 @@ pub(crate) enum Kind {
     /// holds now (a double, an int32 or an int64: the game turns one into another as it likes),
     /// written as a double. Never searched for: values saved by a GameMaker path get it.
     Gm,
+    /// A Lua value (lua.rs): 8 bytes, a double while it holds a number; never written once it
+    /// holds something else (a table that grew moved its entries: the old place is freed).
+    /// Values saved by a Lua path get it.
+    Lua,
 }
 
 impl Kind {
-    /// The kinds searches look for (all but `Gm`).
+    /// The kinds searches look for (all but `Gm` and `Lua`).
     const ALL: [Kind; 5] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor, Kind::U16];
 
     fn name(self) -> &'static str {
@@ -634,18 +645,19 @@ impl Kind {
             Kind::Xor => "xor",
             Kind::U16 => "u16",
             Kind::Gm => "gm",
+            Kind::Lua => "lua",
         }
     }
 
     fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::Gm]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
         match self {
             Kind::U16 => 2,
             Kind::I32 | Kind::F32 => 4,
-            Kind::F64 | Kind::Xor => 8,
+            Kind::F64 | Kind::Xor | Kind::Lua => 8,
             Kind::Gm => 16,
         }
     }
@@ -660,6 +672,7 @@ impl Kind {
                 (i32::from_le_bytes(b[..4].try_into().unwrap()) ^ i32::from_le_bytes(b[4..8].try_into().unwrap())) as f64
             }
             Kind::Gm => gml::rvalue_number(b).unwrap_or(f64::NAN),
+            Kind::Lua => lua::number(b).unwrap_or(f64::NAN),
         }
     }
 
@@ -671,7 +684,7 @@ impl Kind {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
             Kind::I32 | Kind::Xor | Kind::U16 => lo <= n.scaled && n.scaled <= hi,
-            Kind::F32 | Kind::F64 | Kind::Gm => lo < n.value + n.step && hi > n.value - n.step,
+            Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
 
@@ -708,7 +721,7 @@ impl Shown {
 fn read_value(mem: &File, addr: u64, kind: Kind) -> Option<f64> {
     let mut b = [0u8; 16];
     mem.read_exact_at(&mut b[..kind.size()], addr).ok()?;
-    Some(kind.decode(&b)).filter(|v| kind != Kind::Gm || !v.is_nan())
+    Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua) || !v.is_nan())
 }
 
 fn write_value(mem: &File, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
@@ -731,6 +744,14 @@ fn write_value(mem: &File, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
             }
             mem.write_all_at(&v.to_le_bytes(), addr)?;
             mem.write_all_at(&0u32.to_le_bytes(), addr + 12)
+        }
+        Kind::Lua => {
+            let mut b = [0u8; 8];
+            mem.read_exact_at(&mut b, addr)?;
+            if lua::number(&b).is_none() {
+                return Err(io::Error::other("not a Lua number now"));
+            }
+            mem.write_all_at(&v.to_le_bytes(), addr)
         }
     }
 }
@@ -815,6 +836,7 @@ enum Named {
     Mono(MonoPath),
     Js(JsPath),
     Gml(GmlPath),
+    Lua(LuaPath),
 }
 
 impl Named {
@@ -834,6 +856,9 @@ impl Named {
         if text.starts_with("gml:") {
             return GmlPath::parse(text).map(Named::Gml);
         }
+        if text.starts_with("lua:") {
+            return LuaPath::parse(text).map(Named::Lua);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -841,7 +866,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:")
     }
 
     /// Where it leads from the roots found before (no search).
@@ -853,6 +878,7 @@ impl Named {
             Named::Mono(p) => mono::walk(heap, roots, p),
             Named::Js(p) => js::walk(heap, roots, p),
             Named::Gml(p) => gml::walk(heap, program_of(heap.pid).as_deref(), roots, p),
+            Named::Lua(p) => lua::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
@@ -866,6 +892,7 @@ impl Named {
             Named::Mono(p) => mono::find_roots(heap, p),
             Named::Js(p) => js::find_roots(heap, p),
             Named::Gml(p) => gml::find_roots(heap, program_of(heap.pid).as_deref(), p),
+            Named::Lua(p) => lua::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
@@ -2020,7 +2047,7 @@ impl MemScan<'_> {
                 // that has moved on by up to 1 since.
                 let hit = match kind {
                     Kind::I32 | Kind::Xor | Kind::U16 => value == n.scaled,
-                    Kind::F32 | Kind::F64 | Kind::Gm => kind.fits(value - n.step, value + n.step, n),
+                    Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
                     self.hit(r, buf, len, addr, off, kind, value);
@@ -2323,7 +2350,7 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                         let step = match kind {
                             Kind::U16 => 2,
                             Kind::I32 | Kind::F32 | Kind::Xor => 4,
-                            Kind::F64 | Kind::Gm => 8,
+                            Kind::F64 | Kind::Gm | Kind::Lua => 8,
                         };
                         for o in (w..w + 8).step_by(step) {
                             let size = kind.size();
@@ -3699,6 +3726,13 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
             return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
         }
     }
+    // A number in a Lua game's tables, by its path from the globals table.
+    if is_lua(s.pid) {
+        if let Some((p, leads)) = lua::discover(&heap, target) {
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        }
+    }
     if only_unreal {
         return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
     }
@@ -3839,6 +3873,12 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
                     None => writeln!(out, "none character"),
                 };
             }
+            if is_lua(s.pid) && !mono::runs_csharp(s.pid) && !is_godot(s.pid) {
+                return match lua::player(&heap) {
+                    Some(list) => print_player(out, s, &list, t),
+                    None => writeln!(out, "none engine Lua globals not found (only LuaJIT games are read)"),
+                };
+            }
             let found = match is_godot(s.pid) {
                 true => gdscript::player(&heap),
                 false => mono::player(&heap),
@@ -3865,7 +3905,7 @@ fn print_player(out: &mut impl Write, s: &Session, list: &[ue::ListedObject], t:
     writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
 }
 
-/// browsable: "browsable unreal|unity|godot|rpgmaker" when `player` can list the game's numbers, else "browsable no".
+/// browsable: "browsable unreal|unity|godot|rpgmaker|gamemaker|lua" when `player` can list the game's numbers, else "browsable no".
 fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -3876,9 +3916,24 @@ fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
         Err(_) if is_rpgmaker(s.pid) => "rpgmaker",
         Err(_) if s.doubles_only && gml::data_file(s.pid, program_of(s.pid).as_deref()).is_some() => "gamemaker",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
+        Err(_) if is_lua(s.pid) => "lua",
         Err(_) => "no",
     };
     writeln!(out, "browsable {engine}")
+}
+
+/// luadump [path]: a Lua game's layout and globals table, or the table (or a function's
+/// upvalues) at a path from it (`lua::diagnose`).
+fn cmd_luadump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let t = Instant::now();
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    for l in lua::diagnose(&heap, arg.trim()) {
+        writeln!(out, "{l}")?;
+    }
+    writeln!(out, "in {} ms", t.elapsed().as_millis())
 }
 
 /// gml: what a GameMaker game's variable maps look like (`gml::diagnose`).
@@ -4015,6 +4070,7 @@ pub fn run(as_user: Option<&str>) {
             "browsable" => cmd_browsable(&mut out, &session),
             "gdtree" => cmd_gdtree(&mut out, &session),
             "gml" => cmd_gml(&mut out, &session),
+            "luadump" => cmd_luadump(&mut out, &session, arg),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),

@@ -242,9 +242,10 @@ impl Helper {
 }
 
 /// A named path through the engine's own names (Unreal objects, Unity classes, Godot scripts and
-/// dictionaries, RPG Maker's globals, GameMaker's variables): nothing better to upgrade it to.
+/// dictionaries, RPG Maker's globals, GameMaker's variables, Lua tables): nothing better to
+/// upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "{"].iter().any(|p| text.starts_with(p))
 }
 
 /// A name the helper lists in Ferret's words rather than the game's ("@gold": RPG Maker's
@@ -280,7 +281,7 @@ fn backed_by_code(text: &str) -> bool {
 /// float are mostly huge or tiny (a pattern that matches in the wrong place after an update).
 fn plausible(kind: Kind, v: f64) -> bool {
     match kind {
-        Kind::F32 | Kind::F64 | Kind::Gm => v == 0.0 || (1e-9..1e15).contains(&v.abs()),
+        Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua => v == 0.0 || (1e-9..1e15).contains(&v.abs()),
         _ => true,
     }
 }
@@ -468,6 +469,9 @@ pub enum Kind {
     /// A GameMaker value (the helper's gml.rs): a double or an int32 as the game holds it now,
     /// written as a double. Values saved by a GameMaker path get it; never searched for.
     Gm,
+    /// A Lua value (the helper's lua.rs): a double, written only while it still holds a
+    /// number. Values saved by a Lua path get it; never searched for.
+    Lua,
 }
 
 impl Kind {
@@ -482,11 +486,12 @@ impl Kind {
             Kind::Xor => "xor",
             Kind::U16 => "u16",
             Kind::Gm => "gm",
+            Kind::Lua => "lua",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::Gm]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua]).find(|k| k.name() == s)
     }
 
     fn with_article(self) -> String {
@@ -507,6 +512,7 @@ impl Kind {
             Kind::Xor => "encoded whole number",
             Kind::U16 => "2-byte whole number",
             Kind::Gm => "GameMaker number",
+            Kind::Lua => "Lua number",
         }
     }
 }
@@ -1749,9 +1755,11 @@ impl Core {
             return Err(tr!("Ferret can't find this number again by its name, so it isn't saved. Find it with a search instead."));
         }
         // A GameMaker variable turns from a double into an int32 and back: saved as the
-        // helper's GameMaker value, read as whichever it holds.
+        // helper's GameMaker value, read as whichever it holds. A Lua value is written only
+        // while it holds a number (a table that grew left the old place freed).
         let loc = match &named {
             Some((text, _, _)) if text.starts_with("gml:") => Loc { kind: Kind::Gm, ..loc },
+            Some((text, _, _)) if text.starts_with("lua:") => Loc { kind: Kind::Lua, ..loc },
             _ => loc,
         };
         let reply = match &named {
@@ -3707,7 +3715,7 @@ impl Core {
     }
 
     /// Whether the Browse tab can list this game's numbers by name (an Unreal game whose objects
-    /// Ferret reads, or a Unity or Godot game).
+    /// Ferret reads, a Unity, Godot, RPG Maker MV, GameMaker or Lua game).
     pub fn browsable(&mut self) -> bool {
         self.game.is_some() && self.helper.call("browsable").iter().any(|l| l.starts_with("browsable ") && l != "browsable no")
     }
@@ -3725,7 +3733,7 @@ impl Core {
         }
         if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker and RPG Maker MV games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV and Lua (LuaJIT) games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {
