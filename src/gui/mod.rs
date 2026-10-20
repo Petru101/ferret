@@ -1476,6 +1476,7 @@ fn kind_text(kind: crate::core::Kind) -> String {
         Kind::F64 => tr!("double"),
         Kind::Xor => tr!("encoded whole number"),
         Kind::U16 => tr!("2-byte whole number"),
+        Kind::Gm => tr!("GameMaker number"),
     }
 }
 

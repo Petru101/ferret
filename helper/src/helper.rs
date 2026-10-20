@@ -20,6 +20,7 @@ use crate::pointers::{self, Module, Pointers, PtrPath};
 use crate::launchers;
 use crate::mono::{self, MonoPath};
 use crate::js::{self, JsPath};
+use crate::gml::{self, GmlPath};
 use crate::trace;
 
 pub struct Region {
@@ -302,6 +303,11 @@ fn scrambler(pid: u32, regions: &[Region]) -> Option<&'static str> {
     let needle = b"CodeStage.AntiCheat.ObscuredTypes";
     let uses = |p: PathBuf| fs::read(p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle));
     managed.chain([metadata]).any(uses).then_some("CodeStage Anti-Cheat Toolkit")
+}
+
+/// The program a process runs (`program_path`).
+fn program_of(pid: u32) -> Option<PathBuf> {
+    maps(pid).ok().and_then(|m| program_path(pid, &m))
 }
 
 /// RPG Maker MV games (js.rs): NW.js running `www/js/rpg_core.js` from next to the program.
@@ -610,9 +616,14 @@ pub(crate) enum Kind {
     /// A 2-byte whole number, unsigned: Frostbite keeps ammo so (Andromeda: loaded and reserve
     /// side by side, read with movzx); read as 4 bytes, the two together never match.
     U16,
+    /// A GameMaker value (gml.rs): 16 bytes {value, flags, kind}, read as the kind of number it
+    /// holds now (a double, an int32 or an int64: the game turns one into another as it likes),
+    /// written as a double. Never searched for: values saved by a GameMaker path get it.
+    Gm,
 }
 
 impl Kind {
+    /// The kinds searches look for (all but `Gm`).
     const ALL: [Kind; 5] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor, Kind::U16];
 
     fn name(self) -> &'static str {
@@ -622,11 +633,12 @@ impl Kind {
             Kind::F64 => "f64",
             Kind::Xor => "xor",
             Kind::U16 => "u16",
+            Kind::Gm => "gm",
         }
     }
 
     fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
@@ -634,6 +646,7 @@ impl Kind {
             Kind::U16 => 2,
             Kind::I32 | Kind::F32 => 4,
             Kind::F64 | Kind::Xor => 8,
+            Kind::Gm => 16,
         }
     }
 
@@ -646,6 +659,7 @@ impl Kind {
             Kind::Xor => {
                 (i32::from_le_bytes(b[..4].try_into().unwrap()) ^ i32::from_le_bytes(b[4..8].try_into().unwrap())) as f64
             }
+            Kind::Gm => gml::rvalue_number(b).unwrap_or(f64::NAN),
         }
     }
 
@@ -657,7 +671,7 @@ impl Kind {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
             Kind::I32 | Kind::Xor | Kind::U16 => lo <= n.scaled && n.scaled <= hi,
-            Kind::F32 | Kind::F64 => lo < n.value + n.step && hi > n.value - n.step,
+            Kind::F32 | Kind::F64 | Kind::Gm => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
 
@@ -692,9 +706,9 @@ impl Shown {
 }
 
 fn read_value(mem: &File, addr: u64, kind: Kind) -> Option<f64> {
-    let mut b = [0u8; 8];
+    let mut b = [0u8; 16];
     mem.read_exact_at(&mut b[..kind.size()], addr).ok()?;
-    Some(kind.decode(&b))
+    Some(kind.decode(&b)).filter(|v| kind != Kind::Gm || !v.is_nan())
 }
 
 fn write_value(mem: &File, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
@@ -707,6 +721,16 @@ fn write_value(mem: &File, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
             let mut key = [0u8; 4];
             mem.read_exact_at(&mut key, addr + 4)?;
             mem.write_all_at(&((v.round() as i32) ^ i32::from_le_bytes(key)).to_le_bytes(), addr)
+        }
+        // A number of any kind becomes a double (kind 0); the flags stay.
+        Kind::Gm => {
+            let mut b = [0u8; 16];
+            mem.read_exact_at(&mut b, addr)?;
+            if gml::rvalue_number(&b).is_none() {
+                return Err(io::Error::other("not a GameMaker number now"));
+            }
+            mem.write_all_at(&v.to_le_bytes(), addr)?;
+            mem.write_all_at(&0u32.to_le_bytes(), addr + 12)
         }
     }
 }
@@ -780,7 +804,8 @@ struct Limit {
 /// A named path of any kind: through objects the game names (Unity, names.rs), to an entry of
 /// the game's dictionaries (Godot, godot.rs), through its scripts' variables (Godot,
 /// gdscript.rs), through its Unreal objects (ue.rs), to a field of a Mono class's live
-/// objects (Unity, Mono or IL2CPP; mono.rs) or from an RPG Maker MV game's globals (js.rs).
+/// objects (Unity, Mono or IL2CPP; mono.rs), from an RPG Maker MV game's globals (js.rs) or
+/// to a GameMaker instance's or the global object's variable (gml.rs).
 #[derive(Clone)]
 enum Named {
     Objects(NamedPath),
@@ -789,6 +814,7 @@ enum Named {
     Unreal(UePath),
     Mono(MonoPath),
     Js(JsPath),
+    Gml(GmlPath),
 }
 
 impl Named {
@@ -805,6 +831,9 @@ impl Named {
         if text.starts_with("js:") {
             return JsPath::parse(text).map(Named::Js);
         }
+        if text.starts_with("gml:") {
+            return GmlPath::parse(text).map(Named::Gml);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -812,7 +841,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:")
     }
 
     /// Where it leads from the roots found before (no search).
@@ -823,6 +852,7 @@ impl Named {
             Named::Script(p) => gdscript::walk(heap, roots, p),
             Named::Mono(p) => mono::walk(heap, roots, p),
             Named::Js(p) => js::walk(heap, roots, p),
+            Named::Gml(p) => gml::walk(heap, program_of(heap.pid).as_deref(), roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
@@ -835,6 +865,7 @@ impl Named {
             Named::Script(p) => gdscript::find_roots(heap, p),
             Named::Mono(p) => mono::find_roots(heap, p),
             Named::Js(p) => js::find_roots(heap, p),
+            Named::Gml(p) => gml::find_roots(heap, program_of(heap.pid).as_deref(), p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
@@ -1989,7 +2020,7 @@ impl MemScan<'_> {
                 // that has moved on by up to 1 since.
                 let hit = match kind {
                     Kind::I32 | Kind::Xor | Kind::U16 => value == n.scaled,
-                    Kind::F32 | Kind::F64 => kind.fits(value - n.step, value + n.step, n),
+                    Kind::F32 | Kind::F64 | Kind::Gm => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
                     self.hit(r, buf, len, addr, off, kind, value);
@@ -2292,7 +2323,7 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                         let step = match kind {
                             Kind::U16 => 2,
                             Kind::I32 | Kind::F32 | Kind::Xor => 4,
-                            Kind::F64 => 8,
+                            Kind::F64 | Kind::Gm => 8,
                         };
                         for o in (w..w + 8).step_by(step) {
                             let size = kind.size();
@@ -3654,6 +3685,13 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
         return writeln!(out, "{} named paths in {} ms", found.len() + 1, t.elapsed().as_millis());
     }
+    // A variable of a GameMaker instance or of its global object.
+    if s.doubles_only {
+        if let Some((p, leads)) = gml::discover(&heap, program_of(s.pid).as_deref(), target) {
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        }
+    }
     // A number of an RPG Maker MV game, by its path from the game's globals.
     if is_rpgmaker(s.pid) {
         if let Some((p, leads)) = js::discover(&heap, target) {
@@ -3789,6 +3827,12 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
         // script; RPG Maker MV: the party, heroes and variables. The player's first.
         Err(e) => {
             let heap = Heap::new(s.pid, mem, s.width)?;
+            if s.doubles_only {
+                return match gml::player(&heap, program_of(s.pid).as_deref()) {
+                    Some(list) => print_player(out, s, &list, t),
+                    None => writeln!(out, "none engine GameMaker objects not found (only GameMaker Studio 2 bytecode games before 2.3 are read)"),
+                };
+            }
             if is_rpgmaker(s.pid) {
                 return match js::player(&heap) {
                     Some(list) => print_player(out, s, &list, t),
@@ -3830,10 +3874,24 @@ fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
         Ok(_) => "unreal",
         Err(_) if is_godot(s.pid) => "godot",
         Err(_) if is_rpgmaker(s.pid) => "rpgmaker",
+        Err(_) if s.doubles_only && gml::data_file(s.pid, program_of(s.pid).as_deref()).is_some() => "gamemaker",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
         Err(_) => "no",
     };
     writeln!(out, "browsable {engine}")
+}
+
+/// gml: what a GameMaker game's variable maps look like (`gml::diagnose`).
+fn cmd_gml(out: &mut impl Write, s: &Session) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let t = Instant::now();
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    for l in gml::diagnose(&heap, program_of(s.pid).as_deref()) {
+        writeln!(out, "{l}")?;
+    }
+    writeln!(out, "in {} ms", t.elapsed().as_millis())
 }
 
 /// gdtree: a Godot game's scene tree, a node a line with its script (after a script path was
@@ -3956,6 +4014,7 @@ pub fn run(as_user: Option<&str>) {
             "player" => cmd_player(&mut out, &session),
             "browsable" => cmd_browsable(&mut out, &session),
             "gdtree" => cmd_gdtree(&mut out, &session),
+            "gml" => cmd_gml(&mut out, &session),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),

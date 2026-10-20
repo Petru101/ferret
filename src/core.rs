@@ -242,9 +242,9 @@ impl Helper {
 }
 
 /// A named path through the engine's own names (Unreal objects, Unity classes, Godot scripts and
-/// dictionaries, RPG Maker's globals): nothing better to upgrade it to.
+/// dictionaries, RPG Maker's globals, GameMaker's variables): nothing better to upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "{"].iter().any(|p| text.starts_with(p))
 }
 
 /// A name the helper lists in Ferret's words rather than the game's ("@gold": RPG Maker's
@@ -253,6 +253,7 @@ fn engine_word(name: &str) -> String {
     match name {
         // Translators: headings and labels of an RPG Maker game's numbers in the Browse tab.
         "@party" => tr!("Party"),
+        "@global" => tr!("Global variables"),
         "@gold" => tr!("Gold"),
         "@steps" => tr!("Steps"),
         "@items" => tr!("Items"),
@@ -279,7 +280,7 @@ fn backed_by_code(text: &str) -> bool {
 /// float are mostly huge or tiny (a pattern that matches in the wrong place after an update).
 fn plausible(kind: Kind, v: f64) -> bool {
     match kind {
-        Kind::F32 | Kind::F64 => v == 0.0 || (1e-9..1e15).contains(&v.abs()),
+        Kind::F32 | Kind::F64 | Kind::Gm => v == 0.0 || (1e-9..1e15).contains(&v.abs()),
         _ => true,
     }
 }
@@ -464,9 +465,13 @@ pub enum Kind {
     Xor,
     /// 2-byte unsigned integer (Frostbite's ammo).
     U16,
+    /// A GameMaker value (the helper's gml.rs): a double or an int32 as the game holds it now,
+    /// written as a double. Values saved by a GameMaker path get it; never searched for.
+    Gm,
 }
 
 impl Kind {
+    /// The kinds searches look for.
     pub const ALL: [Kind; 5] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor, Kind::U16];
 
     pub fn name(self) -> &'static str {
@@ -476,11 +481,12 @@ impl Kind {
             Kind::F64 => "f64",
             Kind::Xor => "xor",
             Kind::U16 => "u16",
+            Kind::Gm => "gm",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm]).find(|k| k.name() == s)
     }
 
     fn with_article(self) -> String {
@@ -500,6 +506,7 @@ impl Kind {
             Kind::F64 => "double",
             Kind::Xor => "encoded whole number",
             Kind::U16 => "2-byte whole number",
+            Kind::Gm => "GameMaker number",
         }
     }
 }
@@ -1741,6 +1748,12 @@ impl Core {
         if by_name && named.is_none() {
             return Err(tr!("Ferret can't find this number again by its name, so it isn't saved. Find it with a search instead."));
         }
+        // A GameMaker variable turns from a double into an int32 and back: saved as the
+        // helper's GameMaker value, read as whichever it holds.
+        let loc = match &named {
+            Some((text, _, _)) if text.starts_with("gml:") => Loc { kind: Kind::Gm, ..loc },
+            _ => loc,
+        };
         let reply = match &named {
             Some((text, _, _)) if by_name || !backed_by_code(text) => Vec::new(),
             _ => self.helper.call(&format!("sites {loc}")),
@@ -3712,7 +3725,7 @@ impl Core {
         }
         if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot and RPG Maker MV games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker and RPG Maker MV games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {
