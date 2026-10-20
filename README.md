@@ -17,7 +17,7 @@ Download the `.flatpak` file from the [latest release](https://github.com/Petru1
 and install it (Ferret uses the GNOME runtime from Flathub, already set up on most distros):
 
 ```sh
-flatpak install --user ferret-0.1.0-x86_64.flatpak
+flatpak install --user ferret-0.2.0-x86_64.flatpak
 ```
 
 There are no automatic updates yet: install the new file when a new release comes out. Ferret is
