@@ -3706,7 +3706,7 @@ fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 /// player: the player's numbers by name (`Ue::player`, the Browse tab): an "object
 /// <role>\t<owner or ->\t<class>\t<main|more>\t<name>" line (more: shown on asking for everything), then its "field 0x<addr>:<type> = <value>\t<label>"
 /// lines, for each object; "none character" while the player has no character (a menu),
-/// "none engine <why>" for games whose objects Ferret can't read so (not Unreal or Unity).
+/// "none engine <why>" for games whose objects Ferret can't read so (not Unreal, Unity or Godot).
 fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let t = Instant::now();
     let Some(mem) = s.mem.as_ref() else {
@@ -3717,11 +3717,19 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
             Ok(list) => list,
             Err(_) => return writeln!(out, "none character"),
         },
-        // Unity: every live object of the game's own classes, the player's first.
-        Err(e) => match mono::player(&Heap::new(s.pid, mem, s.width)?) {
-            Some(list) => list,
-            None => return writeln!(out, "none engine {e}"),
-        },
+        // Unity: every live object of the game's own classes; Godot: every node running a
+        // script. The player's first.
+        Err(e) => {
+            let heap = Heap::new(s.pid, mem, s.width)?;
+            let found = match is_godot(s.pid) {
+                true => gdscript::player(&heap),
+                false => mono::player(&heap),
+            };
+            match found {
+                Some(list) => list,
+                None => return writeln!(out, "none engine {e}"),
+            }
+        }
     };
     let mut n = 0;
     for o in &list {
@@ -3735,13 +3743,14 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
     writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
 }
 
-/// browsable: "browsable unreal|unity" when `player` can list the game's numbers, else "browsable no".
+/// browsable: "browsable unreal|unity|godot" when `player` can list the game's numbers, else "browsable no".
 fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
     };
     let engine = match unreal(s.pid, mem) {
         Ok(_) => "unreal",
+        Err(_) if is_godot(s.pid) => "godot",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
         Err(_) => "no",
     };

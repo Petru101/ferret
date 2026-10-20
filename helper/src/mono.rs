@@ -979,10 +979,11 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &MonoPath) -> Vec<u64> {
 // that GameObject. Classes with more than `MAX_PLACES` live objects are left out: they're many
 // things (enemies), and a saved path couldn't tell them apart.
 
-/// Words in a class's or a GameObject's name that mark the player's things.
+/// Words in a class's or a GameObject's name that mark the player's things (not "resource":
+/// Godot calls every asset a Resource, and its loaders matched).
 const PLAYER_WORDS: &[&str] = &[
     "player", "hero", "character", "health", "stats", "inventory", "wallet", "money", "gold", "coin", "ammo", "weapon", "gun", "mana",
-    "stamina", "energy", "currency", "resource", "score", "lives",
+    "stamina", "energy", "currency", "score", "lives",
 ];
 /// Namespaces of the engine's and common packages' classes: not the game's.
 const ENGINE_NAMESPACES: &[&str] = &[
@@ -1018,7 +1019,7 @@ fn engine_namespace(ns: &str) -> bool {
 
 /// Whether a name has one of `PLAYER_WORDS` as a word, or at a word's end ("Nailgun"), in
 /// CamelCase, snake_case or spaced names: not inside another ("mana" in "BloodsplatterManager").
-fn player_like(name: &str) -> bool {
+pub fn player_like(name: &str) -> bool {
     let mut words: Vec<String> = Vec::new();
     let mut prev_lower = false;
     for c in name.chars() {

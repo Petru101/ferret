@@ -1712,6 +1712,10 @@ impl Core {
         // across restarts and updates (code patterns break when the game replaces objects), and
         // needs no tracing. Unity's are slow to search for: their code patterns are kept too.
         let mut named = self.named_path(loc, true);
+        // Godot's names aren't among the engine-first ones (Unreal, Unity): the full search.
+        if by_name && named.is_none() {
+            named = self.named_path(loc, false);
+        }
         if by_name && named.is_none() {
             return Err(tr!("Ferret can't find this number again by its name, so it isn't saved. Find it with a search instead."));
         }
@@ -3668,7 +3672,7 @@ impl Core {
     }
 
     /// Whether the Browse tab can list this game's numbers by name (an Unreal game whose objects
-    /// Ferret reads, or a Unity game).
+    /// Ferret reads, or a Unity or Godot game).
     pub fn browsable(&mut self) -> bool {
         self.game.is_some() && self.helper.call("browsable").iter().any(|l| l.starts_with("browsable ") && l != "browsable no")
     }
@@ -3686,7 +3690,7 @@ impl Core {
         }
         if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine and Unity games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity and Godot games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {

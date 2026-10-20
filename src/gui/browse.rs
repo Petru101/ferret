@@ -1,4 +1,4 @@
-// The Browse tab (Unreal and Unity games): the player's numbers by the names the game gives them, found
+// The Browse tab (Unreal, Unity and Godot games): the player's numbers by the names the game gives them, found
 // through the engine's own objects instead of a search (`Core::player_values`). Each shows its
 // number live (the 1 s refresh); Only What Changes keeps the ones that move after it's turned
 // on, so the player changes something in the game and sees which it was; Save keeps one like
