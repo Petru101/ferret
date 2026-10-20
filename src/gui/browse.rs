@@ -49,6 +49,7 @@ fn belongs_text(b: &Belongs, class: &str) -> String {
         Belongs::State => tr!("Your player's state ({class})", class),
         Belongs::Controller => tr!("Your controller ({class})", class),
         Belongs::Game => tr!("The game ({class})", class),
+        Belongs::Party => tr!("Your party ({class})", class),
         Belongs::Owned(owner) => tr!("Belongs to {owner} ({class})", owner, class),
         Belongs::Part(owner) => tr!("Part of {owner} ({class})", owner, class),
         Belongs::Linked(owner) => tr!("Used by {owner} ({class})", owner, class),

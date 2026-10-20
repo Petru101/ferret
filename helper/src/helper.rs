@@ -19,6 +19,7 @@ use crate::names::{self, Heap, NamedPath};
 use crate::pointers::{self, Module, Pointers, PtrPath};
 use crate::launchers;
 use crate::mono::{self, MonoPath};
+use crate::js::{self, JsPath};
 use crate::trace;
 
 pub struct Region {
@@ -98,6 +99,9 @@ pub fn exe_name(pid: u32) -> String {
 /// restored into The Binding of Isaac); Solarus's `solarus-run` every Solarus quest. Started
 /// without a file (opened from its menu), it keeps the player's name.
 pub fn game_name(pid: u32) -> String {
+    if let Some(name) = nwjs_app(pid).map(|dir| nwjs_name(pid, &dir)) {
+        return name;
+    }
     let exe = exe_name(pid);
     let lower = exe.to_ascii_lowercase();
     if DOSBOXES.contains(&lower.trim_end_matches(".exe")) {
@@ -221,6 +225,39 @@ fn dosbox_game(argv0: &str, cwd: &str, home: &str) -> Option<String> {
     game(parts(cwd))
 }
 
+/// The folder of the NW.js app a process belongs to (RPG Maker MV, Construct and other HTML5
+/// games): its program sits next to package.json or package.nw and NW.js's own files.
+/// Native programs only (Wine's are told apart by their .exe, not looked at yet).
+fn nwjs_app(pid: u32) -> Option<PathBuf> {
+    let program = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let dir = program.parent()?;
+    let inside = Path::new("/proc").join(pid.to_string()).join("root").join(dir.strip_prefix("/").unwrap_or(dir));
+    let has = |f: &str| inside.join(f).exists();
+    ((has("package.json") || has("package.nw")) && (has("nw.pak") || has("resources.pak") || has("lib/libnw.so"))).then(|| dir.to_path_buf())
+}
+
+/// An NW.js game runs its JavaScript, and keeps its values, in a Chromium renderer process
+/// (`--type=renderer`; NW.js 0.12's renderers are forked from its zygote and keep the zygote's
+/// command line); the window's own process (GTK) and the GPU process hold none of them.
+fn nwjs_renderer(pid: u32) -> bool {
+    let cmd = cmdline(pid);
+    let parent = fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| s.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(1).and_then(|p| p.parse::<u32>().ok())));
+    cmd.contains(" --type=renderer") || cmd.contains(" --type=zygote") && parent.is_some_and(|p| cmdline(p).contains(" --type=zygote"))
+}
+
+/// An NW.js game's name: an RPG Maker game's title (`www/data/System.json`), else its folder's.
+fn nwjs_name(pid: u32, dir: &Path) -> String {
+    let inside = Path::new("/proc").join(pid.to_string()).join("root").join(dir.strip_prefix("/").unwrap_or(dir));
+    let title = fs::read_to_string(inside.join("www/data/System.json"))
+        .ok()
+        .and_then(|t| crate::json::parse(&t))
+        .and_then(|v| v.get("gameTitle").and_then(|t| t.str()).map(|t| t.trim().replace('\t', " ")))
+        .filter(|t| !t.is_empty());
+    title.unwrap_or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "NW.js game".into()))
+}
+
 /// GameMaker games keep every number as a double; they ship their assets as data.win (or
 /// game.unx on Linux) next to the program.
 fn is_gamemaker(pid: u32, exe: &str) -> bool {
@@ -265,6 +302,12 @@ fn scrambler(pid: u32, regions: &[Region]) -> Option<&'static str> {
     let needle = b"CodeStage.AntiCheat.ObscuredTypes";
     let uses = |p: PathBuf| fs::read(p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle));
     managed.chain([metadata]).any(uses).then_some("CodeStage Anti-Cheat Toolkit")
+}
+
+/// RPG Maker MV games (js.rs): NW.js running `www/js/rpg_core.js` from next to the program.
+fn is_rpgmaker(pid: u32) -> bool {
+    let program = maps(pid).ok().and_then(|m| program_path(pid, &m));
+    js::is_rpgmaker(pid, program.as_deref())
 }
 
 /// Godot games load <program>.pck from next to the program, or carry it at the end of the
@@ -736,8 +779,8 @@ struct Limit {
 
 /// A named path of any kind: through objects the game names (Unity, names.rs), to an entry of
 /// the game's dictionaries (Godot, godot.rs), through its scripts' variables (Godot,
-/// gdscript.rs), through its Unreal objects (ue.rs) or to a field of a Mono class's live
-/// objects (Unity, Mono or IL2CPP; mono.rs).
+/// gdscript.rs), through its Unreal objects (ue.rs), to a field of a Mono class's live
+/// objects (Unity, Mono or IL2CPP; mono.rs) or from an RPG Maker MV game's globals (js.rs).
 #[derive(Clone)]
 enum Named {
     Objects(NamedPath),
@@ -745,6 +788,7 @@ enum Named {
     Script(ScriptPath),
     Unreal(UePath),
     Mono(MonoPath),
+    Js(JsPath),
 }
 
 impl Named {
@@ -758,6 +802,9 @@ impl Named {
         if text.starts_with("mono:") || text.starts_with("il2cpp:") {
             return MonoPath::parse(text).map(Named::Mono);
         }
+        if text.starts_with("js:") {
+            return JsPath::parse(text).map(Named::Js);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -765,7 +812,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:")
     }
 
     /// Where it leads from the roots found before (no search).
@@ -775,6 +822,7 @@ impl Named {
             Named::Dict(p) => godot::walk(heap, roots, p),
             Named::Script(p) => gdscript::walk(heap, roots, p),
             Named::Mono(p) => mono::walk(heap, roots, p),
+            Named::Js(p) => js::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
@@ -786,6 +834,7 @@ impl Named {
             Named::Dict(p) => godot::find_roots(heap, p),
             Named::Script(p) => gdscript::find_roots(heap, p),
             Named::Mono(p) => mono::find_roots(heap, p),
+            Named::Js(p) => js::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
@@ -1596,7 +1645,12 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         if not_game || anti_cheat || lower.contains("crashhandler") || lower.contains("crashreport") {
             continue;
         }
-        if !(windows || app_id.is_some() || draws_like_a_game(pid)) || windows && windows_non_game(pid) {
+        // An NW.js game: only its renderer, where its values are.
+        let nwjs = nwjs_app(pid).is_some();
+        if nwjs && !nwjs_renderer(pid) {
+            continue;
+        }
+        if !nwjs && (!(windows || app_id.is_some() || draws_like_a_game(pid)) || windows && windows_non_game(pid)) {
             continue;
         }
         // Python also runs Steam's and umu's tools (with the game's app ID): only a Python that
@@ -1620,10 +1674,16 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let regions = maps(pid).unwrap_or_default();
         let program = program_path(pid, &regions);
         let name = dash(name.as_deref());
-        let draws = regions.iter().any(|r| gpu_driver(r.path.rsplit('/').next().unwrap_or_default())) || !windows && draws_like_a_game(pid);
+        let draws = !nwjs && (regions.iter().any(|r| gpu_driver(r.path.rsplit('/').next().unwrap_or_default())) || !windows && draws_like_a_game(pid));
         let size: u64 = regions.iter().filter(|r| scannable(r)).map(|r| r.end - r.start).sum();
         let row = format!("{pid}\t{name_now}\t{id}\t{refused}\t{name}\t{}\t{ships}\t{extras}", dash(play));
-        rows.push(Listed { program, launch: launch_of(pid, &env), draws, size, row });
+        // An NW.js game's renderers (NW.js 0.12 forks a second one from its zygote): the one
+        // holding the most memory, as for a launch.
+        let launch = match nwjs.then(|| nwjs_app(pid)).flatten() {
+            Some(dir) => format!("nwjs {}", dir.display()),
+            None => launch_of(pid, &env),
+        };
+        rows.push(Listed { program, launch, draws, size, row });
     }
     // One game per launch: everything a launcher starts for a game carries its ID (Steam gives
     // its app ID to every process of a launch: Bazzite's tail and grep watching Ubisoft
@@ -3594,6 +3654,13 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
         return writeln!(out, "{} named paths in {} ms", found.len() + 1, t.elapsed().as_millis());
     }
+    // A number of an RPG Maker MV game, by its path from the game's globals.
+    if is_rpgmaker(s.pid) {
+        if let Some((p, leads)) = js::discover(&heap, target) {
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        }
+    }
     if only_unreal {
         return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
     }
@@ -3705,8 +3772,9 @@ fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 
 /// player: the player's numbers by name (`Ue::player`, the Browse tab): an "object
 /// <role>\t<owner or ->\t<class>\t<main|more>\t<name>" line (more: shown on asking for everything), then its "field 0x<addr>:<type> = <value>\t<label>"
-/// lines, for each object; "none character" while the player has no character (a menu),
-/// "none engine <why>" for games whose objects Ferret can't read so (not Unreal, Unity or Godot).
+/// lines, for each object; "none character" while the player has no character (a menu; an RPG
+/// Maker game that hasn't made its objects yet), "none engine <why>" for games whose objects
+/// Ferret can't read so (not Unreal, Unity, Godot or RPG Maker MV).
 fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let t = Instant::now();
     let Some(mem) = s.mem.as_ref() else {
@@ -3718,9 +3786,15 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
             Err(_) => return writeln!(out, "none character"),
         },
         // Unity: every live object of the game's own classes; Godot: every node running a
-        // script. The player's first.
+        // script; RPG Maker MV: the party, heroes and variables. The player's first.
         Err(e) => {
             let heap = Heap::new(s.pid, mem, s.width)?;
+            if is_rpgmaker(s.pid) {
+                return match js::player(&heap) {
+                    Some(list) => print_player(out, s, &list, t),
+                    None => writeln!(out, "none character"),
+                };
+            }
             let found = match is_godot(s.pid) {
                 true => gdscript::player(&heap),
                 false => mono::player(&heap),
@@ -3731,8 +3805,12 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
             }
         }
     };
+    print_player(out, s, &list, t)
+}
+
+fn print_player(out: &mut impl Write, s: &Session, list: &[ue::ListedObject], t: Instant) -> io::Result<()> {
     let mut n = 0;
-    for o in &list {
+    for o in list {
         let shown = if o.more { "more" } else { "main" };
         writeln!(out, "object {}\t{}\t{}\t{}\t{}", o.role, o.owner.as_deref().unwrap_or("-"), o.class, shown, o.name)?;
         for f in &o.fields {
@@ -3743,7 +3821,7 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
     writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
 }
 
-/// browsable: "browsable unreal|unity|godot" when `player` can list the game's numbers, else "browsable no".
+/// browsable: "browsable unreal|unity|godot|rpgmaker" when `player` can list the game's numbers, else "browsable no".
 fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -3751,6 +3829,7 @@ fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let engine = match unreal(s.pid, mem) {
         Ok(_) => "unreal",
         Err(_) if is_godot(s.pid) => "godot",
+        Err(_) if is_rpgmaker(s.pid) => "rpgmaker",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
         Err(_) => "no",
     };

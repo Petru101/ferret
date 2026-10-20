@@ -242,9 +242,29 @@ impl Helper {
 }
 
 /// A named path through the engine's own names (Unreal objects, Unity classes, Godot scripts and
-/// dictionaries): nothing better to upgrade it to.
+/// dictionaries, RPG Maker's globals): nothing better to upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "il2cpp:", "gd:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "{"].iter().any(|p| text.starts_with(p))
+}
+
+/// A name the helper lists in Ferret's words rather than the game's ("@gold": RPG Maker's
+/// party, its gold, the player's move speed), in the player's language; others as they are.
+fn engine_word(name: &str) -> String {
+    match name {
+        // Translators: headings and labels of an RPG Maker game's numbers in the Browse tab.
+        "@party" => tr!("Party"),
+        "@gold" => tr!("Gold"),
+        "@steps" => tr!("Steps"),
+        "@items" => tr!("Items"),
+        "@weapons" => tr!("Weapons"),
+        "@armors" => tr!("Armor"),
+        "@variables" => tr!("Variables"),
+        "@player" => tr!("Player"),
+        "@speed" => tr!("Move speed"),
+        "@timer" => tr!("Timer"),
+        "@frames" => tr!("Frames left"),
+        _ => name.to_owned(),
+    }
 }
 
 /// A Unity class path: searching for its class and objects takes seconds (9 on Creeper World
@@ -403,6 +423,8 @@ pub enum Belongs {
     Controller,
     /// The game instance or the game's state.
     Game,
+    /// Their party (RPG Maker: gold and items).
+    Party,
     /// An actor one of those owns (a weapon), by the owner's name.
     Owned(String),
     /// An object inside one of those (a component, an attribute set).
@@ -3690,7 +3712,7 @@ impl Core {
         }
         if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity and Godot games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot and RPG Maker MV games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {
@@ -3703,15 +3725,16 @@ impl Core {
                     "state" => Belongs::State,
                     "controller" => Belongs::Controller,
                     "game" => Belongs::Game,
+                    "party" => Belongs::Party,
                     "owned" => Belongs::Owned(owner),
                     "part" => Belongs::Part(owner),
                     _ => Belongs::Linked(owner),
                 };
-                list.push(PlayerObject { name: name.to_owned(), class: class.to_owned(), belongs, more: shown == "more", fields: Vec::new() });
+                list.push(PlayerObject { name: engine_word(name), class: class.to_owned(), belongs, more: shown == "more", fields: Vec::new() });
             } else if let (Some(f), Some(o)) = (l.strip_prefix("field "), list.last_mut()) {
                 let Some((place, label)) = f.split_once('\t') else { continue };
                 let Some((loc, value)) = parse_exact_values(&[place.to_owned()]).pop() else { continue };
-                o.fields.push(PlayerField { label: label.to_owned(), loc, value });
+                o.fields.push(PlayerField { label: engine_word(label), loc, value });
             } else if l.contains(" numbers in ") {
                 self.say(&format!("listed the player's {l}"));
             }

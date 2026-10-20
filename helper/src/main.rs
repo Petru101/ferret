@@ -4,6 +4,7 @@ mod anticheat;
 mod gdscript;
 mod godot;
 mod helper;
+mod js;
 mod json;
 mod launchers;
 mod mono;
