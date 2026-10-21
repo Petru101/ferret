@@ -17,8 +17,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -160,8 +159,8 @@ impl<'a> Dicts<'a> {
         Dicts { heap, keys: RefCell::default() }
     }
 
-    fn mem(&self) -> &File {
-        self.heap.file()
+    fn mem(&self) -> &Mem {
+        self.heap.mem()
     }
 
     fn u32_at(&self, at: u64) -> Option<u32> {

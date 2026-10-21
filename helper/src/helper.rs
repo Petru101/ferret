@@ -1,13 +1,13 @@
 // The part that runs on the host (started by the frontend through
-// `flatpak-spawn --host`). Reads and writes game memory through /proc/<pid>/mem.
+// `flatpak-spawn --host`). Reads and writes game memory through `Mem` (mem.rs); what it asks
+// the OS about other programs goes through `os` (linux.rs).
 // Protocol: one command per line on stdin; each reply ends with a line "end".
 
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,8 @@ use crate::air::{self, AirPath};
 use crate::java::{self, JavaPath};
 use crate::python::{self, PyPath};
 use crate::trace;
+use crate::mem::{FileAt, Mem};
+use crate::os;
 
 pub struct Region {
     pub start: u64,
@@ -34,68 +36,26 @@ pub struct Region {
     pub path: String,
 }
 
-pub fn maps(pid: u32) -> io::Result<Vec<Region>> {
-    let text = fs::read_to_string(format!("/proc/{pid}/maps"))?;
-    Ok(text
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let (s, e) = it.next()?.split_once('-')?;
-            let perms = it.next()?.to_owned();
-            let path = it.skip(3).collect::<Vec<_>>().join(" ");
-            Some(Region {
-                start: u64::from_str_radix(s, 16).ok()?,
-                end: u64::from_str_radix(e, 16).ok()?,
-                perms,
-                path,
-            })
-        })
-        .collect())
-}
-
-fn environ(pid: u32) -> HashMap<String, String> {
-    fs::read(format!("/proc/{pid}/environ"))
-        .unwrap_or_default()
-        .split(|b| *b == 0)
-        .filter_map(|kv| {
-            let kv = String::from_utf8_lossy(kv);
-            let (k, v) = kv.split_once('=')?;
-            Some((k.to_owned(), v.to_owned()))
-        })
-        .collect()
-}
+pub use crate::os::maps;
+use crate::os::environ;
 
 /// The program as started (argv[0]); Wine paths have spaces ("E:\\Mass Effect Andromeda\\...").
 fn argv0(pid: u32) -> String {
-    fs::read(format!("/proc/{pid}/cmdline"))
-        .map(|b| String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap_or_default()).into_owned())
-        .unwrap_or_default()
+    os::argv(pid).into_iter().next().unwrap_or_default()
 }
 
 /// The program's arguments (without the program itself).
 fn args(pid: u32) -> Vec<String> {
-    let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    raw.split(|b| *b == 0).skip(1).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+    os::argv(pid).into_iter().skip(1).filter(|a| !a.is_empty()).collect()
 }
 
 fn cmdline(pid: u32) -> String {
-    fs::read(format!("/proc/{pid}/cmdline"))
-        .map(|b| {
-            String::from_utf8_lossy(&b)
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_default()
+    os::argv(pid).into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 /// File name of the program, also for Windows programs under Wine.
 pub fn exe_name(pid: u32) -> String {
-    let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    let first = raw.split(|b| *b == 0).next().unwrap_or_default();
-    let first = String::from_utf8_lossy(first);
-    first.rsplit(['/', '\\']).next().unwrap_or_default().to_owned()
+    argv0(pid).rsplit(['/', '\\']).next().unwrap_or_default().to_owned()
 }
 
 /// The name a game goes by (the games list, its profile): the program's, except for players
@@ -110,16 +70,11 @@ pub fn game_name(pid: u32) -> String {
     let exe = exe_name(pid);
     let lower = exe.to_ascii_lowercase();
     if DOSBOXES.contains(&lower.trim_end_matches(".exe")) {
-        let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-        let argv0 = String::from_utf8_lossy(raw.split(|b| *b == 0).next().unwrap_or_default()).into_owned();
-        let cwd = fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let home = std::env::var("HOME").unwrap_or_default();
-        return dosbox_game(&argv0, &cwd, &home).map_or(exe, |g| format!("{g} (DOSBox)"));
+        return dosbox_game(&argv0(pid), &os::cwd(pid), &home).map_or(exe, |g| format!("{g} (DOSBox)"));
     }
-    let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    let args: Vec<String> = raw.split(|b| *b == 0).skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-    let cwd = || fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    run_game(&lower, &args, cwd).unwrap_or(exe)
+    let args: Vec<String> = os::argv(pid).into_iter().skip(1).collect();
+    run_game(&lower, &args, || os::cwd(pid)).unwrap_or(exe)
 }
 
 /// The game a player program was started with (`game_name`): the game file it was given, a
@@ -234,9 +189,9 @@ fn dosbox_game(argv0: &str, cwd: &str, home: &str) -> Option<String> {
 /// games): its program sits next to package.json or package.nw and NW.js's own files.
 /// Native programs only (Wine's are told apart by their .exe, not looked at yet).
 fn nwjs_app(pid: u32) -> Option<PathBuf> {
-    let program = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let program = os::exe(pid)?;
     let dir = program.parent()?;
-    let inside = Path::new("/proc").join(pid.to_string()).join("root").join(dir.strip_prefix("/").unwrap_or(dir));
+    let inside = os::inside(pid, dir);
     let has = |f: &str| inside.join(f).exists();
     ((has("package.json") || has("package.nw")) && (has("nw.pak") || has("resources.pak") || has("lib/libnw.so"))).then(|| dir.to_path_buf())
 }
@@ -246,15 +201,13 @@ fn nwjs_app(pid: u32) -> Option<PathBuf> {
 /// command line); the window's own process (GTK) and the GPU process hold none of them.
 fn nwjs_renderer(pid: u32) -> bool {
     let cmd = cmdline(pid);
-    let parent = fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|s| s.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(1).and_then(|p| p.parse::<u32>().ok())));
+    let parent = os::parent(pid);
     cmd.contains(" --type=renderer") || cmd.contains(" --type=zygote") && parent.is_some_and(|p| cmdline(p).contains(" --type=zygote"))
 }
 
 /// An NW.js game's name: an RPG Maker game's title (`www/data/System.json`), else its folder's.
 fn nwjs_name(pid: u32, dir: &Path) -> String {
-    let inside = Path::new("/proc").join(pid.to_string()).join("root").join(dir.strip_prefix("/").unwrap_or(dir));
+    let inside = os::inside(pid, dir);
     let title = fs::read_to_string(inside.join("www/data/System.json"))
         .ok()
         .and_then(|t| crate::json::parse(&t))
@@ -296,8 +249,7 @@ fn scrambler(pid: u32, regions: &[Region]) -> Option<&'static str> {
         Some(program.with_file_name(format!("{}_Data", program.file_stem()?.to_string_lossy())))
     };
     let data = mapped.or_else(beside)?;
-    let root = Path::new("/proc").join(pid.to_string()).join("root");
-    let data = root.join(data.strip_prefix("/").unwrap_or(&data));
+    let data = os::inside(pid, &data);
     let assembly = |p: &PathBuf| {
         let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         name.ends_with(".dll") && (name.starts_with("assembly-csharp") || name.starts_with("actk"))
@@ -340,8 +292,7 @@ fn is_rpgmaker(pid: u32) -> bool {
 /// program (which then ends with its magic, "GDPC").
 fn is_godot(pid: u32) -> bool {
     let Some(program) = maps(pid).ok().and_then(|m| program_path(pid, &m)) else { return false };
-    let root = Path::new("/proc").join(pid.to_string()).join("root");
-    let inside = |p: &Path| root.join(p.strip_prefix("/").unwrap_or(p));
+    let inside = |p: &Path| os::inside(pid, p);
     if inside(&program.with_extension("pck")).exists() || program.with_extension("pck").exists() {
         return true;
     }
@@ -425,10 +376,8 @@ fn wine_prefix(env: &HashMap<String, String>) -> Option<&String> {
 /// Anti-cheat programs running now and the Wine prefix each runs in: under Proton
 /// EasyAntiCheat_EOS.exe, BEService.exe and start_protected_game.exe run beside the game.
 fn anti_cheat_programs() -> Vec<(String, &'static str)> {
-    let uid = my_uid();
-    let Ok(dir) = fs::read_dir("/proc") else { return Vec::new() };
-    dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| owner_uid(*pid) == Some(uid))
+    os::own_pids()
+        .into_iter()
         .filter_map(|pid| {
             let ac = anticheat::named(&exe_name(pid))?;
             Some((wine_prefix(&environ(pid))?.clone(), ac))
@@ -462,8 +411,7 @@ fn vac_safe(pid: u32, maps: &[Region]) -> bool {
     if SINGLE_PLAYER_PROGRAMS.contains(&exe_name(pid).to_ascii_lowercase().as_str()) {
         return true;
     }
-    let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    let insecure = raw.split(|b| *b == 0).any(|a| a.eq_ignore_ascii_case(b"-insecure"));
+    let insecure = os::argv(pid).iter().any(|a| a.eq_ignore_ascii_case("-insecure"));
     let engine = |r: &Region| {
         let name = r.path.rsplit(['/', '\\']).next().unwrap_or_default().to_ascii_lowercase();
         ["tier0.dll", "libtier0.so", "libtier0_client.so", "hw.dll", "hw.so", "sw.dll"].contains(&name.as_str())
@@ -478,8 +426,7 @@ fn shipped_anti_cheat(pid: u32, maps: &[Region], env: &HashMap<String, String>, 
         return listed;
     }
     // Seen from inside the game's sandbox (pressure-vessel, flatpak).
-    let root = Path::new("/proc").join(pid.to_string()).join("root");
-    let inside = |p: &Path| root.join(p.strip_prefix("/").unwrap_or(p));
+    let inside = |p: &Path| os::inside(pid, p);
     let folder = match env.get("STEAM_COMPAT_INSTALL_PATH") {
         Some(dir) => PathBuf::from(dir),
         None => anticheat::game_folder(&program_path(pid, maps)?),
@@ -497,13 +444,13 @@ fn shipped_anti_cheat(pid: u32, maps: &[Region], env: &HashMap<String, String>, 
 }
 
 /// The program's file, as the game's sandbox sees it: Wine maps the .exe by its Linux path,
-/// native programs are /proc/<pid>/exe.
+/// native programs are their own (`os::exe`).
 fn program_path(pid: u32, maps: &[Region]) -> Option<PathBuf> {
     let exe = exe_name(pid);
     let mapped = maps.iter().map(|r| Path::new(&r.path)).find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(&*exe)));
     match mapped {
         Some(p) => Some(p.to_path_buf()),
-        None => fs::read_link(format!("/proc/{pid}/exe")).ok(),
+        None => os::exe(pid),
     }
 }
 
@@ -528,99 +475,6 @@ fn steam_id(env: &HashMap<String, String>) -> Option<&String> {
 
 fn about(env: &HashMap<String, String>) -> launchers::About {
     launchers::about(env, steam_id(env).and_then(|id| id.parse().ok()))
-}
-
-fn my_uid() -> u32 {
-    fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("Uid:"))
-                .and_then(|v| v.split_whitespace().next()?.parse().ok())
-        })
-        .unwrap_or(u32::MAX)
-}
-
-fn owner_uid(pid: u32) -> Option<u32> {
-    use std::os::unix::fs::MetadataExt;
-    fs::metadata(format!("/proc/{pid}")).ok().map(|m| m.uid())
-}
-
-/// A file inside an open `/proc/<pid>` directory. The directory handle stays that process's
-/// even if its pid is reused meanwhile, so what was checked is what gets opened.
-fn open_in(dir: &File, name: &str, flags: libc::c_int) -> io::Result<File> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    let name = std::ffi::CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-/// The real user id the process behind an open `/proc/<pid>` runs as (the directory itself
-/// belongs to root when the process can't be dumped).
-fn real_uid(proc_dir: &File) -> Option<u32> {
-    use std::io::Read;
-    let mut status = String::new();
-    open_in(proc_dir, "status", libc::O_RDONLY).ok()?.read_to_string(&mut status).ok()?;
-    status.lines().find_map(|l| l.strip_prefix("Uid:"))?.split_whitespace().next()?.parse().ok()
-}
-
-/// Running with CAP_SYS_PTRACE after `drop_root` (started through pkexec).
-static PRIVILEGED: AtomicBool = AtomicBool::new(false);
-
-const CAP_SYS_PTRACE: u32 = 19;
-
-#[repr(C)]
-struct CapHeader {
-    version: u32,
-    pid: libc::c_int,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapData {
-    effective: u32,
-    permitted: u32,
-    inheritable: u32,
-}
-
-/// Started as root through pkexec (kernel.yama.ptrace_scope 1 or 2 keeps the player's own
-/// programs from being opened): becomes the player again at once, keeping only CAP_SYS_PTRACE,
-/// which is all that reading another program's memory needs. `as_user` is `<uid>:<gid>:<home>`
-/// from Ferret; the uid must be the one pkexec says asked. Never serves as root: anything that
-/// fails here ends the helper.
-fn drop_root(as_user: Option<&str>) -> Result<(), String> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Ok(());
-    }
-    let asked: u32 = std::env::var("PKEXEC_UID").ok().and_then(|v| v.parse().ok()).ok_or("started as root, but not through pkexec")?;
-    let mut parts = as_user.ok_or("started as root without --as <uid>:<gid>:<home>")?.splitn(3, ':');
-    let uid: u32 = parts.next().and_then(|v| v.parse().ok()).ok_or("bad --as uid")?;
-    let gid: u32 = parts.next().and_then(|v| v.parse().ok()).ok_or("bad --as gid")?;
-    let home = parts.next().ok_or("bad --as home")?;
-    if uid != asked || uid == 0 {
-        return Err(format!("--as {uid} isn't the user who asked ({asked})"));
-    }
-    let check = |ok: bool, what: &str| if ok { Ok(()) } else { Err(format!("{what}: {}", io::Error::last_os_error())) };
-    unsafe {
-        check(libc::setgroups(0, std::ptr::null()) == 0, "setgroups")?;
-        check(libc::setresgid(gid, gid, gid) == 0, "setresgid")?;
-        // Permitted capabilities survive the uid change; effective ones are cleared by it.
-        check(libc::prctl(8 /* PR_SET_KEEPCAPS */, 1) == 0, "keepcaps")?;
-        check(libc::setresuid(uid, uid, uid) == 0, "setresuid")?;
-        let header = CapHeader { version: 0x2008_0522 /* _LINUX_CAPABILITY_VERSION_3 */, pid: 0 };
-        let bit = 1u32 << CAP_SYS_PTRACE;
-        let data = [CapData { effective: bit, permitted: bit, inheritable: 0 }, CapData { effective: 0, permitted: 0, inheritable: 0 }];
-        check(libc::syscall(libc::SYS_capset, &header, data.as_ptr()) == 0, "capset")?;
-        // Nothing this process starts can gain privileges either.
-        check(libc::prctl(38 /* PR_SET_NO_NEW_PRIVS */, 1, 0, 0, 0) == 0, "no_new_privs")?;
-        check(libc::geteuid() == uid && libc::getegid() == gid, "still not the user")?;
-    }
-    std::env::set_var("HOME", home);
-    PRIVILEGED.store(true, Ordering::Relaxed);
-    Ok(())
 }
 
 // --- How a value is stored. Addresses in commands are "<hex>[:type]", i32 when left out.
@@ -738,7 +592,7 @@ impl Shown {
     }
 }
 
-fn read_value(mem: &File, addr: u64, kind: Kind) -> Option<f64> {
+fn read_value(mem: &Mem, addr: u64, kind: Kind) -> Option<f64> {
     if kind == Kind::Py {
         return python::read_slot(mem, addr);
     }
@@ -747,7 +601,7 @@ fn read_value(mem: &File, addr: u64, kind: Kind) -> Option<f64> {
     Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua) || !v.is_nan())
 }
 
-fn write_value(mem: &File, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
+fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
     match kind {
         Kind::I32 => mem.write_all_at(&(v.round() as i32).to_le_bytes(), addr),
         Kind::F32 => mem.write_all_at(&(v as f32).to_le_bytes(), addr),
@@ -925,7 +779,7 @@ impl Named {
             Named::Java(p) => java::walk(heap, roots, p),
             Named::Py(p) => python::walk(heap, roots, p),
             Named::Air(p) => air::walk(heap, roots, p),
-            Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
+            Named::Unreal(p) => unreal(heap.pid, heap.mem()).map(|ue| ue.walk(heap.mem(), roots, p)).unwrap_or_default(),
         }
     }
 
@@ -942,13 +796,13 @@ impl Named {
             Named::Java(p) => java::find_roots(heap, p),
             Named::Py(p) => python::find_roots(heap, p),
             Named::Air(p) => air::find_roots(heap, p),
-            Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
+            Named::Unreal(p) => unreal(heap.pid, heap.mem()).map(|ue| ue.roots(heap.mem(), p)).unwrap_or_default(),
         }
     }
 }
 
 /// The game's Unreal objects, when it's an Unreal game.
-fn unreal(pid: u32, mem: &File) -> Result<std::sync::Arc<ue::Ue>, String> {
+fn unreal(pid: u32, mem: &Mem) -> Result<std::sync::Arc<ue::Ue>, String> {
     let exe = exe_name(pid);
     ue::shared(pid, mem, &exe, || pointers::modules(pid, mem))
 }
@@ -961,7 +815,7 @@ const MAX_NAMED_PLACES: usize = 32;
 /// no named objects; a path through two random characters led to 95 places, and a write went
 /// to all of them). Places of one value are the same field of objects of one kind: few, lined
 /// up alike, holding plausible numbers.
-fn named_doubt(mem: &File, leads: &[u64], kind: Kind, path: &Named) -> Option<String> {
+fn named_doubt(mem: &Mem, leads: &[u64], kind: Kind, path: &Named) -> Option<String> {
     if leads.len() > MAX_NAMED_PLACES {
         return Some(format!("it leads to {} places, more than one value is kept in", leads.len()));
     }
@@ -990,7 +844,7 @@ struct NamedLimit {
 #[derive(Default)]
 struct Limiter {
     pid: u32,
-    mem: Option<File>,
+    mem: Option<Mem>,
     width: usize,
     modules: Vec<Module>,
     limits: Vec<Limit>,
@@ -1003,7 +857,7 @@ const RECHECK_EVERY: Duration = Duration::from_secs(10);
 const RECHECK_MOST: Duration = Duration::from_secs(160);
 const RESOLVE_WAIT: Duration = Duration::from_secs(2);
 
-fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
+fn read_guard(mem: &Mem, addr: u64) -> Option<[u8; 4]> {
     let mut g = [0u8; 4];
     mem.read_exact_at(&mut g, addr).ok().map(|_| g)
 }
@@ -1013,7 +867,7 @@ fn read_guard(mem: &File, addr: u64) -> Option<[u8; 4]> {
 /// `mov ecx,[esi+eax*4+0x5c8960]` with esi 0) has no object: the value sits at a fixed address
 /// and can't be replaced, so it gets none (address 0). Before, its limits failed with "cannot
 /// read the object at 0x0" and a restore never found it in the background.
-fn guard_of(mem: &File, object: u64) -> Option<(u64, [u8; 4])> {
+fn guard_of(mem: &Mem, object: u64) -> Option<(u64, [u8; 4])> {
     if object < 0x10000 {
         return Some((0, [0; 4]));
     }
@@ -1241,7 +1095,7 @@ fn same_code(a: &[Site], b: &[Site]) -> bool {
 /// Finds limited values by their code patterns again (`limiter_loop`, on a thread of its own):
 /// values going through the same code (From Dust's four power timers) in one trace, else
 /// waiting ones kept the game traced nearly all the time.
-fn refind(shared: &SharedLimiter, pid: u32, mem: &File, width: usize, due: &[(String, Vec<Site>, bool)]) {
+fn refind(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, due: &[(String, Vec<Site>, bool)]) {
     let all: Vec<Vec<Site>> = due.iter().map(|(_, sites, _)| sites.clone()).collect();
     let results = resolve_values(pid, mem, &all, width, RESOLVE_WAIT);
     for ((name, sites, search_code), r) in due.iter().zip(results) {
@@ -1251,7 +1105,7 @@ fn refind(shared: &SharedLimiter, pid: u32, mem: &File, width: usize, due: &[(St
 
 /// What `refind` found for one value (`None`: its code didn't run).
 #[allow(clippy::too_many_arguments)]
-fn refound(shared: &SharedLimiter, pid: u32, mem: &File, width: usize, name: &str, sites: &[Site], search_code: bool, r: Option<Resolved>) {
+fn refound(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, name: &str, sites: &[Site], search_code: bool, r: Option<Resolved>) {
     let mut found = r.map(|r| {
         let disp = r.disp;
         (r, disp)
@@ -1486,7 +1340,7 @@ impl Candidate {
 }
 
 /// Current values of candidates sorted by address, reading memory a block at a time.
-fn read_all(mem: &File, cands: &[Candidate]) -> Vec<Option<f64>> {
+fn read_all(mem: &Mem, cands: &[Candidate]) -> Vec<Option<f64>> {
     const BLOCK: u64 = 1 << 16;
     let mut buf = vec![0u8; BLOCK as usize + 8];
     let (mut start, mut len) = (u64::MAX, 0u64);
@@ -1511,7 +1365,7 @@ fn read_all(mem: &File, cands: &[Candidate]) -> Vec<Option<f64>> {
 #[derive(Default)]
 struct Session {
     pid: u32,
-    mem: Option<File>,
+    mem: Option<Mem>,
     exe: String,
     /// Pointer size in the game: 4 or 8 bytes.
     width: usize,
@@ -1600,30 +1454,10 @@ impl Session {
     }
 }
 
-fn cmd_info(out: &mut impl Write) -> io::Result<()> {
-    let ns = fs::read_link("/proc/self/ns/pid").map(|p| p.display().to_string()).unwrap_or_default();
-    let scope = fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").unwrap_or_else(|_| "n/a".into());
-    let visible = fs::read_dir("/proc")?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()))
-        .count();
-    writeln!(out, "helper pid namespace: {ns}")?;
-    writeln!(out, "helper uid: {}", my_uid())?;
-    writeln!(out, "yama ptrace_scope: {}", scope.trim())?;
-    writeln!(out, "privileged: {}", if PRIVILEGED.load(Ordering::Relaxed) { "yes" } else { "no" })?;
-    writeln!(out, "processes visible to helper: {visible}")
-}
-
 fn cmd_ps(out: &mut impl Write, filter: &str) -> io::Result<()> {
-    let uid = my_uid();
     let filter = filter.to_ascii_lowercase();
     let programs = anti_cheat_programs();
-    let mut pids: Vec<u32> = fs::read_dir("/proc")?
-        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
-        .filter(|pid| owner_uid(*pid) == Some(uid))
-        .collect();
-    pids.sort();
-    for pid in pids {
+    for pid in os::own_pids() {
         let cmd = cmdline(pid);
         let env = environ(pid);
         let app_id = env.get("SteamAppId").or_else(|| env.get("SteamGameId"));
@@ -1683,7 +1517,7 @@ fn draws_like_a_game(pid: u32) -> bool {
         display |= ["libX11.", "libxcb.", "libwayland-client."].iter().any(|l| name.starts_with(l));
     }
     let system = || {
-        let exe = fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_default();
+        let exe = os::exe(pid).unwrap_or_default();
         ["/usr/", "/bin/", "/sbin/", "/lib", "/app/", "/nix/", "/snap/"].iter().any(|d| exe.to_string_lossy().starts_with(d))
     };
     (driver || game || display && !system()) && (game || !toolkit)
@@ -1701,7 +1535,7 @@ fn gpu_driver(name: &str) -> bool {
 /// through the process's root, for sandboxed launchers).
 fn launcher_folder(pid: u32, program: &Path) -> bool {
     let ships_toolkit = |dir: &Path| {
-        fs::read_dir(format!("/proc/{pid}/root{}", dir.display())).is_ok_and(|entries| {
+        fs::read_dir(os::inside(pid, dir)).is_ok_and(|entries| {
             entries.flatten().any(|e| e.file_name().to_str().is_some_and(|n| n.to_ascii_lowercase().ends_with(".dll") && desktop_toolkit(n)))
         })
     };
@@ -1742,15 +1576,9 @@ fn windows_non_game(pid: u32) -> bool {
 /// edited saves get marked, `launchers::MARKS_ACCOUNTS`), "leaderboards" (tab-separated, "-"
 /// when unknown or not).
 fn cmd_games(out: &mut impl Write) -> io::Result<()> {
-    let uid = my_uid();
     let programs = anti_cheat_programs();
-    let mut pids: Vec<u32> = fs::read_dir("/proc")?
-        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
-        .filter(|pid| owner_uid(*pid) == Some(uid))
-        .collect();
-    pids.sort();
     let mut rows = Vec::new();
-    for pid in pids {
+    for pid in os::own_pids() {
         let exe = exe_name(pid);
         let lower = exe.to_ascii_lowercase();
         let name_now = game_name(pid);
@@ -1865,16 +1693,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
     if let Some(r) = verdict(pid, &anti_cheat_programs()).refused {
         return writeln!(out, "error: refusing to attach, {}", r.why());
     }
-    // With CAP_SYS_PTRACE the kernel would open anyone's: only the player's own programs, and
-    // the memory is opened through the same directory handle the owner was checked on.
-    let proc_dir = match File::open(format!("/proc/{pid}")) {
-        Ok(d) => d,
-        Err(e) => return writeln!(out, "error: cannot open /proc/{pid}: {e}"),
-    };
-    if real_uid(&proc_dir) != Some(my_uid()) {
-        return writeln!(out, "error: refusing to attach: not your program");
-    }
-    match open_in(&proc_dir, "mem", libc::O_RDWR) {
+    match os::open_mem(pid) {
         Ok(f) => {
             let exe = exe_name(pid);
             let modules = pointers::modules(pid, &f);
@@ -1902,18 +1721,8 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             }
             Ok(())
         }
-        Err(e) => match ptrace_scope() {
-            // Yama, not file permissions: the game is the user's own.
-            Some(scope @ 1..) if e.kind() == io::ErrorKind::PermissionDenied && owner_uid(pid) == Some(my_uid()) => {
-                writeln!(out, "error: blocked by ptrace_scope {scope}")
-            }
-            _ => writeln!(out, "error: cannot open /proc/{pid}/mem: {e}"),
-        },
+        Err(e) => writeln!(out, "error: {e}"),
     }
-}
-
-fn ptrace_scope() -> Option<u8> {
-    fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok()?.trim().parse().ok()
 }
 
 /// scan <n> [types]: every value that can be what the screen shows as n, stored as a 4-byte
@@ -1984,7 +1793,7 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
 
 /// One pass of `scan` over the game's memory.
 struct MemScan<'a> {
-    mem: &'a File,
+    mem: &'a Mem,
     regions: &'a [Region],
     mapped: &'a Mapped,
     width: usize,
@@ -2822,7 +2631,7 @@ fn le_at(buf: &[u8], i: i64, n: usize) -> Option<u64> {
     Some(u64::from_le_bytes(w))
 }
 
-fn read_le(mem: &File, addr: u64, n: usize) -> Option<u64> {
+fn read_le(mem: &Mem, addr: u64, n: usize) -> Option<u64> {
     let mut w = [0u8; 8];
     mem.read_exact_at(&mut w[..n], addr).ok()?;
     Some(u64::from_le_bytes(w))
@@ -2974,12 +2783,12 @@ fn parse_pattern(text: &str) -> Option<Vec<Option<u8>>> {
 }
 
 /// Addresses in executable memory where `pat` matches (up to `limit`).
-fn find_pattern(pid: u32, mem: &File, pat: &[Option<u8>], limit: usize) -> io::Result<Vec<u64>> {
+fn find_pattern(pid: u32, mem: &Mem, pat: &[Option<u8>], limit: usize) -> io::Result<Vec<u64>> {
     Ok(find_patterns(pid, mem, &[pat], limit)?.pop().unwrap_or_default())
 }
 
 /// `find_pattern` for several patterns in one pass over the game's code (see `Patterns`).
-fn find_patterns(pid: u32, mem: &File, pats: &[&[Option<u8>]], limit: usize) -> io::Result<Vec<Vec<u64>>> {
+fn find_patterns(pid: u32, mem: &Mem, pats: &[&[Option<u8>]], limit: usize) -> io::Result<Vec<Vec<u64>>> {
     let finder = Patterns::new(pats);
     let mut found = vec![Vec::new(); pats.len()];
     for r in maps(pid)?.iter().filter(|r| r.perms.contains('x')) {
@@ -3045,7 +2854,6 @@ impl<'a> Patterns<'a> {
 /// time of the program, IL2CPP's GameAssembly and Mono's Assembly-CSharp.dll): it changes when
 /// the game is updated, when code patterns saved before may find the wrong place.
 fn cmd_build(out: &mut impl Write, s: &Session) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
     let regions = maps(s.pid)?;
     let exe = exe_name(s.pid).to_lowercase();
     let file_name = |p: &str| p.rsplit('/').next().unwrap_or_default().to_lowercase();
@@ -3068,9 +2876,10 @@ fn cmd_build(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let (mut hash, mut was) = (0xcbf2_9ce4_8422_2325u64, 0xcbf2_9ce4_8422_2325u64);
     let mut stamped = 0;
     for f in &files {
-        let at = format!("/proc/{}/root{f}", s.pid);
+        let at = os::inside(s.pid, Path::new(f));
         let Ok(m) = fs::metadata(&at) else { continue };
-        fnv(&mut was, format!("{f} {} {}", m.len(), m.mtime()).as_bytes());
+        let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        fnv(&mut was, format!("{f} {} {mtime}", m.len()).as_bytes());
         let Ok(file) = File::open(&at) else { continue };
         let n = BUILD_SAMPLE.min(m.len());
         let (mut start, mut end) = (vec![0u8; n as usize], vec![0u8; n as usize]);
@@ -3263,8 +3072,7 @@ fn cmd_first(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 }
 
 fn frontend_spoke() -> bool {
-    let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
-    unsafe { libc::poll(&mut fd, 1, 0) > 0 }
+    os::stdin_ready()
 }
 
 /// The distinct addresses the instruction at `instr` reads as [base + disp] while the game runs
@@ -3310,7 +3118,7 @@ fn parse_key(token: &str) -> Option<Key> {
 }
 
 /// Whether the place a site led to is the value's: its key (if any) is there.
-fn key_holds(mem: &File, addr: u64, key: Option<Key>) -> bool {
+fn key_holds(mem: &Mem, addr: u64, key: Option<Key>) -> bool {
     let Some((off, v)) = key else { return true };
     read_value(mem, addr.wrapping_add(off as u64), Kind::I32) == Some(v as f64)
 }
@@ -3351,7 +3159,7 @@ const HOLDER_REACH: usize = 32;
 /// `mov <base>,[address]` shortly before it (how Mono and C++ code read a static object) loads
 /// from a pointer that holds that object now. Following it finds the object the game uses,
 /// also after the game replaces it (Particle Fleet does when the map changes).
-fn holder(mem: &File, instr: u64, site: &Site, is_64bit: bool, width: usize, addr: u64) -> Option<PtrPath> {
+fn holder(mem: &Mem, instr: u64, site: &Site, is_64bit: bool, width: usize, addr: u64) -> Option<PtrPath> {
     let object = addr.wrapping_sub(site.disp as u64);
     if site.disp < 0 || object < 0x10000 {
         return None;
@@ -3382,7 +3190,7 @@ fn holder(mem: &File, instr: u64, site: &Site, is_64bit: bool, width: usize, add
 }
 
 /// The first of `sites` whose code loads the object holding `addr` from a static pointer.
-fn holder_in_code(pid: u32, mem: &File, sites: &[Site], is_64bit: bool, width: usize, addr: u64) -> Option<PtrPath> {
+fn holder_in_code(pid: u32, mem: &Mem, sites: &[Site], is_64bit: bool, width: usize, addr: u64) -> Option<PtrPath> {
     sites.iter().find_map(|site| {
         let [code] = find_pattern(pid, mem, &site.pat, 2).ok()?[..] else { return None };
         holder(mem, code + site.off, site, is_64bit, width, addr)
@@ -3391,7 +3199,7 @@ fn holder_in_code(pid: u32, mem: &File, sites: &[Site], is_64bit: bool, width: u
 
 /// Finds a saved pattern in the game's code, waits for that instruction to
 /// run and reads its base register: the value's address in this run.
-fn resolve_site(pid: u32, mem: &File, site: &Site, width: usize, timeout: Duration) -> Result<Resolved, String> {
+fn resolve_site(pid: u32, mem: &Mem, site: &Site, width: usize, timeout: Duration) -> Result<Resolved, String> {
     let found = find_pattern(pid, mem, &site.pat, 2).map_err(|e| e.to_string())?;
     let [code] = found.as_slice() else {
         return Err(format!("pattern found {} times (the game may not have run that code yet)", found.len()));
@@ -3418,7 +3226,7 @@ fn resolve_site(pid: u32, mem: &File, site: &Site, width: usize, timeout: Durati
 /// together (one per value first), so a restore waits `timeout` per 4 instructions instead of
 /// per instruction (Wolfenstein: three sites of a value only firing runs, 10 s each, held up
 /// everything else). One result per value: where it led, or why not.
-fn resolve_values(pid: u32, mem: &File, values: &[Vec<Site>], width: usize, timeout: Duration) -> Vec<Result<Resolved, String>> {
+fn resolve_values(pid: u32, mem: &Mem, values: &[Vec<Site>], width: usize, timeout: Duration) -> Vec<Result<Resolved, String>> {
     let mut results: Vec<Result<Resolved, String>> = values.iter().map(|_| Err("none of its code ran meanwhile".into())).collect();
     // (value, site, instruction), first sites of every value first. Values found through the
     // same code (others like a value: From Dust's four power timers) search the code once.
@@ -4137,18 +3945,16 @@ fn cmd_resolve(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<(
 }
 
 pub fn run(as_user: Option<&str>) {
-    // Losing Ferret (it closed or crashed) ends stdin: test values are put back then. The
-    // SIGINT flatpak-spawn's --watch-bus sends at the same time would end the helper first.
-    unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+    os::ignore_interrupt();
     let stdin = io::stdin();
     let mut out = io::stdout().lock();
     // Before anything else runs, threads included.
-    if let Err(e) = drop_root(as_user) {
+    if let Err(e) = os::drop_root(as_user) {
         writeln!(out, "error: cannot drop root: {e}").and_then(|_| writeln!(out, "end")).ok();
         return;
     }
     trace::block_sigchld();
-    end_tracing_on_term();
+    os::on_terminate(exit_untraced);
     let mut session = Session::default();
     let limiter = SharedLimiter::default();
     // Anti-cheat that started in the attached game, until `alive` reports it.
@@ -4177,7 +3983,7 @@ pub fn run(as_user: Option<&str>) {
             caught = None;
         }
         let res = match cmd {
-            "info" => cmd_info(&mut out),
+            "info" => os::info(&mut out),
             "ps" => cmd_ps(&mut out, arg),
             "games" => cmd_games(&mut out),
             "attach" => cmd_attach(&mut out, &mut session, &limiter, arg),
@@ -4254,24 +4060,6 @@ pub fn run(as_user: Option<&str>) {
 fn exit_untraced() -> ! {
     let _no_more = TRACING.lock().unwrap_or_else(|e| e.into_inner());
     std::process::exit(0)
-}
-
-/// SIGTERM (systemd stopping the session, `kill`) ends the helper through `exit_untraced`
-/// too: blocked in every thread (they inherit it from this one; the helper starts no
-/// programs, which would inherit it as well) and taken by one thread that waits for it.
-fn end_tracing_on_term() {
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGTERM);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-        std::thread::spawn(move || {
-            let mut sig = 0;
-            if libc::sigwait(&set, &mut sig) == 0 {
-                exit_untraced();
-            }
-        });
-    }
 }
 
 #[cfg(test)]

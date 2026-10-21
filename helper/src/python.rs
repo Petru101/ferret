@@ -23,8 +23,7 @@ use crate::mono::player_like;
 use crate::names::Heap;
 use crate::ue::{Listed, ListedObject, MAX_LISTED};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,22 +49,22 @@ const TP_BASICSIZE: u64 = 32;
 const TP_FLAGS: u64 = 168;
 const TP_DICTOFFSET: u64 = 288;
 
-fn word(mem: &File, at: u64) -> Option<u64> {
+fn word(mem: &Mem, at: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b, at).ok().map(|_| u64::from_le_bytes(b))
 }
 
-fn half(mem: &File, at: u64) -> Option<u32> {
+fn half(mem: &Mem, at: u64) -> Option<u32> {
     let mut b = [0u8; 4];
     mem.read_exact_at(&mut b, at).ok().map(|_| u32::from_le_bytes(b))
 }
 
-fn byte(mem: &File, at: u64) -> Option<u8> {
+fn byte(mem: &Mem, at: u64) -> Option<u8> {
     let mut b = [0u8; 1];
     mem.read_exact_at(&mut b, at).ok().map(|_| b[0])
 }
 
-fn cstr(mem: &File, at: u64) -> Option<String> {
+fn cstr(mem: &Mem, at: u64) -> Option<String> {
     if at < 0x10000 {
         return None;
     }
@@ -90,8 +89,7 @@ fn version(pid: u32, regions: &[crate::helper::Region]) -> Option<(u8, u8)> {
         return Some(v);
     }
     let lib = regions.iter().find(|r| r.path.ends_with("/librenpython.so") || r.path.contains("/librenpython"))?;
-    let root = std::path::Path::new("/proc").join(pid.to_string()).join("root");
-    let data = std::fs::read(root.join(lib.path.trim_start_matches('/'))).ok()?;
+    let data = std::fs::read(crate::os::inside(pid, std::path::Path::new(&lib.path))).ok()?;
     // Its paths and module names say "python3.12" (its first "3.x.y" string isn't always the
     // version: Ren'Py 8's had "3.3.x" earlier): the most common minor version wins.
     let mut counts: HashMap<u8, usize> = HashMap::new();
@@ -180,7 +178,7 @@ impl Py {
         if heap.width() != 8 {
             return None;
         }
-        let mem = heap.file();
+        let mem = heap.mem();
         let regions = crate::helper::maps(heap.pid).ok()?;
         let ver = version(heap.pid, &regions)?;
         // The `type` type: its own type, named "type".
@@ -246,7 +244,7 @@ impl Py {
 
     /// The namespaces: every module's dict and Ren'Py's store dicts, by their `__name__`.
     fn find_roots(&self, heap: &Heap) {
-        let mem = heap.file();
+        let mem = heap.mem();
         let targets: Vec<u64> = [self.t.module, self.t.store].into_iter().filter(|&x| x != 0).collect();
         let mut roots = HashMap::new();
         for r in heap.referrers(&targets) {
@@ -264,20 +262,20 @@ impl Py {
         *self.roots.lock().unwrap() = (roots, Instant::now());
     }
 
-    fn type_of(&self, mem: &File, o: u64) -> Option<u64> {
+    fn type_of(&self, mem: &Mem, o: u64) -> Option<u64> {
         word(mem, o + 8).filter(|&t| t > 0x10000)
     }
 
-    fn flags(&self, mem: &File, t: u64) -> u64 {
+    fn flags(&self, mem: &Mem, t: u64) -> u64 {
         word(mem, t + TP_FLAGS).unwrap_or(0)
     }
 
-    fn is_dict(&self, mem: &File, o: u64) -> bool {
+    fn is_dict(&self, mem: &Mem, o: u64) -> bool {
         self.type_of(mem, o).is_some_and(|t| t == self.t.dict || t == self.t.store || self.flags(mem, t) & DICT_SUBCLASS != 0)
     }
 
     /// A str's text (3.x compact strings; 2.7's byte strings).
-    fn text(&self, mem: &File, o: u64) -> Option<String> {
+    fn text(&self, mem: &Mem, o: u64) -> Option<String> {
         if self.type_of(mem, o)? != self.t.str_ {
             return None;
         }
@@ -306,7 +304,7 @@ impl Py {
     }
 
     /// An int's digits (30 bits each) and sign, as the version keeps them.
-    fn int_value(&self, mem: &File, o: u64, ty: u64) -> Option<i64> {
+    fn int_value(&self, mem: &Mem, o: u64, ty: u64) -> Option<i64> {
         if self.ver.0 == 2 && ty == self.t.int {
             return word(mem, o + 16).map(|v| v as i64);
         }
@@ -328,7 +326,7 @@ impl Py {
     }
 
     /// What an object is, for listing.
-    fn val(&self, mem: &File, o: u64) -> Val {
+    fn val(&self, mem: &Mem, o: u64) -> Val {
         let Some(t) = self.type_of(mem, o) else { return Val::Other };
         if t == self.t.float {
             return word(mem, o + 16).map_or(Val::Other, |b| Val::Float(f64::from_bits(b)));
@@ -346,7 +344,7 @@ impl Py {
         Val::Other
     }
 
-    fn key(&self, mem: &File, k: u64) -> Option<Key> {
+    fn key(&self, mem: &Mem, k: u64) -> Option<Key> {
         if let Some(s) = self.text(mem, k) {
             return Some(Key::Name(s));
         }
@@ -357,7 +355,7 @@ impl Py {
     }
 
     /// A dict's entries: each key with the object it holds and the slot holding it.
-    fn dict_entries(&self, mem: &File, d: u64) -> Vec<(Key, u64, u64)> {
+    fn dict_entries(&self, mem: &Mem, d: u64) -> Vec<(Key, u64, u64)> {
         let mut out = Vec::new();
         let mut push = |k: u64, slot: u64| {
             if let (Some(v), Some(key)) = (word(mem, slot).filter(|&v| v != 0), (k != 0).then(|| self.key(mem, k)).flatten()) {
@@ -392,7 +390,7 @@ impl Py {
 
     /// A dict keys object's entries (address, count) and whether they're the short kind
     /// {key, value} (3.11+: tables of str keys only; earlier entries are {hash, key, value}).
-    fn keys_layout(&self, mem: &File, keys: u64) -> Option<(u64, u64, bool)> {
+    fn keys_layout(&self, mem: &Mem, keys: u64) -> Option<(u64, u64, bool)> {
         if self.ver >= (3, 11) {
             let mut b = [0u8; 32];
             mem.read_exact_at(&mut b, keys).ok()?;
@@ -418,13 +416,13 @@ impl Py {
         }
     }
 
-    fn dict_get(&self, mem: &File, d: u64, key: &Key) -> Option<(u64, u64)> {
+    fn dict_get(&self, mem: &Mem, d: u64, key: &Key) -> Option<(u64, u64)> {
         self.dict_entries(mem, d).into_iter().find(|(k, _, _)| k == key).map(|(_, v, s)| (v, s))
     }
 
     /// Where a heap type keeps its shared keys (`ht_cached_keys`): after `ht_name` (a str
     /// equal to the class's name), `ht_slots` and `ht_qualname`.
-    fn cached_keys(&self, mem: &File, t: u64) -> Option<u64> {
+    fn cached_keys(&self, mem: &Mem, t: u64) -> Option<u64> {
         let mut at = self.ht_name_at.lock().unwrap();
         if at.is_none() {
             let name = word(mem, t + TP_NAME).and_then(|n| cstr(mem, n))?;
@@ -435,7 +433,7 @@ impl Py {
     }
 
     /// An object's attributes (its dict's entries, or its values named by its class's keys).
-    fn attrs(&self, mem: &File, o: u64) -> Vec<(Key, u64, u64)> {
+    fn attrs(&self, mem: &Mem, o: u64) -> Vec<(Key, u64, u64)> {
         let Some(t) = self.type_of(mem, o) else { return Vec::new() };
         let flags = self.flags(mem, t);
         let split = |values: u64| {
@@ -476,7 +474,7 @@ impl Py {
     }
 
     /// A list's or tuple's elements: index, object and slot.
-    fn elements(&self, mem: &File, o: u64) -> Vec<(i64, u64, u64)> {
+    fn elements(&self, mem: &Mem, o: u64) -> Vec<(i64, u64, u64)> {
         let Some(t) = self.type_of(mem, o) else { return Vec::new() };
         let flags = self.flags(mem, t);
         let Some(n) = word(mem, o + 16).filter(|&n| n <= MAX_ENTRIES) else { return Vec::new() };
@@ -494,7 +492,7 @@ impl Py {
     }
 
     /// An object's entries by name or index: a dict's, a list's or an object's attributes.
-    fn children(&self, mem: &File, o: u64) -> Vec<(Key, u64, u64)> {
+    fn children(&self, mem: &Mem, o: u64) -> Vec<(Key, u64, u64)> {
         if self.is_dict(mem, o) {
             return self.dict_entries(mem, o);
         }
@@ -505,19 +503,19 @@ impl Py {
         self.attrs(mem, o)
     }
 
-    fn type_name(&self, mem: &File, o: u64) -> String {
+    fn type_name(&self, mem: &Mem, o: u64) -> String {
         self.type_of(mem, o).and_then(|t| word(mem, t + TP_NAME)).and_then(|n| cstr(mem, n)).unwrap_or_default()
     }
 
     /// Reference count: the low 32 bits in 3.12+ (the rest are flags), the whole word before.
-    fn refcount(&self, mem: &File, o: u64) -> Option<u64> {
+    fn refcount(&self, mem: &Mem, o: u64) -> Option<u64> {
         let w = word(mem, o)?;
         Some(if self.ver >= (3, 12) { w & 0xffff_ffff } else { w })
     }
 
     /// The cached small int for `v` (-5..256): the int objects next to the one for 0, found from
     /// any small int's place.
-    fn small_int(&self, mem: &File, v: i64, near: Option<u64>) -> Option<u64> {
+    fn small_int(&self, mem: &Mem, v: i64, near: Option<u64>) -> Option<u64> {
         if !(-5..=256).contains(&v) {
             return None;
         }
@@ -562,7 +560,7 @@ fn current() -> Option<Arc<Py>> {
 }
 
 /// The number a slot's object holds now (the `py` value type).
-pub fn read_slot(mem: &File, slot: u64) -> Option<f64> {
+pub fn read_slot(mem: &Mem, slot: u64) -> Option<f64> {
     let py = current()?;
     match py.val(mem, word(mem, slot)?) {
         Val::Int(i) => Some(i as f64),
@@ -574,7 +572,7 @@ pub fn read_slot(mem: &File, slot: u64) -> Option<f64> {
 /// Writes a number to the object a slot points to: in place when only that slot points to
 /// it; a small int by pointing the slot to the cached one; else refused (the object is shared:
 /// another variable, a constant of the game's code, Ren'Py's rollback log).
-pub fn write_slot(mem: &File, slot: u64, v: f64) -> std::io::Result<()> {
+pub fn write_slot(mem: &Mem, slot: u64, v: f64) -> std::io::Result<()> {
     let refused = |why: &str| Err(std::io::Error::other(why.to_owned()));
     let Some(py) = current() else { return refused("not a Python game") };
     let Some(o) = word(mem, slot) else { return refused("unreadable") };
@@ -780,7 +778,7 @@ fn constant(name: &str) -> bool {
 /// The namespace the path starts from.
 pub fn find_roots(heap: &Heap, path: &PyPath) -> Vec<u64> {
     let Some(py) = shared(heap) else { return Vec::new() };
-    let mem = heap.file();
+    let mem = heap.mem();
     let found = py.roots.lock().unwrap().0.get(&path.root).copied();
     if let Some(d) = found.filter(|&d| py.is_dict(mem, d)) {
         return vec![d];
@@ -796,7 +794,7 @@ pub fn find_roots(heap: &Heap, path: &PyPath) -> Vec<u64> {
 /// Where the path leads: the slot pointing to the number, while it holds one.
 pub fn walk(heap: &Heap, roots: &[u64], path: &PyPath) -> Vec<u64> {
     let Some(py) = shared(heap) else { return Vec::new() };
-    let mem = heap.file();
+    let mem = heap.mem();
     roots
         .iter()
         .filter(|&&d| py.is_dict(mem, d))
@@ -826,7 +824,7 @@ struct Group {
 
 /// Namespaces listed: the game's (`__main__`, Ren'Py's `store`, modules with no file or one
 /// outside Python's and Ren'Py's own folders), not Python's or the engine's.
-fn game_roots(py: &Py, mem: &File) -> Vec<(String, u64)> {
+fn game_roots(py: &Py, mem: &Mem) -> Vec<(String, u64)> {
     let roots = py.roots.lock().unwrap().0.clone();
     let mut out: Vec<(String, u64)> = roots
         .into_iter()
@@ -855,7 +853,7 @@ fn game_roots(py: &Py, mem: &File) -> Vec<(String, u64)> {
 /// first: `game_roots`' `player` before its UI), each object by its shortest path.
 fn groups(heap: &Heap) -> Option<Vec<Group>> {
     let py = shared(heap)?;
-    let mem = heap.file();
+    let mem = heap.mem();
     if py.roots.lock().unwrap().1.elapsed() >= Duration::from_secs(2) {
         py.find_roots(heap);
     }
@@ -953,7 +951,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(PyPath, Vec<u64>)> {
 pub fn diagnose(heap: &Heap, at: &str) -> Vec<String> {
     let t = Instant::now();
     let Some(py) = shared(heap) else { return vec!["no Python objects found (only 64-bit CPython 2.7 and 3.x)".into()] };
-    let mem = heap.file();
+    let mem = heap.mem();
     let roots = py.roots.lock().unwrap().0.clone();
     let mut out = vec![format!("Python {}.{}, {} namespaces, str at +{}, types {:x?} ({} ms)", py.ver.0, py.ver.1, roots.len(), py.str_at, py.t, t.elapsed().as_millis())];
     let _ = py.pid;

@@ -7,9 +7,9 @@
 // down from where its stack starts: "[stack]-1a8,...". Rust programs (Ruffle) keep their state
 // there, reachable from no global.
 
-use std::fs::{self, File};
+use std::fs;
+use crate::mem::Mem;
 use std::io;
-use std::os::unix::fs::FileExt;
 
 use crate::helper::{maps, scannable};
 
@@ -29,21 +29,13 @@ pub const STACK: &str = "[stack]";
 /// main and the loop it runs stay put for the whole run, deeper ones come and go.
 const STACK_ROOTS: u64 = 64 << 10;
 
-/// Where the main thread's stack starts (`startstack` in /proc/<pid>/stat: the address of argc;
-/// argv's and the environment's strings are above it, the frames below).
-fn stack_start(pid: u32) -> Option<u64> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // Fields after the name (which may hold spaces); startstack is the 28th field.
-    stat.rsplit_once(')')?.1.split_whitespace().nth(25)?.parse().ok().filter(|&a| a != 0)
-}
-
-fn read_u32(mem: &File, addr: u64) -> Option<u32> {
+fn read_u32(mem: &Mem, addr: u64) -> Option<u32> {
     let mut b = [0u8; 4];
     mem.read_exact_at(&mut b, addr).ok().map(|_| u32::from_le_bytes(b))
 }
 
 /// Size of the Windows program mapped at `start` ("MZ" header), from its PE header.
-fn pe_image(mem: &File, start: u64) -> Option<(u16, u64)> {
+fn pe_image(mem: &Mem, start: u64) -> Option<(u16, u64)> {
     let mut mz = [0u8; 2];
     mem.read_exact_at(&mut mz, start).ok()?;
     if &mz != b"MZ" {
@@ -65,7 +57,7 @@ fn temporary(path: &str) -> bool {
     lower.ends_with(".tmp") || lower.contains("/appdata/local/temp/") || lower.starts_with("/tmp/")
 }
 
-pub fn modules(pid: u32, mem: &File) -> Vec<Module> {
+pub fn modules(pid: u32, mem: &Mem) -> Vec<Module> {
     let regions = maps(pid).unwrap_or_default();
     let mut mods: Vec<(String, Module)> = Vec::new();
     for (i, r) in regions.iter().enumerate() {
@@ -105,7 +97,7 @@ pub fn modules(pid: u32, mem: &File) -> Vec<Module> {
     });
     let mut mods: Vec<Module> = mods.into_iter().map(|(_, m)| m).collect();
     // Under Wine the game's threads run on stacks of Wine's own, not this one.
-    if let (false, Some(top)) = (wine, stack_start(pid)) {
+    if let (false, Some(top)) = (wine, crate::os::stack_start(pid)) {
         if let Some(r) = regions.iter().find(|r| r.start < top && top <= r.end) {
             let start = r.start.max(top.saturating_sub(STACK_ROOTS));
             mods.push(Module { name: STACK.to_owned(), start, end: top, ambiguous: false, stack: true });
@@ -120,20 +112,20 @@ pub fn modules(pid: u32, mem: &File) -> Vec<Module> {
 }
 
 /// Pointer size of the game: from the exe's PE header under Wine, else from the ELF header.
-pub fn pointer_width(pid: u32, mem: &File, mods: &[Module], exe: &str) -> usize {
+pub fn pointer_width(pid: u32, mem: &Mem, mods: &[Module], exe: &str) -> usize {
     if let Some(m) = mods.iter().find(|m| m.name.eq_ignore_ascii_case(exe)) {
         if let Some((machine, _)) = pe_image(mem, m.start) {
             return if machine == 0x14C { 4 } else { 8 };
         }
     }
-    let elf = fs::read(format!("/proc/{pid}/exe")).ok();
+    let elf = crate::os::exe(pid).and_then(|p| fs::read(p).ok());
     match elf.as_deref().and_then(|e| e.get(4)) {
         Some(1) => 4,
         _ => 8,
     }
 }
 
-fn read_ptr(mem: &File, addr: u64, width: usize) -> Option<u64> {
+fn read_ptr(mem: &Mem, addr: u64, width: usize) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b[..width], addr).ok()?;
     Some(u64::from_le_bytes(b))
@@ -173,12 +165,12 @@ impl PtrPath {
     /// Where the path leads right now. Values are aligned and in the game's memory: a path that
     /// ends anywhere else went through something that changed (Age of War: 64 of 247 paths shared
     /// a step into junk and agreed on an unmapped address, outvoting the real one).
-    pub fn follow(&self, mem: &File, mods: &[Module], width: usize) -> Option<u64> {
+    pub fn follow(&self, mem: &Mem, mods: &[Module], width: usize) -> Option<u64> {
         Some(self.pointers(mem, mods, width)?.last()? + self.offsets.last()?).filter(|&a| a % 4 == 0 && read_u32(mem, a).is_some())
     }
 
     /// The pointers read along the path right now, one per offset.
-    fn pointers(&self, mem: &File, mods: &[Module], width: usize) -> Option<Vec<u64>> {
+    fn pointers(&self, mem: &Mem, mods: &[Module], width: usize) -> Option<Vec<u64>> {
         let root = match self.module.as_str() {
             "" => self.base,
             name => {
@@ -222,7 +214,7 @@ impl Vote {
 
 /// The address most of `paths` lead to now, and which paths lead there. Paths that stopped
 /// working or lead elsewhere went through something that changed.
-pub fn vote(mem: &File, mods: &[Module], width: usize, paths: &[PtrPath]) -> Option<Vote> {
+pub fn vote(mem: &Mem, mods: &[Module], width: usize, paths: &[PtrPath]) -> Option<Vote> {
     let ends: Vec<Option<u64>> = paths.iter().map(|p| p.follow(mem, mods, width)).collect();
     let mut counts: Vec<(u64, usize)> = Vec::new();
     for e in ends.iter().flatten() {
@@ -263,7 +255,7 @@ impl Pointers {
     }
 }
 
-pub fn collect_pointers(pid: u32, mem: &File, width: usize) -> io::Result<(Pointers, u64)> {
+pub fn collect_pointers(pid: u32, mem: &Mem, width: usize) -> io::Result<(Pointers, u64)> {
     // A 32-bit game's own memory is all below 4 GiB (Wine's 64-bit parts may not be).
     let rw: Vec<(u64, u64)> = maps(pid)?
         .iter()
@@ -363,7 +355,7 @@ impl Bits {
 #[allow(clippy::too_many_arguments)]
 pub fn scan(
     pid: u32,
-    mem: &File,
+    mem: &Mem,
     width: usize,
     exe: &str,
     target: u64,

@@ -11,8 +11,7 @@
 use crate::names::Heap;
 use crate::ue::{Listed, ListedObject};
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -79,7 +78,7 @@ impl Names {
 
 /// A variable's name the way the runner keeps it: a C string an array of slots points to
 /// (map key - 100000), read from memory.
-fn read_name(mem: &File, slots: u64, key: u32) -> Option<String> {
+fn read_name(mem: &Mem, slots: u64, key: u32) -> Option<String> {
     let p = word(mem, slots + 8 * u64::from(key.checked_sub(KEY_BASE)?))?;
     let mut b = [0u8; 64];
     let n = mem.read_at(&mut b, p).ok()?;
@@ -91,8 +90,7 @@ fn read_name(mem: &File, slots: u64, key: u32) -> Option<String> {
 /// The game's data file: next to the program, or in its assets folder.
 pub fn data_file(pid: u32, program: Option<&Path>) -> Option<PathBuf> {
     let dir = program?.parent()?;
-    let root = Path::new("/proc").join(pid.to_string()).join("root");
-    let inside = root.join(dir.strip_prefix("/").unwrap_or(dir));
+    let inside = crate::os::inside(pid, dir);
     ["data.win", "game.unx", "assets/game.unx"].iter().map(|f| inside.join(f)).find(|p| p.exists())
 }
 
@@ -122,18 +120,18 @@ pub struct Gml {
     maps: usize,
 }
 
-fn word(mem: &File, at: u64) -> Option<u64> {
+fn word(mem: &Mem, at: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b, at).ok().map(|_| u64::from_le_bytes(b))
 }
 
-fn half(mem: &File, at: u64) -> Option<u32> {
+fn half(mem: &Mem, at: u64) -> Option<u32> {
     let mut b = [0u8; 4];
     mem.read_exact_at(&mut b, at).ok().map(|_| u32::from_le_bytes(b))
 }
 
 /// A map's entries: (RValue address, key), read from its header.
-fn entries(mem: &File, map: u64) -> Option<Vec<(u64, u32)>> {
+fn entries(mem: &Mem, map: u64) -> Option<Vec<(u64, u32)>> {
     let mut h = [0u8; 24];
     mem.read_exact_at(&mut h, map).ok()?;
     let (size, used, mask, grow) = (u32_at(&h, 0)?, u32_at(&h, 4)?, u32_at(&h, 8)?, u32_at(&h, 12)?);
@@ -159,7 +157,7 @@ impl Gml {
         if heap.width() != 8 {
             return None;
         }
-        let mem = heap.file();
+        let mem = heap.mem();
         let mut heads = Vec::new();
         let (mut first, mut second) = (Vec::new(), Vec::new());
         heap.each_chunk(24, |addr, b, fresh| {
@@ -255,12 +253,12 @@ impl Gml {
         Some(Gml { names, slots, known, id_at, class, owners, maps: maps.len() })
     }
 
-    fn name(&self, mem: &File, key: u32) -> Option<String> {
+    fn name(&self, mem: &Mem, key: u32) -> Option<String> {
         self.known.get(&key).cloned().or_else(|| read_name(mem, self.slots, key))
     }
 
     /// The key of a variable by name (a slot of the runner's array).
-    fn key_of(&self, mem: &File, name: &str) -> Option<u32> {
+    fn key_of(&self, mem: &Mem, name: &str) -> Option<u32> {
         if let Some((k, _)) = self.known.iter().find(|(_, n)| *n == name) {
             return Some(*k);
         }
@@ -269,7 +267,7 @@ impl Gml {
 
     /// The global object: of the owners that aren't instances, the one holding the most of the
     /// game's global variables (by VARI), or the most variables.
-    fn global(&self, mem: &File) -> Option<&Owner> {
+    fn global(&self, mem: &Mem) -> Option<&Owner> {
         self.owners.iter().filter(|o| o.instance.is_none()).max_by_key(|o| {
             let e = entries(mem, o.map).unwrap_or_default();
             (e.iter().filter(|&&(_, k)| self.name(mem, k).is_some_and(|n| self.names.globals.contains(&n))).count(), e.len())
@@ -277,7 +275,7 @@ impl Gml {
     }
 
     /// An owner's numbers: (variable name, address, kind).
-    fn numbers(&self, mem: &File, o: &Owner) -> Vec<(String, u64, &'static str)> {
+    fn numbers(&self, mem: &Mem, o: &Owner) -> Vec<(String, u64, &'static str)> {
         let mut out: Vec<(String, u64, &'static str)> = entries(mem, o.map)
             .unwrap_or_default()
             .into_iter()
@@ -306,7 +304,7 @@ pub fn rvalue_number(b: &[u8]) -> Option<f64> {
 }
 
 /// Whether an RValue holds a number now.
-fn holds_number(mem: &File, rv: u64) -> bool {
+fn holds_number(mem: &Mem, rv: u64) -> bool {
     let mut b = [0u8; 16];
     mem.read_exact_at(&mut b, rv).is_ok() && rvalue_number(&b).is_some()
 }
@@ -361,7 +359,7 @@ impl GmlPath {
 /// The global object or the instances the path starts from.
 pub fn find_roots(heap: &Heap, program: Option<&Path>, path: &GmlPath) -> Vec<u64> {
     let Some(g) = shared(heap, program, true) else { return Vec::new() };
-    let mem = heap.file();
+    let mem = heap.mem();
     match &path.object {
         None => g.global(mem).map(|o| vec![o.addr]).unwrap_or_default(),
         Some(name) => {
@@ -375,7 +373,7 @@ pub fn find_roots(heap: &Heap, program: Option<&Path>, path: &GmlPath) -> Vec<u6
 /// the global object holding the variable): the RValue's value, while it holds a number.
 pub fn walk(heap: &Heap, program: Option<&Path>, roots: &[u64], path: &GmlPath) -> Vec<u64> {
     let Some(g) = shared(heap, program, false) else { return Vec::new() };
-    let mem = heap.file();
+    let mem = heap.mem();
     let Some(key) = g.key_of(mem, &path.var) else { return Vec::new() };
     let index = path.object.as_ref().and_then(|n| g.names.objects.iter().position(|o| o == n));
     roots
@@ -395,7 +393,7 @@ pub fn walk(heap: &Heap, program: Option<&Path>, roots: &[u64], path: &GmlPath) 
 /// The path to a number some instance's or the global object's variable holds.
 pub fn discover(heap: &Heap, program: Option<&Path>, target: u64) -> Option<(GmlPath, Vec<u64>)> {
     let g = shared(heap, program, true)?;
-    let mem = heap.file();
+    let mem = heap.mem();
     let global = g.global(mem).map(|o| o.addr);
     for o in &g.owners {
         if o.instance.is_none() && Some(o.addr) != global {
@@ -417,7 +415,7 @@ pub fn discover(heap: &Heap, program: Option<&Path>, target: u64) -> Option<(Gml
 /// objects by name in the main list).
 pub fn player(heap: &Heap, program: Option<&Path>) -> Option<Vec<ListedObject>> {
     let g = shared(heap, program, true)?;
-    let mem = heap.file();
+    let mem = heap.mem();
     let mut out = Vec::new();
     if let Some(o) = g.global(mem) {
         let fields = g.numbers(mem, o).into_iter().map(|(label, addr, kind)| Listed { label, addr, kind }).collect();
@@ -448,7 +446,7 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
     let Some(names) = Names::parse(&data) else { return vec![format!("{}: no OBJT chunk", path.display())] };
     let mut lines = vec![format!("{}: {} global variable names, {} objects", path.display(), names.globals.len(), names.objects.len())];
     // Every map header, valid keys or not: the biggest, with their key ranges.
-    let mem = heap.file();
+    let mem = heap.mem();
     let mut all: Vec<(u64, Vec<(u64, u32)>)> = Vec::new();
     heap.each_chunk(24, |addr, b, fresh| {
         for off in (0..fresh).step_by(8) {

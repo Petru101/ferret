@@ -15,8 +15,7 @@
 
 use crate::names::Heap;
 use crate::ue::{Listed, ListedObject};
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -79,17 +78,17 @@ pub struct Js {
     globals: Vec<(&'static str, Vec<u64>)>,
 }
 
-fn word(mem: &File, at: u64) -> Option<u64> {
+fn word(mem: &Mem, at: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b, at).ok().map(|_| u64::from_le_bytes(b))
 }
 
-fn half(mem: &File, at: u64) -> Option<u32> {
+fn half(mem: &Mem, at: u64) -> Option<u32> {
     let mut b = [0u8; 4];
     mem.read_exact_at(&mut b, at).ok().map(|_| u32::from_le_bytes(b))
 }
 
-fn byte(mem: &File, at: u64) -> Option<u8> {
+fn byte(mem: &Mem, at: u64) -> Option<u8> {
     let mut b = [0u8; 1];
     mem.read_exact_at(&mut b, at).ok().map(|_| b[0])
 }
@@ -113,7 +112,7 @@ impl Js {
         if heap.width() != 8 {
             return None;
         }
-        let mem = heap.file();
+        let mem = heap.mem();
         let texts: Vec<&[u8]> = GLOBALS.iter().map(|g| g.as_bytes()).collect();
         let longest = texts.iter().map(|t| t.len()).max().unwrap_or(0);
         let mut names: Vec<Vec<u64>> = vec![Vec::new(); texts.len()];
@@ -180,7 +179,7 @@ impl Js {
 
     /// Checks the field index's place on an object every MV game has: Game_Party's first
     /// fields are `_inBattle`, `_gold`, `_steps`, set in that order.
-    fn calibrate(&mut self, mem: &File) {
+    fn calibrate(&mut self, mem: &Mem) {
         let Some(party) = self.global(mem, "$gameParty") else { return };
         let Some(m) = self.map_of(mem, party) else { return };
         let descs: Vec<(Option<String>, u32)> = self.descriptors(mem, m).into_iter().map(|(k, d)| (self.text(mem, k), d)).collect();
@@ -193,18 +192,18 @@ impl Js {
         }
     }
 
-    fn is_map(&self, mem: &File, m: u64) -> bool {
+    fn is_map(&self, mem: &Mem, m: u64) -> bool {
         tagged(m) && word(mem, m - 1) == Some(self.meta)
     }
 
-    fn map_of(&self, mem: &File, o: u64) -> Option<u64> {
+    fn map_of(&self, mem: &Mem, o: u64) -> Option<u64> {
         if !tagged(o) {
             return None;
         }
         word(mem, o - 1).filter(|&m| self.is_map(mem, m))
     }
 
-    fn instance_type(&self, mem: &File, m: u64) -> Option<u16> {
+    fn instance_type(&self, mem: &Mem, m: u64) -> Option<u16> {
         match self.cells {
             Cells::Named => half(mem, m - 1 + 12).map(|t| t as u16),
             Cells::InDictionary => byte(mem, m - 1 + 12).map(u16::from),
@@ -213,13 +212,13 @@ impl Js {
 
     /// The value of a global (an object), from the cells found for it: a cell still holding its
     /// name and an object.
-    fn global(&self, mem: &File, name: &str) -> Option<u64> {
+    fn global(&self, mem: &Mem, name: &str) -> Option<u64> {
         let (_, cells) = self.globals.iter().find(|(g, _)| *g == name)?;
         cells.iter().find_map(|&c| self.cell_value(mem, c, name))
     }
 
     /// The object a global's cell holds, if it's still the cell of that global.
-    fn cell_value(&self, mem: &File, cell: u64, name: &str) -> Option<u64> {
+    fn cell_value(&self, mem: &Mem, cell: u64, name: &str) -> Option<u64> {
         if word(mem, cell)? != self.cell_map {
             return None;
         }
@@ -237,7 +236,7 @@ impl Js {
     }
 
     /// A map's own properties: each name (a string, tagged) and its details.
-    fn descriptors(&self, mem: &File, m: u64) -> Vec<(u64, u32)> {
+    fn descriptors(&self, mem: &Mem, m: u64) -> Vec<(u64, u32)> {
         let Some(bits) = half(mem, m - 1 + 16) else { return Vec::new() };
         let own = (bits >> 10) & 0x3ff;
         let Some(d) = word(mem, m - 1 + 48).filter(|&d| tagged(d)) else { return Vec::new() };
@@ -259,11 +258,11 @@ impl Js {
 
     /// A string's text: sequential (one or two bytes a character), a concatenation, a slice of
     /// another, or a thin string pointing to its internalized copy.
-    fn text(&self, mem: &File, s: u64) -> Option<String> {
+    fn text(&self, mem: &Mem, s: u64) -> Option<String> {
         self.text_in(mem, s, 0)
     }
 
-    fn text_in(&self, mem: &File, s: u64, depth: u32) -> Option<String> {
+    fn text_in(&self, mem: &Mem, s: u64, depth: u32) -> Option<String> {
         if depth > 16 {
             return None;
         }
@@ -307,7 +306,7 @@ impl Js {
     }
 
     /// What a slot holds; `double`: the field is kept as a double in a box of its own.
-    fn slot(&self, mem: &File, at: u64, double: bool) -> Val {
+    fn slot(&self, mem: &Mem, at: u64, double: bool) -> Val {
         let Some(w) = word(mem, at) else { return Val::Other };
         if is_smi(w) {
             return Val::Int(at + 4);
@@ -326,7 +325,7 @@ impl Js {
 
     /// An object's own properties by name, with what each holds (fast and dictionary-mode
     /// objects).
-    pub fn fields(&self, mem: &File, o: u64) -> Vec<(String, Val)> {
+    pub fn fields(&self, mem: &Mem, o: u64) -> Vec<(String, Val)> {
         let Some(m) = self.map_of(mem, o) else { return Vec::new() };
         let Some(bits) = half(mem, m - 1 + 16) else { return Vec::new() };
         let props = word(mem, o - 1 + 8).unwrap_or(0);
@@ -378,11 +377,11 @@ impl Js {
         out
     }
 
-    pub fn field(&self, mem: &File, o: u64, name: &str) -> Option<Val> {
+    pub fn field(&self, mem: &Mem, o: u64, name: &str) -> Option<Val> {
         self.fields(mem, o).into_iter().find(|(k, _)| k == name).map(|(_, v)| v)
     }
 
-    fn field_obj(&self, mem: &File, o: u64, name: &str) -> Option<u64> {
+    fn field_obj(&self, mem: &Mem, o: u64, name: &str) -> Option<u64> {
         match self.field(mem, o, name)? {
             Val::Obj(p) => Some(p),
             _ => None,
@@ -391,7 +390,7 @@ impl Js {
 
     /// A hash table's entries {key, value, details} from `first` bytes in (a dictionary of
     /// names: 56, of numbers: 48): each key with what the value slot holds.
-    fn dictionary(&self, mem: &File, table: u64, first: u64) -> Vec<(u64, Val)> {
+    fn dictionary(&self, mem: &Mem, table: u64, first: u64) -> Vec<(u64, Val)> {
         if !tagged(table) {
             return Vec::new();
         }
@@ -408,7 +407,7 @@ impl Js {
     }
 
     /// An array's or object's indexed elements: (index, what it holds), holes left out.
-    pub fn elements(&self, mem: &File, o: u64) -> Vec<(u32, Val)> {
+    pub fn elements(&self, mem: &Mem, o: u64) -> Vec<(u32, Val)> {
         let Some(m) = self.map_of(mem, o) else { return Vec::new() };
         let Some(kind) = byte(mem, m - 1 + 15).map(|b| b >> 3) else { return Vec::new() };
         let Some(e) = word(mem, o - 1 + 16).filter(|&e| tagged(e)) else { return Vec::new() };
@@ -430,12 +429,12 @@ impl Js {
         }
     }
 
-    fn element(&self, mem: &File, o: u64, i: u32) -> Option<Val> {
+    fn element(&self, mem: &Mem, o: u64, i: u32) -> Option<Val> {
         self.elements(mem, o).into_iter().find(|(k, _)| *k == i).map(|(_, v)| v)
     }
 
     /// The texts of an array of strings (missing ones empty).
-    fn texts(&self, mem: &File, o: Option<u64>) -> Vec<String> {
+    fn texts(&self, mem: &Mem, o: Option<u64>) -> Vec<String> {
         let Some(o) = o else { return Vec::new() };
         let mut out = Vec::new();
         for (i, v) in self.elements(mem, o) {
@@ -459,7 +458,7 @@ pub fn shared(heap: &Heap) -> Option<Arc<Js>> {
     let mut found = FOUND.lock().unwrap();
     if let Some((pid, js, at)) = found.as_ref() {
         // Still the game's globals (a cell can move when V8 compacts memory).
-        let valid = js.as_ref().is_some_and(|js| js.global(heap.file(), "$gameParty").is_some() || js.global(heap.file(), "$dataSystem").is_some());
+        let valid = js.as_ref().is_some_and(|js| js.global(heap.mem(), "$gameParty").is_some() || js.global(heap.mem(), "$dataSystem").is_some());
         if *pid == heap.pid && (valid || js.is_none() && at.elapsed() < RETRY) {
             return js.clone();
         }
@@ -472,8 +471,7 @@ pub fn shared(heap: &Heap) -> Option<Arc<Js>> {
 /// Whether the game is an RPG Maker MV game: its program sits next to `www/js/rpg_core.js`.
 pub fn is_rpgmaker(pid: u32, program: Option<&std::path::Path>) -> bool {
     let Some(dir) = program.and_then(|p| p.parent()) else { return false };
-    let root = std::path::Path::new("/proc").join(pid.to_string()).join("root");
-    let inside = root.join(dir.strip_prefix("/").unwrap_or(dir));
+    let inside = crate::os::inside(pid, dir);
     inside.join("www/js/rpg_core.js").exists() || dir.join("www/js/rpg_core.js").exists()
 }
 
@@ -589,14 +587,14 @@ pub fn find_roots(heap: &Heap, path: &JsPath) -> Vec<u64> {
 /// Where the path leads from its global's cells: the number's address (an i32 or an f64).
 pub fn walk(heap: &Heap, roots: &[u64], path: &JsPath) -> Vec<u64> {
     let Some(js) = shared(heap) else { return Vec::new() };
-    let mem = heap.file();
+    let mem = heap.mem();
     let mut out: Vec<u64> = roots.iter().filter_map(|&c| follow(&js, mem, js.cell_value(mem, c, &path.global)?, &path.steps)).collect();
     out.sort_unstable();
     out.dedup();
     out
 }
 
-fn follow(js: &Js, mem: &File, mut o: u64, steps: &[Step]) -> Option<u64> {
+fn follow(js: &Js, mem: &Mem, mut o: u64, steps: &[Step]) -> Option<u64> {
     for (i, s) in steps.iter().enumerate() {
         let v = match s {
             Step::Prop(name) => js.field(mem, o, name)?,
@@ -640,7 +638,7 @@ impl Group {
     }
 
     /// Every number among an object's own fields, by the field's name.
-    fn add_all(&mut self, js: &Js, mem: &File, o: u64, path: &JsPath) {
+    fn add_all(&mut self, js: &Js, mem: &Mem, o: u64, path: &JsPath) {
         for (name, val) in js.fields(mem, o) {
             self.add(name.clone(), Some(val), path.clone().prop(&name));
         }
@@ -659,7 +657,7 @@ fn term(terms: &[String], i: usize, fallback: &str) -> String {
 /// objects (the title screen of some games, a loading screen).
 fn groups(heap: &Heap) -> Option<Vec<Group>> {
     let js = shared(heap)?;
-    let mem = heap.file();
+    let mem = heap.mem();
     let party = js.global(mem, "$gameParty")?;
     let system = js.global(mem, "$dataSystem");
     let terms = system.and_then(|s| js.field_obj(mem, s, "terms"));

@@ -5,6 +5,7 @@ mod anticheat;
 mod gdscript;
 mod gml;
 mod lua;
+mod mem;
 mod java;
 mod python;
 mod godot;
@@ -14,6 +15,9 @@ mod json;
 mod launchers;
 mod mono;
 mod names;
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod os;
 mod pointers;
 mod steam;
 mod trace;

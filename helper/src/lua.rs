@@ -15,8 +15,7 @@ use crate::mono::player_like;
 use crate::names::Heap;
 use crate::ue::{Listed, ListedObject, MAX_LISTED};
 use std::collections::{HashSet, VecDeque};
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -79,17 +78,17 @@ enum Key {
     Index(i64),
 }
 
-fn word(mem: &File, at: u64) -> Option<u64> {
+fn word(mem: &Mem, at: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b, at).ok().map(|_| u64::from_le_bytes(b))
 }
 
-fn half(mem: &File, at: u64) -> Option<u32> {
+fn half(mem: &Mem, at: u64) -> Option<u32> {
     let mut b = [0u8; 4];
     mem.read_exact_at(&mut b, at).ok().map(|_| u32::from_le_bytes(b))
 }
 
-fn byte(mem: &File, at: u64) -> Option<u8> {
+fn byte(mem: &Mem, at: u64) -> Option<u8> {
     let mut b = [0u8; 1];
     mem.read_exact_at(&mut b, at).ok().map(|_| b[0])
 }
@@ -141,7 +140,7 @@ impl Layout {
     }
 
     /// A reference (GCRef or MRef) at `at`.
-    fn reference(self, mem: &File, at: u64) -> Option<u64> {
+    fn reference(self, mem: &Mem, at: u64) -> Option<u64> {
         match self.gc64 {
             true => word(mem, at),
             false => half(mem, at).map(u64::from),
@@ -150,7 +149,7 @@ impl Layout {
     }
 
     /// An object's type byte (`gct`).
-    fn gct(self, mem: &File, o: u64) -> Option<u8> {
+    fn gct(self, mem: &Mem, o: u64) -> Option<u8> {
         byte(mem, o + if self.gc64 { 9 } else { 5 })
     }
 }
@@ -188,7 +187,7 @@ impl Lj {
         if strings.is_empty() {
             return None;
         }
-        let mem = heap.file();
+        let mem = heap.mem();
         // A key is a whole TValue; on a 32-bit game the pass looks at 4-byte words, so its
         // pointer half.
         let wanted: Vec<u64> = strings.iter().map(|&(lay, s)| if heap.width() == 8 { lay.value(s, STR) } else { s }).collect();
@@ -214,7 +213,7 @@ impl Lj {
         best.map(|(lj, _)| lj)
     }
 
-    fn parts(&self, mem: &File, t: u64) -> Option<Parts> {
+    fn parts(&self, mem: &Mem, t: u64) -> Option<Parts> {
         if self.lay.gct(mem, t)? != TAB {
             return None;
         }
@@ -227,7 +226,7 @@ impl Lj {
     }
 
     /// A string's text.
-    fn text(&self, mem: &File, s: u64) -> Option<String> {
+    fn text(&self, mem: &Mem, s: u64) -> Option<String> {
         if self.lay.gct(mem, s)? != STR {
             return None;
         }
@@ -241,7 +240,7 @@ impl Lj {
     }
 
     /// A key TValue as a name or a whole number.
-    fn key(&self, mem: &File, k: u64) -> Option<Key> {
+    fn key(&self, mem: &Mem, k: u64) -> Option<Key> {
         if is_number(k) {
             let n = f64::from_bits(k);
             return (n.fract() == 0.0 && n.abs() < 1e15).then_some(Key::Index(n as i64));
@@ -251,7 +250,7 @@ impl Lj {
 
     /// A table's entries: each key with its value (a TValue) and where that is; nil ones left
     /// out.
-    fn entries(&self, mem: &File, t: u64) -> Vec<(Key, u64, u64)> {
+    fn entries(&self, mem: &Mem, t: u64) -> Vec<(Key, u64, u64)> {
         let Some(p) = self.parts(mem, t) else { return Vec::new() };
         let mut out = Vec::new();
         let nil = |w: u64| w == u64::MAX || !self.lay.gc64 && w >> 32 == 0xffff_ffff;
@@ -283,7 +282,7 @@ impl Lj {
     }
 
     /// One entry's value and where it is.
-    fn get(&self, mem: &File, t: u64, key: &Key) -> Option<(u64, u64)> {
+    fn get(&self, mem: &Mem, t: u64, key: &Key) -> Option<(u64, u64)> {
         let p = self.parts(mem, t)?;
         if let Key::Index(i) = *key {
             if (0..i64::from(p.asize)).contains(&i) {
@@ -311,7 +310,7 @@ impl Lj {
     /// A Lua function's closed upvalues: each name (from its prototype's debug info; "#i" when
     /// stripped) with its value and where that is. Open ones (on a running function's stack,
     /// which moves when it grows) are left out. Functions of LÖVE's own boot code too.
-    fn upvalues(&self, mem: &File, f: u64) -> Vec<(String, u64, u64)> {
+    fn upvalues(&self, mem: &Mem, f: u64) -> Vec<(String, u64, u64)> {
         let lay = self.lay;
         if lay.gct(mem, f) != Some(FUNC) {
             return Vec::new();
@@ -359,7 +358,7 @@ impl Lj {
     }
 
     /// Whether `_G` is still the game's globals table.
-    fn valid(&self, mem: &File) -> bool {
+    fn valid(&self, mem: &Mem) -> bool {
         self.get(mem, self.g, &Key::Name("_G".into())).is_some_and(|(w, _)| self.lay.object(w, TAB) == Some(self.g))
     }
 }
@@ -371,7 +370,7 @@ pub fn shared(heap: &Heap) -> Option<Arc<Lj>> {
     static FOUND: Mutex<Option<(u32, Option<Arc<Lj>>, Instant)>> = Mutex::new(None);
     let mut found = FOUND.lock().unwrap();
     if let Some((pid, lj, at)) = found.as_ref() {
-        let valid = lj.as_ref().is_some_and(|lj| lj.valid(heap.file()));
+        let valid = lj.as_ref().is_some_and(|lj| lj.valid(heap.mem()));
         if *pid == heap.pid && (valid || lj.is_none() && at.elapsed() < RETRY) {
             return lj.clone();
         }
@@ -390,8 +389,7 @@ pub fn runs_lua(pid: u32, regions: &[crate::helper::Region], program: Option<&st
         name.starts_with("libluajit") || name.starts_with("liblua5") || name.starts_with("lua51.") || name.starts_with("lua5.1.") || name == "liblove.so" || name.starts_with("liblove")
     });
     let defold = program.and_then(|p| p.parent()).is_some_and(|dir| {
-        let root = std::path::Path::new("/proc").join(pid.to_string()).join("root");
-        let inside = root.join(dir.strip_prefix("/").unwrap_or(dir));
+        let inside = crate::os::inside(pid, dir);
         inside.join("game.arcd").exists() || dir.join("game.arcd").exists()
     });
     lib || defold
@@ -529,11 +527,11 @@ pub fn find_roots(heap: &Heap, _path: &LuaPath) -> Vec<u64> {
 /// Where the path leads from `_G`: the number's TValue, while it holds a number.
 pub fn walk(heap: &Heap, roots: &[u64], path: &LuaPath) -> Vec<u64> {
     let Some(lj) = shared(heap) else { return Vec::new() };
-    let mem = heap.file();
+    let mem = heap.mem();
     roots.iter().filter(|&&r| r == lj.g).filter_map(|_| follow(&lj, mem, &path.steps)).collect()
 }
 
-fn follow(lj: &Lj, mem: &File, steps: &[Step]) -> Option<u64> {
+fn follow(lj: &Lj, mem: &Mem, steps: &[Step]) -> Option<u64> {
     let mut cur = lj.lay.value(lj.g, TAB);
     let mut at = 0;
     for s in steps {
@@ -561,7 +559,7 @@ struct Group {
 /// through `package.loaded`.
 fn groups(heap: &Heap) -> Option<Vec<Group>> {
     let lj = shared(heap)?;
-    let mem = heap.file();
+    let mem = heap.mem();
     let lay = lj.lay;
     let mut seen: HashSet<u64> = HashSet::new();
     let mut numbers_seen: HashSet<u64> = HashSet::new();
@@ -711,7 +709,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(LuaPath, Vec<u64>)> {
 pub fn diagnose(heap: &Heap, at: &str) -> Vec<String> {
     let t = Instant::now();
     let Some(lj) = shared(heap) else { return vec!["no LuaJIT globals table found".into()] };
-    let mem = heap.file();
+    let mem = heap.mem();
     let mut out = vec![format!("layout {:?}, _G at {:#x} ({} ms)", lj.lay, lj.g, t.elapsed().as_millis())];
     let mut cur = lj.lay.value(lj.g, TAB);
     if !at.is_empty() {

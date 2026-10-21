@@ -12,8 +12,7 @@
 // of the array in Main's static field `player`, its field `statLife`; `mono:Game.instance.gold`
 // without a slot. Mono keeps a class's static fields in a block its vtable points to.
 
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::Mutex;
 
 use crate::names::Heap;
@@ -207,14 +206,14 @@ fn runtime(pid: u32) -> Option<Runtime> {
     paths.iter().any(|p| p.ends_with("/gameassembly.dll") || p.ends_with("/gameassembly.so")).then_some(Runtime::Il2cpp)
 }
 
-fn word(mem: &File, at: u64, w: u64) -> Option<u64> {
+fn word(mem: &Mem, at: u64, w: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b[..w as usize], at).ok()?;
     Some(u64::from_le_bytes(b))
 }
 
 /// A C string of printable ASCII (empty is fine: the global namespace).
-fn cstr(mem: &File, at: u64) -> Option<String> {
+fn cstr(mem: &Mem, at: u64) -> Option<String> {
     if at < 0x10000 {
         return None;
     }
@@ -226,13 +225,13 @@ fn cstr(mem: &File, at: u64) -> Option<String> {
 }
 
 /// A class points to itself (Mono: first, element_class, other for arrays only).
-fn is_class(mem: &File, k: u64, this: u64, w: u64) -> bool {
+fn is_class(mem: &Mem, k: u64, this: u64, w: u64) -> bool {
     k >= 0x10000 && word(mem, k + this, w) == Some(k)
 }
 
 /// The class of the object at `obj`: Mono: its vtable's first word (a class itself fits that
 /// shape, pointing to itself, and isn't an object); IL2CPP: its first word.
-fn class_of(mem: &File, obj: u64, lay: &Layout) -> Option<u64> {
+fn class_of(mem: &Mem, obj: u64, lay: &Layout) -> Option<u64> {
     let w = lay.w;
     match lay.runtime {
         Runtime::Mono => {
@@ -244,7 +243,7 @@ fn class_of(mem: &File, obj: u64, lay: &Layout) -> Option<u64> {
 }
 
 /// The layout, from what may be an object at `obj` (before it's known).
-fn detect_at(mem: &File, obj: u64, runtime: Runtime, w: u64) -> Option<Layout> {
+fn detect_at(mem: &Mem, obj: u64, runtime: Runtime, w: u64) -> Option<Layout> {
     let first = word(mem, obj, w).filter(|&v| v >= 0x10000)?;
     match runtime {
         Runtime::Mono => {
@@ -256,7 +255,7 @@ fn detect_at(mem: &File, obj: u64, runtime: Runtime, w: u64) -> Option<Layout> {
 }
 
 /// Finds where the Mono class `k` keeps its name, parent and fields.
-fn detect(mem: &File, k: u64, w: u64) -> Option<Layout> {
+fn detect(mem: &Mem, k: u64, w: u64) -> Option<Layout> {
     let name = (4 * w..=0x80).step_by(w as usize).find(|&off| {
         word(mem, k + off, w).and_then(|p| cstr(mem, p)).is_some_and(|s| ident(&s))
             && word(mem, k + off + w, w).and_then(|p| cstr(mem, p)).is_some()
@@ -278,7 +277,7 @@ fn detect(mem: &File, k: u64, w: u64) -> Option<Layout> {
 /// World 4, 64-bit: name +0x10, namespace +0x18, parent +0x58, itself +0x78, fields +0x80;
 /// field = {name, type, parent class, i32 offset, token}). Its name comes after two words
 /// (image, gc_desc) in every IL2CPP version.
-fn detect_il2cpp(mem: &File, k: u64, w: u64) -> Option<Layout> {
+fn detect_il2cpp(mem: &Mem, k: u64, w: u64) -> Option<Layout> {
     let name = 2 * w;
     let named = word(mem, k + name, w).and_then(|p| cstr(mem, p)).is_some_and(|s| ident(&s)) && word(mem, k + name + w, w).and_then(|p| cstr(mem, p)).is_some();
     if !named {
@@ -317,7 +316,7 @@ fn layout_near(heap: &Heap, target: u64) -> Option<Layout> {
             return Some(lay);
         }
     }
-    let (mem, w) = (heap.file(), heap.width() as u64);
+    let (mem, w) = (heap.mem(), heap.width() as u64);
     let start = target - target % w;
     let lay = (0..MAX_OBJECT).step_by(w as usize).find_map(|back| detect_at(mem, start.checked_sub(back)?, runtime, w))?;
     *known = Some((heap.pid, lay));
@@ -334,14 +333,14 @@ fn known_layout(pid: u32) -> Option<Layout> {
 }
 
 struct Mono<'a> {
-    mem: &'a File,
+    mem: &'a Mem,
     lay: Layout,
     heap: &'a Heap<'a>,
 }
 
 impl<'a> Mono<'a> {
     fn new(heap: &'a Heap<'a>, lay: Layout) -> Self {
-        Mono { mem: heap.file(), lay, heap }
+        Mono { mem: heap.mem(), lay, heap }
     }
 
     fn word(&self, at: u64) -> Option<u64> {
@@ -680,7 +679,7 @@ fn static_starts(heap: &Heap, m: &Mono, vts: &[(u64, u64)]) -> Vec<(u64, u64)> {
     let mut b = vec![0u8; MAX_VTABLE as usize];
     for (i, &(vt, k)) in vts.iter().enumerate() {
         let end = vts.get(i + 1).map_or(vt + MAX_VTABLE, |n| n.0.min(vt + MAX_VTABLE));
-        let n = heap.file().read_at(&mut b[..(end - vt) as usize], vt).unwrap_or(0);
+        let n = heap.mem().read_at(&mut b[..(end - vt) as usize], vt).unwrap_or(0);
         for at in (3 * w..n - n % w).step_by(w) {
             let mut x = [0u8; 8];
             x[..w].copy_from_slice(&b[at..at + w]);
@@ -803,7 +802,7 @@ fn find_static(heap: &Heap, path: &MonoPath) -> Option<(u64, u64)> {
     let mut b = vec![0u8; MAX_VTABLE as usize];
     for &vt in &vts {
         let Some(k) = m.word(vt).filter(|&k| k != vt && m.is_class(k) && m.is(k, path)) else { continue };
-        let n = heap.file().read_at(&mut b, vt).unwrap_or(0);
+        let n = heap.mem().read_at(&mut b, vt).unwrap_or(0);
         for at in (w as usize..n - n % w as usize).step_by(w as usize) {
             let mut x = [0u8; 8];
             x[..w as usize].copy_from_slice(&b[at..at + w as usize]);
@@ -865,7 +864,7 @@ fn find_name(heap: &Heap, runtime: Runtime, bytes: &[u8]) -> Vec<u64> {
     };
     for r in files {
         let mut b = vec![0u8; (r.end - r.start) as usize];
-        let n = heap.file().read_at(&mut b, r.start).unwrap_or(0);
+        let n = heap.mem().read_at(&mut b, r.start).unwrap_or(0);
         find_in(&mut found, bytes, r.start, &b[..n], n);
     }
     found
@@ -898,7 +897,7 @@ fn vtables(heap: &Heap, path: &MonoPath) -> Vec<u64> {
 /// The classes named like the path's (sorted), found by their name (a pass over memory, two on
 /// a new run, which also finds the layout).
 fn classes_named(heap: &Heap, path: &MonoPath) -> Vec<u64> {
-    let (mem, w) = (heap.file(), heap.width() as u64);
+    let (mem, w) = (heap.mem(), heap.width() as u64);
     // An assembly's names share endings: Terraria.exe keeps "Player" only as the end of
     // "DeadPlayer" and others, where Mono points. The classes found are checked by name.
     let (pattern, skip): (Vec<u8>, u64) = match path.runtime {
@@ -1041,7 +1040,7 @@ pub fn player_like(name: &str) -> bool {
 }
 
 /// A GameObject's name: printable text, spaces and brackets too ("Player(Clone)").
-fn object_name(mem: &File, at: u64) -> Option<String> {
+fn object_name(mem: &Mem, at: u64) -> Option<String> {
     if at < 0x10000 {
         return None;
     }

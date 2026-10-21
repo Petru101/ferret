@@ -26,8 +26,7 @@ use crate::mono::player_like;
 use crate::names::Heap;
 use crate::ue::{Listed, ListedObject, MAX_LISTED};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -94,7 +93,7 @@ const POS_SCRIPT: u8 = 2;
 /// Atom tags.
 const ATOM_OBJECT: u64 = 1;
 
-fn read(mem: &File, at: u64, n: usize) -> Option<Vec<u8>> {
+fn read(mem: &Mem, at: u64, n: usize) -> Option<Vec<u8>> {
     if !(0x10000..1 << 32).contains(&at) {
         return None;
     }
@@ -102,21 +101,21 @@ fn read(mem: &File, at: u64, n: usize) -> Option<Vec<u8>> {
     (mem.read_at(&mut b, at).ok()? == n).then_some(b)
 }
 
-fn u(mem: &File, at: u64) -> Option<u64> {
+fn u(mem: &Mem, at: u64) -> Option<u64> {
     read(mem, at, 4).map(|b| u64::from(u32::from_le_bytes(b.try_into().unwrap())))
 }
 
 /// A pointer field: non-null, and 4-aligned.
-fn ptr(mem: &File, at: u64) -> Option<u64> {
+fn ptr(mem: &Mem, at: u64) -> Option<u64> {
     u(mem, at).filter(|&p| p >= 0x10000 && p % 4 == 0)
 }
 
-fn u16_at(mem: &File, at: u64) -> Option<u64> {
+fn u16_at(mem: &Mem, at: u64) -> Option<u64> {
     read(mem, at, 2).map(|b| u64::from(u16::from_le_bytes(b.try_into().unwrap())))
 }
 
 /// An avmplus String's text (8- or 16-bit, its own buffer or a part of another's).
-fn string(mem: &File, s: u64) -> Option<String> {
+fn string(mem: &Mem, s: u64) -> Option<String> {
     if s < 0x10000 || !s.is_multiple_of(4) {
         return None;
     }
@@ -182,7 +181,7 @@ pub struct Abc {
 
 /// Reads a pool's bytecode from the game's memory as the parser needs it.
 struct Cur<'a> {
-    mem: &'a File,
+    mem: &'a Mem,
     at: u64,
     buf: Vec<u8>,
     p: usize,
@@ -234,7 +233,7 @@ impl Cur<'_> {
 
 impl Abc {
     /// The block starting at `start` (its version, 46.16).
-    fn parse(mem: &File, start: u64) -> Option<Abc> {
+    fn parse(mem: &Mem, start: u64) -> Option<Abc> {
         let mut c = Cur { mem, at: start, buf: Vec::new(), p: 4 };
         let n = c.u30()?;
         c.u30s(n.saturating_sub(1))?;
@@ -499,7 +498,7 @@ impl Air {
         if heap.width() != 4 {
             return None;
         }
-        let mem = heap.file();
+        let mem = heap.mem();
         // Pass 1: Traits, by pointing to themselves among their primary supertypes (the slot
         // for their own depth, after their base's), with a core and a pool.
         let mut found: HashMap<u64, usize> = HashMap::new();
@@ -561,7 +560,7 @@ impl Air {
     /// Pass 2: AbcEnvs (a pool of ours, our core, and a DomainEnv listing itself first among
     /// its bases).
     fn find_domains(&self, heap: &Heap, pools: &[u64]) {
-        let mem = heap.file();
+        let mem = heap.mem();
         let mut out = Vec::new();
         for at in heap.referrers(pools) {
             let env = at - AE_POOL;
@@ -581,7 +580,7 @@ impl Air {
     }
 
     /// The pool's bytecode (parsed once).
-    fn abc(&self, mem: &File, pool: u64) -> Option<Arc<Abc>> {
+    fn abc(&self, mem: &Mem, pool: u64) -> Option<Arc<Abc>> {
         if let Some(a) = self.pools.lock().unwrap().get(&pool) {
             return a.clone();
         }
@@ -597,7 +596,7 @@ impl Air {
     }
 
     /// An object's Traits, checked: its VTable's Traits belongs to our core, from a pool of it.
-    fn traits_of(&self, mem: &File, o: u64) -> Option<u64> {
+    fn traits_of(&self, mem: &Mem, o: u64) -> Option<u64> {
         if !o.is_multiple_of(8) {
             return None;
         }
@@ -605,24 +604,24 @@ impl Air {
         self.is_traits(mem, tr).then_some(tr)
     }
 
-    fn is_traits(&self, mem: &File, tr: u64) -> bool {
+    fn is_traits(&self, mem: &Mem, tr: u64) -> bool {
         u(mem, tr + TR_CORE) == Some(self.core) && ptr(mem, tr + TR_POOL).is_some_and(|p| u(mem, p + 4) == Some(self.core))
     }
 
     /// A class's name as its Traits has it (`GameSpace`, `Creeper$` for the class itself).
-    fn class_name(&self, mem: &File, tr: u64) -> Option<String> {
+    fn class_name(&self, mem: &Mem, tr: u64) -> Option<String> {
         string(mem, ptr(mem, tr + TR_NAME)?)
     }
 
     /// The Traits's declaration in its pool's bytecode.
-    fn declaration(&self, mem: &File, tr: u64) -> Option<(Arc<Abc>, u32)> {
+    fn declaration(&self, mem: &Mem, tr: u64) -> Option<(Arc<Abc>, u32)> {
         let abc = self.abc(mem, ptr(mem, tr + TR_POOL)?)?;
         let pos = u(mem, tr + TR_POS)?.checked_sub(abc.start)? as u32;
         abc.by_pos.contains_key(&pos).then_some((abc, pos))
     }
 
     /// The fields one class declares, where the VM puts them (see the module's notes).
-    fn own_slots(&self, mem: &File, tr: u64) -> Option<Vec<Slot>> {
+    fn own_slots(&self, mem: &Mem, tr: u64) -> Option<Vec<Slot>> {
         let (abc, pos) = self.declaration(mem, tr)?;
         let decl = &abc.by_pos[&pos];
         let base = ptr(mem, tr + TR_BASE);
@@ -658,7 +657,7 @@ impl Air {
 
     /// Every field of an object of this class, the most derived class's first (a private field
     /// may share a name with one of a base class: the class's own is the one a path means).
-    fn slots(&self, mem: &File, tr: u64) -> Option<Arc<Vec<Slot>>> {
+    fn slots(&self, mem: &Mem, tr: u64) -> Option<Arc<Vec<Slot>>> {
         if let Some(s) = self.layouts.lock().unwrap().get(&tr) {
             return Some(s.clone());
         }
@@ -679,19 +678,19 @@ impl Air {
     }
 
     /// A class of Adobe's or a library's (not the game's own).
-    fn library_class(&self, mem: &File, tr: u64) -> bool {
+    fn library_class(&self, mem: &Mem, tr: u64) -> bool {
         self.declaration(mem, tr).is_none_or(|(a, _)| a.builtin) || is_library(&self.package_of(mem, tr).unwrap_or_default())
     }
 
     /// The package a class is in: its namespace's name.
-    fn package_of(&self, mem: &File, tr: u64) -> Option<String> {
+    fn package_of(&self, mem: &Mem, tr: u64) -> Option<String> {
         // Namespace: {C++ vtable, prefix, uri and type (a String, 3 tag bits)}.
         string(mem, u(mem, ptr(mem, tr + TR_NS)? + 8)? & !7)
     }
 
     /// Whether the VM's own table of this class's field places, where it has one now, says
     /// what `own_slots` works out: Some(false) when a name sits elsewhere.
-    fn agrees(&self, mem: &File, tr: u64) -> Option<bool> {
+    fn agrees(&self, mem: &Mem, tr: u64) -> Option<bool> {
         let tb = ptr(mem, ptr(mem, tr + TR_TBREF)?)?;
         let mine = self.own_slots(mem, tr)?;
         // Bindings: {.., quads +4, .., capacity +12}; quads {.., entries +8}: {name, ns, binding,
@@ -716,7 +715,7 @@ impl Air {
     }
 
     /// The script globals of every domain, and the classes they hold, by qualified name.
-    fn index(&self, mem: &File) {
+    fn index(&self, mem: &Mem) {
         let mut classes = HashMap::new();
         for de in self.domains.lock().unwrap().clone() {
             for g in self.globals(mem, de) {
@@ -743,7 +742,7 @@ impl Air {
 
     /// A domain's script globals: its map from script to ScriptEnv (an InlineHashtable of
     /// atom pairs, after one header word), each ScriptEnv's global (null until the script runs).
-    fn globals(&self, mem: &File, de: u64) -> Vec<u64> {
+    fn globals(&self, mem: &Mem, de: u64) -> Vec<u64> {
         let Some(map) = ptr(mem, de + DE_MAP) else { return Vec::new() };
         let (Some(atoms), Some(size)) = (u(mem, map + 4), u(mem, map + 8)) else { return Vec::new() };
         let log = size >> 27;
@@ -769,7 +768,7 @@ impl Air {
     /// 2 s when it isn't known (classes are made as their scripts first run), and for new
     /// domains at most every 10 s.
     fn class(&self, heap: &Heap, name: &str) -> Option<u64> {
-        let mem = heap.file();
+        let mem = heap.mem();
         let known = |air: &Air| {
             let c = air.classes.lock().unwrap().0.get(name).cloned()?;
             let o = ptr(mem, c.global + c.off)?;
@@ -794,7 +793,7 @@ impl Air {
     }
 
     /// What a field of an object holds.
-    fn val(&self, mem: &File, o: u64, s: &Slot) -> Val {
+    fn val(&self, mem: &Mem, o: u64, s: &Slot) -> Val {
         let at = o + s.off;
         match s.ty {
             Ty::F64 => Val::Num(at, "f64"),
@@ -809,7 +808,7 @@ impl Air {
     }
 
     /// An Array's elements (up to `MAX_ELEMENTS`) that are objects, by index.
-    fn elements(&self, mem: &File, a: u64) -> Vec<(u32, u64)> {
+    fn elements(&self, mem: &Mem, a: u64) -> Vec<(u32, u64)> {
         let (Some(list), Some(start), Some(used)) = (ptr(mem, a + ARR_LIST), u(mem, a + ARR_START), u(mem, a + ARR_USED)) else { return Vec::new() };
         if start != 0 || u(mem, list + 4) != Some(used) {
             return Vec::new();
@@ -826,7 +825,7 @@ impl Air {
     }
 
     /// Whether the object is an Array (Adobe's own `Array`).
-    fn is_array(&self, mem: &File, tr: u64) -> bool {
+    fn is_array(&self, mem: &Mem, tr: u64) -> bool {
         self.class_name(mem, tr).as_deref() == Some("Array") && self.declaration(mem, tr).is_some_and(|(a, _)| a.builtin)
     }
 }
@@ -998,7 +997,7 @@ pub fn find_roots(heap: &Heap, path: &AirPath) -> Vec<u64> {
 /// checked.
 pub fn walk(heap: &Heap, roots: &[u64], path: &AirPath) -> Vec<u64> {
     let Some(air) = shared(heap) else { return Vec::new() };
-    roots.iter().filter_map(|&c| follow(&air, heap.file(), c, path)).collect()
+    roots.iter().filter_map(|&c| follow(&air, heap.mem(), c, path)).collect()
 }
 
 /// The first field by that name (the most derived class's).
@@ -1006,7 +1005,7 @@ fn field<'a>(slots: &'a [Slot], name: &str) -> Option<&'a Slot> {
     slots.iter().find(|s| s.name == name)
 }
 
-fn follow(air: &Air, mem: &File, closure: u64, path: &AirPath) -> Option<u64> {
+fn follow(air: &Air, mem: &Mem, closure: u64, path: &AirPath) -> Option<u64> {
     let tr = air.traits_of(mem, closure)?;
     if air.class_name(mem, tr)? != format!("{}$", short_name(&path.class)) {
         return None;
@@ -1047,7 +1046,7 @@ struct Group {
 /// object is named by its shortest path.
 fn groups(heap: &Heap) -> Option<Vec<Group>> {
     let air = shared(heap)?;
-    let mem = heap.file();
+    let mem = heap.mem();
     air.index(mem);
     let mut classes: Vec<(String, Class)> = air.classes.lock().unwrap().0.iter().filter(|(_, c)| !c.library).map(|(n, c)| (n.clone(), c.clone())).collect();
     classes.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1163,7 +1162,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(AirPath, Vec<u64>)> {
 /// statics, or the object at a path, field by field.
 pub fn diagnose(heap: &Heap, at: &str) -> Vec<String> {
     let t = Instant::now();
-    let mem = heap.file();
+    let mem = heap.mem();
     let Some(air) = shared(heap) else { return vec!["no ActionScript VM found (only 32-bit AIR runtimes are read)".into()] };
     air.index(mem);
     let n = air.classes.lock().unwrap().0.len();

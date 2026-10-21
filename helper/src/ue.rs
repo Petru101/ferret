@@ -28,8 +28,7 @@
 // (Quat, Vector, Vector) and Actor's Tags (an array of names), in each known form.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::{Arc, Mutex};
 
 use crate::helper::{maps, Region};
@@ -75,23 +74,23 @@ const LAYOUTS: [Layout; 3] = [
 const MAX_PROPS: usize = 2000;
 const MAX_NAME: usize = 1024;
 
-fn u32_at(mem: &File, at: u64) -> Option<u32> {
+fn u32_at(mem: &Mem, at: u64) -> Option<u32> {
     let mut b = [0u8; 4];
     mem.read_exact_at(&mut b, at).ok()?;
     Some(u32::from_le_bytes(b))
 }
 
-fn i32_at(mem: &File, at: u64) -> Option<i32> {
+fn i32_at(mem: &Mem, at: u64) -> Option<i32> {
     u32_at(mem, at).map(|v| v as i32)
 }
 
-fn u64_at(mem: &File, at: u64) -> Option<u64> {
+fn u64_at(mem: &Mem, at: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b, at).ok()?;
     Some(u64::from_le_bytes(b))
 }
 
-fn ptr_at(mem: &File, at: u64) -> Option<u64> {
+fn ptr_at(mem: &Mem, at: u64) -> Option<u64> {
     u64_at(mem, at).filter(|&p| p >= 0x10000 && p < 1 << 47 && p % 8 == 0)
 }
 
@@ -135,7 +134,7 @@ fn module_data(pid: u32, mods: &[Module], exe: &str) -> Vec<(u64, u64)> {
 
 impl Ue {
     /// Finds the object array and the name pool in the program's static data.
-    pub fn locate(pid: u32, mem: &File, mods: &[Module], exe: &str) -> Result<Ue, String> {
+    pub fn locate(pid: u32, mem: &Mem, mods: &[Module], exe: &str) -> Result<Ue, String> {
         let data = module_data(pid, mods, exe);
         if data.is_empty() {
             return Err(format!("no writable data in {exe}"));
@@ -186,7 +185,7 @@ impl Ue {
     /// Then whether the types are where the layout says: Transform's fields must lead to the
     /// Quat and Vector structs, and Actor's Tags to an array of names (checked when the game
     /// has them).
-    fn check_layout(&self, mem: &File) -> Result<bool, String> {
+    fn check_layout(&self, mem: &Mem) -> Result<bool, String> {
         let objects = self.objects(mem);
         let find = |name: &str, class: &str| {
             objects.iter().copied().find(|&o| self.object_name(mem, o).as_deref() == Some(name) && self.class_name(mem, o).as_deref() == Some(class))
@@ -214,12 +213,12 @@ impl Ue {
         Ok(true)
     }
 
-    pub fn object_count(&self, mem: &File) -> usize {
+    pub fn object_count(&self, mem: &Mem) -> usize {
         i32_at(mem, self.objects + 20).unwrap_or(0).max(0) as usize
     }
 
     /// Every object alive now.
-    pub fn objects(&self, mem: &File) -> Vec<u64> {
+    pub fn objects(&self, mem: &Mem) -> Vec<u64> {
         let num = self.object_count(mem) as u64;
         let Some(table) = ptr_at(mem, self.objects) else { return Vec::new() };
         let mut out = Vec::with_capacity(num as usize);
@@ -236,7 +235,7 @@ impl Ue {
     }
 
     /// The text of name pool entry `index`.
-    pub fn name(&self, mem: &File, index: u32) -> Option<String> {
+    pub fn name(&self, mem: &Mem, index: u32) -> Option<String> {
         if let Some(n) = self.names.lock().unwrap().get(&index) {
             return n.clone();
         }
@@ -245,7 +244,7 @@ impl Ue {
         n
     }
 
-    fn read_name(&self, mem: &File, index: u32) -> Option<String> {
+    fn read_name(&self, mem: &Mem, index: u32) -> Option<String> {
         let block = ptr_at(mem, self.blocks + 8 * (index >> 16) as u64)?;
         let at = block + 2 * (index & 0xFFFF) as u64;
         let mut h = [0u8; 2];
@@ -268,35 +267,35 @@ impl Ue {
     }
 
     /// The FName at `at` as text ("Item_3" for number 4: numbers are stored plus one).
-    pub fn fname(&self, mem: &File, at: u64) -> Option<String> {
+    pub fn fname(&self, mem: &Mem, at: u64) -> Option<String> {
         let index = u32_at(mem, at)?;
         let number = u32_at(mem, at + 4)?;
         let base = self.name(mem, index)?;
         Some(if number == 0 { base } else { format!("{base}_{}", number - 1) })
     }
 
-    pub fn object_name(&self, mem: &File, obj: u64) -> Option<String> {
+    pub fn object_name(&self, mem: &Mem, obj: u64) -> Option<String> {
         self.fname(mem, obj + OBJ_NAME)
     }
 
-    pub fn class_of(&self, mem: &File, obj: u64) -> Option<u64> {
+    pub fn class_of(&self, mem: &Mem, obj: u64) -> Option<u64> {
         ptr_at(mem, obj + OBJ_CLASS)
     }
 
-    pub fn class_name(&self, mem: &File, obj: u64) -> Option<String> {
+    pub fn class_name(&self, mem: &Mem, obj: u64) -> Option<String> {
         self.object_name(mem, self.class_of(mem, obj)?)
     }
 
-    pub fn outer(&self, mem: &File, obj: u64) -> Option<u64> {
+    pub fn outer(&self, mem: &Mem, obj: u64) -> Option<u64> {
         ptr_at(mem, obj + OBJ_OUTER)
     }
 
-    pub fn struct_size(&self, mem: &File, st: u64) -> u64 {
+    pub fn struct_size(&self, mem: &Mem, st: u64) -> u64 {
         i32_at(mem, st + STRUCT_SIZE).unwrap_or(0).max(0) as u64
     }
 
     /// The properties of a class or struct, its parents' first.
-    pub fn props(&self, mem: &File, st: u64) -> Arc<Vec<Prop>> {
+    pub fn props(&self, mem: &Mem, st: u64) -> Arc<Vec<Prop>> {
         if let Some(p) = self.props.lock().unwrap().get(&st) {
             return p.clone();
         }
@@ -330,7 +329,7 @@ impl Ue {
     }
 
     /// The property described by the FField at `field`.
-    pub fn prop(&self, mem: &File, field: u64) -> Option<Prop> {
+    pub fn prop(&self, mem: &Mem, field: u64) -> Option<Prop> {
         let kind = self.fname(mem, ptr_at(mem, field + FIELD_CLASS)?)?;
         let l = self.layout;
         let extra = if matches!(kind.as_str(), "ArrayProperty" | "SetProperty") { l.inner } else { l.extra };
@@ -348,7 +347,7 @@ impl Ue {
     }
 
     /// The object's full name: outers first ("Level.BP_Player_C_0.Inventory").
-    pub fn full_name(&self, mem: &File, obj: u64) -> String {
+    pub fn full_name(&self, mem: &Mem, obj: u64) -> String {
         let mut parts = Vec::new();
         let mut cur = Some(obj);
         while let Some(o) = cur.filter(|_| parts.len() < 16) {
@@ -361,7 +360,7 @@ impl Ue {
 }
 
 /// The object array's header: counts that fit together, and its first object has index 0.
-fn is_object_array(mem: &File, w: &[u64]) -> bool {
+fn is_object_array(mem: &Mem, w: &[u64]) -> bool {
     let (max, num) = (w[2] as u32 as u64, w[2] >> 32);
     let (max_chunks, num_chunks) = (w[3] as u32 as u64, w[3] >> 32);
     if num == 0 || num > max || max > 1 << 26 || num_chunks == 0 {
@@ -377,7 +376,7 @@ fn is_object_array(mem: &File, w: &[u64]) -> bool {
 
 /// The name pool's blocks (`w[1..]`, after CurrentBlock and CurrentByteCursor in `w[0]`): as
 /// many as the current block says, and the first starts with "None" then "ByteProperty".
-fn is_name_blocks(mem: &File, w: &[u64]) -> bool {
+fn is_name_blocks(mem: &Mem, w: &[u64]) -> bool {
     let (current, cursor) = (w[0] as u32 as usize, w[0] >> 32);
     if current >= 8192 || cursor == 0 || cursor > 0x20000 || w.len() < current + 3 {
         return false;
@@ -394,7 +393,7 @@ fn is_name_blocks(mem: &File, w: &[u64]) -> bool {
 
 impl Ue {
     /// A property's value as text, for looking at objects (`ue dump`).
-    fn value_text(&self, mem: &File, at: u64, p: &Prop) -> String {
+    fn value_text(&self, mem: &Mem, at: u64, p: &Prop) -> String {
         let int = |n: usize| {
             let mut b = [0u8; 8];
             mem.read_exact_at(&mut b[..n], at).ok().map(|_| i64::from_le_bytes(b))
@@ -423,7 +422,7 @@ impl Ue {
     }
 
     /// An FString's text (TArray of UTF-16 units, the last one 0).
-    pub fn fstring(&self, mem: &File, at: u64) -> Option<String> {
+    pub fn fstring(&self, mem: &Mem, at: u64) -> Option<String> {
         let data = u64_at(mem, at)?;
         let num = i32_at(mem, at + 8)?;
         if data == 0 || num <= 0 {
@@ -438,7 +437,7 @@ impl Ue {
 
     /// ue objects <text> | ue props <hex struct> | ue class <name> | ue dump <hex obj> [hex struct]:
     /// looking around a game's objects while working out where it keeps a value.
-    pub fn command(&self, out: &mut impl std::io::Write, mem: &File, arg: &str) -> std::io::Result<()> {
+    pub fn command(&self, out: &mut impl std::io::Write, mem: &Mem, arg: &str) -> std::io::Result<()> {
         let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         let hex = |s: &str| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok();
         match sub {
@@ -495,7 +494,7 @@ impl Ue {
     }
 
     /// What a property refers to: its struct, inner type or class.
-    fn extra_text(&self, mem: &File, p: &Prop) -> String {
+    fn extra_text(&self, mem: &Mem, p: &Prop) -> String {
         match p.kind.as_str() {
             "StructProperty" | "ObjectProperty" | "ClassProperty" | "WeakObjectProperty" | "SoftObjectProperty" => {
                 format!(", {} 0x{:x}", self.object_name(mem, p.extra).unwrap_or_default(), p.extra)
@@ -691,7 +690,7 @@ struct Snap {
 }
 
 impl Snap {
-    fn read(mem: &File, base: u64, size: u64) -> Snap {
+    fn read(mem: &Mem, base: u64, size: u64) -> Snap {
         let mut bytes = vec![0u8; size.min(1 << 16) as usize];
         let n = mem.read_at(&mut bytes, base).unwrap_or(0);
         bytes.truncate(n);
@@ -699,7 +698,7 @@ impl Snap {
     }
 
     /// An array's or a map's data pointer and element count (nothing when empty).
-    fn head(&self, mem: &File, at: u64) -> Option<(u64, u64)> {
+    fn head(&self, mem: &Mem, at: u64) -> Option<(u64, u64)> {
         let mut h = [0u8; 12];
         match at.checked_sub(self.base).filter(|o| o + 12 <= self.bytes.len() as u64) {
             Some(o) => h.copy_from_slice(&self.bytes[o as usize..][..12]),
@@ -729,16 +728,16 @@ fn numeric(kind: &str) -> bool {
 }
 
 impl Ue {
-    fn is_template(&self, mem: &File, obj: u64) -> bool {
+    fn is_template(&self, mem: &Mem, obj: u64) -> bool {
         u32_at(mem, obj + OBJ_FLAGS).is_none_or(|f| f & TEMPLATE_FLAGS != 0)
     }
 
-    fn find_prop(&self, mem: &File, st: u64, name: &str) -> Option<Prop> {
+    fn find_prop(&self, mem: &Mem, st: u64, name: &str) -> Option<Prop> {
         self.props(mem, st).iter().find(|p| p.name == name).cloned()
     }
 
     /// How a property's value reads as a key: an object's name, a name, a string, a number.
-    fn key_text(&self, mem: &File, at: u64, p: &Prop) -> Option<String> {
+    fn key_text(&self, mem: &Mem, at: u64, p: &Prop) -> Option<String> {
         match p.kind.as_str() {
             "ObjectProperty" | "ClassProperty" => self.object_name(mem, ptr_at(mem, at)?),
             "NameProperty" => self.fname(mem, at),
@@ -753,7 +752,7 @@ impl Ue {
         }
     }
 
-    fn align(&self, mem: &File, p: &Prop) -> u64 {
+    fn align(&self, mem: &Mem, p: &Prop) -> u64 {
         match p.kind.as_str() {
             "StructProperty" => i32_at(mem, p.extra + STRUCT_ALIGN).map_or(8, |a| a.clamp(1, 16) as u64),
             "BoolProperty" => 1,
@@ -766,7 +765,7 @@ impl Ue {
     }
 
     /// The elements of the array at `at`: (address, struct or class, or 0 for a number).
-    fn elements(&self, mem: &File, at: u64, p: &Prop) -> Vec<(u64, u64)> {
+    fn elements(&self, mem: &Mem, at: u64, p: &Prop) -> Vec<(u64, u64)> {
         let Some(inner) = p.inner.as_deref() else { return Vec::new() };
         let mut h = [0u8; 12];
         if mem.read_exact_at(&mut h, at).is_err() {
@@ -799,7 +798,7 @@ impl Ue {
 
     /// The entries of the map at `at` that are in use: (key address, value address). A map is
     /// a sparse array of { key, value, hash next, hash index } with a bit per slot in use.
-    fn map_entries(&self, mem: &File, at: u64, kp: &Prop, vp: &Prop) -> Vec<(u64, u64)> {
+    fn map_entries(&self, mem: &Mem, at: u64, kp: &Prop, vp: &Prop) -> Vec<(u64, u64)> {
         let (Some(data), Some(num)) = (u64_at(mem, at), i32_at(mem, at + 8)) else { return Vec::new() };
         if data == 0 || num <= 0 || num as u64 > MAX_ELEMENTS {
             return Vec::new();
@@ -822,7 +821,7 @@ impl Ue {
 
     /// Where a property leads from a struct or object at `at`: (address, its struct or class,
     /// 0 for a number).
-    fn enter(&self, mem: &File, at: u64, p: &Prop) -> Option<(u64, u64)> {
+    fn enter(&self, mem: &Mem, at: u64, p: &Prop) -> Option<(u64, u64)> {
         match p.kind.as_str() {
             "StructProperty" => Some((at, p.extra)),
             "ObjectProperty" => {
@@ -835,7 +834,7 @@ impl Ue {
     }
 
     /// The objects a path starts from now.
-    pub fn roots(&self, mem: &File, path: &UePath) -> Vec<u64> {
+    pub fn roots(&self, mem: &Mem, path: &UePath) -> Vec<u64> {
         let mut class_names: HashMap<u64, Option<String>> = HashMap::new();
         let mut class_name = |c: u64| class_names.entry(c).or_insert_with(|| self.object_name(mem, c)).clone();
         self.objects(mem)
@@ -852,7 +851,7 @@ impl Ue {
     }
 
     /// Where a path leads from these objects (each still checked: the game may have freed it).
-    pub fn walk(&self, mem: &File, roots: &[u64], path: &UePath) -> Vec<u64> {
+    pub fn walk(&self, mem: &Mem, roots: &[u64], path: &UePath) -> Vec<u64> {
         let start: Vec<(u64, u64)> = roots
             .iter()
             .filter(|&&r| self.class_name(mem, r).as_deref() == Some(path.class.as_str()) && !self.is_template(mem, r))
@@ -864,7 +863,7 @@ impl Ue {
         leads
     }
 
-    fn walk_steps(&self, mem: &File, mut cur: Vec<(u64, u64)>, steps: &[Step]) -> Vec<u64> {
+    fn walk_steps(&self, mem: &Mem, mut cur: Vec<(u64, u64)>, steps: &[Step]) -> Vec<u64> {
         for (i, step) in steps.iter().enumerate() {
             let last = i + 1 == steps.len();
             let mut next = Vec::new();
@@ -914,7 +913,7 @@ impl Ue {
     /// under the same key (Astro Colony's ItemsLookupCounts{CarbonOreResource} next to
     /// Items[Item=CarbonOreResource].Quantity), or another array's element with the same key
     /// and the same field, holding the same number now.
-    fn twins(&self, mem: &File, root: u64, steps: &[Step], target: u64) -> Vec<Vec<Step>> {
+    fn twins(&self, mem: &Mem, root: u64, steps: &[Step], target: u64) -> Vec<Vec<Step>> {
         let keys: Vec<&String> = steps
             .iter()
             .filter_map(|s| match s {
@@ -989,7 +988,7 @@ impl Ue {
 
     /// Whether `steps` (fields only) end in a field of a GameplayAttributeData struct (or a
     /// struct made from it).
-    fn in_attribute(&self, mem: &File, class: u64, steps: &[Step]) -> bool {
+    fn in_attribute(&self, mem: &Mem, class: u64, steps: &[Step]) -> bool {
         let mut st = class;
         for s in &steps[..steps.len().saturating_sub(1)] {
             let Step::Field(name) = s else { return false };
@@ -1011,7 +1010,7 @@ impl Ue {
 
     /// The key that tells element `i` of these apart from the others: one of its properties
     /// (an object, a name, a string, then a number) that no other element shows the same.
-    fn elem_key(&self, mem: &File, elems: &[(u64, u64)], i: usize) -> Key {
+    fn elem_key(&self, mem: &Mem, elems: &[(u64, u64)], i: usize) -> Key {
         let (e, st) = elems[i];
         let props = self.props(mem, st);
         let rank = |k: &str| match k {
@@ -1033,7 +1032,7 @@ impl Ue {
     }
 
     /// Whether a struct holds arrays or maps (itself or in structs inside it).
-    fn has_containers(&self, mem: &File, st: u64, depth: usize) -> bool {
+    fn has_containers(&self, mem: &Mem, st: u64, depth: usize) -> bool {
         if let Some(&has) = self.containers.lock().unwrap().get(&st) {
             return has;
         }
@@ -1048,7 +1047,7 @@ impl Ue {
     }
 
     /// The steps from the struct or object at `at` to `target`.
-    fn find_in(&self, mem: &File, snap: &Snap, at: u64, st: u64, target: u64, depth: usize) -> Option<Vec<Step>> {
+    fn find_in(&self, mem: &Mem, snap: &Snap, at: u64, st: u64, target: u64, depth: usize) -> Option<Vec<Step>> {
         if depth > MAX_DEPTH {
             return None;
         }
@@ -1117,12 +1116,12 @@ impl Ue {
 
     /// Paths from the game's objects to `target`, each with every place it leads to now, best
     /// (fewest places, then fewest steps) first.
-    pub fn discover(&self, mem: &File, target: u64) -> Vec<(UePath, Vec<u64>)> {
+    pub fn discover(&self, mem: &Mem, target: u64) -> Vec<(UePath, Vec<u64>)> {
         self.discover_all(mem, &[target]).pop().unwrap_or_default()
     }
 
     /// `discover` for several places in one pass over the objects.
-    pub fn discover_all(&self, mem: &File, targets: &[u64]) -> Vec<Vec<(UePath, Vec<u64>)>> {
+    pub fn discover_all(&self, mem: &Mem, targets: &[u64]) -> Vec<Vec<(UePath, Vec<u64>)>> {
         let mut found: Vec<Vec<(UePath, Vec<u64>)>> = vec![Vec::new(); targets.len()];
         let mut sizes: HashMap<u64, u64> = HashMap::new();
         for obj in self.objects(mem) {
@@ -1248,7 +1247,7 @@ fn listed_kind(kind: &str) -> Option<&'static str> {
 /// Walks objects' fields for `Ue::player`.
 struct Lister<'a> {
     ue: &'a Ue,
-    mem: &'a File,
+    mem: &'a Mem,
     engine: HashMap<u64, bool>,
     out: Vec<Listed>,
     /// Objects the fields point to (`links` on).
@@ -1373,7 +1372,7 @@ impl Lister<'_> {
 impl Ue {
     /// The name of the package an object (a class, a struct) is in: "/Script/Engine",
     /// "/Game/Blueprints/BP_Player".
-    fn package(&self, mem: &File, obj: u64) -> Option<String> {
+    fn package(&self, mem: &Mem, obj: u64) -> Option<String> {
         let mut cur = obj;
         for _ in 0..16 {
             match self.outer(mem, cur) {
@@ -1385,7 +1384,7 @@ impl Ue {
     }
 
     /// Whether a struct is (or is made from) GameplayAttributeData.
-    fn is_attribute(&self, mem: &File, st: u64) -> bool {
+    fn is_attribute(&self, mem: &Mem, st: u64) -> bool {
         let mut cur = Some(st);
         for _ in 0..8 {
             let Some(s) = cur else { return false };
@@ -1398,7 +1397,7 @@ impl Ue {
     }
 
     /// The names of a class and its parents.
-    fn lineage(&self, mem: &File, class: u64) -> Vec<String> {
+    fn lineage(&self, mem: &Mem, class: u64) -> Vec<String> {
         let mut out = Vec::new();
         let mut cur = Some(class);
         while let Some(c) = cur.filter(|_| out.len() < 64) {
@@ -1409,14 +1408,14 @@ impl Ue {
     }
 
     /// The live object an object property of `obj` points to.
-    fn object_in(&self, mem: &File, obj: u64, prop: &str) -> Option<u64> {
+    fn object_in(&self, mem: &Mem, obj: u64, prop: &str) -> Option<u64> {
         let p = self.find_prop(mem, self.class_of(mem, obj)?, prop).filter(|p| p.kind == "ObjectProperty")?;
         ptr_at(mem, obj + p.offset).filter(|&o| self.class_of(mem, o).is_some() && !self.is_template(mem, o))
     }
 
     /// The player's numbers, by object: their character first, then the actors it owns, the
     /// player state, the controller, the game, and the objects their fields point to.
-    pub fn player(&self, mem: &File) -> Result<Vec<ListedObject>, NoPlayer> {
+    pub fn player(&self, mem: &Mem) -> Result<Vec<ListedObject>, NoPlayer> {
         // Every live object's class and outer, read once.
         let mut heads: Vec<(u64, u64, u64)> = Vec::new();
         for obj in self.objects(mem) {
@@ -1574,7 +1573,7 @@ impl Ue {
 
 /// The game's Unreal objects (found once per game, shared with the limits' thread); an error
 /// for games that aren't Unreal (asked again after a while: the engine may still be starting).
-pub fn shared(pid: u32, mem: &File, exe: &str, mods: impl FnOnce() -> Vec<Module>) -> Result<Arc<Ue>, String> {
+pub fn shared(pid: u32, mem: &Mem, exe: &str, mods: impl FnOnce() -> Vec<Module>) -> Result<Arc<Ue>, String> {
     static FOUND: Mutex<Option<(u32, Result<Arc<Ue>, String>, std::time::Instant)>> = Mutex::new(None);
     let mut found = FOUND.lock().unwrap();
     if let Some((p, r, at)) = found.as_ref() {

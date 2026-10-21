@@ -7,9 +7,8 @@
 // whose [+10]+10 is the string "$item_wood"; the value at +0x38 of each (Valheim's wood stacks).
 // Names are percent-encoded (no spaces, commas, quotes), so a path is one word.
 
-use std::fs::File;
+use crate::mem::Mem;
 use std::io;
-use std::os::unix::fs::FileExt;
 
 use crate::helper::{maps, scannable};
 use crate::pointers::Pointers;
@@ -136,7 +135,7 @@ fn good_name(units: &[u16]) -> Option<String> {
 /// The game's writable memory, read as objects.
 pub struct Heap<'a> {
     pub pid: u32,
-    mem: &'a File,
+    mem: &'a Mem,
     width: usize,
     rw: Vec<(u64, u64)>,
     /// The program's and libraries' own mappings (code, constant data, and their data
@@ -145,7 +144,7 @@ pub struct Heap<'a> {
 }
 
 impl<'a> Heap<'a> {
-    pub fn new(pid: u32, mem: &'a File, width: usize) -> io::Result<Self> {
+    pub fn new(pid: u32, mem: &'a Mem, width: usize) -> io::Result<Self> {
         let regions = maps(pid)?;
         let fits = |r: &&crate::helper::Region| width == 8 || r.end <= 1 << 32;
         let rw = regions.iter().filter(|r| scannable(r)).filter(fits).map(|r| (r.start, r.end)).collect();
@@ -176,7 +175,7 @@ impl<'a> Heap<'a> {
         self.width as u64
     }
 
-    pub fn file(&self) -> &File {
+    pub fn mem(&self) -> &Mem {
         self.mem
     }
 

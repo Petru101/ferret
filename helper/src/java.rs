@@ -17,8 +17,7 @@ use crate::mono::player_like;
 use crate::names::Heap;
 use crate::ue::{Listed, ListedObject, MAX_LISTED};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -129,27 +128,27 @@ struct Classes {
     at: Option<Instant>,
 }
 
-fn word(mem: &File, at: u64) -> Option<u64> {
+fn word(mem: &Mem, at: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b, at).ok().map(|_| u64::from_le_bytes(b))
 }
 
-fn half(mem: &File, at: u64) -> Option<u32> {
+fn half(mem: &Mem, at: u64) -> Option<u32> {
     let mut b = [0u8; 4];
     mem.read_exact_at(&mut b, at).ok().map(|_| u32::from_le_bytes(b))
 }
 
-fn short(mem: &File, at: u64) -> Option<u16> {
+fn short(mem: &Mem, at: u64) -> Option<u16> {
     let mut b = [0u8; 2];
     mem.read_exact_at(&mut b, at).ok().map(|_| u16::from_le_bytes(b))
 }
 
-fn byte(mem: &File, at: u64) -> Option<u8> {
+fn byte(mem: &Mem, at: u64) -> Option<u8> {
     let mut b = [0u8; 1];
     mem.read_exact_at(&mut b, at).ok().map(|_| b[0])
 }
 
-fn cstr(mem: &File, at: u64) -> Option<String> {
+fn cstr(mem: &Mem, at: u64) -> Option<String> {
     if at == 0 {
         return None;
     }
@@ -164,8 +163,7 @@ fn hotspot_symbols(pid: u32) -> Option<HashMap<String, u64>> {
     let maps = crate::helper::maps(pid).ok()?;
     // Its first mapping is where it's loaded (the maps are in address order).
     let r = maps.iter().find(|r| r.path.ends_with("/libjvm.so"))?;
-    let root = std::path::Path::new("/proc").join(pid.to_string()).join("root");
-    let elf = std::fs::read(root.join(r.path.trim_start_matches('/'))).or_else(|_| std::fs::read(&r.path)).ok()?;
+    let elf = std::fs::read(crate::os::inside(pid, std::path::Path::new(&r.path))).or_else(|_| std::fs::read(&r.path)).ok()?;
     let u16_at = |o: usize| elf.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
     let u32_at = |o: usize| elf.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
     let u64_at = |o: usize| elf.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
@@ -202,7 +200,7 @@ fn hotspot_symbols(pid: u32) -> Option<HashMap<String, u64>> {
 /// size, integer constants.
 type Structs = HashMap<(String, String), (Option<String>, bool, u64, u64)>;
 
-fn read_tables(mem: &File, syms: &HashMap<String, u64>) -> Option<(Structs, HashMap<String, u64>, HashMap<String, i32>)> {
+fn read_tables(mem: &Mem, syms: &HashMap<String, u64>) -> Option<(Structs, HashMap<String, u64>, HashMap<String, i32>)> {
     let sym = |n: &str| word(mem, *syms.get(n)?);
     let mut structs = HashMap::new();
     let (mut e, stride) = (sym("gHotSpotVMStructs")?, sym("gHotSpotVMStructEntryArrayStride")?);
@@ -264,7 +262,7 @@ fn unsigned5(b: &[u8], i: &mut usize) -> Option<u32> {
 }
 
 impl Jvm {
-    fn locate(pid: u32, mem: &File) -> Option<Jvm> {
+    fn locate(pid: u32, mem: &Mem) -> Option<Jvm> {
         let syms = hotspot_symbols(pid)?;
         let (structs, types, ints) = read_tables(mem, &syms)?;
         let off = |t: &str, f: &str| structs.get(&(t.to_owned(), f.to_owned())).filter(|v| !v.1).map(|v| v.2);
@@ -340,19 +338,19 @@ impl Jvm {
     }
 
     /// A Symbol's text (class and field names; class names with '/').
-    fn symbol(&self, mem: &File, s: u64) -> Option<String> {
+    fn symbol(&self, mem: &Mem, s: u64) -> Option<String> {
         let n = short(mem, s + self.sym_length)?;
         let mut b = vec![0u8; n as usize];
         mem.read_exact_at(&mut b, s + self.sym_body).ok()?;
         Some(String::from_utf8_lossy(&b).into_owned())
     }
 
-    fn klass_name(&self, mem: &File, k: u64) -> Option<String> {
+    fn klass_name(&self, mem: &Mem, k: u64) -> Option<String> {
         self.symbol(mem, word(mem, k + self.klass_name)?)
     }
 
     /// Reads the class list again (classes load as the game goes; at most once a second).
-    fn scan_classes(&self, mem: &File) {
+    fn scan_classes(&self, mem: &Mem) {
         let mut c = self.classes.lock().unwrap();
         if c.at.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
             return;
@@ -376,7 +374,7 @@ impl Jvm {
     }
 
     /// The class of that name (with '/'), looking at the class list again when it isn't known.
-    fn class(&self, mem: &File, name: &str) -> Option<u64> {
+    fn class(&self, mem: &Mem, name: &str) -> Option<u64> {
         if let Some(&k) = self.classes.lock().unwrap().by_name.get(name) {
             return Some(k);
         }
@@ -384,7 +382,7 @@ impl Jvm {
         self.classes.lock().unwrap().by_name.get(name).copied()
     }
 
-    fn known(&self, mem: &File, k: u64) -> bool {
+    fn known(&self, mem: &Mem, k: u64) -> bool {
         if self.classes.lock().unwrap().all.contains(&k) {
             return true;
         }
@@ -394,7 +392,7 @@ impl Jvm {
 
     /// The flag bits of the field info stream: the scheme whose decoding of the game's
     /// classes ends where their streams do.
-    fn pick_scheme(&mut self, mem: &File) {
+    fn pick_scheme(&mut self, mem: &Mem) {
         if self.stream.is_none() {
             return;
         }
@@ -406,13 +404,13 @@ impl Jvm {
         self.scheme = *best.unwrap_or(&SCHEMES[0]);
     }
 
-    fn cp_symbol(&self, mem: &File, cp: u64, i: u32) -> Option<String> {
+    fn cp_symbol(&self, mem: &Mem, cp: u64, i: u32) -> Option<String> {
         self.symbol(mem, word(mem, cp + self.cp_size + 8 * u64::from(i))?)
     }
 
     /// JDK 21+: a class's own fields from its field info stream, and whether the stream ended
     /// where it should.
-    fn decode_stream(&self, mem: &File, k: u64) -> Option<(Vec<Field>, bool)> {
+    fn decode_stream(&self, mem: &Mem, k: u64) -> Option<(Vec<Field>, bool)> {
         let (at, data) = self.stream?;
         let a = word(mem, k + at)?;
         if a == 0 {
@@ -444,7 +442,7 @@ impl Jvm {
     }
 
     /// JDK 8-20: a class's own fields from its `_fields` array.
-    fn decode_old(&self, mem: &File, k: u64) -> Option<Vec<Field>> {
+    fn decode_old(&self, mem: &Mem, k: u64) -> Option<Vec<Field>> {
         let o = self.old?;
         let a = word(mem, k + o.fields)?;
         let count = short(mem, k + o.count)?;
@@ -465,7 +463,7 @@ impl Jvm {
     }
 
     /// A class's own fields (cached: a class's fields don't change).
-    fn own_fields(&self, mem: &File, k: u64) -> Arc<Vec<Field>> {
+    fn own_fields(&self, mem: &Mem, k: u64) -> Arc<Vec<Field>> {
         if let Some(f) = self.fields.lock().unwrap().get(&k) {
             return f.clone();
         }
@@ -483,7 +481,7 @@ impl Jvm {
     }
 
     /// An object's instance fields, its own class's first, then its superclasses'.
-    fn instance_fields(&self, mem: &File, mut k: u64) -> Vec<Field> {
+    fn instance_fields(&self, mem: &Mem, mut k: u64) -> Vec<Field> {
         let mut out = Vec::new();
         for _ in 0..32 {
             if k == 0 {
@@ -496,7 +494,7 @@ impl Jvm {
     }
 
     /// Whether a class is an enum (its constants are objects too, never the game's state).
-    fn is_enum(&self, mem: &File, mut k: u64) -> bool {
+    fn is_enum(&self, mem: &Mem, mut k: u64) -> bool {
         for _ in 0..32 {
             k = match word(mem, k + self.klass_super) {
                 Some(s) if s != 0 => s,
@@ -510,14 +508,14 @@ impl Jvm {
     }
 
     /// A class's mirror (java.lang.Class object), where its statics are.
-    fn mirror(&self, mem: &File, k: u64) -> Option<u64> {
+    fn mirror(&self, mem: &Mem, k: u64) -> Option<u64> {
         let m = word(mem, k + self.klass_mirror)?;
         let m = if self.mirror_handle { word(mem, m)? } else { m };
         (m != 0).then_some(m)
     }
 
     /// The object a reference slot points to (0 for null).
-    fn reference(&self, mem: &File, at: u64) -> Option<u64> {
+    fn reference(&self, mem: &Mem, at: u64) -> Option<u64> {
         match self.coops {
             true => half(mem, at).map(|n| if n == 0 { 0 } else { self.oop_base + (u64::from(n) << self.oop_shift) }),
             false => word(mem, at),
@@ -527,7 +525,7 @@ impl Jvm {
     /// An object's class, if the object is sound: in the heap, not being moved by the collector,
     /// of a class the JVM has loaded.
     fn klass_of(&self, heap: &Heap, o: u64) -> Option<u64> {
-        let mem = heap.file();
+        let mem = heap.mem();
         if o == 0 || o % 8 != 0 || !heap.is_pointer(o) {
             return None;
         }
@@ -554,7 +552,7 @@ impl Jvm {
     }
 
     /// What a field of this type holds at `at`.
-    fn val(&self, mem: &File, at: u64, sig: &str) -> Val {
+    fn val(&self, mem: &Mem, at: u64, sig: &str) -> Val {
         match sig.as_bytes().first() {
             Some(b'I') => Val::Num(at, "i32"),
             Some(b'F') => Val::Num(at, "f32"),
@@ -567,7 +565,7 @@ impl Jvm {
 
     /// An array's elements (up to `MAX_ELEMENTS`): index and what it holds.
     fn elements(&self, heap: &Heap, a: u64, name: &str) -> Vec<(u32, Val)> {
-        let mem = heap.file();
+        let mem = heap.mem();
         let elem_sig = &name[1..];
         let size = match elem_sig.as_bytes().first() {
             Some(b'D' | b'J') => 8,
@@ -584,7 +582,7 @@ impl Jvm {
 
 /// The located JVM of the game attached to, per pid; a failed search is tried again after
 /// `RETRY`.
-pub fn shared(pid: u32, mem: &File) -> Option<Arc<Jvm>> {
+pub fn shared(pid: u32, mem: &Mem) -> Option<Arc<Jvm>> {
     const RETRY: Duration = Duration::from_secs(10);
     static FOUND: Mutex<Option<(u32, Option<Arc<Jvm>>, Instant)>> = Mutex::new(None);
     let mut found = FOUND.lock().unwrap();
@@ -703,19 +701,19 @@ impl JavaPath {
 
 /// The class the path starts from.
 pub fn find_roots(heap: &Heap, path: &JavaPath) -> Vec<u64> {
-    let Some(jvm) = shared(heap.pid, heap.file()) else { return Vec::new() };
-    jvm.class(heap.file(), &path.class).into_iter().collect()
+    let Some(jvm) = shared(heap.pid, heap.mem()) else { return Vec::new() };
+    jvm.class(heap.mem(), &path.class).into_iter().collect()
 }
 
 /// Where the path leads from its class now: the number's address, every object along it
 /// checked (see the module's notes).
 pub fn walk(heap: &Heap, roots: &[u64], path: &JavaPath) -> Vec<u64> {
-    let Some(jvm) = shared(heap.pid, heap.file()) else { return Vec::new() };
+    let Some(jvm) = shared(heap.pid, heap.mem()) else { return Vec::new() };
     roots.iter().filter_map(|&k| follow(&jvm, heap, k, path)).collect()
 }
 
 fn follow(jvm: &Jvm, heap: &Heap, k: u64, path: &JavaPath) -> Option<u64> {
-    let mem = heap.file();
+    let mem = heap.mem();
     if jvm.klass_name(mem, k)? != path.class {
         return None;
     }
@@ -767,8 +765,8 @@ fn container(class: &str) -> Option<&'static str> {
 /// libraries' classes left out; their lists looked through), breadth first, so each object is
 /// named by its shortest path.
 fn groups(heap: &Heap) -> Option<Vec<Group>> {
-    let jvm = shared(heap.pid, heap.file())?;
-    let mem = heap.file();
+    let jvm = shared(heap.pid, heap.mem())?;
+    let mem = heap.mem();
     jvm.scan_classes(mem);
     let mut classes: Vec<(String, u64)> = jvm.classes.lock().unwrap().by_name.iter().filter(|(n, _)| !is_library(n) && !n.starts_with('[')).map(|(n, &k)| (n.clone(), k)).collect();
     classes.sort();
@@ -908,7 +906,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(JavaPath, Vec<u64>)> {
 /// class's fields with their values.
 pub fn diagnose(heap: &Heap, class: &str) -> Vec<String> {
     let t = Instant::now();
-    let mem = heap.file();
+    let mem = heap.mem();
     let Some(jvm) = shared(heap.pid, mem) else { return vec!["no HotSpot tables found (libjvm.so's gHotSpotVMStructs)".into()] };
     let n = jvm.classes.lock().unwrap().all.len();
     let mut out = vec![format!(

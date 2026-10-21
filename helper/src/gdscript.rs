@@ -30,8 +30,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
-use std::os::unix::fs::FileExt;
+use crate::mem::Mem;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -267,20 +266,20 @@ struct Godot<'a> {
     indices: RefCell<HashMap<u64, Option<HashMap<String, u64>>>>,
 }
 
-fn mem_u32(mem: &File, at: u64) -> Option<u32> {
+fn mem_u32(mem: &Mem, at: u64) -> Option<u32> {
     let mut b = [0u8; 4];
     mem.read_exact_at(&mut b, at).ok()?;
     Some(u32::from_le_bytes(b))
 }
 
-fn mem_u64(mem: &File, at: u64) -> Option<u64> {
+fn mem_u64(mem: &Mem, at: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b, at).ok()?;
     Some(u64::from_le_bytes(b))
 }
 
 /// The size of the Vector or String whose data is at `data`.
-fn cow_size(mem: &File, data: u64, cow: u64) -> Option<u64> {
+fn cow_size(mem: &Mem, data: u64, cow: u64) -> Option<u64> {
     match cow {
         4 => mem_u32(mem, data.checked_sub(4)?).map(u64::from),
         _ => mem_u64(mem, data.checked_sub(cow)?),
@@ -288,7 +287,7 @@ fn cow_size(mem: &File, data: u64, cow: u64) -> Option<u64> {
 }
 
 /// A Godot string's characters at `p` (its size counts the terminating 0).
-fn read_chars(mem: &File, p: u64, wide: u64, cow: u64) -> Option<String> {
+fn read_chars(mem: &Mem, p: u64, wide: u64, cow: u64) -> Option<String> {
     let n = cow_size(mem, p, cow)?;
     if !(2..=4 * MAX_NAME as u64).contains(&n) {
         return None;
@@ -302,7 +301,7 @@ fn read_chars(mem: &File, p: u64, wide: u64, cow: u64) -> Option<String> {
 }
 
 /// The entries of a Godot 4 HashMap at `map`: (key, address of the value), in order.
-fn hash_entries(mem: &File, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
+fn hash_entries(mem: &Mem, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
     let (head, tail) = (mem_u64(mem, map + 0x10)?, mem_u64(mem, map + 0x18)?);
     let (capacity, size) = (mem_u32(mem, map + 0x20)?, mem_u32(mem, map + 0x24)? as u64);
     if head == 0 || tail == 0 || capacity > 40 || !(1..=most).contains(&size) {
@@ -321,7 +320,7 @@ fn hash_entries(mem: &File, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
 }
 
 /// The entries of a Map at `map` ({ root, nil, size }): (key, address of the value), in order.
-fn map_entries(mem: &File, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
+fn map_entries(mem: &Mem, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
     let (root, nil, size) = (mem_u64(mem, map)?, mem_u64(mem, map + 8)?, mem_u32(mem, map + 16)? as u64);
     if root == 0 || nil == 0 || root == nil || !(1..=most).contains(&size) {
         return None;
@@ -345,11 +344,11 @@ fn map_entries(mem: &File, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
 }
 
 /// A StringName's text: its String (at +0x10, or +8 in Godot 4.5+), else its C string.
-fn string_name(mem: &File, sn: u64, wide: u64, cow: u64) -> Option<String> {
+fn string_name(mem: &Mem, sn: u64, wide: u64, cow: u64) -> Option<String> {
     string_name_if(mem, sn, wide, cow, good_name)
 }
 
-fn string_name_if(mem: &File, sn: u64, wide: u64, cow: u64, good: impl Fn(&str) -> bool) -> Option<String> {
+fn string_name_if(mem: &Mem, sn: u64, wide: u64, cow: u64, good: impl Fn(&str) -> bool) -> Option<String> {
     for at in [0x10, 8] {
         if let Some(t) = mem_u64(mem, sn + at).filter(|&p| p != 0).and_then(|p| read_chars(mem, p, wide, cow)) {
             if good(&t) {
@@ -365,7 +364,7 @@ fn string_name_if(mem: &File, sn: u64, wide: u64, cow: u64, good: impl Fn(&str) 
 }
 
 /// member_indices at `map`: every index 0..n-1 once, each under a name.
-fn member_table(mem: &File, map: u64, lay: &Layout) -> Option<HashMap<String, u64>> {
+fn member_table(mem: &Mem, map: u64, lay: &Layout) -> Option<HashMap<String, u64>> {
     let entries = match lay.v4 {
         true => hash_entries(mem, map, MAX_MEMBERS)?,
         false => map_entries(mem, map, MAX_MEMBERS)?,
@@ -387,7 +386,7 @@ fn member_table(mem: &File, map: u64, lay: &Layout) -> Option<HashMap<String, u6
 /// them, the size found `cow` bytes before them): its owner points back to it, its script has a
 /// member table of `count` names and a path.
 fn detect(heap: &Heap, inst: u64, members: u64, count: u64, cow: u64) -> Option<Layout> {
-    let mem = heap.file();
+    let mem = heap.mem();
     let m = (8..0x40).step_by(8).find(|&m| mem_u64(mem, inst + m) == Some(members))?;
     for owner in [8u64, 0x10, 0x18].into_iter().filter(|&o| o < m) {
         let Some(obj) = mem_u64(mem, inst + owner).filter(|&p| heap.is_pointer(p)) else { continue };
@@ -405,7 +404,7 @@ fn detect(heap: &Heap, inst: u64, members: u64, count: u64, cow: u64) -> Option<
 
 /// The rest of the layout from a GDScript: its path's characters and member table.
 fn detect_script(heap: &Heap, gd: u64, count: u64, lay: Layout) -> Option<Layout> {
-    let mem = heap.file();
+    let mem = heap.mem();
     for wide in [2u64, 4] {
         let Some(path) = (0..SCRIPT_SIZE).step_by(8).find(|&p| {
             mem_u64(mem, gd + p)
@@ -435,8 +434,8 @@ impl<'a> Godot<'a> {
         Godot { heap, lay, indices: RefCell::default() }
     }
 
-    fn mem(&self) -> &File {
-        self.heap.file()
+    fn mem(&self) -> &Mem {
+        self.heap.mem()
     }
 
     fn u32_at(&self, at: u64) -> Option<u32> {
@@ -875,7 +874,7 @@ struct Partial {
 /// Finds the layout from the value at `target` (an int or real variable of a script), and the
 /// instance and variable it is.
 fn start(heap: &Heap, target: u64) -> Option<(Layout, u64, u64)> {
-    let mem = heap.file();
+    let mem = heap.mem();
     let v = target.checked_sub(8)?;
     if !matches!(mem_u32(mem, v), Some(INT | REAL)) {
         return None;
@@ -930,7 +929,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
         g.ptr(gd + lay.path)?;
         Some(ScriptPath { script: g.script_path(gd)?, nodes: None, steps: p.steps.clone() })
     };
-    let owner = |p: &Partial| mem_u64(heap.file(), p.inst + lay.owner);
+    let owner = |p: &Partial| mem_u64(heap.mem(), p.inst + lay.owner);
     let mut level = vec![own.clone()];
     let mut levels = Vec::new();
     let mut own_runs = Vec::new();
@@ -939,9 +938,9 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
         let mut gds: Vec<u64> = level.iter().filter_map(|p| g.script_of(p.inst)).collect();
         gds.sort_unstable();
         gds.dedup();
-        let objs: Vec<u64> = level.iter().filter_map(|p| mem_u64(heap.file(), p.inst + lay.owner)).collect();
+        let objs: Vec<u64> = level.iter().filter_map(|p| mem_u64(heap.mem(), p.inst + lay.owner)).collect();
         let refs = heap.referrers(&[gds.as_slice(), objs.as_slice()].concat());
-        let points_to = |at: u64, set: &[u64]| mem_u64(heap.file(), at).is_some_and(|v| set.contains(&v));
+        let points_to = |at: u64, set: &[u64]| mem_u64(heap.mem(), at).is_some_and(|v| set.contains(&v));
         let runs = g.instances_at(refs.iter().copied().filter(|&at| points_to(at, &gds)));
         if depth == 0 {
             own_runs = runs.clone();
@@ -1023,7 +1022,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
 /// keeps a snapshot of the player's data each wave whose gold looked just like the live one in
 /// the matches list. All of them at once: a few passes over memory, not a climb each.
 pub fn about_all(heap: &Heap, addrs: &[(u64, Kind)]) -> Vec<Option<String>> {
-    let mem = heap.file();
+    let mem = heap.mem();
     let mut out = vec![None; addrs.len()];
     // A number Variant: an int64 (the match is its low half, the high half its sign) or a
     // double. Junk passing this would each cost a detect per pointer to it (61 s for 20 places
@@ -1236,7 +1235,7 @@ fn search_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
         // The same places that point to scripts hold the instances.
         let g = Godot::new(heap, lay);
         let ours = |at: &u64| {
-            mem_u64(heap.file(), *at)
+            mem_u64(heap.mem(), *at)
                 .filter(|&gd| refs.iter().any(|&r| r == gd + lay.path))
                 .is_some_and(|gd| g.script_path(gd).as_deref() == Some(path.script.as_str()))
         };
@@ -1245,7 +1244,7 @@ fn search_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
         // aren't around (Brotato's shop: no player).
         if roots.is_empty() {
             let inst = seen.wrapping_sub(lay.script);
-            g.tree(&mem_u64(heap.file(), inst + lay.owner).into_iter().collect::<Vec<_>>());
+            g.tree(&mem_u64(heap.mem(), inst + lay.owner).into_iter().collect::<Vec<_>>());
         }
         return g.settle(path, roots);
     }
@@ -1256,14 +1255,14 @@ fn search_roots(heap: &Heap, path: &ScriptPath) -> Vec<u64> {
 /// first that fits, and that place.
 fn layout_from(heap: &Heap, ats: &[u64]) -> Option<(Layout, u64)> {
     ats.iter().find_map(|&at| {
-        let gd = mem_u64(heap.file(), at)?;
+        let gd = mem_u64(heap.mem(), at)?;
         let lay = [8u64, 0x10, 0x18].into_iter().find_map(|script| {
             let inst = at.checked_sub(script)?;
             (script + 8..0x40).step_by(8).find_map(|m| {
-                let members = mem_u64(heap.file(), inst + m).filter(|&p| heap.is_pointer(p))?;
+                let members = mem_u64(heap.mem(), inst + m).filter(|&p| heap.is_pointer(p))?;
                 SIZES.iter().find_map(|&cow| {
-                    let count = cow_size(heap.file(), members, cow).filter(|n| (1..=MAX_MEMBERS).contains(n))?;
-                    detect(heap, inst, members, count, cow).filter(|l| l.script == script && mem_u64(heap.file(), inst + l.script) == Some(gd))
+                    let count = cow_size(heap.mem(), members, cow).filter(|n| (1..=MAX_MEMBERS).contains(n))?;
+                    detect(heap, inst, members, count, cow).filter(|l| l.script == script && mem_u64(heap.mem(), inst + l.script) == Some(gd))
                 })
             })
         })?;
@@ -1308,7 +1307,7 @@ fn learn(heap: &Heap) -> Option<Layout> {
             _ => "res://".chars().map(|c| c as u32).flat_map(u32::to_le_bytes).collect(),
         };
         // Script paths only: a game has thousands of other resources.
-        let strings: Vec<u64> = find_bytes(heap, &prefix).into_iter().filter(|&at| raw_text(heap.file(), at, wide).is_some_and(|t| t.ends_with(".gd"))).collect();
+        let strings: Vec<u64> = find_bytes(heap, &prefix).into_iter().filter(|&at| raw_text(heap.mem(), at, wide).is_some_and(|t| t.ends_with(".gd"))).collect();
         if strings.is_empty() {
             continue;
         }
@@ -1320,8 +1319,8 @@ fn learn(heap: &Heap) -> Option<Layout> {
         let Some((lay, _)) = layout_from(heap, &ats) else { continue };
         remember(heap.pid, lay);
         let g = Godot::new(heap, lay);
-        let insts = g.instances_at(ats.iter().copied().filter(|&at| mem_u64(heap.file(), at).is_some_and(|gd| g.script_path(gd).is_some())));
-        let objs: Vec<u64> = insts.iter().filter_map(|&i| mem_u64(heap.file(), i + lay.owner)).collect();
+        let insts = g.instances_at(ats.iter().copied().filter(|&at| mem_u64(heap.mem(), at).is_some_and(|gd| g.script_path(gd).is_some())));
+        let objs: Vec<u64> = insts.iter().filter_map(|&i| mem_u64(heap.mem(), i + lay.owner)).collect();
         // Any node will do: the tree is the same from each.
         g.tree(&objs);
         return Some(lay);
@@ -1330,7 +1329,7 @@ fn learn(heap: &Heap) -> Option<Layout> {
 }
 
 /// Text at `at` up to its terminating 0 (before the layout tells where a string's size is).
-fn raw_text(mem: &File, at: u64, wide: u64) -> Option<String> {
+fn raw_text(mem: &Mem, at: u64, wide: u64) -> Option<String> {
     let mut b = vec![0u8; (MAX_NAME as u64 * wide) as usize];
     let n = mem.read_at(&mut b, at).ok()?;
     let units: Vec<u32> = b[..n - n % wide as usize]
@@ -1400,7 +1399,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
         .filter_map(|n| {
             let inst = g.instance_of(n)?;
             let script = file(g.script_of(inst)?)?;
-            Some((n, inst, script, mem_u64(heap.file(), n + t.parent).unwrap_or(0)))
+            Some((n, inst, script, mem_u64(heap.mem(), n + t.parent).unwrap_or(0)))
         })
         .collect();
     let name = |n: u64| g.node_name(&t, n).unwrap_or_else(|| "?".into());
@@ -1435,7 +1434,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
             groups.push((main, crate::ue::ListedObject { name: node_name.clone(), class: script.clone(), role, owner, more: !main, fields }));
         }
         for (label, o) in held {
-            if mem_u64(heap.file(), o + lay.owner).is_some_and(|obj| in_tree.contains(&obj)) {
+            if mem_u64(heap.mem(), o + lay.owner).is_some_and(|obj| in_tree.contains(&obj)) {
                 continue;
             }
             let Some(script) = g.script_of(o).and_then(file) else { continue };
