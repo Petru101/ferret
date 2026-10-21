@@ -1124,26 +1124,32 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
 /// rest under Show Everything.
 pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     let groups = groups(heap)?;
-    let mut out: Vec<ListedObject> = groups
+    let named = |n: &str| player_like(n) && !constant(n);
+    let mut out: Vec<((bool, usize), ListedObject)> = groups
         .into_iter()
         .map(|g| {
-            let named = |n: &str| player_like(n) && !constant(n);
+            let hits = g.numbers.iter().filter(|n| named(&n.0)).count();
+            let near = g.path.steps.len() <= 2;
             let shown = short_name(&g.class).to_owned();
             let player = (g.path.last_field().is_some_and(the_player) || !g.statics && the_player(&shown)) && !g.path.presentation();
             let owner = g.path.player_part().filter(|p| !player && *p != g.path && !g.path.presentation()).map(|p| p.shown());
-            let main = player || owner.is_some() || !g.path.presentation() && g.numbers.iter().any(|n| named(&n.0));
-            ListedObject {
+            let main = player || owner.is_some() || !g.path.presentation() && hits > 0;
+            let o = ListedObject {
                 name: g.path.shown(),
                 class: shown,
                 role: if player { "character" } else if owner.is_some() { "part" } else { "game" },
                 owner,
                 more: !main,
                 fields: g.numbers.into_iter().map(|(label, addr, kind, _)| Listed { label, addr, kind }).collect(),
-            }
+            };
+            ((near, hits), o)
         })
         .collect();
-    out.sort_by_key(|o| (o.more, o.role != "character"));
-    Some(out)
+    // The game's objects near a static (two steps at most) first, the most player-like numbers
+    // first among them: CW1's `GameSpace.instance` (six energy numbers) before the path
+    // finder's `Graph.tentative_g_score` and the units further down.
+    out.sort_by_key(|((near, hits), o)| (o.more, o.role != "character", o.role == "game", !near, std::cmp::Reverse(*hits)));
+    Some(out.into_iter().map(|(_, o)| o).collect())
 }
 
 /// The path to a number the list has, checked by following it the way a restart does.
