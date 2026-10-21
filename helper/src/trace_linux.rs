@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::time::{Duration, Instant};
 
-use super::{Hit, Regs, DR6_HITS, DR7_EXECUTE};
+use super::{refuse_when_stopping, stopping, Hit, Regs, DR6_HITS, DR7_EXECUTE};
 
 /// offsetof(struct user, u_debugreg) on x86_64.
 const DEBUGREG: usize = 848;
@@ -40,6 +40,7 @@ fn debugreg(tid: i32, n: usize) -> u64 {
 
 impl Tracer {
     pub fn attach(pid: u32) -> io::Result<Self> {
+        refuse_when_stopping()?;
         let tids: Vec<i32> = fs::read_dir(format!("/proc/{pid}/task"))?
             .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
             .filter(|&tid| ptrace(libc::PTRACE_SEIZE, tid, 0, 0) == 0)
@@ -112,7 +113,7 @@ impl Tracer {
     /// Lets the game run, calling `on_hit` at every breakpoint hit (false = stop), until `done`
     /// or the game's threads are gone.
     pub fn watch_until(&mut self, mut done: impl FnMut() -> bool, mut on_hit: impl FnMut(&Hit) -> bool) {
-        while !done() && !self.tids.is_empty() {
+        while !done() && !stopping() && !self.tids.is_empty() {
             let Some((tid, st)) = wait(-1, libc::WNOHANG) else {
                 child_stopped(Duration::from_millis(5));
                 continue;
@@ -178,6 +179,12 @@ fn child_stopped(most: Duration) {
         let ts = libc::timespec { tv_sec: most.as_secs() as libc::time_t, tv_nsec: most.subsec_nanos() as libc::c_long };
         libc::sigtimedwait(&set, std::ptr::null_mut(), &ts);
     }
+}
+
+/// Windows only: a killed ptrace tracer's breakpoints stay too, but taking them off would mean
+/// tracing every thread again (the stutter `saving.md` tells of).
+pub fn clear_left(_pid: u32) -> usize {
+    0
 }
 
 /// Blocks SIGCHLD in the calling thread and every thread it starts later, for `child_stopped`:

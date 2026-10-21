@@ -7,7 +7,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use super::{Hit, Regs, DR6_HITS, DR7_EXECUTE};
+use super::{refuse_when_stopping, stopping, Hit, Regs, DR6_HITS, DR7_EXECUTE};
 use crate::win32::*;
 
 pub struct Tracer {
@@ -70,6 +70,7 @@ fn next_event(wait: Duration) -> Option<DEBUG_EVENT> {
 
 impl Tracer {
     pub fn attach(pid: u32) -> io::Result<Self> {
+        refuse_when_stopping()?;
         let wow64 = crate::os::is_wow64(pid);
         if unsafe { DebugActiveProcess(pid) } == 0 {
             return Err(io::Error::last_os_error());
@@ -150,7 +151,7 @@ impl Tracer {
     /// Lets the game run, calling `on_hit` at every breakpoint hit (false = stop), until `done`
     /// or the game is gone.
     pub fn watch_until(&mut self, mut done: impl FnMut() -> bool, mut on_hit: impl FnMut(&Hit) -> bool) {
-        while !done() && !self.gone && self.parked.is_none() {
+        while !done() && !stopping() && !self.gone && self.parked.is_none() {
             let Some(ev) = next_event(Duration::from_millis(5)) else { continue };
             let (pid, tid) = (ev.dwProcessId, ev.dwThreadId);
             match ev.dwDebugEventCode {
@@ -280,6 +281,33 @@ impl Drop for Tracer {
         }
         unsafe { DebugActiveProcessStop(self.pid) };
     }
+}
+
+/// Takes off breakpoints a helper left on the game's threads when it was killed in the middle
+/// of a trace (Task Manager, taskkill /f): Windows detaches a dead debugger but keeps the
+/// threads' debug registers, and the next hit, with no debugger to take it, ends the game.
+/// Nothing is touched while a debugger is attached (a trace running in another helper).
+/// Returns how many threads had some.
+pub fn clear_left(pid: u32) -> usize {
+    let Some(p) = Handle::valid(unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid) }) else { return 0 };
+    let mut debugged = 0;
+    if unsafe { CheckRemoteDebuggerPresent(p.0, &mut debugged) } == 0 || debugged != 0 {
+        return 0;
+    }
+    let mut cleared = 0;
+    for tid in threads_of(pid) {
+        let Some(t) = thread(tid) else { continue };
+        if unsafe { SuspendThread(t.0) } == u32::MAX {
+            continue;
+        }
+        let mut c = CONTEXT::new(CONTEXT_DEBUG_REGISTERS);
+        // DR7's enable bits, 2 per breakpoint.
+        if unsafe { GetThreadContext(t.0, &mut *c) } != 0 && c.u64_at(CTX_DR7) & 0xff != 0 && set_debug(&t, &[], 0) {
+            cleared += 1;
+        }
+        unsafe { ResumeThread(t.0) };
+    }
+    cleared
 }
 
 /// Linux waits for SIGCHLD; nothing to set up here.

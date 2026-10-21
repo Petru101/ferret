@@ -405,8 +405,66 @@ pub fn stdin_ready() -> bool {
 /// Ferret going away ends stdin; nothing else to catch.
 pub fn ignore_interrupt() {}
 
-/// Windows ends a process without a signal it could take: nothing to set up.
-pub fn on_terminate(_end: fn() -> !) {}
+/// What ends the helper, set once by `on_terminate`.
+static END: OnceLock<fn() -> !> = OnceLock::new();
+
+/// The session ending (sign-out, shutdown, restart) or the helper's console closing calls
+/// `end` (`exit_untraced`): it stops a running trace and takes its breakpoints off the game
+/// first, where Windows would otherwise end the helper in the middle of it (the game then dies
+/// at the next hit). A program that uses user32 (EnumWindows) gets the session's end only as
+/// WM_ENDSESSION, through a window: a hidden one, on a thread of its own. Being killed
+/// (Task Manager, taskkill /f) can't be caught: `attach` clears what that leaves behind
+/// (`trace::clear_left`).
+pub fn on_terminate(end: fn() -> !) {
+    END.set(end).ok();
+    unsafe extern "system" fn console(event: u32) -> BOOL {
+        match event {
+            CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+                eprintln!("helper: console closing (event {event}): ending");
+                END.get().unwrap()()
+            }
+            // Ctrl+C and Ctrl+Break are ignored, as SIGINT is on Linux: losing Ferret ends stdin.
+            _ => 1,
+        }
+    }
+    unsafe extern "system" fn window(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
+        if msg == WM_ENDSESSION && wparam != 0 {
+            eprintln!("helper: the session is ending: ending");
+            END.get().unwrap()();
+        }
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+    unsafe { SetConsoleCtrlHandler(Some(console), 1) };
+    std::thread::spawn(|| {
+        let name: Vec<u16> = "FerretHelperSession".encode_utf16().chain([0]).collect();
+        let class = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: window,
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: unsafe { GetModuleHandleW(std::ptr::null()) },
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: name.as_ptr(),
+        };
+        if unsafe { RegisterClassW(&class) } == 0 {
+            return;
+        }
+        // Top-level (a message-only window isn't told), never shown.
+        let hwnd = unsafe {
+            CreateWindowExW(0, name.as_ptr(), name.as_ptr(), 0, 0, 0, 0, 0, std::ptr::null_mut(), std::ptr::null_mut(), class.hInstance, std::ptr::null_mut())
+        };
+        if hwnd.is_null() {
+            return;
+        }
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
+            unsafe { DispatchMessageW(&msg) };
+        }
+    });
+}
 
 #[cfg(test)]
 mod tests {

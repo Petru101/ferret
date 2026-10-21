@@ -11,6 +11,27 @@ mod tracer;
 mod tracer;
 pub use tracer::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The helper is being ended (the session ends, SIGTERM): traces stop at once and no new one
+/// starts, so it leaves the game without breakpoints soon enough.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+pub fn stop_all() {
+    STOPPING.store(true, Ordering::SeqCst);
+}
+
+fn stopping() -> bool {
+    STOPPING.load(Ordering::Relaxed)
+}
+
+fn refuse_when_stopping() -> std::io::Result<()> {
+    match stopping() {
+        true => Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "the helper is ending")),
+        false => Ok(()),
+    }
+}
+
 pub const DR7_ACCESS_4: u64 = 1 | (3 << 16) | (3 << 18);
 pub const DR7_ACCESS_2: u64 = 1 | (3 << 16) | (1 << 18);
 pub const DR7_EXECUTE: u64 = 1;

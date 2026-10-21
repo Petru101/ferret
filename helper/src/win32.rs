@@ -215,7 +215,15 @@ extern "system" {
     pub fn ContinueDebugEvent(pid: u32, tid: u32, status: u32) -> BOOL;
     pub fn GetStdHandle(which: u32) -> HANDLE;
     pub fn PeekNamedPipe(pipe: HANDLE, buf: *mut c_void, size: u32, read: *mut u32, avail: *mut u32, left: *mut u32) -> BOOL;
+    pub fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> BOOL>, add: BOOL) -> BOOL;
+    pub fn GetModuleHandleW(name: *const u16) -> HANDLE;
+    pub fn CheckRemoteDebuggerPresent(p: HANDLE, present: *mut BOOL) -> BOOL;
 }
+
+pub const CTRL_CLOSE_EVENT: u32 = 2;
+pub const CTRL_LOGOFF_EVENT: u32 = 5;
+pub const CTRL_SHUTDOWN_EVENT: u32 = 6;
+pub const WM_ENDSESSION: u32 = 0x0016;
 
 pub type HWND = *mut c_void;
 
@@ -224,6 +232,51 @@ extern "system" {
     pub fn EnumWindows(each: unsafe extern "system" fn(HWND, isize) -> BOOL, data: isize) -> BOOL;
     pub fn GetWindowThreadProcessId(hwnd: HWND, pid: *mut u32) -> u32;
     pub fn IsWindowVisible(hwnd: HWND) -> BOOL;
+    pub fn RegisterClassW(class: *const WNDCLASSW) -> u16;
+    pub fn CreateWindowExW(
+        ex_style: u32,
+        class: *const u16,
+        title: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        parent: HWND,
+        menu: HANDLE,
+        instance: HANDLE,
+        param: *mut c_void,
+    ) -> HWND;
+    pub fn DefWindowProcW(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize;
+    pub fn GetMessageW(msg: *mut MSG, hwnd: HWND, min: u32, max: u32) -> BOOL;
+    pub fn DispatchMessageW(msg: *const MSG) -> isize;
+}
+
+pub type WNDPROC = unsafe extern "system" fn(HWND, u32, usize, isize) -> isize;
+
+#[repr(C)]
+pub struct WNDCLASSW {
+    pub style: u32,
+    pub lpfnWndProc: WNDPROC,
+    pub cbClsExtra: i32,
+    pub cbWndExtra: i32,
+    pub hInstance: HANDLE,
+    pub hIcon: HANDLE,
+    pub hCursor: HANDLE,
+    pub hbrBackground: HANDLE,
+    pub lpszMenuName: *const u16,
+    pub lpszClassName: *const u16,
+}
+
+#[repr(C)]
+pub struct MSG {
+    pub hwnd: HWND,
+    pub message: u32,
+    pub wParam: usize,
+    pub lParam: isize,
+    pub time: u32,
+    pub pt: [i32; 2],
+    pub lPrivate: u32,
 }
 
 pub const SC_MANAGER_ENUMERATE_SERVICE: u32 = 0x0004;

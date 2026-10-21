@@ -1773,6 +1773,10 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
             // Only the program: launchers pass login tokens as arguments (Heroic's Epic games get
             // -AUTH_PASSWORD=<code>), and the log is kept.
             writeln!(out, "attached to {pid}: {}", argv0(pid))?;
+            match trace::clear_left(pid) {
+                0 => {}
+                n => writeln!(out, "took off breakpoints a stopped helper left on {n} of the game's threads")?,
+            }
             writeln!(out, "exe: {}", game_name(pid))?;
             writeln!(out, "{} mappings, {} MiB writable, {}-bit", regions.len(), rw >> 20, width * 8)?;
             if doubles_only {
@@ -4120,13 +4124,14 @@ pub fn run(as_user: Option<&str>) {
     exit_untraced();
 }
 
-/// Ends the helper once no trace is running, and keeps another from starting. Leaving in the
-/// middle of one leaves its hardware breakpoints on the game's threads (the kernel detaches
-/// them but keeps their debug registers), and the game dies of SIGTRAP the next time it runs
-/// that code: Minecraft Dungeons quit 9 s after a helper was stopped during a limiter
-/// re-check; the stand-in dies the same way, whether the helper is killed or its stdin ends
-/// (Ferret closing).
+/// Ends the helper once no trace is running: a running one stops early, and no other starts.
+/// Leaving in the middle of one leaves its hardware breakpoints on the game's threads (the
+/// kernel detaches them but keeps their debug registers), and the game dies of SIGTRAP (on
+/// Windows, an unhandled single step) the next time it runs that code: Minecraft Dungeons quit
+/// 9 s after a helper was stopped during a limiter re-check; the stand-in dies the same way,
+/// whether the helper is killed or its stdin ends (Ferret closing).
 fn exit_untraced() -> ! {
+    trace::stop_all();
     let _no_more = TRACING.lock().unwrap_or_else(|e| e.into_inner());
     std::process::exit(0)
 }
