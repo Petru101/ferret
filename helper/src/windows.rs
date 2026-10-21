@@ -395,11 +395,18 @@ pub fn drop_root(_as_user: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// A line from the frontend is waiting on stdin (a pipe from Ferret).
+/// A line from the frontend is waiting on stdin (a pipe from Ferret), or Ferret is gone (its
+/// end closed, as poll's POLLHUP on Linux): a wait for the game then ends at once, and the
+/// next read finds the end of stdin. Before, the in-game check's wait went on for its 180 s
+/// after Ferret was killed, the test values still in the game.
 pub fn stdin_ready() -> bool {
+    const ERROR_BROKEN_PIPE: i32 = 109;
     let mut avail = 0u32;
     let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    unsafe { PeekNamedPipe(h, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut()) != 0 && avail > 0 }
+    match unsafe { PeekNamedPipe(h, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut()) } {
+        0 => io::Error::last_os_error().raw_os_error() == Some(ERROR_BROKEN_PIPE),
+        _ => avail > 0,
+    }
 }
 
 /// Ferret going away ends stdin; nothing else to catch.

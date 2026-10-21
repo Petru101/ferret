@@ -171,6 +171,8 @@ struct Helper {
     /// Set when the helper turns out to be gone: Core's cancel flag, so a long wait (the
     /// in-game check's 180 s) ends as at Stop, and the next look starts a new helper.
     stop_on_exit: Option<Arc<AtomicBool>>,
+    /// A call found it gone: Windows may not report the process ended yet (`exited`).
+    lost: bool,
 }
 
 impl Helper {
@@ -213,7 +215,7 @@ impl Helper {
             .map_err(|e| format!("could not start host helper: {e}"))?;
         let input = child.stdin.take();
         let output = BufReader::new(child.stdout.take().unwrap());
-        Ok(Self { child, input, output, stop_on_exit: None })
+        Ok(Self { child, input, output, stop_on_exit: None, lost: false })
     }
 
     fn call(&mut self, line: &str) -> Vec<String> {
@@ -221,6 +223,7 @@ impl Helper {
     }
 
     fn gone(&mut self) -> Vec<String> {
+        self.lost = true;
         if let Some(stop) = &self.stop_on_exit {
             stop.store(true, Ordering::Relaxed);
         }
@@ -231,6 +234,7 @@ impl Helper {
     fn exited(&mut self) -> Option<String> {
         match self.child.try_wait() {
             Ok(Some(status)) => Some(status.to_string()),
+            _ if self.lost => Some("its pipes closed".into()),
             _ => None,
         }
     }
