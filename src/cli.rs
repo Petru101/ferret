@@ -329,6 +329,8 @@ pub fn run() {
         if line == "quit" || line == "exit" {
             break;
         }
+        // A helper that stopped is started again first (the log says so).
+        core.check_helper();
         if let Err(e) = run_command(&mut core, &line) {
             println!("error: {e}");
         }

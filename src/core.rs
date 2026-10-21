@@ -168,6 +168,9 @@ struct Helper {
     child: Child,
     input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
+    /// Set when the helper turns out to be gone: Core's cancel flag, so a long wait (the
+    /// in-game check's 180 s) ends as at Stop, and the next look starts a new helper.
+    stop_on_exit: Option<Arc<AtomicBool>>,
 }
 
 impl Helper {
@@ -210,17 +213,32 @@ impl Helper {
             .map_err(|e| format!("could not start host helper: {e}"))?;
         let input = child.stdin.take();
         let output = BufReader::new(child.stdout.take().unwrap());
-        Ok(Self { child, input, output })
+        Ok(Self { child, input, output, stop_on_exit: None })
     }
 
     fn call(&mut self, line: &str) -> Vec<String> {
         self.call_with(line, &mut |_| {})
     }
 
+    fn gone(&mut self) -> Vec<String> {
+        if let Some(stop) = &self.stop_on_exit {
+            stop.store(true, Ordering::Relaxed);
+        }
+        vec!["error: host helper exited".into()]
+    }
+
+    /// The helper ended (killed, crashed): how, for the log.
+    fn exited(&mut self) -> Option<String> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.to_string()),
+            _ => None,
+        }
+    }
+
     /// `call`, telling `progress` how far a scan is (0.0..=1.0) as the helper reports it.
     fn call_with(&mut self, line: &str, progress: &mut dyn FnMut(f64)) -> Vec<String> {
         if !self.send(line) {
-            return vec!["error: host helper exited".into()];
+            return self.gone();
         }
         self.reply(progress)
     }
@@ -239,7 +257,7 @@ impl Helper {
         #[cfg(windows)]
         use std::os::windows::io::AsHandle as AsDup;
         if !self.send(line) {
-            return vec!["error: host helper exited".into()];
+            return self.gone();
         }
         let done = Arc::new(AtomicBool::new(false));
         #[cfg(unix)]
@@ -282,7 +300,7 @@ impl Helper {
             let mut l = String::new();
             match self.output.read_line(&mut l) {
                 Ok(0) | Err(_) => {
-                    reply.push("error: host helper exited".into());
+                    reply.extend(self.gone());
                     return reply;
                 }
                 Ok(_) if l.trim_end() == "end" => return reply,
@@ -376,6 +394,10 @@ impl Upgrader {
         std::thread::spawn(move || {
             let (mut helper, mut attached) = (None, 0);
             for job in todo {
+                // One that stopped (killed, crashed) is started again, attached anew.
+                if helper.as_mut().is_some_and(|h: &mut Helper| h.exited().is_some()) {
+                    (helper, attached) = (None, 0);
+                }
                 if helper.is_none() {
                     helper = Helper::start(false).ok();
                 }
@@ -1150,6 +1172,12 @@ pub enum Gone {
     /// Anti-cheat started in it, or (`true`) elsewhere on the computer: its program name and the
     /// anti-cheat. Ferret let go.
     AntiCheat(String, String, bool),
+    /// Not gone: the helper stopped (killed, crashed) and a new one took over, attached to the
+    /// game again with its limits; the search in progress was the old one's. Its program name.
+    HelperRestarted(String),
+    /// The helper stopped and the new one couldn't open the game again: let go. Its program
+    /// name and why.
+    HelperLost(String, String),
 }
 
 pub struct ValueRow {
@@ -1404,6 +1432,7 @@ const PROBE_STEP: i64 = 100;
 const PROBE_NEAR: i64 = 49;
 
 /// A candidate's test write: its exact original and its test value.
+#[derive(Clone)]
 struct Probe {
     loc: Loc,
     orig: String,
@@ -1485,6 +1514,13 @@ pub struct Core {
     /// The last place tried that kept its test number: where, what it held before, the number
     /// written (`put_back_try`).
     last_try: Option<(Loc, f64, f64)>,
+    /// The limits the helper held as of the last change or look (`limits`), and test values
+    /// written for the in-game check and not yet put back: what a new helper is given again
+    /// when the old one stops (`revive_helper`).
+    known_limits: Vec<(String, u64, String)>,
+    tests_out: Vec<Probe>,
+    /// When the helper was started again lately: one that keeps stopping isn't started forever.
+    revived: Vec<Instant>,
     log_name: &'static str,
 }
 
@@ -1507,8 +1543,11 @@ impl Core {
             fs::rename(file(i), file(i + 1)).ok();
         }
         fs::write(file(0), "").ok();
-        Ok(Self {
+        let mut core = Self {
             log_name,
+            known_limits: Vec::new(),
+            tests_out: Vec::new(),
+            revived: Vec::new(),
             helper: Helper::start(false)?,
             upgrader: None,
             capture: None,
@@ -1542,7 +1581,9 @@ impl Core {
             phase_started: None,
             shapes_before_pick: None,
             last_try: None,
-        })
+        };
+        core.helper.stop_on_exit = Some(core.cancel.clone());
+        Ok(core)
     }
 
     /// Something the player has to do now (shown in the interface, not only logged).
@@ -1621,6 +1662,9 @@ impl Core {
     /// Lets go of the attached game when it quit, or when anti-cheat started in it (the helper
     /// already let go then).
     pub fn check_game(&mut self) -> Option<Gone> {
+        if let Some(gone) = self.check_helper() {
+            return Some(gone);
+        }
         self.game.as_ref()?;
         let reply = self.helper.call("alive");
         let first = reply.first().map(String::as_str).unwrap_or_default();
@@ -1634,6 +1678,8 @@ impl Core {
         let exe = self.game.take()?.exe;
         self.search = None;
         self.capture = None;
+        self.known_limits.clear();
+        self.tests_out.clear();
         Some(match anti_cheat {
             Some((ac, elsewhere)) => {
                 let place = if elsewhere { "on the computer" } else { "in the game" };
@@ -1645,6 +1691,76 @@ impl Core {
                 Gone::Quit(exe)
             }
         })
+    }
+
+    /// Starts a new helper when the old one stopped (Task Manager, a crash): `check_game` looks
+    /// every second, the CLI before each command.
+    pub fn check_helper(&mut self) -> Option<Gone> {
+        let how = self.helper.exited()?;
+        self.revive_helper(&how)
+    }
+
+    /// The new helper is attached to the game again, given its limits again (turned off as they
+    /// were) and the shapes of earlier finds, and test values left in the game are put back.
+    /// The search starts over: its matches were the old helper's. Without the right to open the
+    /// player's programs (pkexec would ask for the password again, unasked): a native game at
+    /// ptrace_scope 1 or 2 is let go. A helper that stopped 3 times in a minute stays stopped.
+    fn revive_helper(&mut self, how: &str) -> Option<Gone> {
+        self.revived.retain(|t| t.elapsed() < Duration::from_secs(60));
+        if self.revived.len() >= 3 {
+            return None;
+        }
+        self.revived.push(Instant::now());
+        self.say(&format!("the helper stopped ({how}): starting a new one"));
+        match Helper::start(false) {
+            Ok(h) => {
+                self.helper = h;
+                self.helper.stop_on_exit = Some(self.cancel.clone());
+            }
+            Err(e) => {
+                self.say(&e);
+                return None;
+            }
+        }
+        PRIVILEGED.store(false, Ordering::Relaxed);
+        // Set when the old one was found gone (`Helper::gone`).
+        self.cancel.store(false, Ordering::Relaxed);
+        self.search = None;
+        self.bar_last = None;
+        self.phase_copy = false;
+        let (pid, exe) = self.game.as_ref().map(|g| (g.pid, g.exe.clone()))?;
+        let reply = self.helper.call(&format!("attach {pid}"));
+        if let Some(e) = first_error(&reply) {
+            self.say(&format!("the new helper couldn't open {exe}: {e}"));
+            self.game = None;
+            self.capture = None;
+            self.known_limits.clear();
+            self.tests_out.clear();
+            self.last_try = None;
+            return Some(Gone::HelperLost(exe, e));
+        }
+        reply.iter().filter(|l| l.starts_with("took off ")).for_each(|l| self.say(l));
+        self.send_shapes();
+        let saved = read_profile(&exe);
+        for (name, _, rest) in std::mem::take(&mut self.known_limits) {
+            let Some(entry) = saved.iter().find(|e| e.name == name) else { continue };
+            match self.apply_limit(entry) {
+                Ok(()) if rest.ends_with("turned off") => {
+                    self.helper.call(&format!("switch {name} off"));
+                }
+                Ok(()) => {}
+                Err(e) => self.say(&format!("{name}: not kept in range again: {e}")),
+            }
+        }
+        self.limits();
+        let tests = std::mem::take(&mut self.tests_out);
+        if !tests.is_empty() {
+            self.say(&format!("putting back {} test values the old helper left", tests.len()));
+            self.undo_probes(&tests);
+        }
+        self.put_back_try();
+        self.say(&format!("a new helper took over {exe}"));
+        Some(Gone::HelperRestarted(exe))
     }
 
     /// Attaches and, when the game has a profile, finds its saved values again.
@@ -1687,6 +1803,7 @@ impl Core {
         }
         PRIVILEGED.store(true, Ordering::Relaxed);
         self.helper = helper;
+        self.helper.stop_on_exit = Some(self.cancel.clone());
         self.game = None;
         self.search = None;
         self.capture = None;
@@ -1706,6 +1823,9 @@ impl Core {
             });
         }
         let exe = reply.iter().find_map(|l| l.strip_prefix("exe: ")).ok_or("no program name")?.to_owned();
+        // The helper starts this game with no limits: restoring registers them again.
+        self.known_limits.clear();
+        self.tests_out.clear();
         // Another game (or the same one restarted) has another window: the old capture shows
         // nothing anymore.
         if self.game.as_ref().map(|g| g.pid) != Some(pid) {
@@ -2017,6 +2137,7 @@ impl Core {
         });
         let path = write_profile(&game.exe, &entries)?;
         self.helper.call(&format!("unlimit {name}"));
+        self.limits();
         let game = self.game.as_mut().ok_or("no game")?;
         game.entries.retain(|(n, _)| n != name);
         game.entries.push((name.to_owned(), loc));
@@ -2396,6 +2517,7 @@ impl Core {
             .chain(entry.named.iter().cloned())
             .collect();
         let reply = self.helper.call(&format!("limit {} {loc} {limit} {}", entry.name, sites.join(" ")));
+        self.limits();
         first_error(&reply).map_or(Ok(()), Err)
     }
 
@@ -2419,6 +2541,7 @@ impl Core {
     pub fn switch_limits(&mut self) -> Result<(bool, Vec<String>), String> {
         self.game()?;
         let reply = self.helper.call("switch * toggle");
+        self.limits();
         if reply.iter().any(|l| l.starts_with("error: no limit")) {
             return Err(tr!("Nothing is kept in range in this game"));
         }
@@ -2431,10 +2554,11 @@ impl Core {
         Ok((on, names))
     }
 
-    /// Limits the helper enforces: name, current address, and the rest of its line.
+    /// Limits the helper enforces: name, current address, and the rest of its line. Kept as
+    /// `known_limits` while the helper answers.
     fn limits(&mut self) -> Vec<(String, u64, String)> {
-        self.helper
-            .call("limits")
+        let reply = self.helper.call("limits");
+        let limits: Vec<(String, u64, String)> = reply
             .iter()
             .filter_map(|l| {
                 let mut f = l.splitn(3, ' ');
@@ -2442,7 +2566,11 @@ impl Core {
                 let addr = u64::from_str_radix(f.next()?.trim_start_matches("0x"), 16).ok()?;
                 Some((name, addr, f.next()?.to_owned()))
             })
-            .collect()
+            .collect();
+        if first_error(&reply).is_none() {
+            self.known_limits.clone_from(&limits);
+        }
+        limits
     }
 
     /// The helper may have found a limited value at a new address; use that one.
@@ -2481,6 +2609,7 @@ impl Core {
         }
         write_profile(&exe, &entries)?;
         self.helper.call(&format!("unlimit {name}"));
+        self.limits();
         if let Some(game) = self.game.as_mut() {
             game.entries.retain(|(n, _)| n != name);
             game.paths.retain(|(n, _)| n != name);
@@ -2532,10 +2661,12 @@ impl Core {
         // as it was (the limits hotkey).
         let off = self.limits().iter().any(|(n, _, rest)| *n == name && rest.ends_with("turned off"));
         self.helper.call(&format!("unlimit {name}"));
+        self.limits();
         if let Some(entry) = entries.iter().find(|e| e.name == to) {
             let registered = entry.limit.is_some() || !entry.sites.is_empty();
             if registered && self.apply_limit(entry).is_ok() && off {
                 self.helper.call(&format!("switch {to} off"));
+                self.limits();
             }
         }
         self.say(&format!("renamed {name} to {to}"));
@@ -2858,6 +2989,7 @@ impl Core {
             self.say(&format!("{name} is no longer limited"));
         } else {
             self.helper.call(&format!("unlimit {name}"));
+            self.limits();
             self.say(&format!("{name} is no longer limited"));
         }
         write_profile(&exe, &entries)?;
@@ -3274,6 +3406,7 @@ impl Core {
         self.set_named_doubt(&u.name, None);
         // The helper followed it the old way (code patterns, paths): by name from now on.
         self.helper.call(&format!("unlimit {}", u.name));
+        self.limits();
         if limited {
             if let Some(entry) = entries.iter().find(|e| e.name == u.name) {
                 self.apply_limit(entry)?;
@@ -4158,6 +4291,15 @@ impl Core {
     /// that only swept past it between reads can be anything (a stand-in's malloc chunk header
     /// went 0 -> 69 -> 117 across 74 and 85; its test value crashed the game).
     pub fn probe(&mut self, n: &Shown) -> Result<Probed, String> {
+        let probed = self.probe_writes(n);
+        // Put back unless the helper stopped meanwhile: then a new one does (`revive_helper`).
+        if self.helper.exited().is_none() {
+            self.tests_out.clear();
+        }
+        probed
+    }
+
+    fn probe_writes(&mut self, n: &Shown) -> Result<Probed, String> {
         let listed = self.helper.call("list");
         if listed.iter().any(|l| l.starts_with("...")) {
             return Err("too many candidates to probe; narrow down first".into());
@@ -4186,6 +4328,7 @@ impl Core {
             return Ok(Probed::Unclear);
         }
         self.phase(Phase::Checking(tests.len(), 0.0));
+        self.tests_out = tests.clone();
         for t in &tests {
             self.helper.call(&format!("write {} {} test", t.loc, t.test));
         }
@@ -4265,6 +4408,7 @@ impl Core {
                     _ => {}
                 }
             }
+            self.tests_out = tests.clone();
             let found = self.probe_in_game(&tests, &kept);
             self.undo_probes(&tests);
             self.tell_matches(tests.len());
@@ -4324,6 +4468,7 @@ impl Core {
             let Some(orig) = listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()) else { continue };
             let Some(Some(shown)) = self.peek(&[loc]).first().copied() else { continue };
             let test = shown + 10;
+            self.tests_out = vec![Probe { loc, orig: orig.clone(), test, step: 10 }];
             self.helper.call(&format!("write {loc} {test} test"));
             std::thread::sleep(Duration::from_millis(1500));
             let after = self.peek(&locs);

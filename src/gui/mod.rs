@@ -106,6 +106,11 @@ pub enum Event {
     /// Anti-cheat started in the attached game (its program name, the anti-cheat): Ferret let go.
     /// The game's program, the anti-cheat, and whether it started elsewhere on the computer.
     AntiCheat(String, String, bool),
+    /// Ferret's helper stopped and a new one took over the game (its program name): the search
+    /// starts over.
+    HelperRestarted(String),
+    /// Ferret's helper stopped and the new one couldn't open the game (its program name, why).
+    HelperLost(String, String),
     /// The game just opened hides its numbers (its program name, the memory scrambler).
     Scrambler(Option<(String, String)>),
     /// A frame the watched number was just read from, and the watched area: shown while
@@ -861,6 +866,20 @@ impl Ui {
                 self.notify.send(&tr!("{name} closed", name), &tr!("Ferret opens it again when it starts."), None, Some(6));
                 self.waiting_for.replace(Some(exe));
             }
+            Event::HelperRestarted(exe) => {
+                let name = self.game_names.borrow().get(&exe).cloned().unwrap_or_else(|| exe.clone());
+                self.find.start_over();
+                self.toast(&tr!("Ferret's helper stopped and started again. {name} keeps its values in range; a search starts over.", name));
+            }
+            Event::HelperLost(exe, why) => {
+                self.attached.set(None);
+                self.find.stop();
+                if self.on_game_page() {
+                    self.nav.pop();
+                }
+                let name = self.game_names.borrow().get(&exe).cloned().unwrap_or_else(|| exe.clone());
+                self.explain(&tr!("Ferret let go of {name}", name), &tr!("Ferret's helper stopped, and the new one couldn't open the game: {why}", why));
+            }
             Event::Scrambler(Some((exe, scrambler))) => self.warn_scrambler(&exe, &scrambler),
             Event::Scrambler(None) => {}
             Event::AntiCheat(exe, ac, elsewhere) => {
@@ -1439,6 +1458,8 @@ fn build(app: &adw::Application) {
                 ui.worker.run(move |core| match core.check_game() {
                     Some(Gone::Quit(exe)) => Event::Quit(exe),
                     Some(Gone::AntiCheat(exe, ac, elsewhere)) => Event::AntiCheat(exe, ac, elsewhere),
+                    Some(Gone::HelperRestarted(exe)) => Event::HelperRestarted(exe),
+                    Some(Gone::HelperLost(exe, why)) => Event::HelperLost(exe, why),
                     None if matches => Event::Matches(Ok(core.matches())),
                     None if !listed.is_empty() => Event::Peeked(core.values(), core.peek_values(&listed)),
                     None if values => Event::Values(core.values()),
