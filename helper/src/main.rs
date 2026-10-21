@@ -18,10 +18,15 @@ mod names;
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod os;
+#[cfg(windows)]
+#[path = "windows.rs"]
+mod os;
 mod pointers;
 mod steam;
 mod trace;
 mod ue;
+#[cfg(windows)]
+mod win32;
 
 fn main() {
     // `--as <uid>:<gid>:<home>`: who to become when started as root through pkexec (which wipes

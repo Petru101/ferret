@@ -62,7 +62,7 @@ pub fn modules(pid: u32, mem: &Mem) -> Vec<Module> {
     let mut mods: Vec<(String, Module)> = Vec::new();
     for (i, r) in regions.iter().enumerate() {
         let path = &r.path;
-        if !path.starts_with('/') || path.starts_with("/dev/") || path.starts_with("/memfd:") || path.ends_with(" (deleted)") {
+        if !crate::helper::from_file(path) || path.starts_with("/dev/") || path.starts_with("/memfd:") || path.ends_with(" (deleted)") {
             // Zero-filled data (.bss) right after a file's mappings belongs to it.
             let after_file = i > 0 && !regions[i - 1].path.is_empty() && regions[i - 1].end == r.start;
             if path.is_empty() && after_file {

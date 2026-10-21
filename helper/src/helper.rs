@@ -37,6 +37,11 @@ pub struct Region {
 }
 
 pub use crate::os::maps;
+
+/// A region mapped from a file: Linux paths start with '/', Windows ones with a drive ("C:/").
+pub fn from_file(path: &str) -> bool {
+    path.starts_with('/') || path.as_bytes().get(1..3) == Some(b":/")
+}
 use crate::os::environ;
 
 /// The program as started (argv[0]); Wine paths have spaces ("E:\\Mass Effect Andromeda\\...").
@@ -2857,7 +2862,7 @@ fn cmd_build(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let regions = maps(s.pid)?;
     let exe = exe_name(s.pid).to_lowercase();
     let file_name = |p: &str| p.rsplit('/').next().unwrap_or_default().to_lowercase();
-    let mut files: Vec<String> = regions.iter().map(|r| r.path.clone()).filter(|p| p.starts_with('/') && (file_name(p) == exe || file_name(p).starts_with("gameassembly."))).collect();
+    let mut files: Vec<String> = regions.iter().map(|r| r.path.clone()).filter(|p| from_file(p) && (file_name(p) == exe || file_name(p).starts_with("gameassembly."))).collect();
     // Mono reads it from <Game>_Data/Managed (not always mapped).
     if let Some(data) = regions.iter().find_map(|r| r.path.find("_Data/").map(|i| r.path[..i + 5].to_owned())) {
         files.push(format!("{data}/Managed/Assembly-CSharp.dll"));

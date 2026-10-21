@@ -1,10 +1,13 @@
 // Hardware breakpoints on every thread of the game: "which instructions access this address"
 // and "what is in the registers when this instruction runs". Nothing is written into the
-// game's code. Setting them is the OS's part (`Tracer`: ptrace on Linux); working out the
-// instruction is the same everywhere.
+// game's code. Setting them is the OS's part (`Tracer`: ptrace on Linux, the debugger API on
+// Windows); working out the instruction is the same everywhere.
 
 #[cfg(target_os = "linux")]
 #[path = "trace_linux.rs"]
+mod tracer;
+#[cfg(windows)]
+#[path = "trace_windows.rs"]
 mod tracer;
 pub use tracer::*;
 

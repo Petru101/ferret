@@ -152,7 +152,7 @@ impl<'a> Heap<'a> {
         // RELRO) keep their C++ vtables in the program's writable data, and live objects there
         // were all taken for destroyed ones (2026-10-20).
         let image = |r: &crate::helper::Region| {
-            r.path.starts_with('/') && !r.path.starts_with("/dev/") && !r.path.starts_with("/memfd:") && !r.path.ends_with("(deleted)")
+            crate::helper::from_file(&r.path) && !r.path.starts_with("/dev/") && !r.path.starts_with("/memfd:") && !r.path.ends_with("(deleted)")
         };
         let ro = regions
             .iter()
