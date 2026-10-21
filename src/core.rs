@@ -4235,13 +4235,15 @@ impl Core {
         Ok(loc)
     }
 
-    /// Makes `loc` the only match (tests: a place found another way, to save or try it).
-    pub fn track(&mut self, loc: Loc) -> Result<(), String> {
+    /// Makes `locs` the only matches (tests: places found another way, to save or try them, or
+    /// a value paired with a decoy for the in-game check).
+    pub fn track(&mut self, locs: &[Loc]) -> Result<(), String> {
         self.game()?;
-        let reply = self.helper.call(&format!("track {loc}"));
+        let arg: Vec<String> = locs.iter().map(|l| l.to_string()).collect();
+        let reply = self.helper.call(&format!("track {}", arg.join(" ")));
         match match_count(&reply) {
-            Some(1) => {
-                self.search = Some((1, 0));
+            Some(n) if n == locs.len() => {
+                self.search = Some((n, 0));
                 Ok(())
             }
             _ => Err(first_error(&reply).unwrap_or_else(|| reply.join(" "))),

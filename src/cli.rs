@@ -135,7 +135,8 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         }
         // Tests: a place found another way becomes the only match.
         "track" => {
-            core.track(core::parse_loc(arg).ok_or("usage: track <hex addr[:type]>")?)?;
+            let locs: Option<Vec<_>> = arg.split_whitespace().map(core::parse_loc).collect();
+            core.track(&locs.filter(|l| !l.is_empty()).ok_or("usage: track <hex addr[:type]>...")?)?;
             println!("tracking {arg}");
         }
         "unpick" => match core.unpick() {
