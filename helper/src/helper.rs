@@ -550,6 +550,10 @@ pub(crate) enum Kind {
     /// immutable objects), read as the number it points to, written in place or by pointing
     /// the slot to a cached small int (`python::write_slot`). Values saved by a Python path.
     Py,
+    /// A small integer of 32-bit V8 (js.rs, RPG Maker MV on 32-bit NW.js): 4 bytes holding the
+    /// number times two (bit 0 clear; set, it's a pointer: not a number now). Values saved by a
+    /// JavaScript path on a 32-bit game.
+    Smi,
 }
 
 impl Kind {
@@ -566,17 +570,18 @@ impl Kind {
             Kind::Gm => "gm",
             Kind::Lua => "lua",
             Kind::Py => "py",
+            Kind::Smi => "smi",
         }
     }
 
     fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
         match self {
             Kind::U16 => 2,
-            Kind::I32 | Kind::F32 => 4,
+            Kind::I32 | Kind::F32 | Kind::Smi => 4,
             Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py => 8,
             Kind::Gm => 16,
         }
@@ -595,6 +600,10 @@ impl Kind {
             Kind::Lua => lua::number(b).unwrap_or(f64::NAN),
             // Read through the slot (`read_value`).
             Kind::Py => f64::NAN,
+            Kind::Smi => match i32::from_le_bytes(b[..4].try_into().unwrap()) {
+                w if w & 1 == 0 => (w >> 1) as f64,
+                _ => f64::NAN,
+            },
         }
     }
 
@@ -605,7 +614,7 @@ impl Kind {
     fn fits(self, lo: f64, hi: f64, n: Shown) -> bool {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
-            Kind::I32 | Kind::Xor | Kind::U16 => lo <= n.scaled && n.scaled <= hi,
+            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi => lo <= n.scaled && n.scaled <= hi,
             Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
@@ -646,7 +655,7 @@ fn read_value(mem: &Mem, addr: u64, kind: Kind) -> Option<f64> {
     }
     let mut b = [0u8; 16];
     mem.read_exact_at(&mut b[..kind.size()], addr).ok()?;
-    Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua) || !v.is_nan())
+    Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua | Kind::Smi) || !v.is_nan())
 }
 
 fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
@@ -679,6 +688,15 @@ fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
             mem.write_all_at(&v.to_le_bytes(), addr)
         }
         Kind::Py => python::write_slot(mem, addr, v),
+        Kind::Smi => {
+            let mut b = [0u8; 4];
+            mem.read_exact_at(&mut b, addr)?;
+            if b[0] & 1 != 0 {
+                return Err(io::Error::other("not a small integer now"));
+            }
+            let n = v.round().clamp(-(1 << 30) as f64, ((1 << 30) - 1) as f64) as i32;
+            mem.write_all_at(&(n << 1).to_le_bytes(), addr)
+        }
     }
 }
 
@@ -1990,7 +2008,7 @@ impl MemScan<'_> {
                 // The scan runs after the screen was read: allow for a fraction
                 // that has moved on by up to 1 since.
                 let hit = match kind {
-                    Kind::I32 | Kind::Xor | Kind::U16 => value == n.scaled,
+                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi => value == n.scaled,
                     Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
@@ -2293,7 +2311,7 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                     for &kind in &snap.kinds {
                         let step = match kind {
                             Kind::U16 => 2,
-                            Kind::I32 | Kind::F32 | Kind::Xor => 4,
+                            Kind::I32 | Kind::F32 | Kind::Xor | Kind::Smi => 4,
                             Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => 8,
                         };
                         for o in (w..w + 8).step_by(step) {
@@ -3949,6 +3967,19 @@ fn cmd_pydump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     writeln!(out, "in {} ms", t.elapsed().as_millis())
 }
 
+/// jsdump [global]: an RPG Maker MV game's V8 layout and a global's fields ($gameParty).
+fn cmd_jsdump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let t = Instant::now();
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    for l in js::diagnose(&heap, arg.trim()) {
+        writeln!(out, "{l}")?;
+    }
+    writeln!(out, "in {} ms", t.elapsed().as_millis())
+}
+
 /// luadump [path]: a Lua game's layout and globals table, or the table (or a function's
 /// upvalues) at a path from it (`lua::diagnose`).
 fn cmd_luadump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
@@ -4099,6 +4130,7 @@ pub fn run(as_user: Option<&str>) {
             "luadump" => cmd_luadump(&mut out, &session, arg),
             "jvm" => cmd_jvm(&mut out, &session, arg),
             "pydump" => cmd_pydump(&mut out, &session, arg),
+            "jsdump" => cmd_jsdump(&mut out, &session, arg),
             "airdump" => cmd_airdump(&mut out, &session, arg),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),

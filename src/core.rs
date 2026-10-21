@@ -559,6 +559,9 @@ pub enum Kind {
     /// A Python value (the helper's python.rs): the slot pointing to a number object, written
     /// in place or by pointing it to a cached small int. Values saved by a Python path.
     Py,
+    /// A small integer of 32-bit V8 (the helper's js.rs: RPG Maker MV on 32-bit NW.js), kept
+    /// as the number times two. Values saved by a JavaScript path on such a game.
+    Smi,
 }
 
 impl Kind {
@@ -575,11 +578,12 @@ impl Kind {
             Kind::Gm => "gm",
             Kind::Lua => "lua",
             Kind::Py => "py",
+            Kind::Smi => "smi",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi]).find(|k| k.name() == s)
     }
 
     fn with_article(self) -> String {
@@ -589,7 +593,7 @@ impl Kind {
 
     /// Whole numbers in memory (a game may still show them with decimals: 12 as "1.2").
     pub fn whole(self) -> bool {
-        matches!(self, Kind::I32 | Kind::Xor | Kind::U16)
+        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi)
     }
 
     pub fn describe(self) -> &'static str {
@@ -602,6 +606,7 @@ impl Kind {
             Kind::Gm => "GameMaker number",
             Kind::Lua => "Lua number",
             Kind::Py => "Python number",
+            Kind::Smi => "JavaScript whole number",
         }
     }
 }

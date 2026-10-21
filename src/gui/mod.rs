@@ -1569,6 +1569,7 @@ fn kind_text(kind: crate::core::Kind) -> String {
         Kind::Gm => tr!("GameMaker number"),
         Kind::Lua => tr!("Lua number"),
         Kind::Py => tr!("Python number"),
+        Kind::Smi => tr!("JavaScript whole number"),
     }
 }
 

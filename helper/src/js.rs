@@ -67,6 +67,7 @@ pub enum Val {
 
 /// How one game's V8 lays its objects out, and where its globals are.
 pub struct Js {
+    l: Layout,
     cells: Cells,
     /// The meta map (tagged).
     meta: u64,
@@ -97,33 +98,114 @@ fn tagged(w: u64) -> bool {
     w & 1 == 1 && w > 0x10000 && w < 1 << 47
 }
 
-fn is_smi(w: u64) -> bool {
-    w & 0xffff_ffff == 0
+/// Where V8 keeps things, 64-bit or 32-bit (NW.js on Windows often is: Lilac and Her Light).
+/// 32-bit V8 has 4-byte words, keeps a small integer as the number times two (bit 0 clear)
+/// and never keeps a double inside an object (always in a box of the field's own).
+#[derive(Clone, Copy)]
+struct Layout {
+    w: u64,
 }
 
-fn smi(w: u64) -> Option<i32> {
-    is_smi(w).then_some((w >> 32) as u32 as i32)
+impl Layout {
+    /// The 64-bit offset or the 32-bit one.
+    fn at(self, o64: u64, o32: u64) -> u64 {
+        if self.w == 8 { o64 } else { o32 }
+    }
+
+    fn word(self, mem: &Mem, at: u64) -> Option<u64> {
+        match self.w {
+            8 => word(mem, at),
+            _ => half(mem, at).map(u64::from),
+        }
+    }
+
+    fn is_smi(self, x: u64) -> bool {
+        match self.w {
+            8 => x & 0xffff_ffff == 0,
+            _ => x & 1 == 0,
+        }
+    }
+
+    fn smi(self, x: u64) -> Option<i32> {
+        match self.w {
+            8 => self.is_smi(x).then_some((x >> 32) as u32 as i32),
+            _ => self.is_smi(x).then_some(x as u32 as i32 >> 1),
+        }
+    }
+
+    /// A Smi slot as a number's place: the i32 in its upper half (64-bit), or the slot itself
+    /// (32-bit, read as `smi`).
+    fn int_at(self, slot: u64) -> u64 {
+        slot + self.at(4, 0)
+    }
+
+    // Strings: {map, hash, length (a Smi), characters}; cons {.., first, second}, sliced
+    // {.., parent, offset}, thin {.., actual}.
+    fn str_len(self) -> u64 {
+        self.at(16, 8)
+    }
+    fn str_body(self) -> u64 {
+        self.at(24, 12)
+    }
+    // Maps: sizes (instance size in words, in-object count or start), instance type, bit
+    // fields, then pointers (prototype, constructor, transitions, descriptors, layout).
+    fn map_words(self) -> u64 {
+        self.at(8, 4)
+    }
+    fn map_type(self) -> u64 {
+        self.at(12, 8)
+    }
+    fn map_bit_field2(self) -> u64 {
+        self.at(15, 11)
+    }
+    fn map_bit_field3(self) -> u64 {
+        self.at(16, 12)
+    }
+    fn map_descriptors(self) -> u64 {
+        self.at(48, 28)
+    }
+    // Objects: {map, properties, elements, in-object fields...}; arrays {map, length, data}.
+    fn obj_props(self) -> u64 {
+        self.w
+    }
+    fn obj_elements(self) -> u64 {
+        2 * self.w
+    }
+    fn array_data(self) -> u64 {
+        2 * self.w
+    }
+    /// A HeapNumber's double.
+    fn number_value(self) -> u64 {
+        self.at(8, 4)
+    }
+}
+
+/// The layout of the game attached to: its pointer width.
+fn layout_of(heap: &Heap) -> Layout {
+    Layout { w: heap.width() as u64 }
 }
 
 impl Js {
-    /// Finds the globals' names (V8 strings: {map, hash, length as a Smi, characters at +24}),
-    /// what points to them (their cells) and the layout, in two passes over memory.
+    /// Finds the globals' names (V8 strings: {map, hash, length as a Smi, characters}), what
+    /// points to them (their cells) and the layout, in two passes over memory.
     fn locate(heap: &Heap) -> Option<Js> {
-        if heap.width() != 8 {
-            return None;
-        }
+        let l = layout_of(heap);
         let mem = heap.mem();
         let texts: Vec<&[u8]> = GLOBALS.iter().map(|g| g.as_bytes()).collect();
         let longest = texts.iter().map(|t| t.len()).max().unwrap_or(0);
         let mut names: Vec<Vec<u64>> = vec![Vec::new(); texts.len()];
-        heap.each_chunk(24 + longest, |addr, b, fresh| {
-            for off in (0..fresh).step_by(8) {
-                if b.get(off + 24) != Some(&b'$') || b.get(off + 16..off + 20) != Some(&[0, 0, 0, 0]) {
+        let (len_at, body) = (l.str_len() as usize, l.str_body() as usize);
+        heap.each_chunk(body + longest, |addr, b, fresh| {
+            for off in (0..fresh).step_by(l.w as usize) {
+                if b.get(off + body) != Some(&b'$') {
                     continue;
                 }
-                let len = u32::from_le_bytes([b[off + 20], b[off + 21], b[off + 22], b[off + 23]]) as usize;
+                let Some(lw) = b.get(off + len_at..off + len_at + l.w as usize) else { continue };
+                let mut x = [0u8; 8];
+                x[..lw.len()].copy_from_slice(lw);
+                let Some(len) = l.smi(u64::from_le_bytes(x)) else { continue };
                 for (i, t) in texts.iter().enumerate() {
-                    if t.len() == len && b.get(off + 24..off + 24 + len) == Some(t) {
+                    if t.len() as i32 == len && b.get(off + body..off + body + t.len()) == Some(t) {
                         names[i].push(addr + off as u64 + 1);
                     }
                 }
@@ -131,13 +213,13 @@ impl Js {
         });
         // A string's map's map is the meta map, which is its own map.
         let meta = names.iter().flatten().find_map(|&s| {
-            let m = word(mem, s - 1).filter(|&m| tagged(m))?;
-            let meta = word(mem, m - 1).filter(|&x| tagged(x))?;
-            (word(mem, meta - 1) == Some(meta)).then_some(meta)
+            let m = l.word(mem, s - 1).filter(|&m| tagged(m))?;
+            let meta = l.word(mem, m - 1).filter(|&x| tagged(x))?;
+            (l.word(mem, meta - 1) == Some(meta)).then_some(meta)
         })?;
         let all: Vec<u64> = names.iter().flatten().copied().collect();
         let refs = heap.referrers(&all);
-        let is_map = |m: u64| tagged(m) && word(mem, m - 1) == Some(meta);
+        let is_map = |m: u64| tagged(m) && l.word(mem, m - 1) == Some(meta);
         // Each way of keeping globals, by the cell map it finds: the one finding the most
         // globals wins.
         let mut found: Vec<((Cells, u64), Vec<(usize, u64)>)> = Vec::new();
@@ -145,17 +227,18 @@ impl Js {
             Some((_, v)) => v.push((g, cell)),
             None => found.push((key, vec![(g, cell)])),
         };
+        let w = l.w;
         for &r in &refs {
-            let Some(name) = word(mem, r) else { continue };
+            let Some(name) = l.word(mem, r) else { continue };
             let Some(g) = names.iter().position(|v| v.contains(&name)) else { continue };
-            if let (Some(m), Some(d)) = (word(mem, r - 16), word(mem, r - 8)) {
-                if is_map(m) && is_smi(d) {
-                    note((Cells::Named, m), g, r - 16);
+            if let (Some(m), Some(d)) = (l.word(mem, r - 2 * w), l.word(mem, r - w)) {
+                if is_map(m) && l.is_smi(d) {
+                    note((Cells::Named, m), g, r - 2 * w);
                 }
             }
-            if let (Some(c), Some(d)) = (word(mem, r + 8), word(mem, r + 16)) {
-                if tagged(c) && is_smi(d) && word(mem, c - 1).is_some_and(is_map) {
-                    note((Cells::InDictionary, word(mem, c - 1)?), g, c - 1);
+            if let (Some(c), Some(d)) = (l.word(mem, r + w), l.word(mem, r + 2 * w)) {
+                if tagged(c) && l.is_smi(d) && l.word(mem, c - 1).is_some_and(is_map) {
+                    note((Cells::InDictionary, l.word(mem, c - 1)?), g, c - 1);
                 }
             }
         }
@@ -172,7 +255,7 @@ impl Js {
             }
         }
         let field_shift = if cells == Cells::Named { 20 } else { 19 };
-        let mut js = Js { cells, meta, cell_map, field_shift, globals };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals };
         js.calibrate(mem);
         Some(js)
     }
@@ -192,21 +275,39 @@ impl Js {
         }
     }
 
+    fn word(&self, mem: &Mem, at: u64) -> Option<u64> {
+        self.l.word(mem, at)
+    }
+
+    /// A small integer's value, from its place (`Val::Int`).
+    pub fn int(&self, mem: &Mem, at: u64) -> Option<u32> {
+        match self.l.w {
+            8 => half(mem, at),
+            _ => self.l.smi(u64::from(half(mem, at)?)).map(|v| v as u32),
+        }
+    }
+
+    /// The value type of a small integer's place: a plain i32, or 32-bit V8's doubled one.
+    pub fn int_kind(&self) -> &'static str {
+        if self.l.w == 8 { "i32" } else { "smi" }
+    }
+
     fn is_map(&self, mem: &Mem, m: u64) -> bool {
-        tagged(m) && word(mem, m - 1) == Some(self.meta)
+        tagged(m) && self.word(mem, m - 1) == Some(self.meta)
     }
 
     fn map_of(&self, mem: &Mem, o: u64) -> Option<u64> {
         if !tagged(o) {
             return None;
         }
-        word(mem, o - 1).filter(|&m| self.is_map(mem, m))
+        self.word(mem, o - 1).filter(|&m| self.is_map(mem, m))
     }
 
     fn instance_type(&self, mem: &Mem, m: u64) -> Option<u16> {
+        let at = m - 1 + self.l.map_type();
         match self.cells {
-            Cells::Named => half(mem, m - 1 + 12).map(|t| t as u16),
-            Cells::InDictionary => byte(mem, m - 1 + 12).map(u16::from),
+            Cells::Named => half(mem, at).map(|t| t as u16),
+            Cells::InDictionary => byte(mem, at).map(u16::from),
         }
     }
 
@@ -219,39 +320,45 @@ impl Js {
 
     /// The object a global's cell holds, if it's still the cell of that global.
     fn cell_value(&self, mem: &Mem, cell: u64, name: &str) -> Option<u64> {
-        if word(mem, cell)? != self.cell_map {
+        if self.word(mem, cell)? != self.cell_map {
             return None;
         }
+        let w = self.l.w;
         let v = match self.cells {
             Cells::Named => {
-                let n = word(mem, cell + 16)?;
+                let n = self.word(mem, cell + 2 * w)?;
                 if self.text(mem, n).as_deref() != Some(name) {
                     return None;
                 }
-                word(mem, cell + 24)?
+                self.word(mem, cell + 3 * w)?
             }
-            Cells::InDictionary => word(mem, cell + 8)?,
+            Cells::InDictionary => self.word(mem, cell + w)?,
         };
         self.map_of(mem, v).map(|_| v)
     }
 
-    /// A map's own properties: each name (a string, tagged) and its details.
+    /// A map's own properties: each name (a string, tagged) and its details. The descriptor
+    /// array: {map, length, count, enum cache, (name, details, value)...}.
     fn descriptors(&self, mem: &Mem, m: u64) -> Vec<(u64, u32)> {
-        let Some(bits) = half(mem, m - 1 + 16) else { return Vec::new() };
+        let l = self.l;
+        let Some(bits) = half(mem, m - 1 + l.map_bit_field3()) else { return Vec::new() };
         let own = (bits >> 10) & 0x3ff;
-        let Some(d) = word(mem, m - 1 + 48).filter(|&d| tagged(d)) else { return Vec::new() };
-        let mut b = vec![0u8; 24 * own as usize];
-        if mem.read_exact_at(&mut b, d - 1 + 32).is_err() {
+        let Some(d) = self.word(mem, m - 1 + l.map_descriptors()).filter(|&d| tagged(d)) else { return Vec::new() };
+        let ws = l.w as usize;
+        let mut b = vec![0u8; 3 * ws * own as usize];
+        if mem.read_exact_at(&mut b, d - 1 + 4 * l.w).is_err() {
             return Vec::new();
         }
-        let w = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        let w = |i: usize| {
+            let mut x = [0u8; 8];
+            x[..ws].copy_from_slice(&b[i..i + ws]);
+            u64::from_le_bytes(x)
+        };
         let mut out = Vec::with_capacity(own as usize);
         for i in 0..own as usize {
-            let (k, det) = (w(24 * i), w(24 * i + 8));
-            if !tagged(k) || !is_smi(det) {
-                return Vec::new();
-            }
-            out.push((k, (det >> 32) as u32));
+            let (k, det) = (w(3 * ws * i), w(3 * ws * i + ws));
+            let Some(det) = l.smi(det).filter(|_| tagged(k)) else { return Vec::new() };
+            out.push((k, det as u32));
         }
         out
     }
@@ -266,12 +373,13 @@ impl Js {
         if depth > 16 {
             return None;
         }
+        let l = self.l;
         let m = self.map_of(mem, s)?;
         let t = self.instance_type(mem, m)?;
         if t >= 0x80 {
             return None;
         }
-        let len = half(mem, s - 1 + 20)?;
+        let len = l.smi(self.word(mem, s - 1 + l.str_len())?)? as u32;
         if len > MAX_TEXT {
             return None;
         }
@@ -281,41 +389,42 @@ impl Js {
             Cells::InDictionary => (t & 0x4 != 0, t & 0x3),
             Cells::Named => (t & 0x8 != 0, t & 0x7),
         };
-        let o = s - 1;
+        let (o, body) = (s - 1, l.str_body());
         match rep {
             0 => {
                 let mut b = vec![0u8; if one_byte { len } else { 2 * len } as usize];
-                mem.read_exact_at(&mut b, o + 24).ok()?;
+                mem.read_exact_at(&mut b, o + body).ok()?;
                 Some(match one_byte {
                     true => b.iter().map(|&c| c as char).collect(),
                     false => String::from_utf16_lossy(&b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()),
                 })
             }
             1 => {
-                let a = self.text_in(mem, word(mem, o + 24)?, depth + 1)?;
-                Some(a + &self.text_in(mem, word(mem, o + 32)?, depth + 1)?)
+                let a = self.text_in(mem, self.word(mem, o + body)?, depth + 1)?;
+                Some(a + &self.text_in(mem, self.word(mem, o + body + l.w)?, depth + 1)?)
             }
             3 => {
-                let parent = self.text_in(mem, word(mem, o + 24)?, depth + 1)?;
-                let from = smi(word(mem, o + 32)?)? as usize;
+                let parent = self.text_in(mem, self.word(mem, o + body)?, depth + 1)?;
+                let from = l.smi(self.word(mem, o + body + l.w)?)? as usize;
                 Some(parent.chars().skip(from).take(len as usize).collect())
             }
-            5 => self.text_in(mem, word(mem, o + 24)?, depth + 1),
+            5 => self.text_in(mem, self.word(mem, o + body)?, depth + 1),
             _ => None,
         }
     }
 
     /// What a slot holds; `double`: the field is kept as a double in a box of its own.
     fn slot(&self, mem: &Mem, at: u64, double: bool) -> Val {
-        let Some(w) = word(mem, at) else { return Val::Other };
-        if is_smi(w) {
-            return Val::Int(at + 4);
+        let l = self.l;
+        let Some(w) = self.word(mem, at) else { return Val::Other };
+        if l.is_smi(w) {
+            return Val::Int(l.int_at(at));
         }
         if !tagged(w) {
             return Val::Other;
         }
         if double {
-            return Val::Real(w - 1 + 8);
+            return Val::Real(w - 1 + l.number_value());
         }
         match self.map_of(mem, w) {
             Some(_) => Val::Obj(w),
@@ -326,23 +435,25 @@ impl Js {
     /// An object's own properties by name, with what each holds (fast and dictionary-mode
     /// objects).
     pub fn fields(&self, mem: &Mem, o: u64) -> Vec<(String, Val)> {
+        let l = self.l;
         let Some(m) = self.map_of(mem, o) else { return Vec::new() };
-        let Some(bits) = half(mem, m - 1 + 16) else { return Vec::new() };
-        let props = word(mem, o - 1 + 8).unwrap_or(0);
+        let Some(bits) = half(mem, m - 1 + l.map_bit_field3()) else { return Vec::new() };
+        let props = self.word(mem, o - 1 + l.obj_props()).unwrap_or(0);
         if bits >> 20 & 1 == 1 {
-            return self.dictionary(mem, props, 56).into_iter().filter_map(|(k, v)| Some((self.text(mem, k)?, v))).collect();
+            return self.dictionary(mem, props, 5).into_iter().filter_map(|(k, v)| Some((self.text(mem, k)?, v))).collect();
         }
-        let (Some(words), Some(b9)) = (byte(mem, m - 1 + 8), byte(mem, m - 1 + 9)) else { return Vec::new() };
+        let (Some(words), Some(b9)) = (byte(mem, m - 1 + l.map_words()), byte(mem, m - 1 + l.map_words() + 1)) else { return Vec::new() };
         let (words, b9) = (u64::from(words), u64::from(b9));
         // V8 4.x keeps the count of in-object fields, 6.x where they start.
         let inside = match self.cells {
             Cells::InDictionary => b9,
             Cells::Named => words.saturating_sub(b9),
         };
-        let start = (words.saturating_sub(inside)) * 8;
-        // Doubles kept in the object itself (no box): a bit each in the layout descriptor (a
-        // Smi; a pointer for objects of more fields, not read: those doubles are left out).
-        let layout = word(mem, m - 1 + 56).unwrap_or(0);
+        let start = (words.saturating_sub(inside)) * l.w;
+        // 64-bit: doubles kept in the object itself (no box), a bit each in the layout
+        // descriptor (a Smi; a pointer for objects of more fields, not read: those doubles are
+        // left out). 32-bit V8 boxes every double field.
+        let layout = if l.w == 8 { word(mem, m - 1 + 56).unwrap_or(0) } else { 0 };
         let mut out = Vec::new();
         for (k, det) in self.descriptors(mem, m) {
             // Constants and accessors aren't fields.
@@ -354,13 +465,14 @@ impl Js {
             // Representations: ..., Smi 5, Integer32 6, Double 7, HeapObject 8, Tagged 9.
             let double = rep == 7;
             let val = if index < inside {
-                let at = o - 1 + start + index * 8;
-                let raw = match smi(layout) {
-                    Some(bits) => index < 32 && (bits as u32) >> index & 1 == 1,
-                    None => double,
+                let at = o - 1 + start + index * l.w;
+                let raw = match (l.w, l.smi(layout)) {
+                    (8, Some(bits)) => index < 32 && (bits as u32) >> index & 1 == 1,
+                    (8, None) => double,
+                    _ => false,
                 };
                 match (double, raw) {
-                    (true, true) if is_smi(layout) => Val::Real(at),
+                    (true, true) if l.is_smi(layout) => Val::Real(at),
                     (true, true) => Val::Other,
                     _ => self.slot(mem, at, double),
                 }
@@ -368,7 +480,7 @@ impl Js {
                 if !tagged(props) {
                     continue;
                 }
-                self.slot(mem, props - 1 + 16 + (index - inside) * 8, double)
+                self.slot(mem, props - 1 + l.array_data() + (index - inside) * l.w, double)
             };
             if let Some(name) = self.text(mem, k) {
                 out.push((name, val));
@@ -388,43 +500,45 @@ impl Js {
         }
     }
 
-    /// A hash table's entries {key, value, details} from `first` bytes in (a dictionary of
-    /// names: 56, of numbers: 48): each key with what the value slot holds.
+    /// A hash table's entries {key, value, details} from slot `first` on (a dictionary of
+    /// names: 5, of numbers: 4): each key with what the value slot holds.
     fn dictionary(&self, mem: &Mem, table: u64, first: u64) -> Vec<(u64, Val)> {
+        let l = self.l;
         if !tagged(table) {
             return Vec::new();
         }
-        let Some(len) = word(mem, table - 1 + 8).and_then(smi) else { return Vec::new() };
-        let words = (len.max(0) as u64 + 2) * 8;
-        let entries = (words.saturating_sub(first) / 24).min(4 * MAX_ELEMENTS as u64);
+        let Some(len) = self.word(mem, table - 1 + l.w).and_then(|x| l.smi(x)) else { return Vec::new() };
+        let entries = ((len.max(0) as u64).saturating_sub(first) / 3).min(4 * MAX_ELEMENTS as u64);
         (0..entries)
             .filter_map(|i| {
-                let at = table - 1 + first + 24 * i;
-                let key = word(mem, at)?;
-                is_smi(word(mem, at + 16)?).then_some((key, self.slot(mem, at + 8, false)))
+                let at = table - 1 + l.array_data() + (first + 3 * i) * l.w;
+                let key = self.word(mem, at)?;
+                l.is_smi(self.word(mem, at + 2 * l.w)?).then_some((key, self.slot(mem, at + l.w, false)))
             })
             .collect()
     }
 
     /// An array's or object's indexed elements: (index, what it holds), holes left out.
     pub fn elements(&self, mem: &Mem, o: u64) -> Vec<(u32, Val)> {
+        let l = self.l;
         let Some(m) = self.map_of(mem, o) else { return Vec::new() };
-        let Some(kind) = byte(mem, m - 1 + 15).map(|b| b >> 3) else { return Vec::new() };
-        let Some(e) = word(mem, o - 1 + 16).filter(|&e| tagged(e)) else { return Vec::new() };
-        let Some(n) = word(mem, e - 1 + 8).and_then(smi) else { return Vec::new() };
+        let Some(kind) = byte(mem, m - 1 + l.map_bit_field2()).map(|b| b >> 3) else { return Vec::new() };
+        let Some(e) = self.word(mem, o - 1 + l.obj_elements()).filter(|&e| tagged(e)) else { return Vec::new() };
+        let Some(n) = self.word(mem, e - 1 + l.w).and_then(|x| l.smi(x)) else { return Vec::new() };
         let n = (n.max(0) as usize).min(MAX_ELEMENTS);
+        let data = e - 1 + l.array_data();
         match kind {
             // Smis or anything, packed or with holes.
-            0..=3 => (0..n).map(|i| (i as u32, self.slot(mem, e - 1 + 16 + 8 * i as u64, false))).filter(|(_, v)| *v != Val::Other).collect(),
+            0..=3 => (0..n).map(|i| (i as u32, self.slot(mem, data + l.w * i as u64, false))).filter(|(_, v)| *v != Val::Other).collect(),
             // Doubles, packed or with holes.
             4 | 5 => (0..n)
                 .filter_map(|i| {
-                    let at = e - 1 + 16 + 8 * i as u64;
+                    let at = data + 8 * i as u64;
                     (word(mem, at)? != DOUBLE_HOLE).then_some((i as u32, Val::Real(at)))
                 })
                 .collect(),
             // A dictionary of numbers.
-            6 => self.dictionary(mem, e, 48).into_iter().filter_map(|(k, v)| Some((smi(k)?.try_into().ok()?, v))).filter(|(_, v)| *v != Val::Other).collect(),
+            6 => self.dictionary(mem, e, 4).into_iter().filter_map(|(k, v)| Some((l.smi(k)?.try_into().ok()?, v))).filter(|(_, v)| *v != Val::Other).collect(),
             _ => Vec::new(),
         }
     }
@@ -448,6 +562,36 @@ impl Js {
         }
         out
     }
+}
+
+/// jsdump: the layout found and a global's map and fields (diagnostics).
+pub fn diagnose(heap: &Heap, global: &str) -> Vec<String> {
+    let Some(js) = shared(heap) else { return vec!["no RPG Maker MV globals found".into()] };
+    let mem = heap.mem();
+    let l = js.l;
+    let mut out = vec![format!("{}-bit, cells {:?}, field shift {}", l.w * 8, js.cells, js.field_shift)];
+    for (g, cells) in &js.globals {
+        out.push(format!("{g}: {} cells, value {:?}", cells.len(), js.global(mem, g).map(|v| format!("{v:#x}"))));
+    }
+    let name = if global.is_empty() { "$gameParty" } else { global };
+    let Some(o) = js.global(mem, name) else { return out };
+    let Some(m) = js.map_of(mem, o) else { return out };
+    let raw = |at: u64, n: usize| -> String {
+        let mut b = vec![0u8; n];
+        match mem.read_exact_at(&mut b, at) {
+            Ok(()) => b.chunks(4).map(|c| format!("{:08x}", u32::from_le_bytes(c.try_into().unwrap()))).collect::<Vec<_>>().join(" "),
+            Err(_) => "unreadable".into(),
+        }
+    };
+    out.push(format!("{name} at {o:#x}, map {m:#x}: {}", raw(m - 1, 48)));
+    out.push(format!("object: {}", raw(o - 1, 64)));
+    for (k, det) in js.descriptors(mem, m) {
+        out.push(format!("  {:?} details {det:#x} index {} rep {}", js.text(mem, k), (det >> js.field_shift) & 0x3ff, (det >> (js.field_shift - 14)) & 0xf));
+    }
+    for (k, v) in js.fields(mem, o) {
+        out.push(format!("  field {k}: {v:?}"));
+    }
+    out
 }
 
 /// The located layout of the game attached to, per pid; a failed search is tried again after
@@ -692,7 +836,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     let members: Vec<u32> = js
         .field_obj(mem, party, "_actors")
         .map(|a| js.elements(mem, a).into_iter().filter_map(|(_, v)| match v {
-            Val::Int(at) => half(mem, at),
+            Val::Int(at) => js.int(mem, at),
             _ => None,
         }).collect())
         .unwrap_or_default();
@@ -715,7 +859,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         g.add(term(&basic, 6, "TP"), js.field(mem, actor, "_tp"), path.clone().prop("_tp"));
         g.add(term(&basic, 0, "Level"), js.field(mem, actor, "_level"), path.clone().prop("_level"));
         if let (Some(exp), Some(Val::Int(class))) = (js.field_obj(mem, actor, "_exp"), js.field(mem, actor, "_classId")) {
-            if let Some(class) = half(mem, class) {
+            if let Some(class) = js.int(mem, class) {
                 g.add(term(&basic, 8, "EXP"), js.element(mem, exp, class), path.clone().prop("_exp").index(class));
             }
         }
@@ -765,6 +909,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
 /// made its objects.
 pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     let groups = groups(heap)?;
+    let int_kind = shared(heap)?.int_kind();
     Some(
         groups
             .into_iter()
@@ -779,8 +924,8 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
                     .into_iter()
                     .map(|e| match e.val {
                         Val::Real(addr) => Listed { label: e.label, addr, kind: "f64" },
-                        Val::Int(addr) | Val::Obj(addr) => Listed { label: e.label, addr, kind: "i32" },
-                        Val::Other => Listed { label: e.label, addr: 0, kind: "i32" },
+                        Val::Int(addr) | Val::Obj(addr) => Listed { label: e.label, addr, kind: int_kind },
+                        Val::Other => Listed { label: e.label, addr: 0, kind: int_kind },
                     })
                     .collect(),
             })
