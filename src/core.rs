@@ -3478,13 +3478,17 @@ impl Core {
     }
 
     /// The player picked the wrong window: forget it (and the box picked in it) and ask the
-    /// desktop again, then find the numbers in the new one. Closing Ferret didn't help: the
-    /// choice is kept with a restore token so the picker only shows up once.
+    /// desktop again (Windows: take the game's next window), then find the numbers in the new
+    /// one. Closing Ferret didn't help: the choice is kept with a restore token so the picker
+    /// only shows up once.
     pub fn change_window(&mut self) -> Result<(PathBuf, Vec<Word>), String> {
         self.capture = None;
         WindowCapture::forget_window();
         self.clear_area();
-        self.say("forgot the window picked before: the desktop asks which window to watch");
+        self.say(match cfg!(windows) {
+            true => "watching the game's next window",
+            false => "forgot the window picked before: the desktop asks which window to watch",
+        });
         self.numbers()
     }
 

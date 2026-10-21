@@ -1,6 +1,7 @@
 // Captures frames of the attached game's main window with Windows.Graphics.Capture: only that
 // window, never the rest of the desktop (as the portal does on Linux). No picker: Ferret
-// knows the game, so it takes the game's largest visible top-level window.
+// knows the game, so it takes the game's largest visible top-level window; Watch the Game's
+// Next Window goes on to its next largest (a launcher or splash window picked by mistake).
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -32,11 +33,14 @@ pub struct WindowCapture {
     last: Mutex<Option<(u32, u32, Vec<u8>)>>,
 }
 
-/// The game's main window: its largest visible window that no other window owns.
-fn main_window(pid: u32) -> Option<HWND> {
+/// Which of the game's windows to watch: (pid, how many to skip from the largest).
+static SKIP: Mutex<(u32, usize)> = Mutex::new((0, 0));
+
+/// The game's windows, largest first: visible ones that no other window owns.
+fn game_windows(pid: u32) -> Vec<HWND> {
     struct Search {
         pid: u32,
-        best: Option<(i64, HWND)>,
+        found: Vec<(i64, HWND)>,
     }
     unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> BOOL {
         let s = unsafe { &mut *(data.0 as *mut Search) };
@@ -46,17 +50,25 @@ fn main_window(pid: u32) -> Option<HWND> {
         if owner == s.pid && unsafe { IsWindowVisible(hwnd) }.as_bool() && !owned {
             let mut r = RECT::default();
             if unsafe { GetWindowRect(hwnd, &mut r) }.is_ok() {
-                let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
-                if s.best.is_none_or(|(a, _)| area > a) {
-                    s.best = Some((area, hwnd));
-                }
+                s.found.push(((r.right - r.left) as i64 * (r.bottom - r.top) as i64, hwnd));
             }
         }
         BOOL(1)
     }
-    let mut s = Search { pid, best: None };
+    let mut s = Search { pid, found: Vec::new() };
     unsafe { EnumWindows(Some(each), LPARAM(&mut s as *mut Search as isize)) }.ok();
-    s.best.map(|(_, h)| h)
+    s.found.sort_by_key(|&(area, _)| std::cmp::Reverse(area));
+    s.found.into_iter().map(|(_, h)| h).collect()
+}
+
+/// The window to watch: the largest, or the one Watch the Game's Next Window went on to.
+fn main_window(pid: u32) -> Option<HWND> {
+    let windows = game_windows(pid);
+    let mut skip = SKIP.lock().unwrap();
+    if skip.0 != pid {
+        *skip = (pid, 0);
+    }
+    windows.get(skip.1 % windows.len().max(1)).copied()
 }
 
 fn err(e: windows::core::Error) -> String {
@@ -100,8 +112,11 @@ impl WindowCapture {
         Ok(Self { device, context, pool, session, last: Mutex::new(None) })
     }
 
-    /// No window is remembered between runs on Windows.
-    pub fn forget_window() {}
+    /// The next start takes the game's next window (back to the largest after the last one).
+    /// Nothing is remembered between runs.
+    pub fn forget_window() {
+        SKIP.lock().unwrap().1 += 1;
+    }
 
     /// The newest frame, as RGB, when one came since the last look.
     fn newest(&self) -> Result<Option<(u32, u32, Vec<u8>)>, String> {

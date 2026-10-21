@@ -34,9 +34,10 @@
  * whichever runs (30 s), so a power's timer is found again through code the others share: the
  * index tells them apart. The log line ends with each one's time run, and the first one says
  * where they are.
- * Usage: target <command file> <log file> [window]. Built for Linux and Windows; on Windows,
- * "window" opens a window showing gold, for capture tests (it draws from the log file, never
- * reading the game's memory, so the code touching gold stays the same). */
+ * Usage: target <command file> <log file> [window|launcher]. Built for Linux and Windows; on
+ * Windows, "window" opens a window showing gold, for capture tests (it draws from the log file,
+ * never reading the game's memory, so the code touching gold stays the same); "launcher" also
+ * opens a larger window without numbers before it, as a game's launcher would. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -404,17 +405,39 @@ static LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcA(w, msg, wp, lp);
 }
 
-static DWORD WINAPI window_thread(LPVOID unused)
+/* The launcher: a plain grey window, larger than the game's. */
+static LRESULT CALLBACK launcher_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(w, &ps);
+        RECT r;
+
+        GetClientRect(w, &r);
+        FillRect(dc, &r, (HBRUSH)GetStockObject(GRAY_BRUSH));
+        EndPaint(w, &ps);
+        return 0;
+    }
+    return DefWindowProcA(w, msg, wp, lp);
+}
+
+static DWORD WINAPI window_thread(LPVOID launcher)
 {
     WNDCLASSA wc = { 0 };
     HWND w;
     MSG m;
 
-    (void)unused;
-    wc.lpfnWndProc = window_proc;
     wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "FerretStandIn";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    if (launcher) {
+        wc.lpfnWndProc = launcher_proc;
+        wc.lpszClassName = "FerretStandInLauncher";
+        RegisterClassA(&wc);
+        CreateWindowA("FerretStandInLauncher", "Ferret stand-in launcher", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 60, 60, 900, 500, NULL,
+                      NULL, wc.hInstance, NULL);
+    }
+    wc.lpfnWndProc = window_proc;
+    wc.lpszClassName = "FerretStandIn";
     RegisterClassA(&wc);
     w = CreateWindowA("FerretStandIn", "Ferret stand-in", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 640, 280, NULL, NULL,
                       wc.hInstance, NULL);
@@ -514,9 +537,9 @@ int main(int argc, char **argv)
     run_hp[3] = p->hp;
     report(argv[2], p, coins, wood, inv, chest);
 #ifdef _WIN32
-    if (argc > 3 && strcmp(argv[3], "window") == 0) {
+    if (argc > 3 && (strcmp(argv[3], "window") == 0 || strcmp(argv[3], "launcher") == 0)) {
         window_log = argv[2];
-        CreateThread(NULL, 0, window_thread, NULL, 0, NULL);
+        CreateThread(NULL, 0, window_thread, strcmp(argv[3], "launcher") == 0 ? (LPVOID)1 : NULL, 0, NULL);
     }
 #endif
     for (;;) {

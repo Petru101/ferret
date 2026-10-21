@@ -276,7 +276,11 @@ impl FindView {
         // The menu: the window picked by mistake (the choice is remembered across restarts).
         let window_menu = gio::Menu::new();
         // The app's actions all take a string (D-Bus test actions): without one the item is off.
-        let repick = gio::MenuItem::new(Some(&tr!("Pick Another Window…")), None);
+        // Windows has no picker: Ferret goes on to the game's next window.
+        let repick = match cfg!(windows) {
+            true => gio::MenuItem::new(Some(&tr!("Watch the Game's Next Window")), None),
+            false => gio::MenuItem::new(Some(&tr!("Pick Another Window…")), None),
+        };
         repick.set_action_and_target_value(Some("app.repick"), Some(&"".to_variant()));
         window_menu.append_item(&repick);
         let capture = adw::SplitButton::builder()
@@ -515,7 +519,10 @@ impl FindView {
         let intro = adw::StatusPage::builder()
             .icon_name("edit-find-symbolic")
             .title(tr!("Find a Value"))
-            .description(tr!("Ferret looks at the game window, you pick the number, and then you just play. Only the game window is captured; the first time, your desktop asks which window to share."))
+            .description(match cfg!(windows) {
+                true => tr!("Ferret looks at the game window, you pick the number, and then you just play. Only the game window is captured."),
+                false => tr!("Ferret looks at the game window, you pick the number, and then you just play. Only the game window is captured; the first time, your desktop asks which window to share."),
+            })
             .child(&{
                 let buttons = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
                 buttons.append(&begin);
@@ -1036,7 +1043,11 @@ impl FindView {
     pub fn capture(&self) {
         // The intro page has no instruction bar: errors would go unseen there.
         self.root.set_visible_child_name("pick");
-        self.guide.wait(guide::PICK, &tr!("Capturing the game window…"), &tr!("The first time, your desktop asks which window to share."));
+        let note = match cfg!(windows) {
+            true => String::new(),
+            false => tr!("The first time, your desktop asks which window to share."),
+        };
+        self.guide.wait(guide::PICK, &tr!("Capturing the game window…"), &note);
         self.worker.run(|core| Event::Numbers(core.numbers()));
     }
 
@@ -1915,7 +1926,11 @@ impl FindView {
         self.start.set_sensitive(false);
         self.nudge(None);
         self.root.set_visible_child_name("pick");
-        self.guide.wait(guide::PICK, &tr!("Pick the game window in your desktop's window picker…"), "");
+        let text = match cfg!(windows) {
+            true => tr!("Capturing the game's next window…"),
+            false => tr!("Pick the game window in your desktop's window picker…"),
+        };
+        self.guide.wait(guide::PICK, &text, "");
         self.worker.run(|core| Event::Numbers(core.change_window()));
     }
 
