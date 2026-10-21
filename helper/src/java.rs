@@ -196,6 +196,33 @@ fn hotspot_symbols(pid: u32) -> Option<HashMap<String, u64>> {
     (!out.is_empty()).then_some(out)
 }
 
+/// The same `gHotSpot*` symbols on Windows: jvm.dll's exports, read from the loaded image (its
+/// first mapping holds the PE headers; the export directory is data directory 0).
+fn hotspot_exports(pid: u32, mem: &Mem) -> Option<HashMap<String, u64>> {
+    let maps = crate::helper::maps(pid).ok()?;
+    let base = maps.iter().find(|r| r.path.to_ascii_lowercase().ends_with("/jvm.dll"))?.start;
+    let (u16_at, u32_at) = (|a: u64| short(mem, a), |a: u64| half(mem, a));
+    if u16_at(base)? != 0x5A4D {
+        return None;
+    }
+    let pe = base + u32_at(base + 0x3C)? as u64;
+    // PE32+ only (a 64-bit JVM): the data directories start 112 bytes into its optional header.
+    if u32_at(pe)? != 0x4550 || u16_at(pe + 24)? != 0x20B {
+        return None;
+    }
+    let dir = base + u32_at(pe + 24 + 112)? as u64;
+    let (count, funcs, names, ords) = (u32_at(dir + 24)?, u32_at(dir + 28)? as u64, u32_at(dir + 32)? as u64, u32_at(dir + 36)? as u64);
+    let mut out = HashMap::new();
+    for i in 0..count.min(100_000) as u64 {
+        let Some(n) = u32_at(base + names + 4 * i).and_then(|r| cstr(mem, base + r as u64)) else { continue };
+        if n.starts_with("gHotSpot") {
+            let ord = u16_at(base + ords + 2 * i)? as u64;
+            out.insert(n, base + u32_at(base + funcs + 4 * ord)? as u64);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// The JVM's tables: fields (type, field) -> (type string, static, offset, address), types ->
 /// size, integer constants.
 type Structs = HashMap<(String, String), (Option<String>, bool, u64, u64)>;
@@ -263,7 +290,7 @@ fn unsigned5(b: &[u8], i: &mut usize) -> Option<u32> {
 
 impl Jvm {
     fn locate(pid: u32, mem: &Mem) -> Option<Jvm> {
-        let syms = hotspot_symbols(pid)?;
+        let syms = hotspot_symbols(pid).or_else(|| hotspot_exports(pid, mem))?;
         let (structs, types, ints) = read_tables(mem, &syms)?;
         let off = |t: &str, f: &str| structs.get(&(t.to_owned(), f.to_owned())).filter(|v| !v.1).map(|v| v.2);
         let addr = |t: &str, f: &str| structs.get(&(t.to_owned(), f.to_owned())).filter(|v| v.1).map(|v| v.3);
