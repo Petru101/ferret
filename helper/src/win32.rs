@@ -295,8 +295,12 @@ pub struct ENUM_SERVICE_STATUS_PROCESSW {
     pub status: [u32; 9],
 }
 
+pub const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+pub const RRF_RT_REG_SZ: u32 = 0x2;
+
 #[link(name = "advapi32")]
 extern "system" {
+    pub fn RegGetValueW(key: isize, subkey: *const u16, value: *const u16, flags: u32, kind: *mut u32, data: *mut c_void, size: *mut u32) -> i32;
     pub fn OpenSCManagerW(machine: *const u16, database: *const u16, access: u32) -> HANDLE;
     pub fn CloseServiceHandle(h: HANDLE) -> BOOL;
     pub fn EnumServicesStatusExW(

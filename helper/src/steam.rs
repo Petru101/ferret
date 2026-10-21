@@ -37,11 +37,10 @@ const MULTIPLAYER: &[&str] = &["category_1", "category_20", "category_36", "cate
 /// The games list asks every second: answers are kept until appinfo.vdf changes.
 static CACHE: Mutex<Option<HashMap<(PathBuf, u32), (SystemTime, Option<App>)>>> = Mutex::new(None);
 
-/// `steam` = the Steam folder the game was started from (STEAM_COMPAT_CLIENT_INSTALL_PATH).
+/// `steam` = the Steam folder the game was started from (STEAM_COMPAT_CLIENT_INSTALL_PATH),
+/// else Steam's usual folders (`os::steam_roots`).
 pub fn app(steam: Option<&str>, id: u32) -> Option<App> {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let usual = [".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"];
-    let roots = steam.map(PathBuf::from).into_iter().chain(usual.iter().map(|d| home.join(d)));
+    let roots = steam.map(PathBuf::from).into_iter().chain(crate::os::steam_roots());
     for root in roots {
         let path = root.join("appcache/appinfo.vdf");
         let Ok(mtime) = path.metadata().and_then(|m| m.modified()) else { continue };

@@ -395,6 +395,26 @@ pub fn drop_root(_as_user: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Where Steam keeps its files (appcache/appinfo.vdf): the folder Steam itself records for the
+/// player (HKCU\Software\Valve\Steam, SteamPath, written with forward slashes), and its
+/// default one.
+pub fn steam_roots() -> Vec<PathBuf> {
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (key, value) = (wide("Software\\Valve\\Steam"), wide("SteamPath"));
+    let mut buf = [0u16; 520];
+    let mut size = (buf.len() * 2) as u32;
+    let mut roots = Vec::new();
+    let found = unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut size)
+    };
+    if found == 0 {
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+        roots.push(PathBuf::from(String::from_utf16_lossy(&buf[..len])));
+    }
+    roots.push(PathBuf::from("C:/Program Files (x86)/Steam"));
+    roots
+}
+
 /// A line from the frontend is waiting on stdin (a pipe from Ferret), or Ferret is gone (its
 /// end closed, as poll's POLLHUP on Linux): a wait for the game then ends at once, and the
 /// next read finds the end of stdin. Before, the in-game check's wait went on for its 180 s

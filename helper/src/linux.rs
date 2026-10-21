@@ -220,6 +220,12 @@ pub fn drop_root(as_user: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Where Steam keeps its files (appcache/appinfo.vdf): native, the older link, the flatpak.
+pub fn steam_roots() -> Vec<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    [".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"].iter().map(|d| home.join(d)).collect()
+}
+
 /// A line from the frontend is waiting on stdin.
 pub fn stdin_ready() -> bool {
     let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
