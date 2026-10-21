@@ -34,7 +34,9 @@
  * whichever runs (30 s), so a power's timer is found again through code the others share: the
  * index tells them apart. The log line ends with each one's time run, and the first one says
  * where they are.
- * Usage: target <command file> <log file>. Built for Linux and Windows. */
+ * Usage: target <command file> <log file> [window]. Built for Linux and Windows; on Windows,
+ * "window" opens a window showing gold, for capture tests (it draws from the log file, never
+ * reading the game's memory, so the code touching gold stays the same). */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -360,6 +362,71 @@ static void report(const char *log, const struct player *p, const double *coins,
     }
 }
 
+#ifdef _WIN32
+static const char *window_log;
+
+/* The last gold= in the log, drawn large: what a game's HUD shows. */
+static LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(w, &ps);
+        RECT r;
+        char line[512] = "", last[512] = "", text[64] = "GOLD ?";
+        FILE *f = fopen(window_log, "r");
+        HFONT font = CreateFontA(72, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Arial");
+        const char *g;
+
+        if (f) {
+            while (fgets(line, sizeof line, f))
+                if (strstr(line, "gold="))
+                    strcpy(last, line);
+            fclose(f);
+        }
+        if ((g = strstr(last, "gold=")) != NULL)
+            snprintf(text, sizeof text, "GOLD %d", atoi(g + 5));
+        GetClientRect(w, &r);
+        FillRect(dc, &r, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 210, 60));
+        DrawTextA(dc, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DeleteObject(font);
+        EndPaint(w, &ps);
+        return 0;
+    }
+    if (msg == WM_TIMER) {
+        InvalidateRect(w, NULL, FALSE);
+        return 0;
+    }
+    if (msg == WM_DESTROY)
+        ExitProcess(0);
+    return DefWindowProcA(w, msg, wp, lp);
+}
+
+static DWORD WINAPI window_thread(LPVOID unused)
+{
+    WNDCLASSA wc = { 0 };
+    HWND w;
+    MSG m;
+
+    (void)unused;
+    wc.lpfnWndProc = window_proc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = "FerretStandIn";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClassA(&wc);
+    w = CreateWindowA("FerretStandIn", "Ferret stand-in", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 640, 280, NULL, NULL,
+                      wc.hInstance, NULL);
+    SetTimer(w, 1, 200, NULL);
+    while (GetMessageA(&m, NULL, 0, 0) > 0) {
+        TranslateMessage(&m);
+        DispatchMessageA(&m);
+    }
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     char *padding = malloc(123456);
@@ -446,6 +513,12 @@ int main(int argc, char **argv)
     add_stack(chest, logs_info, 50);
     run_hp[3] = p->hp;
     report(argv[2], p, coins, wood, inv, chest);
+#ifdef _WIN32
+    if (argc > 3 && strcmp(argv[3], "window") == 0) {
+        window_log = argv[2];
+        CreateThread(NULL, 0, window_thread, NULL, 0, NULL);
+    }
+#endif
     for (;;) {
         sleep_ms(100);
         *hud_food = needs.food;
