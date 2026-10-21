@@ -269,6 +269,43 @@ fn snapshot_processes() -> Vec<PROCESSENTRY32W> {
     all
 }
 
+/// What runs on the computer, for anti-cheat that runs beside games rather than in them: every
+/// process's program name (any user's: the snapshot names them all) and every active service
+/// and kernel driver by its service name (BEDaisy, vgk, EasyAntiCheat_EOS). Neither needs
+/// administrator rights.
+pub fn running_programs() -> Vec<String> {
+    let mut names: Vec<String> = snapshot_processes().iter().map(|e| from_wide(&e.szExeFile)).collect();
+    let Some(scm) = Handle::valid(unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_ENUMERATE_SERVICE) }) else {
+        return names;
+    };
+    let scm = std::mem::ManuallyDrop::new(scm);
+    let (mut needed, mut count, mut resume) = (0u32, 0u32, 0u32);
+    let mut buf: Vec<u64> = vec![0; 1 << 15];
+    loop {
+        let size = (buf.len() * 8) as u32;
+        let ok = unsafe {
+            EnumServicesStatusExW(scm.0, 0, SERVICE_DRIVERS_AND_WIN32, SERVICE_ACTIVE, buf.as_mut_ptr().cast(), size, &mut needed, &mut count, &mut resume, std::ptr::null())
+        };
+        let more = ok == 0 && std::io::Error::last_os_error().raw_os_error() == Some(ERROR_MORE_DATA);
+        if ok == 0 && !more {
+            break;
+        }
+        let entries = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const ENUM_SERVICE_STATUS_PROCESSW, count as usize) };
+        for e in entries {
+            let len = (0..).take_while(|&i| unsafe { *e.lpServiceName.add(i) } != 0).count();
+            names.push(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(e.lpServiceName, len) }));
+        }
+        if !more {
+            break;
+        }
+        if count == 0 {
+            buf.resize((needed as usize).div_ceil(8) + 1, 0);
+        }
+    }
+    unsafe { CloseServiceHandle(scm.0) };
+    names
+}
+
 /// The process that started it.
 pub fn parent(pid: u32) -> Option<u32> {
     snapshot_processes().iter().find(|e| e.th32ProcessID == pid).map(|e| e.th32ParentProcessID)
@@ -349,7 +386,8 @@ pub fn info(out: &mut impl Write) -> io::Result<()> {
     unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
     writeln!(out, "helper session: {session}")?;
     writeln!(out, "privileged: no")?;
-    writeln!(out, "processes visible to helper: {}", snapshot_processes().len())
+    writeln!(out, "processes visible to helper: {}", snapshot_processes().len())?;
+    writeln!(out, "programs, services and drivers running: {}", running_programs().len())
 }
 
 /// Elevation is never asked for on Windows: the player's own games open without it.

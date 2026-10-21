@@ -104,7 +104,8 @@ pub enum Event {
     /// The attached game quit (its program name).
     Quit(String),
     /// Anti-cheat started in the attached game (its program name, the anti-cheat): Ferret let go.
-    AntiCheat(String, String),
+    /// The game's program, the anti-cheat, and whether it started elsewhere on the computer.
+    AntiCheat(String, String, bool),
     /// The game just opened hides its numbers (its program name, the memory scrambler).
     Scrambler(Option<(String, String)>),
     /// A frame the watched number was just read from, and the watched area: shown while
@@ -262,6 +263,9 @@ struct Ui {
     last_toast: RefCell<Option<adw::Toast>>,
     /// Games with anti-cheat the player was told to quit Ferret for, by pid (`warn_risky`).
     warned_risky: RefCell<std::collections::HashSet<u32>>,
+    /// Anti-cheat running on the computer the player was told about, by name
+    /// (`warn_anti_cheat_elsewhere`).
+    warned_elsewhere: RefCell<std::collections::HashSet<String>>,
     /// The names games go by (Steam's), by program, from the games list.
     game_names: RefCell<std::collections::HashMap<String, String>>,
     /// What the games list knows of each game's online features, by pid: the warning on opening it.
@@ -590,6 +594,10 @@ impl Ui {
     /// user's call: offer to quit, don't quit by itself). Once per game launch.
     fn warn_risky<'a>(self: &Rc<Self>, games: impl IntoIterator<Item = &'a GameProcess>) {
         for g in games {
+            if let Some(Refusal::AntiCheatElsewhere(ac)) = &g.refused {
+                self.warn_anti_cheat_elsewhere(ac);
+                continue;
+            }
             if !matches!(g.refused, Some(Refusal::AntiCheat(_) | Refusal::Vac)) {
                 continue;
             }
@@ -630,6 +638,40 @@ impl Ui {
         }
     }
 
+    /// Anti-cheat running on the computer, not in one game (Windows: a service or driver that
+    /// watches every program): every game is refused meanwhile, and Ferret offers to quit, once
+    /// per anti-cheat in a run (`warn_risky` is per game).
+    fn warn_anti_cheat_elsewhere(self: &Rc<Self>, anticheat: &str) {
+        if !self.warned_elsewhere.borrow_mut().insert(anticheat.to_owned()) {
+            return;
+        }
+        let ui = self.clone();
+        self.notify.send_action(
+            &tr!("{anticheat} is running", anticheat),
+            &tr!("Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret while it runs."),
+            &tr!("Quit Ferret"),
+            move || ui.quit(),
+            None,
+        );
+        if !self.window.is_visible() {
+            return;
+        }
+        let dialog = adw::AlertDialog::new(
+            Some(&tr!("Quit Ferret While {anticheat} Runs?", anticheat)),
+            Some(&tr!(
+                "{anticheat} is running on your computer. Some anti-cheat looks for cheat tools anywhere on your computer, even ones that don't touch its game, and may ban for them. Ferret won't open any game while it runs, but it's safest to quit Ferret.",
+                anticheat
+            )),
+        );
+        dialog.add_responses(&[("keep", &tr!("Keep Ferret Open")), ("quit", &tr!("Quit Ferret"))]);
+        dialog.set_response_appearance("quit", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("quit"));
+        dialog.set_close_response("keep");
+        let ui = self.clone();
+        dialog.connect_response(Some("quit"), move |_, _| ui.quit());
+        dialog.present(Some(&self.nav));
+    }
+
     fn show_games(self: &Rc<Self>, games: Vec<GameProcess>) {
         self.warn_risky(&games);
         for g in &games {
@@ -653,7 +695,7 @@ impl Ui {
         *self.online.borrow_mut() = games.iter().map(|g| (g.pid, online_features(g))).collect();
         let blocked = crate::core::native_games_blocked();
         let shown: String =
-            games.iter().map(|g| format!("{}:{}:{:?}:{:?}:{}:{}:{};", g.pid, g.exe, g.refused, g.ships, g.multiplayer, g.marks_accounts, g.leaderboards)).chain([format!("{blocked:?}")]).collect();
+            games.iter().map(|g| format!("{}:{}:{:?}:{:?}:{}:{}:{}:{:?};", g.pid, g.exe, g.refused, g.ships, g.multiplayer, g.marks_accounts, g.leaderboards, g.resident)).chain([format!("{blocked:?}")]).collect();
         self.games_stack.set_visible_child_name(if games.is_empty() { "empty" } else { "list" });
         if *self.games_shown.borrow() == shown {
             return;
@@ -687,6 +729,9 @@ impl Ui {
             row.set_subtitle_lines(2);
             let refused = g.refused.as_ref().map(|r| match r {
                 Refusal::AntiCheat(ac) => tr!("{anticheat} is running. Ferret won't attach while anti-cheat runs.", anticheat = ac),
+                Refusal::AntiCheatElsewhere(ac) => {
+                    tr!("{anticheat} is running on your computer. Ferret won't attach to any game while it runs.", anticheat = ac)
+                }
                 Refusal::OnlineOnly => tr!("Online-only game. Ferret won't attach to online games."),
                 Refusal::Vac => tr!(
                     "Uses Valve Anti-Cheat. Ferret won't attach to it. Source games started with -insecure \
@@ -803,7 +848,7 @@ impl Ui {
             }
             Event::Scrambler(Some((exe, scrambler))) => self.warn_scrambler(&exe, &scrambler),
             Event::Scrambler(None) => {}
-            Event::AntiCheat(exe, ac) => {
+            Event::AntiCheat(exe, ac, elsewhere) => {
                 self.attached.set(None);
                 self.find.stop();
                 if self.on_game_page() {
@@ -811,12 +856,20 @@ impl Ui {
                 }
                 let name = self.game_names.borrow().get(&exe).cloned().unwrap_or_else(|| exe.clone());
                 let heading = tr!("Ferret let go of {name}", name);
-                let text = tr!(
-                    "{anticheat} started in {name}. Ferret stopped keeping values in range and won't change anything in \
-                     the game while the anti-cheat runs.",
-                    anticheat = ac,
-                    name
-                );
+                let text = match elsewhere {
+                    false => tr!(
+                        "{anticheat} started in {name}. Ferret stopped keeping values in range and won't change anything in \
+                         the game while the anti-cheat runs.",
+                        anticheat = ac,
+                        name
+                    ),
+                    true => tr!(
+                        "{anticheat} started on your computer. Ferret stopped keeping values in range and won't change \
+                         anything in {name} while the anti-cheat runs.",
+                        anticheat = ac,
+                        name
+                    ),
+                };
                 self.notify.send(&heading, &text, None, Some(10));
                 if self.background.get() {
                     self.quit();
@@ -1311,6 +1364,7 @@ fn build(app: &adw::Application) {
         opening: Rc::default(),
         last_toast: RefCell::default(),
         warned_risky: RefCell::default(),
+        warned_elsewhere: RefCell::default(),
         game_names: RefCell::default(),
         online: RefCell::default(),
         background: Rc::default(),
@@ -1369,7 +1423,7 @@ fn build(app: &adw::Application) {
                 let listed = if values && ui.stack.visible_child_name().as_deref() == Some("browse") { ui.browse.locs() } else { Vec::new() };
                 ui.worker.run(move |core| match core.check_game() {
                     Some(Gone::Quit(exe)) => Event::Quit(exe),
-                    Some(Gone::AntiCheat(exe, ac)) => Event::AntiCheat(exe, ac),
+                    Some(Gone::AntiCheat(exe, ac, elsewhere)) => Event::AntiCheat(exe, ac, elsewhere),
                     None if matches => Event::Matches(Ok(core.matches())),
                     None if !listed.is_empty() => Event::Peeked(core.values(), core.peek_values(&listed)),
                     None if values => Event::Values(core.values()),
@@ -1515,6 +1569,13 @@ fn online_features(g: &GameProcess) -> Vec<String> {
     }
     if g.leaderboards {
         lines.push(tr!("Its scores go on online leaderboards that other players see."));
+    }
+    if let Some(ac) = &g.resident {
+        lines.push(tr!(
+            "{anticheat} runs on your computer all the time, for other games. It may take Ferret for a cheat tool: quit \
+             Ferret before you play those games.",
+            anticheat = ac
+        ));
     }
     lines
 }

@@ -6,19 +6,40 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Lowercase file or folder name prefixes, and exact names.
+/// Lowercase file or folder name prefixes, and exact names. On Windows also the names of the
+/// programs, services and kernel drivers they run (the Service Control Manager's names: vgk,
+/// BEDaisy, EasyAntiCheat_EOS...).
 const KNOWN: &[(&str, &[&str], &[&str])] = &[
     ("Easy Anti-Cheat", &["easyanticheat"], &["start_protected_game.exe"]),
-    ("BattlEye", &["battleye", "beclient", "beservice"], &[]),
+    ("BattlEye", &["battleye", "beclient", "beservice", "bedaisy"], &[]),
     ("PunkBuster", &["pnkbstr"], &["pbcl.dll", "pbsv.dll"]),
     ("nProtect GameGuard", &["npgg", "gamemon"], &["gameguard"]),
-    ("XIGNCODE3", &["xigncode"], &["x3.xem"]),
-    ("Anti-Cheat Expert", &["anticheatexpert", "sguard"], &[]),
+    ("XIGNCODE3", &["xigncode", "xhunter"], &["x3.xem"]),
+    ("Anti-Cheat Expert", &["anticheatexpert", "sguard"], &["ace-base", "ace-base.sys"]),
     ("HoYoverse anti-cheat", &["mhyprot", "hoyokprotect"], &[]),
     ("EQU8", &["equ8"], &[]),
     ("EA Javelin", &["eaanticheat"], &[]),
     ("Denuvo Anti-Cheat", &["denuvo-anti-cheat", "denuvoanticheat"], &[]),
+    ("Riot Vanguard", &[], &["vgc", "vgc.exe", "vgk", "vgk.sys", "vgtray.exe"]),
+    ("FACEIT Anti-Cheat", &["faceit"], &[]),
+    ("ESEA Anti-Cheat", &["eseaclient", "eseadriver"], &[]),
+    ("Ricochet", &[], &["randgrid", "randgrid.sys"]),
 ];
+
+/// Anti-cheat that stays on all the time once installed, whether its game runs or not (Windows):
+/// Riot Vanguard's kernel driver (from boot) and tray program, PunkBuster's first service,
+/// Anti-Cheat Expert's base driver. Only a warning: refusing them would refuse every game on
+/// those computers, and the risk is to the player's account with those games (quit Ferret
+/// before playing them). Their parts that only run with their game (Vanguard's vgc,
+/// PunkBuster's PnkBstrB, ACE's SGuard) refuse like any running anti-cheat.
+#[cfg_attr(not(windows), allow(dead_code))]
+const RESIDENT: &[&str] = &["vgk", "vgk.sys", "vgtray.exe", "pnkbstra", "pnkbstra.exe", "ace-base", "ace-base.sys"];
+
+/// A program, service or driver of anti-cheat that is always on (`RESIDENT`).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn resident(name: &str) -> bool {
+    RESIDENT.contains(&name.to_ascii_lowercase().as_str())
+}
 
 /// Folders a game's program sits in below the game's own folder (Unreal: Binaries/Win64).
 const PROGRAM_DIRS: &[&str] =
@@ -83,4 +104,24 @@ fn search(dir: &Path, depth: usize, seen: &mut usize) -> Option<&'static str> {
         return None;
     }
     subdirs.iter().find_map(|d| search(d, depth - 1, seen))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tells_windows_parts_apart() {
+        // Services and drivers by their Service Control Manager names, programs by file name.
+        assert_eq!(named("EasyAntiCheat_EOS"), Some("Easy Anti-Cheat"));
+        assert_eq!(named("BEDaisy"), Some("BattlEye"));
+        assert_eq!(named("BEService_x64.exe"), Some("BattlEye"));
+        assert_eq!(named("vgc"), Some("Riot Vanguard"));
+        assert_eq!(named("vgk"), Some("Riot Vanguard"));
+        assert_eq!(named("FACEIT"), Some("FACEIT Anti-Cheat"));
+        assert_eq!(named("xhunter1"), Some("XIGNCODE3"));
+        assert_eq!(named("vgcore.dll"), None);
+        assert!(resident("vgk") && resident("vgtray.exe") && resident("PnkBstrA"));
+        assert!(!resident("vgc") && !resident("PnkBstrB") && !resident("BEService"));
+    }
 }

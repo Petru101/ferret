@@ -42,6 +42,7 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                 let id = g.app_id.map(|id| format!("  [SteamAppId={id}]")).unwrap_or_default();
                 let refused = match &g.refused {
                     Some(core::Refusal::AntiCheat(ac)) => format!("  [refused: {ac}]"),
+                    Some(core::Refusal::AntiCheatElsewhere(ac)) => format!("  [refused: {ac} runs on the computer]"),
                     Some(core::Refusal::OnlineOnly) => "  [refused: online only]".into(),
                     Some(core::Refusal::Vac) => "  [refused: Valve Anti-Cheat]".into(),
                     Some(core::Refusal::FlagsEdits) => "  [refused: flags edited characters online]".into(),
@@ -51,8 +52,9 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                 let mp = if g.multiplayer { "  [multiplayer]" } else { "" };
                 let marks = if g.marks_accounts { "  [marks edited accounts]" } else { "" };
                 let boards = if g.leaderboards { "  [leaderboards]" } else { "" };
+                let resident = g.resident.as_ref().map(|ac| format!("  [{ac} always on]")).unwrap_or_default();
                 let name = g.name.map(|n| format!("  ({n})")).unwrap_or_default();
-                println!("{:>7}  {}{name}{id}{refused}{ships}{mp}{marks}{boards}", g.pid, g.exe);
+                println!("{:>7}  {}{name}{id}{refused}{ships}{mp}{marks}{boards}{resident}", g.pid, g.exe);
             }
         }
         "attach" => {

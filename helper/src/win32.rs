@@ -226,6 +226,40 @@ extern "system" {
     pub fn IsWindowVisible(hwnd: HWND) -> BOOL;
 }
 
+pub const SC_MANAGER_ENUMERATE_SERVICE: u32 = 0x0004;
+/// SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER | SERVICE_WIN32_OWN_PROCESS |
+/// SERVICE_WIN32_SHARE_PROCESS.
+pub const SERVICE_DRIVERS_AND_WIN32: u32 = 0x0B | 0x30;
+pub const SERVICE_ACTIVE: u32 = 0x1;
+pub const ERROR_MORE_DATA: i32 = 234;
+
+/// ENUM_SERVICE_STATUS_PROCESSW: the names (pointers into the same buffer) and nine DWORDs of
+/// SERVICE_STATUS_PROCESS.
+#[repr(C)]
+pub struct ENUM_SERVICE_STATUS_PROCESSW {
+    pub lpServiceName: *const u16,
+    pub lpDisplayName: *const u16,
+    pub status: [u32; 9],
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    pub fn OpenSCManagerW(machine: *const u16, database: *const u16, access: u32) -> HANDLE;
+    pub fn CloseServiceHandle(h: HANDLE) -> BOOL;
+    pub fn EnumServicesStatusExW(
+        manager: HANDLE,
+        level: u32,
+        kind: u32,
+        state: u32,
+        services: *mut u8,
+        size: u32,
+        needed: *mut u32,
+        returned: *mut u32,
+        resume: *mut u32,
+        group: *const u16,
+    ) -> BOOL;
+}
+
 #[link(name = "ntdll")]
 extern "system" {
     pub fn NtQueryInformationProcess(p: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;

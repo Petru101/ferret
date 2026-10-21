@@ -1076,6 +1076,9 @@ pub struct GameProcess {
     pub marks_accounts: bool,
     /// Steam lists online leaderboards for it.
     pub leaderboards: bool,
+    /// Anti-cheat that is always on on the computer, for other games (Windows: Riot Vanguard's
+    /// driver): a warning.
+    pub resident: Option<String>,
 }
 
 /// Why attaching failed, as shown to the player; `password_may_help`: the system's
@@ -1116,6 +1119,9 @@ impl From<String> for AttachError {
 pub enum Refusal {
     /// Loaded in the game or running beside it.
     AntiCheat(String),
+    /// Running elsewhere on the computer (Windows: as a service or driver, watching every
+    /// program): Ferret attaches to no game meanwhile.
+    AntiCheatElsewhere(String),
     OnlineOnly,
     /// Steam lists Valve Anti-Cheat.
     Vac,
@@ -1130,6 +1136,7 @@ impl Refusal {
             "online" => Refusal::OnlineOnly,
             "vac" => Refusal::Vac,
             "edits" => Refusal::FlagsEdits,
+            other if other.starts_with("anti-cheat-elsewhere ") => Refusal::AntiCheatElsewhere(other["anti-cheat-elsewhere ".len()..].to_owned()),
             // An unknown reason from a newer helper still refuses.
             other => Refusal::AntiCheat(other.strip_prefix("anti-cheat ").unwrap_or(other).to_owned()),
         })
@@ -1140,8 +1147,9 @@ impl Refusal {
 pub enum Gone {
     /// It quit: its program name.
     Quit(String),
-    /// Anti-cheat started in it: its program name and the anti-cheat. Ferret let go.
-    AntiCheat(String, String),
+    /// Anti-cheat started in it, or (`true`) elsewhere on the computer: its program name and the
+    /// anti-cheat. Ferret let go.
+    AntiCheat(String, String, bool),
 }
 
 pub struct ValueRow {
@@ -1589,6 +1597,7 @@ impl Core {
                     ships: f.get(6).and_then(|s| opt(s)),
                     marks_accounts: f.get(7).is_some_and(|s| s.split(',').any(|w| w == "marks")),
                     leaderboards: f.get(7).is_some_and(|s| s.split(',').any(|w| w == "leaderboards")),
+                    resident: f.get(8).and_then(|s| opt(s)),
                 })
             })
             .collect()
@@ -1599,7 +1608,7 @@ impl Core {
     pub fn risky_games(&mut self) -> Vec<GameProcess> {
         let attached = self.game.as_ref().map(|g| g.pid);
         let mut games = self.games();
-        games.retain(|g| Some(g.pid) != attached && matches!(g.refused, Some(Refusal::AntiCheat(_) | Refusal::Vac)));
+        games.retain(|g| Some(g.pid) != attached && matches!(g.refused, Some(Refusal::AntiCheat(_) | Refusal::AntiCheatElsewhere(_) | Refusal::Vac)));
         games
     }
 
@@ -1614,17 +1623,22 @@ impl Core {
     pub fn check_game(&mut self) -> Option<Gone> {
         self.game.as_ref()?;
         let reply = self.helper.call("alive");
-        let anti_cheat = reply.first().and_then(|l| l.strip_prefix("alive anti-cheat ")).map(str::to_owned);
-        if anti_cheat.is_none() && reply.first().map(String::as_str) != Some("alive no") {
+        let first = reply.first().map(String::as_str).unwrap_or_default();
+        let anti_cheat = match first.strip_prefix("alive anti-cheat-elsewhere ") {
+            Some(ac) => Some((ac.to_owned(), true)),
+            None => first.strip_prefix("alive anti-cheat ").map(|ac| (ac.to_owned(), false)),
+        };
+        if anti_cheat.is_none() && first != "alive no" {
             return None;
         }
         let exe = self.game.take()?.exe;
         self.search = None;
         self.capture = None;
         Some(match anti_cheat {
-            Some(ac) => {
-                self.say(&format!("{ac} started in {exe}: Ferret let go of the game and changes nothing in it"));
-                Gone::AntiCheat(exe, ac)
+            Some((ac, elsewhere)) => {
+                let place = if elsewhere { "on the computer" } else { "in the game" };
+                self.say(&format!("{ac} started {place}: Ferret let go of {exe} and changes nothing in it"));
+                Gone::AntiCheat(exe, ac, elsewhere)
             }
             None => {
                 self.say(&format!("{exe} quit"));
