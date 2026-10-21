@@ -1478,6 +1478,7 @@ fn kind_text(kind: crate::core::Kind) -> String {
         Kind::U16 => tr!("2-byte whole number"),
         Kind::Gm => tr!("GameMaker number"),
         Kind::Lua => tr!("Lua number"),
+        Kind::Py => tr!("Python number"),
     }
 }
 

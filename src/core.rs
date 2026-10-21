@@ -245,7 +245,7 @@ impl Helper {
 /// dictionaries, RPG Maker's globals, GameMaker's variables, Lua tables): nothing better to
 /// upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "java:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "java:", "py:", "{"].iter().any(|p| text.starts_with(p))
 }
 
 /// A name the helper lists in Ferret's words rather than the game's ("@gold": RPG Maker's
@@ -281,7 +281,7 @@ fn backed_by_code(text: &str) -> bool {
 /// float are mostly huge or tiny (a pattern that matches in the wrong place after an update).
 fn plausible(kind: Kind, v: f64) -> bool {
     match kind {
-        Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua => v == 0.0 || (1e-9..1e15).contains(&v.abs()),
+        Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => v == 0.0 || (1e-9..1e15).contains(&v.abs()),
         _ => true,
     }
 }
@@ -472,6 +472,9 @@ pub enum Kind {
     /// A Lua value (the helper's lua.rs): a double, written only while it still holds a
     /// number. Values saved by a Lua path get it; never searched for.
     Lua,
+    /// A Python value (the helper's python.rs): the slot pointing to a number object, written
+    /// in place or by pointing it to a cached small int. Values saved by a Python path.
+    Py,
 }
 
 impl Kind {
@@ -487,11 +490,12 @@ impl Kind {
             Kind::U16 => "u16",
             Kind::Gm => "gm",
             Kind::Lua => "lua",
+            Kind::Py => "py",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py]).find(|k| k.name() == s)
     }
 
     fn with_article(self) -> String {
@@ -513,6 +517,7 @@ impl Kind {
             Kind::U16 => "2-byte whole number",
             Kind::Gm => "GameMaker number",
             Kind::Lua => "Lua number",
+            Kind::Py => "Python number",
         }
     }
 }
@@ -1779,6 +1784,7 @@ impl Core {
         let loc = match &named {
             Some((text, _, _)) if text.starts_with("gml:") => Loc { kind: Kind::Gm, ..loc },
             Some((text, _, _)) if text.starts_with("lua:") => Loc { kind: Kind::Lua, ..loc },
+            Some((text, _, _)) if text.starts_with("py:") => Loc { kind: Kind::Py, ..loc },
             _ => loc,
         };
         let reply = match &named {
@@ -3758,7 +3764,7 @@ impl Core {
         }
         if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Lua (LuaJIT) and Java games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java and Python games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {

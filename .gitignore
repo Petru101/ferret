@@ -8,6 +8,7 @@ test-game/target
 test-game/target.exe
 test-game/target-x87
 test-game/target32.exe
+test-game/python/game.log
 vendor/
 CLAUDE.md
 images/

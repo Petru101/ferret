@@ -5,6 +5,7 @@ mod gdscript;
 mod gml;
 mod lua;
 mod java;
+mod python;
 mod godot;
 mod helper;
 mod js;

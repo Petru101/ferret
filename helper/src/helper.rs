@@ -23,6 +23,7 @@ use crate::js::{self, JsPath};
 use crate::gml::{self, GmlPath};
 use crate::lua::{self, LuaPath};
 use crate::java::{self, JavaPath};
+use crate::python::{self, PyPath};
 use crate::trace;
 
 pub struct Region {
@@ -310,6 +311,11 @@ fn scrambler(pid: u32, regions: &[Region]) -> Option<&'static str> {
 /// The program a process runs (`program_path`).
 fn program_of(pid: u32) -> Option<PathBuf> {
     maps(pid).ok().and_then(|m| program_path(pid, &m))
+}
+
+/// Python games (python.rs): CPython mapped (libpython, Ren'Py's librenpython) or running.
+fn is_python_game(pid: u32, exe: &str) -> bool {
+    maps(pid).is_ok_and(|r| python::runs_python(&r, exe))
 }
 
 /// Lua games (lua.rs): a Lua library mapped (LÖVE's LuaJIT), or Defold's engine.
@@ -632,6 +638,10 @@ pub(crate) enum Kind {
     /// holds something else (a table that grew moved its entries: the old place is freed).
     /// Values saved by a Lua path get it.
     Lua,
+    /// A Python value (python.rs): the slot pointing to a number object (Python's numbers are
+    /// immutable objects), read as the number it points to, written in place or by pointing
+    /// the slot to a cached small int (`python::write_slot`). Values saved by a Python path.
+    Py,
 }
 
 impl Kind {
@@ -647,18 +657,19 @@ impl Kind {
             Kind::U16 => "u16",
             Kind::Gm => "gm",
             Kind::Lua => "lua",
+            Kind::Py => "py",
         }
     }
 
     fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
         match self {
             Kind::U16 => 2,
             Kind::I32 | Kind::F32 => 4,
-            Kind::F64 | Kind::Xor | Kind::Lua => 8,
+            Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py => 8,
             Kind::Gm => 16,
         }
     }
@@ -674,6 +685,8 @@ impl Kind {
             }
             Kind::Gm => gml::rvalue_number(b).unwrap_or(f64::NAN),
             Kind::Lua => lua::number(b).unwrap_or(f64::NAN),
+            // Read through the slot (`read_value`).
+            Kind::Py => f64::NAN,
         }
     }
 
@@ -685,7 +698,7 @@ impl Kind {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
             Kind::I32 | Kind::Xor | Kind::U16 => lo <= n.scaled && n.scaled <= hi,
-            Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua => lo < n.value + n.step && hi > n.value - n.step,
+            Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
 
@@ -720,6 +733,9 @@ impl Shown {
 }
 
 fn read_value(mem: &File, addr: u64, kind: Kind) -> Option<f64> {
+    if kind == Kind::Py {
+        return python::read_slot(mem, addr);
+    }
     let mut b = [0u8; 16];
     mem.read_exact_at(&mut b[..kind.size()], addr).ok()?;
     Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua) || !v.is_nan())
@@ -754,6 +770,7 @@ fn write_value(mem: &File, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
             }
             mem.write_all_at(&v.to_le_bytes(), addr)
         }
+        Kind::Py => python::write_slot(mem, addr, v),
     }
 }
 
@@ -839,6 +856,7 @@ enum Named {
     Gml(GmlPath),
     Lua(LuaPath),
     Java(JavaPath),
+    Py(PyPath),
 }
 
 impl Named {
@@ -864,6 +882,9 @@ impl Named {
         if text.starts_with("java:") {
             return JavaPath::parse(text).map(Named::Java);
         }
+        if text.starts_with("py:") {
+            return PyPath::parse(text).map(Named::Py);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -871,13 +892,14 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:") || text.starts_with("py:")
     }
 
     /// Walked again right before every write (not only every `LIMIT_FIND_EVERY`): Java moves
-    /// its objects, and the old copy's memory is reused.
+    /// its objects, and the old copy's memory is reused; Python makes a new number object at
+    /// every change (`hp -= 1`) and frees the old one.
     fn fresh(&self) -> bool {
-        matches!(self, Named::Java(_))
+        matches!(self, Named::Java(_) | Named::Py(_))
     }
 
     /// Where it leads from the roots found before (no search).
@@ -891,6 +913,7 @@ impl Named {
             Named::Gml(p) => gml::walk(heap, program_of(heap.pid).as_deref(), roots, p),
             Named::Lua(p) => lua::walk(heap, roots, p),
             Named::Java(p) => java::walk(heap, roots, p),
+            Named::Py(p) => python::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
@@ -906,6 +929,7 @@ impl Named {
             Named::Gml(p) => gml::find_roots(heap, program_of(heap.pid).as_deref(), p),
             Named::Lua(p) => lua::find_roots(heap, p),
             Named::Java(p) => java::find_roots(heap, p),
+            Named::Py(p) => python::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
@@ -988,6 +1012,9 @@ fn guard_of(mem: &File, object: u64) -> Option<(u64, [u8; 4])> {
 /// find where the values are (pointer paths, named paths). Lumencraft's lumen took a moment to
 /// come back after a purchase.
 const LIMIT_WRITE_EVERY: Duration = Duration::from_millis(50);
+/// A named Python limit's state while its number is one the game shares (python.rs,
+/// `write_slot`): still tried on every check.
+const PY_SHARED: &str = "the game shares this number with its code, not written until the game changes it";
 /// How often the attached game is checked for anti-cheat that started after attaching (some
 /// games start it only when going online).
 const ANTI_CHEAT_EVERY: Duration = Duration::from_secs(3);
@@ -1073,11 +1100,11 @@ fn limiter_loop(shared: SharedLimiter) {
                 } else if named_doubt(mem, &leads, l.kind, &n.path).is_some() {
                     l.paused = Some("its name leads to places that aren't one value, not written");
                 } else {
-                    if leads != n.addrs || l.paused.is_some() {
+                    if leads != n.addrs || l.paused.is_some_and(|p| p != PY_SHARED) {
                         l.restores += 1;
                     }
                     l.addr = leads[0];
-                    l.paused = None;
+                    l.paused = l.paused.filter(|&p| p == PY_SHARED);
                 }
                 n.addrs = leads;
             }
@@ -1091,7 +1118,7 @@ fn limiter_loop(shared: SharedLimiter) {
                     due.then(|| (l.name.clone(), n.path.clone()))
                 })
                 .collect();
-            for l in limits.iter_mut().filter(|l| l.paused.is_none()) {
+            for l in limits.iter_mut().filter(|l| l.paused.is_none() || l.paused == Some(PY_SHARED)) {
                 if let Some(n) = &l.named {
                     let interim = [l.addr];
                     let addrs = if n.addrs.is_empty() { &interim[..] } else { &n.addrs[..] };
@@ -1102,8 +1129,15 @@ fn limiter_loop(shared: SharedLimiter) {
                             (Some(min), _) if v < min => min,
                             _ => continue,
                         };
-                        if write_value(mem, addr, l.kind, target).is_ok() {
-                            l.fixes += 1;
+                        match write_value(mem, addr, l.kind, target) {
+                            Ok(()) => {
+                                l.fixes += 1;
+                                l.paused = None;
+                            }
+                            // A Python number the game shares (a constant of its code): said, and
+                            // tried again on each check (the game makes its own when it changes it).
+                            Err(_) if l.kind == Kind::Py => l.paused = Some(PY_SHARED),
+                            Err(_) => {}
                         }
                     }
                     continue;
@@ -2064,7 +2098,7 @@ impl MemScan<'_> {
                 // that has moved on by up to 1 since.
                 let hit = match kind {
                     Kind::I32 | Kind::Xor | Kind::U16 => value == n.scaled,
-                    Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua => kind.fits(value - n.step, value + n.step, n),
+                    Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
                     self.hit(r, buf, len, addr, off, kind, value);
@@ -2367,7 +2401,7 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                         let step = match kind {
                             Kind::U16 => 2,
                             Kind::I32 | Kind::F32 | Kind::Xor => 4,
-                            Kind::F64 | Kind::Gm | Kind::Lua => 8,
+                            Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => 8,
                         };
                         for o in (w..w + 8).step_by(step) {
                             let size = kind.size();
@@ -3751,6 +3785,13 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         }
         return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
     }
+    // A number of a Python game, by its namespace and the names from there (its slot).
+    if is_python_game(s.pid, &s.exe) {
+        if let Some((p, leads)) = python::discover(&heap, target) {
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        }
+    }
     // A number in a Lua game's tables, by its path from the globals table.
     if is_lua(s.pid) {
         if let Some((p, leads)) = lua::discover(&heap, target) {
@@ -3904,6 +3945,12 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
                     None => writeln!(out, "none engine Java classes not found (only HotSpot JVMs are read)"),
                 };
             }
+            if is_python_game(s.pid, &s.exe) && !mono::runs_csharp(s.pid) && !is_godot(s.pid) {
+                return match python::player(&heap) {
+                    Some(list) => print_player(out, s, &list, t),
+                    None => writeln!(out, "none engine Python objects not found (only 64-bit CPython 2.7 and 3.x)"),
+                };
+            }
             if is_lua(s.pid) && !mono::runs_csharp(s.pid) && !is_godot(s.pid) {
                 return match lua::player(&heap) {
                     Some(list) => print_player(out, s, &list, t),
@@ -3936,7 +3983,7 @@ fn print_player(out: &mut impl Write, s: &Session, list: &[ue::ListedObject], t:
     writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
 }
 
-/// browsable: "browsable unreal|unity|godot|rpgmaker|gamemaker|lua|java" when `player` can list the game's numbers, else "browsable no".
+/// browsable: "browsable unreal|unity|godot|rpgmaker|gamemaker|lua|java|python" when `player` can list the game's numbers, else "browsable no".
 fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -3947,6 +3994,7 @@ fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
         Err(_) if is_rpgmaker(s.pid) => "rpgmaker",
         Err(_) if s.doubles_only && gml::data_file(s.pid, program_of(s.pid).as_deref()).is_some() => "gamemaker",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
+        Err(_) if is_python_game(s.pid, &s.exe) => "python",
         Err(_) if is_lua(s.pid) => "lua",
         Err(_) if s.java && java::shared(s.pid, mem).is_some() => "java",
         Err(_) => "no",
@@ -3962,6 +4010,20 @@ fn cmd_jvm(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let t = Instant::now();
     let heap = Heap::new(s.pid, mem, s.width)?;
     for l in java::diagnose(&heap, arg.trim()) {
+        writeln!(out, "{l}")?;
+    }
+    writeln!(out, "in {} ms", t.elapsed().as_millis())
+}
+
+/// pydump [path]: a Python game's interpreter as Ferret reads it, or a namespace's or object's
+/// entries at a path (`python::diagnose`).
+fn cmd_pydump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let t = Instant::now();
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    for l in python::diagnose(&heap, arg.trim()) {
         writeln!(out, "{l}")?;
     }
     writeln!(out, "in {} ms", t.elapsed().as_millis())
@@ -4117,6 +4179,7 @@ pub fn run(as_user: Option<&str>) {
             "gml" => cmd_gml(&mut out, &session),
             "luadump" => cmd_luadump(&mut out, &session, arg),
             "jvm" => cmd_jvm(&mut out, &session, arg),
+            "pydump" => cmd_pydump(&mut out, &session, arg),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),
