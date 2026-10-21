@@ -27,14 +27,8 @@ pub struct WindowCapture {
     direct: bool,
 }
 
-fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/ferret"))
-}
-
 fn token_file() -> PathBuf {
-    data_dir().join("screencast-restore-token")
+    crate::core::data_dir().join("screencast-restore-token")
 }
 
 fn string_of(v: &Value) -> Option<String> {
@@ -67,7 +61,8 @@ fn request(
 }
 
 impl WindowCapture {
-    pub fn start() -> Result<Self, String> {
+    /// `_pid`: the game's (the desktop's picker chooses the window here).
+    pub fn start(_pid: Option<u32>) -> Result<Self, String> {
         let conn = Connection::session().map_err(|e| e.to_string())?;
         if let Some(node) = std::env::var("FERRET_PIPEWIRE_NODE").ok().and_then(|n| n.parse().ok()) {
             return Ok(Self { conn, session: String::new(), node, direct: true });

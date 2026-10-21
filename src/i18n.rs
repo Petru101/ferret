@@ -13,19 +13,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gtk::glib;
 
 pub const DOMAIN: &str = "ferret";
-const LOCALE_DIR: &str = "/app/share/locale";
 
 static ON: AtomicBool = AtomicBool::new(false);
 
+// MSYS2's libintl exports them as libintl_* (its header renames them).
+#[cfg_attr(windows, link(name = "intl"))]
 extern "C" {
+    #[cfg_attr(windows, link_name = "libintl_bindtextdomain")]
     fn bindtextdomain(domain: *const c_char, dir: *const c_char) -> *mut c_char;
+    #[cfg_attr(windows, link_name = "libintl_bind_textdomain_codeset")]
     fn bind_textdomain_codeset(domain: *const c_char, codeset: *const c_char) -> *mut c_char;
 }
 
 /// The player's language from the environment, and Ferret's texts in it.
 pub fn init() {
-    let (domain, dir, utf8) = (CString::new(DOMAIN).unwrap(), CString::new(LOCALE_DIR).unwrap(), c"UTF-8");
+    let dir = crate::core::share_dir().join("locale");
+    let (domain, dir, utf8) = (CString::new(DOMAIN).unwrap(), CString::new(dir.to_string_lossy().as_bytes()).unwrap(), c"UTF-8");
     unsafe {
+        #[cfg(unix)]
         libc::setlocale(libc::LC_ALL, c"".as_ptr());
         bindtextdomain(domain.as_ptr(), dir.as_ptr());
         bind_textdomain_codeset(domain.as_ptr(), utf8.as_ptr());

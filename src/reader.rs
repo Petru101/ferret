@@ -47,9 +47,15 @@ struct Line {
     weakest_digit: f32,
 }
 
-/// Where the models are: installed with the app, or `FERRET_OCR_MODELS` (tools run outside it).
+/// Where the models are: installed with the app (/app/share/ferret/ocr; on Windows
+/// `share\ferret\ocr` beside the `bin` folder, as `core::share_dir`, which this file can't use:
+/// examples/ocr.rs and the bench compile it alone), or `FERRET_OCR_MODELS` (tools run outside it).
 fn models_dir() -> PathBuf {
-    std::env::var_os("FERRET_OCR_MODELS").map_or_else(|| PathBuf::from("/app/share/ferret/ocr"), PathBuf::from)
+    #[cfg(windows)]
+    let installed = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.parent()?.join("share/ferret/ocr"))).unwrap_or_default();
+    #[cfg(not(windows))]
+    let installed = PathBuf::from("/app/share/ferret/ocr");
+    std::env::var_os("FERRET_OCR_MODELS").map_or(installed, PathBuf::from)
 }
 
 fn reader() -> Result<&'static Reader, String> {

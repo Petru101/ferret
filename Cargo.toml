@@ -12,12 +12,34 @@ adw = { version = "0.9.2", package = "libadwaita", features = ["v1_6"] }
 async-channel = "2.5.0"
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_14"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-libc = "0.2"
 # Feedback and bug reports (feedback.rs): HTTPS with its own certificates, no system TLS.
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 rten = "0.26"
 rten-tensor = "0.26"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+# The ScreenCast portal (capture_linux.rs).
 zbus = "5"
+
+[target.'cfg(windows)'.dependencies]
+# Windows.Graphics.Capture and Direct3D 11 (capture_windows.rs).
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 opt-level = 3

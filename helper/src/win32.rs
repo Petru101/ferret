@@ -217,6 +217,15 @@ extern "system" {
     pub fn PeekNamedPipe(pipe: HANDLE, buf: *mut c_void, size: u32, read: *mut u32, avail: *mut u32, left: *mut u32) -> BOOL;
 }
 
+pub type HWND = *mut c_void;
+
+#[link(name = "user32")]
+extern "system" {
+    pub fn EnumWindows(each: unsafe extern "system" fn(HWND, isize) -> BOOL, data: isize) -> BOOL;
+    pub fn GetWindowThreadProcessId(hwnd: HWND, pid: *mut u32) -> u32;
+    pub fn IsWindowVisible(hwnd: HWND) -> BOOL;
+}
+
 #[link(name = "ntdll")]
 extern "system" {
     pub fn NtQueryInformationProcess(p: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;

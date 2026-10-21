@@ -27,6 +27,7 @@ fn flatpak_app_path() -> Option<String> {
     flatpak_info("app-path")
 }
 
+#[cfg(not(windows))]
 const APP_ID: &str = "io.github.Petru101.Ferret";
 
 /// Ferret's version and, in the flatpak, the start of its build's commit ("0.1.0 (3f2a9c1e)").
@@ -53,13 +54,16 @@ pub fn newer_install() -> bool {
 /// instance would only hand over to this one); call right before quitting. Detached on the
 /// host, so flatpak-spawn returns at once instead of keeping this sandbox alive meanwhile.
 pub fn restart_after_quit() -> Result<(), String> {
-    let script = format!(
+    #[cfg(windows)]
+    let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    #[cfg(not(windows))]
+    let mut cmd = Command::new("flatpak-spawn");
+    #[cfg(not(windows))]
+    cmd.args(["--host", "setsid", "-f", "sh", "-c", &format!(
         "for i in $(seq 50); do gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
          --method org.freedesktop.DBus.NameHasOwner {APP_ID} | grep -q true || break; sleep 0.2; done; exec flatpak run {APP_ID}"
-    );
-    Command::new("flatpak-spawn")
-        .args(["--host", "setsid", "-f", "sh", "-c", &script])
-        .stdin(Stdio::null())
+    )]);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -86,12 +90,45 @@ pub fn sandbox_report() -> Vec<String> {
     ]
 }
 
+/// Where logs and frames go: the flatpak's cache (XDG_CACHE_HOME); on Windows
+/// %LOCALAPPDATA%\Ferret\cache.
 pub fn cache_dir() -> PathBuf {
+    #[cfg(windows)]
+    let dir = local_app_data().join("cache");
+    #[cfg(not(windows))]
     let dir = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/ferret"));
     fs::create_dir_all(&dir).ok();
     dir
+}
+
+/// Where profiles and the like are kept: the flatpak's data (XDG_DATA_HOME); on Windows
+/// %LOCALAPPDATA%\Ferret.
+pub fn data_dir() -> PathBuf {
+    #[cfg(windows)]
+    return local_app_data();
+    #[cfg(not(windows))]
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/ferret"))
+}
+
+#[cfg(windows)]
+fn local_app_data() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Ferret")
+}
+
+/// The files Ferret ships (OCR models, translations): /app/share in the flatpak; on Windows
+/// the `share` folder beside the `bin` folder Ferret runs from.
+pub fn share_dir() -> PathBuf {
+    #[cfg(windows)]
+    return std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("share")))
+        .unwrap_or_else(|| PathBuf::from("share"));
+    #[cfg(not(windows))]
+    PathBuf::from("/app/share")
 }
 
 /// Whether the helper runs with the player's password (`Core::allow_with_password`): it then
@@ -117,6 +154,7 @@ pub fn native_games_blocked() -> Option<bool> {
 
 /// `<uid>:<gid>:<home>` of the player, for the helper started as root (pkexec wipes its
 /// environment).
+#[cfg(not(windows))]
 fn as_user() -> Result<String, String> {
     let status = fs::read_to_string("/proc/self/status").map_err(|e| e.to_string())?;
     let id = |key: &str| status.lines().find_map(|l| l.strip_prefix(key)?.split_whitespace().next()).ok_or(format!("no {key} in /proc/self/status"));
@@ -124,7 +162,8 @@ fn as_user() -> Result<String, String> {
     Ok(format!("{}:{}:{home}", id("Uid:")?, id("Gid:")?))
 }
 
-/// The host helper, started through flatpak-spawn so it can see the game.
+/// The host helper, started through flatpak-spawn so it can see the game (on Windows, the
+/// `ferret-helper.exe` beside Ferret's own program).
 struct Helper {
     child: Child,
     input: Option<ChildStdin>,
@@ -135,10 +174,21 @@ impl Helper {
     /// `privileged`: through pkexec (the desktop asks for the password); the helper becomes
     /// the player again at once, keeping only the right to open their programs.
     fn start(privileged: bool) -> Result<Self, String> {
+        #[cfg(windows)]
+        let mut cmd = {
+            use std::os::windows::process::CommandExt;
+            let _ = privileged;
+            let mut c = Command::new(std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("ferret-helper.exe"));
+            // No console window of its own.
+            c.creation_flags(0x0800_0000 /* CREATE_NO_WINDOW */);
+            c
+        };
+        #[cfg(not(windows))]
         let helper = match flatpak_app_path() {
             Some(app) => PathBuf::from(format!("{app}/bin/ferret-helper")),
             None => std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("ferret-helper"),
         };
+        #[cfg(not(windows))]
         let mut cmd = match flatpak_app_path() {
             Some(_) => {
                 let mut c = Command::new("flatpak-spawn");
@@ -147,6 +197,7 @@ impl Helper {
             }
             None => Command::new("env"),
         };
+        #[cfg(not(windows))]
         if privileged {
             cmd.arg("pkexec").arg(&helper).arg("--as").arg(as_user()?);
         } else {
@@ -183,12 +234,19 @@ impl Helper {
     /// `call_cancellable`, telling `note` each "note ..." line as it comes (what a long wait
     /// found so far), without the "note ".
     fn call_noting(&mut self, line: &str, cancel: &Arc<AtomicBool>, note: &mut dyn FnMut(&str)) -> Vec<String> {
-        use std::os::fd::AsFd;
+        #[cfg(unix)]
+        use std::os::fd::AsFd as AsDup;
+        #[cfg(windows)]
+        use std::os::windows::io::AsHandle as AsDup;
         if !self.send(line) {
             return vec!["error: host helper exited".into()];
         }
         let done = Arc::new(AtomicBool::new(false));
-        let watcher = self.input.as_ref().and_then(|i| i.as_fd().try_clone_to_owned().ok()).map(|fd| {
+        #[cfg(unix)]
+        let dup = self.input.as_ref().and_then(|i| i.as_fd().try_clone_to_owned().ok());
+        #[cfg(windows)]
+        let dup = self.input.as_ref().and_then(|i| i.as_handle().try_clone_to_owned().ok());
+        let watcher = dup.map(|fd| {
             let (done, cancel) = (done.clone(), cancel.clone());
             std::thread::spawn(move || {
                 let mut input = fs::File::from(fd);
@@ -674,10 +732,7 @@ fn first_error(reply: &[String]) -> Option<String> {
 // --- Profiles: named values that survive game restarts, one file per game.
 
 fn profile_path(exe: &str) -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/ferret"));
-    base.join("profiles").join(format!("{}.profile", exe.to_lowercase()))
+    data_dir().join("profiles").join(format!("{}.profile", exe.to_lowercase()))
 }
 
 /// The game's saved values as the profile holds them (feedback.rs sends them with a report).
@@ -3403,7 +3458,7 @@ impl Core {
     /// Starts window capture; the first time, the desktop asks which window.
     pub fn start_capture(&mut self) -> Result<(), String> {
         if self.capture.is_none() {
-            self.capture = Some(WindowCapture::start()?);
+            self.capture = Some(WindowCapture::start(self.game.as_ref().map(|g| g.pid))?);
         }
         Ok(())
     }

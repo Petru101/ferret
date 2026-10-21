@@ -1496,6 +1496,12 @@ const NOT_GAMES: &[&str] = &[
     "srt-bwrap", "bwrap", "wineserver", "sh",
     "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep", "umu.exe", "xalia.exe",
     "xwayland", "gamescope", "gamescope-wl", "gamescopereaper", "gpu-screen-recorder", "mpv", "ffplay",
+    // Windows itself: launchers, browsers, consoles and Ferret (most of Windows' own programs
+    // run from C:\Windows, `windows_non_game`).
+    "epicgameslauncher.exe", "epicwebhelper.exe", "galaxyclient.exe", "galaxyclient helper.exe", "eadesktop.exe",
+    "upc.exe", "battle.net.exe", "msedge.exe", "msedgewebview2.exe", "chrome.exe", "firefox.exe", "discord.exe",
+    "obs64.exe", "windowsterminal.exe", "openconsole.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "ferret.exe",
+    "ferret-helper.exe",
 ];
 
 /// Native games outside Steam: a GPU driver is loaded (the program draws with OpenGL or Vulkan;
@@ -1534,6 +1540,9 @@ fn gpu_driver(name: &str) -> bool {
         .iter()
         .any(|d| name.starts_with(d))
         || name.ends_with("_dri.so")
+        // On Windows itself: Direct3D, OpenGL or Vulkan loaded (only telling a launch's game from
+        // its helpers apart: most Windows apps load Direct3D).
+        || cfg!(windows) && ["d3d8.dll", "d3d9.dll", "d3d11.dll", "d3d12.dll", "opengl32.dll", "vulkan-1.dll"].contains(&name.to_ascii_lowercase().as_str())
 }
 
 /// A launcher's install: its folder or the one above ships Qt or Chromium Embedded DLLs (seen
@@ -1551,7 +1560,7 @@ fn launcher_folder(pid: u32, program: &Path) -> bool {
 /// GDK 3 alone too: GNOME's ibus-x11 loads it and Mesa without GTK, and showed up as a game.
 fn desktop_toolkit(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    ["libgtk-3.", "libgdk-3.", "libgtk-4.", "libqt5core.", "libqt6core.", "libcef.", "qt5core.dll", "qt6core.dll"]
+    ["libgtk-3.", "libgdk-3.", "libgtk-4.", "libqt5core.", "libqt6core.", "libcef.", "qt5core.dll", "qt6core.dll", "chrome_elf.dll", "msedge_elf.dll"]
         .iter()
         .any(|t| name.starts_with(t))
 }
@@ -1562,6 +1571,11 @@ fn desktop_toolkit(name: &str) -> bool {
 /// neither and don't draw (the EA app starts compatibility32\EADesktop.exe next to every game).
 fn windows_non_game(pid: u32) -> bool {
     if cmdline(pid).contains(" --type=") {
+        return true;
+    }
+    // On Windows itself a game has a window, and doesn't come with Windows.
+    #[cfg(windows)]
+    if !os::has_window(pid) || os::exe(pid).is_some_and(|p| p.to_string_lossy().to_ascii_lowercase().starts_with("c:/windows/")) {
         return true;
     }
     let Ok(regions) = maps(pid) else { return true };

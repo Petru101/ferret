@@ -303,6 +303,27 @@ pub fn own_pids() -> Vec<u32> {
     pids
 }
 
+/// Whether the process shows a window (a visible top-level one).
+pub fn has_window(pid: u32) -> bool {
+    struct Search {
+        pid: u32,
+        found: bool,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, data: isize) -> BOOL {
+        let s = unsafe { &mut *(data as *mut Search) };
+        let mut owner = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut owner) };
+        if owner == s.pid && unsafe { IsWindowVisible(hwnd) } != 0 {
+            s.found = true;
+            return 0;
+        }
+        1
+    }
+    let mut s = Search { pid, found: false };
+    unsafe { EnumWindows(each, &mut s as *mut Search as isize) };
+    s.found
+}
+
 /// Whether the process runs 32-bit code (WOW64).
 pub fn is_wow64(pid: u32) -> bool {
     let Some(p) = open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else { return false };

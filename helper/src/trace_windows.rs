@@ -170,8 +170,13 @@ impl Tracer {
                 }
                 EXCEPTION_DEBUG_EVENT => {
                     let code = ev.exception_code();
-                    let hit = if code == EXCEPTION_SINGLE_STEP || code == STATUS_WX86_SINGLE_STEP { self.take_hit(tid, code) } else { None };
-                    match hit {
+                    if code != EXCEPTION_SINGLE_STEP && code != STATUS_WX86_SINGLE_STEP {
+                        // The game's own exceptions (C++ exceptions, its own breakpoints, faults it
+                        // handles) go back to it.
+                        continue_event(pid, tid, DBG_EXCEPTION_NOT_HANDLED);
+                        continue;
+                    }
+                    match self.take_hit(tid, code) {
                         Some(hit) => {
                             if !on_hit(&hit) {
                                 self.parked = Some(tid);
@@ -179,9 +184,10 @@ impl Tracer {
                             }
                             continue_event(pid, tid, DBG_CONTINUE);
                         }
-                        // The game's own exceptions (C++ exceptions, its own breakpoints, faults it
-                        // handles) go back to it.
-                        None => continue_event(pid, tid, DBG_EXCEPTION_NOT_HANDLED),
+                        // A single step with no breakpoint in DR6: one of ours whose DR6 was
+                        // cleared when the breakpoints were set again (Drop's comment). Games
+                        // don't single-step themselves; passing it on would end the game.
+                        None => continue_event(pid, tid, DBG_CONTINUE),
                     }
                 }
                 _ => continue_event(pid, tid, DBG_CONTINUE),
@@ -242,13 +248,17 @@ impl Tracer {
 impl Drop for Tracer {
     fn drop(&mut self) {
         if !self.gone {
-            // Clear every thread's breakpoints, then let through what is still queued: hits
-            // that came meanwhile are ours, anything else goes back to the game.
+            // Clear every thread's breakpoints, then let through what is still queued. Every
+            // single step is ours: a thread whose hit was on its way when its registers were
+            // cleared (DR6 with them) can't be told apart, and handing it to the game kills it
+            // (EXCEPTION_SINGLE_STEP, unhandled: it happened to the stand-in under load). A
+            // hit can take a while to arrive in a busy game, so the queue is waited on until
+            // it stays empty for 100 ms.
             self.arm_slots(&[], 0);
             if let Some(tid) = self.parked.take() {
                 continue_event(self.pid, tid, DBG_CONTINUE);
             }
-            while let Some(ev) = next_event(Duration::from_millis(20)) {
+            while let Some(ev) = next_event(Duration::from_millis(100)) {
                 let status = match ev.dwDebugEventCode {
                     CREATE_PROCESS_DEBUG_EVENT | LOAD_DLL_DEBUG_EVENT => {
                         if !ev.file_handle().is_null() {
@@ -257,7 +267,10 @@ impl Drop for Tracer {
                         DBG_CONTINUE
                     }
                     EXCEPTION_DEBUG_EVENT => match ev.exception_code() {
-                        EXCEPTION_SINGLE_STEP | STATUS_WX86_SINGLE_STEP if self.take_hit(ev.dwThreadId, ev.exception_code()).is_some() => DBG_CONTINUE,
+                        EXCEPTION_SINGLE_STEP | STATUS_WX86_SINGLE_STEP => {
+                            self.take_hit(ev.dwThreadId, ev.exception_code());
+                            DBG_CONTINUE
+                        }
                         _ => DBG_EXCEPTION_NOT_HANDLED,
                     },
                     _ => DBG_CONTINUE,
