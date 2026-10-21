@@ -308,6 +308,21 @@ impl Ui {
         }
         let list = listed(names);
         self.background.set(true);
+        // Windows: no Background portal, and nothing ends a windowless program: Windows'
+        // notification says so (click = the window, Quit Ferret).
+        #[cfg(windows)]
+        {
+            let ui = self.clone();
+            self.notify.send_action(
+                &tr!("Ferret Is Still Running"),
+                &tr!("It keeps {values} in range while you play, and quits when the game does.", values = list),
+                &tr!("Quit Ferret"),
+                move || ui.quit(),
+                None,
+            );
+            return;
+        }
+        #[cfg_attr(windows, allow(unreachable_code))]
         let Some(app) = self.app() else { return };
         let notify = {
             let (app, list) = (app.clone(), list.clone());

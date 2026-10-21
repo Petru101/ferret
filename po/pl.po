@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-21 06:54+0100\n"
+"POT-Creation-Date: 2026-10-21 07:34+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Polish\n"
 "Language: pl\n"
@@ -1405,7 +1405,7 @@ msgid "The first time, your desktop asks which window to share."
 msgstr "Za pierwszym razem twój pulpit zapyta, które okno udostępnić."
 
 #: src/gui/find.rs:1055 src/gui/find.rs:1961 src/gui/guide.rs:203
-#: src/gui/mod.rs:936
+#: src/gui/mod.rs:951
 msgid "Click the number you want to find"
 msgstr "Kliknij liczbę, którą chcesz znaleźć"
 
@@ -1947,7 +1947,7 @@ msgstr "Nie wybrano ramki"
 msgid "Type the number the game holds below, or click one in the picture."
 msgstr "Wpisz poniżej liczbę, którą ma gra, albo kliknij jedną na obrazie."
 
-#: src/gui/find.rs:1961 src/gui/guide.rs:203 src/gui/mod.rs:936
+#: src/gui/find.rs:1961 src/gui/guide.rs:203 src/gui/mod.rs:951
 msgid "In the picture of your game below, or drag a box around it."
 msgstr "Na obrazie gry poniżej albo zaznacz ją ramką."
 
@@ -2548,39 +2548,51 @@ msgstr "{count}. Potem wpisz poniżej nową liczbę."
 msgid "{count}. Then type the new number in Ferret."
 msgstr "{count}. Potem wpisz nową liczbę w Ferrecie."
 
-#: src/gui/hotkeys.rs:22
+#: src/gui/hotkeys.rs:24
 msgid "Turn limits off or on"
 msgstr "Wyłącz lub włącz limity"
 
-#: src/gui/hotkeys.rs:23
+#: src/gui/hotkeys.rs:25
 msgid "Start or stop the search"
 msgstr "Rozpocznij lub zatrzymaj wyszukiwanie"
 
-#: src/gui/hotkeys.rs:24
+#: src/gui/hotkeys.rs:26
 msgid "Scan again (the number stayed the same)"
 msgstr "Skanuj ponownie (liczba się nie zmieniła)"
 
-#: src/gui/hotkeys.rs:27
+#: src/gui/hotkeys.rs:29
 msgid "It's still (No Number?)"
 msgstr "Stoi w miejscu (Brak liczby?)"
 
-#: src/gui/hotkeys.rs:28
+#: src/gui/hotkeys.rs:30
 msgid "It's moving (No Number?)"
 msgstr "Zmienia się (Brak liczby?)"
 
-#: src/gui/hotkeys.rs:70 src/gui/hotkeys.rs:76
+#: src/gui/hotkeys.rs:72 src/gui/hotkeys.rs:78
 msgid "Hotkeys"
 msgstr "Skróty klawiszowe"
 
-#: src/gui/hotkeys.rs:127
+#: src/gui/hotkeys.rs:134
 msgid "None"
 msgstr "Brak"
 
-#: src/gui/hotkeys.rs:132
+#: src/gui/hotkeys.rs:139
 msgid "This desktop doesn't offer hotkeys to apps."
 msgstr "Ten pulpit nie udostępnia aplikacjom skrótów klawiszowych."
 
-#: src/gui/hotkeys.rs:134
+#: src/gui/hotkeys.rs:142
+msgid ""
+"Another program has some of these keys already, so those don't work. Close "
+"it and start Ferret again."
+msgstr "Inny program używa już niektórych z tych klawiszy, więc nie działają. Zamknij go i uruchom Ferret ponownie."
+
+#: src/gui/hotkeys.rs:144 src/gui/hotkeys.rs:149
+msgid ""
+"They work while the game is in front. A notification says what they did."
+msgstr ""
+"Działają, gdy gra jest na pierwszym planie. Powiadomienie mówi, co zrobiły."
+
+#: src/gui/hotkeys.rs:146
 msgid ""
 "Your desktop gave some of them no key, likely because another shortcut has "
 "it already: pick one in Change Hotkeys."
@@ -2588,17 +2600,11 @@ msgstr ""
 "Pulpit nie przypisał niektórym klawisza, pewnie dlatego, że inny skrót już "
 "go używa: wybierz go w Zmień skróty."
 
-#: src/gui/hotkeys.rs:135 src/gui/hotkeys.rs:137
+#: src/gui/hotkeys.rs:147 src/gui/hotkeys.rs:149
 msgid "Change Hotkeys…"
 msgstr "Zmień skróty…"
 
-#: src/gui/hotkeys.rs:137
-msgid ""
-"They work while the game is in front. A notification says what they did."
-msgstr ""
-"Działają, gdy gra jest na pierwszym planie. Powiadomienie mówi, co zrobiły."
-
-#: src/gui/hotkeys.rs:139
+#: src/gui/hotkeys.rs:151
 msgid ""
 "Turn limits off or on, and search, without leaving the game. They aren't set "
 "up: your desktop asks you to accept them."
@@ -2606,7 +2612,7 @@ msgstr ""
 "Włączaj i wyłączaj limity oraz szukaj bez wychodzenia z gry. Nie są "
 "skonfigurowane: twój pulpit poprosi cię o ich zaakceptowanie."
 
-#: src/gui/hotkeys.rs:140
+#: src/gui/hotkeys.rs:152
 msgid "Set Up Hotkeys…"
 msgstr "Skonfiguruj skróty…"
 
@@ -2615,54 +2621,54 @@ msgstr "Skonfiguruj skróty…"
 msgid "Ferret hit a bug and stopped: {what}"
 msgstr "Ferret natrafił na błąd i się zatrzymał: {what}"
 
-#: src/gui/mod.rs:315
+#: src/gui/mod.rs:317 src/gui/mod.rs:330
 msgid "Ferret Is Still Running"
 msgstr "Ferret nadal działa"
 
-#: src/gui/mod.rs:316
+#: src/gui/mod.rs:318 src/gui/mod.rs:331
 #, rust-format
 msgid ""
 "It keeps {values} in range while you play, and quits when the game does."
 msgstr ""
 "Utrzymuje {values} w zakresie podczas gry i kończy działanie razem z grą."
 
-#: src/gui/mod.rs:318 src/gui/mod.rs:616 src/gui/mod.rs:631 src/gui/mod.rs:652
-#: src/gui/mod.rs:666
+#: src/gui/mod.rs:319 src/gui/mod.rs:333 src/gui/mod.rs:631 src/gui/mod.rs:646
+#: src/gui/mod.rs:667 src/gui/mod.rs:681
 msgid "Quit Ferret"
 msgstr "Zakończ Ferreta"
 
-#: src/gui/mod.rs:354
+#: src/gui/mod.rs:369
 #, rust-format
 msgid "To keep {values} in range while you play"
 msgstr "Aby utrzymać {values} w zakresie podczas gry"
 
-#: src/gui/mod.rs:381
+#: src/gui/mod.rs:396
 #, rust-format
 msgid "Keeping {values} in range"
 msgstr "Utrzymuje {values} w zakresie"
 
-#: src/gui/mod.rs:403 src/gui/mod.rs:404 src/gui/mod.rs:406 src/gui/mod.rs:407
-#: src/gui/mod.rs:408
+#: src/gui/mod.rs:418 src/gui/mod.rs:419 src/gui/mod.rs:421 src/gui/mod.rs:422
+#: src/gui/mod.rs:423
 msgid "Can't search yet"
 msgstr "Nie można jeszcze szukać"
 
-#: src/gui/mod.rs:403 src/gui/mod.rs:406
+#: src/gui/mod.rs:418 src/gui/mod.rs:421
 msgid "Open the game in Ferret first."
 msgstr "Najpierw otwórz grę w Ferrecie."
 
-#: src/gui/mod.rs:405
+#: src/gui/mod.rs:420
 msgid "Can't scan again yet"
 msgstr "Nie można jeszcze skanować ponownie"
 
-#: src/gui/mod.rs:483
+#: src/gui/mod.rs:498
 msgid "Allow With Your Password"
 msgstr "Zezwól hasłem"
 
-#: src/gui/mod.rs:516 src/gui/tips.rs:86
+#: src/gui/mod.rs:531 src/gui/tips.rs:86
 msgid "Close"
 msgstr "Zamknij"
 
-#: src/gui/mod.rs:534
+#: src/gui/mod.rs:549
 msgid ""
 "Only change values while you play alone and offline. If anti-cheat starts in "
 "the game, Ferret lets go of it at once."
@@ -2670,12 +2676,12 @@ msgstr ""
 "Zmieniaj wartości tylko, gdy grasz sam i offline. Jeśli w grze uruchomi się "
 "anti-cheat, Ferret od razu ją puszcza."
 
-#: src/gui/mod.rs:537
+#: src/gui/mod.rs:552
 #, rust-format
 msgid "{name} has online features"
 msgstr "{name} ma funkcje online"
 
-#: src/gui/mod.rs:551
+#: src/gui/mod.rs:566
 #, rust-format
 msgid ""
 "{name} uses {scrambler}, which keeps its numbers scrambled in memory. Ferret "
@@ -2687,21 +2693,21 @@ msgstr ""
 "to przynęty przywracane przez grę, a ich zmiana może zostać przez grę "
 "zauważona."
 
-#: src/gui/mod.rs:557
+#: src/gui/mod.rs:572
 #, rust-format
 msgid "{name} hides its numbers"
 msgstr "{name} ukrywa swoje liczby"
 
-#: src/gui/mod.rs:610
+#: src/gui/mod.rs:625
 msgid "Valve Anti-Cheat"
 msgstr "Valve Anti-Cheat"
 
-#: src/gui/mod.rs:614
+#: src/gui/mod.rs:629
 #, rust-format
 msgid "{game} has anti-cheat"
 msgstr "{game} ma anti-cheat"
 
-#: src/gui/mod.rs:615
+#: src/gui/mod.rs:630
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
@@ -2709,12 +2715,12 @@ msgstr ""
 "Niektóre systemy anti-cheat szukają narzędzi do oszukiwania na całym "
 "komputerze. Zamknij Ferret, gdy w to grasz."
 
-#: src/gui/mod.rs:624
+#: src/gui/mod.rs:639
 #, rust-format
 msgid "Quit Ferret While You Play {game}?"
 msgstr "Zamknąć Ferret, gdy grasz w {game}?"
 
-#: src/gui/mod.rs:626
+#: src/gui/mod.rs:641
 #, rust-format
 msgid ""
 "{game} runs {anticheat}. Some anti-cheat looks for cheat tools anywhere on "
@@ -2727,75 +2733,83 @@ msgstr ""
 "mogą za nie banować. Ferret nie otworzy tej gry, ale najbezpieczniej jest "
 "zamknąć Ferret, gdy w nią grasz."
 
-#: src/gui/mod.rs:631 src/gui/mod.rs:666
+#: src/gui/mod.rs:646 src/gui/mod.rs:681
 msgid "Keep Ferret Open"
 msgstr "Zostaw Ferret otwarty"
 
-#: src/gui/mod.rs:650
+#: src/gui/mod.rs:665
 #, rust-format
 msgid "{anticheat} is running"
 msgstr "{anticheat} działa"
 
-#: src/gui/mod.rs:651
+#: src/gui/mod.rs:666
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while it runs."
-msgstr "Niektóre systemy anti-cheat szukają narzędzi do oszukiwania na całym komputerze. Zamknij Ferret, dopóki działa."
+msgstr ""
+"Niektóre systemy anti-cheat szukają narzędzi do oszukiwania na całym "
+"komputerze. Zamknij Ferret, dopóki działa."
 
-#: src/gui/mod.rs:660
+#: src/gui/mod.rs:675
 #, rust-format
 msgid "Quit Ferret While {anticheat} Runs?"
 msgstr "Zamknąć Ferret, dopóki działa {anticheat}?"
 
-#: src/gui/mod.rs:662
+#: src/gui/mod.rs:677
 #, rust-format
 msgid ""
 "{anticheat} is running on your computer. Some anti-cheat looks for cheat "
 "tools anywhere on your computer, even ones that don't touch its game, and "
 "may ban for them. Ferret won't open any game while it runs, but it's safest "
 "to quit Ferret."
-msgstr "{anticheat} działa na twoim komputerze. Niektóre systemy anti-cheat szukają narzędzi do oszukiwania na całym komputerze, nawet takich, które nie dotykają ich gry, i mogą za nie banować. Ferret nie otworzy żadnej gry, dopóki działa, ale najbezpieczniej jest zamknąć Ferret."
+msgstr ""
+"{anticheat} działa na twoim komputerze. Niektóre systemy anti-cheat szukają "
+"narzędzi do oszukiwania na całym komputerze, nawet takich, które nie "
+"dotykają ich gry, i mogą za nie banować. Ferret nie otworzy żadnej gry, "
+"dopóki działa, ale najbezpieczniej jest zamknąć Ferret."
 
-#: src/gui/mod.rs:686
+#: src/gui/mod.rs:701
 #, rust-format
 msgid "{name} started again: opening it"
 msgstr "{name} uruchomiono ponownie: otwieranie"
 
-#: src/gui/mod.rs:708
+#: src/gui/mod.rs:723
 #, rust-format
 msgid "Process {pid}"
 msgstr "Proces {pid}"
 
-#: src/gui/mod.rs:710
+#: src/gui/mod.rs:725
 #, rust-format
 msgid "Steam app {id}"
 msgstr "Aplikacja Steam {id}"
 
-#: src/gui/mod.rs:723
+#: src/gui/mod.rs:738
 msgid "Needs your password"
 msgstr "Wymaga twojego hasła"
 
-#: src/gui/mod.rs:724
+#: src/gui/mod.rs:739
 msgid "Blocked by your system until it restarts"
 msgstr "Zablokowane przez system do ponownego uruchomienia"
 
-#: src/gui/mod.rs:731
+#: src/gui/mod.rs:746
 #, rust-format
 msgid "{anticheat} is running. Ferret won't attach while anti-cheat runs."
 msgstr "{anticheat} działa. Ferret nie podłącza się, gdy działa anti-cheat."
 
-#: src/gui/mod.rs:733
+#: src/gui/mod.rs:748
 #, rust-format
 msgid ""
 "{anticheat} is running on your computer. Ferret won't attach to any game "
 "while it runs."
-msgstr "{anticheat} działa na twoim komputerze. Ferret nie podłączy się do żadnej gry, dopóki działa."
+msgstr ""
+"{anticheat} działa na twoim komputerze. Ferret nie podłączy się do żadnej "
+"gry, dopóki działa."
 
-#: src/gui/mod.rs:735
+#: src/gui/mod.rs:750
 msgid "Online-only game. Ferret won't attach to online games."
 msgstr "Gra tylko online. Ferret nie podłącza się do gier online."
 
-#: src/gui/mod.rs:737
+#: src/gui/mod.rs:752
 msgid ""
 "Uses Valve Anti-Cheat. Ferret won't attach to it. Source games started with "
 "-insecure in their launch options are allowed."
@@ -2803,7 +2817,7 @@ msgstr ""
 "Używa Valve Anti-Cheat. Ferret się do niej nie podłącza. Gry na silniku "
 "Source uruchomione z -insecure w opcjach uruchamiania są dozwolone."
 
-#: src/gui/mod.rs:740
+#: src/gui/mod.rs:755
 msgid ""
 "This game flags edited characters when they go online. Ferret won't attach "
 "to it."
@@ -2811,35 +2825,35 @@ msgstr ""
 "Ta gra oznacza edytowane postacie, gdy wchodzą do sieci. Ferret się do niej "
 "nie podłącza."
 
-#: src/gui/mod.rs:749
+#: src/gui/mod.rs:764
 msgid "Online features"
 msgstr "Funkcje online"
 
-#: src/gui/mod.rs:770 src/gui/phase.rs:44
+#: src/gui/mod.rs:785 src/gui/phase.rs:44
 #, rust-format
 msgid "Opening {game}…"
 msgstr "Otwieranie {game}…"
 
-#: src/gui/mod.rs:845
+#: src/gui/mod.rs:860
 #, rust-format
 msgid "{name} closed. Ferret opens it again when it starts."
 msgstr "Zamknięto {name}. Ferret otworzy ją ponownie, gdy się uruchomi."
 
-#: src/gui/mod.rs:846
+#: src/gui/mod.rs:861
 #, rust-format
 msgid "{name} closed"
 msgstr "Zamknięto {name}"
 
-#: src/gui/mod.rs:846
+#: src/gui/mod.rs:861
 msgid "Ferret opens it again when it starts."
 msgstr "Ferret otworzy ją ponownie, gdy się uruchomi."
 
-#: src/gui/mod.rs:858
+#: src/gui/mod.rs:873
 #, rust-format
 msgid "Ferret let go of {name}"
 msgstr "Ferret puścił {name}"
 
-#: src/gui/mod.rs:861
+#: src/gui/mod.rs:876
 #, rust-format
 msgid ""
 "{anticheat} started in {name}. Ferret stopped keeping values in range and "
@@ -2848,159 +2862,161 @@ msgstr ""
 "{anticheat} uruchomił się w {name}. Ferret przestał utrzymywać wartości w "
 "zakresie i nie zmieni niczego w grze, dopóki działa anti-cheat."
 
-#: src/gui/mod.rs:867
+#: src/gui/mod.rs:882
 #, rust-format
 msgid ""
 "{anticheat} started on your computer. Ferret stopped keeping values in range "
 "and won't change anything in {name} while the anti-cheat runs."
-msgstr "{anticheat} uruchomił się na twoim komputerze. Ferret przestał utrzymywać wartości w zakresie i nie zmieni niczego w {name}, dopóki działa anti-cheat."
+msgstr ""
+"{anticheat} uruchomił się na twoim komputerze. Ferret przestał utrzymywać "
+"wartości w zakresie i nie zmieni niczego w {name}, dopóki działa anti-cheat."
 
-#: src/gui/mod.rs:923
+#: src/gui/mod.rs:938
 msgid "Saved"
 msgstr "Zapisano"
 
-#: src/gui/mod.rs:931
+#: src/gui/mod.rs:946
 msgid "More like this"
 msgstr "Więcej takich"
 
-#: src/gui/mod.rs:932
+#: src/gui/mod.rs:947
 msgid "Nothing saved"
 msgstr "Nic nie zapisano"
 
-#: src/gui/mod.rs:945
+#: src/gui/mod.rs:960
 msgid "Limits on"
 msgstr "Limity włączone"
 
-#: src/gui/mod.rs:945
+#: src/gui/mod.rs:960
 #, rust-format
 msgid "Ferret keeps {values} in range again."
 msgstr "Ferret znowu utrzymuje {values} w zakresie."
 
-#: src/gui/mod.rs:946
+#: src/gui/mod.rs:961
 msgid "Limits off"
 msgstr "Limity wyłączone"
 
-#: src/gui/mod.rs:946
+#: src/gui/mod.rs:961
 #, rust-format
 msgid "{values} can change freely until you turn limits on again."
 msgstr ""
 "{values} może się swobodnie zmieniać, dopóki nie włączysz limitów ponownie."
 
-#: src/gui/mod.rs:954
+#: src/gui/mod.rs:969
 msgid "Limits"
 msgstr "Limity"
 
-#: src/gui/mod.rs:971
+#: src/gui/mod.rs:986
 msgid "Ferret Can't Open This Game"
 msgstr "Ferret nie może otworzyć tej gry"
 
-#: src/gui/mod.rs:993
+#: src/gui/mod.rs:1008
 msgid "Running games"
 msgstr "Uruchomione gry"
 
-#: src/gui/mod.rs:994
+#: src/gui/mod.rs:1009
 msgid "Pick the game to attach to. Ferret only works with single-player games."
 msgstr ""
 "Wybierz grę, do której chcesz się podłączyć. Ferret działa tylko z grami "
 "jednoosobowymi."
 
-#: src/gui/mod.rs:1012
+#: src/gui/mod.rs:1027
 msgid "No Games Running"
 msgstr "Brak uruchomionych gier"
 
-#: src/gui/mod.rs:1013
+#: src/gui/mod.rs:1028
 msgid "Start a game and it shows up here."
 msgstr "Uruchom grę, a pojawi się tutaj."
 
-#: src/gui/mod.rs:1261
+#: src/gui/mod.rs:1276
 msgid "Values"
 msgstr "Wartości"
 
-#: src/gui/mod.rs:1262
+#: src/gui/mod.rs:1277
 msgid "Find Value"
 msgstr "Znajdź wartość"
 
-#: src/gui/mod.rs:1264
+#: src/gui/mod.rs:1279
 msgid "Browse"
 msgstr "Przeglądaj"
 
-#: src/gui/mod.rs:1281
+#: src/gui/mod.rs:1296
 msgid "A newer version of Ferret is installed"
 msgstr "Zainstalowano nowszą wersję Ferreta"
 
-#: src/gui/mod.rs:1281
+#: src/gui/mod.rs:1296
 msgid "Restart"
 msgstr "Uruchom ponownie"
 
-#: src/gui/mod.rs:1305
+#: src/gui/mod.rs:1320
 msgid "Game"
 msgstr "Gra"
 
-#: src/gui/mod.rs:1311
+#: src/gui/mod.rs:1326
 msgid "Ferret Could Not Start"
 msgstr "Nie udało się uruchomić Ferreta"
 
-#: src/gui/mod.rs:1314
+#: src/gui/mod.rs:1329
 msgid "Refresh"
 msgstr "Odśwież"
 
-#: src/gui/mod.rs:1507
+#: src/gui/mod.rs:1522
 #, rust-format
 msgid "{names} and {last}"
 msgstr "{names} i {last}"
 
-#: src/gui/mod.rs:1528
+#: src/gui/mod.rs:1543
 msgid "whole number"
 msgstr "liczba całkowita"
 
-#: src/gui/mod.rs:1529
+#: src/gui/mod.rs:1544
 msgid "float"
 msgstr "float"
 
-#: src/gui/mod.rs:1530
+#: src/gui/mod.rs:1545
 msgid "double"
 msgstr "double"
 
-#: src/gui/mod.rs:1531
+#: src/gui/mod.rs:1546
 msgid "encoded whole number"
 msgstr "zakodowana liczba całkowita"
 
-#: src/gui/mod.rs:1532
+#: src/gui/mod.rs:1547
 msgid "2-byte whole number"
 msgstr "2-bajtowa liczba całkowita"
 
-#: src/gui/mod.rs:1533
+#: src/gui/mod.rs:1548
 msgid "GameMaker number"
 msgstr "Liczba GameMakera"
 
-#: src/gui/mod.rs:1534
+#: src/gui/mod.rs:1549
 msgid "Lua number"
 msgstr "Liczba Lua"
 
-#: src/gui/mod.rs:1535
+#: src/gui/mod.rs:1550
 msgid "Python number"
 msgstr "Liczba Pythona"
 
-#: src/gui/mod.rs:1543
+#: src/gui/mod.rs:1558
 #, rust-format
 msgid "at most {max}"
 msgstr "co najwyżej {max}"
 
-#: src/gui/mod.rs:1544
+#: src/gui/mod.rs:1559
 #, rust-format
 msgid "at least {min}"
 msgstr "co najmniej {min}"
 
-#: src/gui/mod.rs:1545
+#: src/gui/mod.rs:1560
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "między {min} a {max}"
 
-#: src/gui/mod.rs:1546
+#: src/gui/mod.rs:1561
 msgid "unlimited"
 msgstr "bez limitu"
 
-#: src/gui/mod.rs:1552
+#: src/gui/mod.rs:1567
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
@@ -3008,16 +3024,16 @@ msgstr[0] "{n} rodzaj miejsca"
 msgstr[1] "{n} rodzaje miejsc"
 msgstr[2] "{n} rodzajów miejsc"
 
-#: src/gui/mod.rs:1559
+#: src/gui/mod.rs:1574
 msgid "It can be played with other people."
 msgstr "Można w nią grać z innymi ludźmi."
 
-#: src/gui/mod.rs:1562
+#: src/gui/mod.rs:1577
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "Zawiera {anticheat}, który teraz nie działa."
 
-#: src/gui/mod.rs:1566
+#: src/gui/mod.rs:1581
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
@@ -3025,18 +3041,21 @@ msgstr ""
 "Wydawca oznacza konta, których zapisy zostały zmienione: oznaczone konto "
 "może zostać wykluczone z rankingów, wydarzeń lub kooperacji."
 
-#: src/gui/mod.rs:1571
+#: src/gui/mod.rs:1586
 msgid "Its scores go on online leaderboards that other players see."
 msgstr "Wyniki trafiają do rankingów online, które widzą inni gracze."
 
-#: src/gui/mod.rs:1575
+#: src/gui/mod.rs:1590
 #, rust-format
 msgid ""
 "{anticheat} runs on your computer all the time, for other games. It may take "
 "Ferret for a cheat tool: quit Ferret before you play those games."
-msgstr "{anticheat} działa na twoim komputerze cały czas, dla innych gier. Może uznać Ferret za narzędzie do oszukiwania: zamknij Ferret, zanim zagrasz w te gry."
+msgstr ""
+"{anticheat} działa na twoim komputerze cały czas, dla innych gier. Może "
+"uznać Ferret za narzędzie do oszukiwania: zamknij Ferret, zanim zagrasz w te "
+"gry."
 
-#: src/gui/notify.rs:166
+#: src/gui/notify.rs:245
 msgid "Show Ferret"
 msgstr "Pokaż Ferreta"
 

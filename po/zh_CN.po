@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-21 06:54+0100\n"
+"POT-Creation-Date: 2026-10-21 07:34+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -1277,7 +1277,7 @@ msgid "The first time, your desktop asks which window to share."
 msgstr "第一次时,你的桌面会询问要共享哪个窗口。"
 
 #: src/gui/find.rs:1055 src/gui/find.rs:1961 src/gui/guide.rs:203
-#: src/gui/mod.rs:936
+#: src/gui/mod.rs:951
 msgid "Click the number you want to find"
 msgstr "点击你想查找的数字"
 
@@ -1751,7 +1751,7 @@ msgstr "没有选择框"
 msgid "Type the number the game holds below, or click one in the picture."
 msgstr "请在下方输入游戏中的数字,或点击画面中的一个数字。"
 
-#: src/gui/find.rs:1961 src/gui/guide.rs:203 src/gui/mod.rs:936
+#: src/gui/find.rs:1961 src/gui/guide.rs:203 src/gui/mod.rs:951
 msgid "In the picture of your game below, or drag a box around it."
 msgstr "在下方的游戏画面中,或者在它周围拖出一个框。"
 
@@ -2270,39 +2270,50 @@ msgstr "{count}。然后在下方输入新的数字。"
 msgid "{count}. Then type the new number in Ferret."
 msgstr "{count}。然后在 Ferret 中输入新的数字。"
 
-#: src/gui/hotkeys.rs:22
+#: src/gui/hotkeys.rs:24
 msgid "Turn limits off or on"
 msgstr "关闭或开启限制"
 
-#: src/gui/hotkeys.rs:23
+#: src/gui/hotkeys.rs:25
 msgid "Start or stop the search"
 msgstr "开始或停止搜索"
 
-#: src/gui/hotkeys.rs:24
+#: src/gui/hotkeys.rs:26
 msgid "Scan again (the number stayed the same)"
 msgstr "再次扫描(数字没有变)"
 
-#: src/gui/hotkeys.rs:27
+#: src/gui/hotkeys.rs:29
 msgid "It's still (No Number?)"
 msgstr "静止(没有数字?)"
 
-#: src/gui/hotkeys.rs:28
+#: src/gui/hotkeys.rs:30
 msgid "It's moving (No Number?)"
 msgstr "在变化(没有数字?)"
 
-#: src/gui/hotkeys.rs:70 src/gui/hotkeys.rs:76
+#: src/gui/hotkeys.rs:72 src/gui/hotkeys.rs:78
 msgid "Hotkeys"
 msgstr "快捷键"
 
-#: src/gui/hotkeys.rs:127
+#: src/gui/hotkeys.rs:134
 msgid "None"
 msgstr "无"
 
-#: src/gui/hotkeys.rs:132
+#: src/gui/hotkeys.rs:139
 msgid "This desktop doesn't offer hotkeys to apps."
 msgstr "这个桌面不向应用提供快捷键。"
 
-#: src/gui/hotkeys.rs:134
+#: src/gui/hotkeys.rs:142
+msgid ""
+"Another program has some of these keys already, so those don't work. Close "
+"it and start Ferret again."
+msgstr "另一个程序已经占用了其中一些按键，所以它们不起作用。关闭那个程序后重新启动 Ferret。"
+
+#: src/gui/hotkeys.rs:144 src/gui/hotkeys.rs:149
+msgid ""
+"They work while the game is in front. A notification says what they did."
+msgstr "游戏在前台时它们也能用。会有通知告诉你它们做了什么。"
+
+#: src/gui/hotkeys.rs:146
 msgid ""
 "Your desktop gave some of them no key, likely because another shortcut has "
 "it already: pick one in Change Hotkeys."
@@ -2310,22 +2321,17 @@ msgstr ""
 "你的桌面没有给其中一些分配按键,可能是因为别的快捷键已经占用了:请在“更改快捷"
 "键”中选择一个。"
 
-#: src/gui/hotkeys.rs:135 src/gui/hotkeys.rs:137
+#: src/gui/hotkeys.rs:147 src/gui/hotkeys.rs:149
 msgid "Change Hotkeys…"
 msgstr "更改快捷键……"
 
-#: src/gui/hotkeys.rs:137
-msgid ""
-"They work while the game is in front. A notification says what they did."
-msgstr "游戏在前台时它们也能用。会有通知告诉你它们做了什么。"
-
-#: src/gui/hotkeys.rs:139
+#: src/gui/hotkeys.rs:151
 msgid ""
 "Turn limits off or on, and search, without leaving the game. They aren't set "
 "up: your desktop asks you to accept them."
 msgstr "不离开游戏就能开关限制和搜索。它们还没有设置:你的桌面会请你接受它们。"
 
-#: src/gui/hotkeys.rs:140
+#: src/gui/hotkeys.rs:152
 msgid "Set Up Hotkeys…"
 msgstr "设置快捷键……"
 
@@ -2334,65 +2340,65 @@ msgstr "设置快捷键……"
 msgid "Ferret hit a bug and stopped: {what}"
 msgstr "Ferret 遇到了一个错误并已停止:{what}"
 
-#: src/gui/mod.rs:315
+#: src/gui/mod.rs:317 src/gui/mod.rs:330
 msgid "Ferret Is Still Running"
 msgstr "Ferret 仍在运行"
 
-#: src/gui/mod.rs:316
+#: src/gui/mod.rs:318 src/gui/mod.rs:331
 #, rust-format
 msgid ""
 "It keeps {values} in range while you play, and quits when the game does."
 msgstr "它会在你玩游戏时让 {values} 保持在范围内,并在游戏退出时退出。"
 
-#: src/gui/mod.rs:318 src/gui/mod.rs:616 src/gui/mod.rs:631 src/gui/mod.rs:652
-#: src/gui/mod.rs:666
+#: src/gui/mod.rs:319 src/gui/mod.rs:333 src/gui/mod.rs:631 src/gui/mod.rs:646
+#: src/gui/mod.rs:667 src/gui/mod.rs:681
 msgid "Quit Ferret"
 msgstr "退出 Ferret"
 
-#: src/gui/mod.rs:354
+#: src/gui/mod.rs:369
 #, rust-format
 msgid "To keep {values} in range while you play"
 msgstr "在你玩游戏时让 {values} 保持在范围内"
 
-#: src/gui/mod.rs:381
+#: src/gui/mod.rs:396
 #, rust-format
 msgid "Keeping {values} in range"
 msgstr "正在让 {values} 保持在范围内"
 
-#: src/gui/mod.rs:403 src/gui/mod.rs:404 src/gui/mod.rs:406 src/gui/mod.rs:407
-#: src/gui/mod.rs:408
+#: src/gui/mod.rs:418 src/gui/mod.rs:419 src/gui/mod.rs:421 src/gui/mod.rs:422
+#: src/gui/mod.rs:423
 msgid "Can't search yet"
 msgstr "还不能搜索"
 
-#: src/gui/mod.rs:403 src/gui/mod.rs:406
+#: src/gui/mod.rs:418 src/gui/mod.rs:421
 msgid "Open the game in Ferret first."
 msgstr "请先在 Ferret 中打开游戏。"
 
-#: src/gui/mod.rs:405
+#: src/gui/mod.rs:420
 msgid "Can't scan again yet"
 msgstr "还不能再次扫描"
 
-#: src/gui/mod.rs:483
+#: src/gui/mod.rs:498
 msgid "Allow With Your Password"
 msgstr "用密码允许"
 
-#: src/gui/mod.rs:516 src/gui/tips.rs:86
+#: src/gui/mod.rs:531 src/gui/tips.rs:86
 msgid "Close"
 msgstr "关闭"
 
-#: src/gui/mod.rs:534
+#: src/gui/mod.rs:549
 msgid ""
 "Only change values while you play alone and offline. If anti-cheat starts in "
 "the game, Ferret lets go of it at once."
 msgstr ""
 "只在单人离线游玩时修改数值。如果游戏中启动了反作弊,Ferret 会立刻放开它。"
 
-#: src/gui/mod.rs:537
+#: src/gui/mod.rs:552
 #, rust-format
 msgid "{name} has online features"
 msgstr "{name} 有联网功能"
 
-#: src/gui/mod.rs:551
+#: src/gui/mod.rs:566
 #, rust-format
 msgid ""
 "{name} uses {scrambler}, which keeps its numbers scrambled in memory. Ferret "
@@ -2403,32 +2409,32 @@ msgstr ""
 "其中的大部分:它找到的明文副本是游戏会改回去的诱饵,而修改它们可能会被游戏察"
 "觉。"
 
-#: src/gui/mod.rs:557
+#: src/gui/mod.rs:572
 #, rust-format
 msgid "{name} hides its numbers"
 msgstr "{name} 隐藏了它的数字"
 
-#: src/gui/mod.rs:610
+#: src/gui/mod.rs:625
 msgid "Valve Anti-Cheat"
 msgstr "Valve 反作弊（VAC）"
 
-#: src/gui/mod.rs:614
+#: src/gui/mod.rs:629
 #, rust-format
 msgid "{game} has anti-cheat"
 msgstr "{game} 有反作弊"
 
-#: src/gui/mod.rs:615
+#: src/gui/mod.rs:630
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
 msgstr "有些反作弊会在整台电脑上查找作弊工具。玩这个游戏时请退出 Ferret。"
 
-#: src/gui/mod.rs:624
+#: src/gui/mod.rs:639
 #, rust-format
 msgid "Quit Ferret While You Play {game}?"
 msgstr "玩 {game} 时退出 Ferret？"
 
-#: src/gui/mod.rs:626
+#: src/gui/mod.rs:641
 #, rust-format
 msgid ""
 "{game} runs {anticheat}. Some anti-cheat looks for cheat tools anywhere on "
@@ -2440,75 +2446,78 @@ msgstr ""
 "的工具，并可能因此封号。Ferret 不会打开这个游戏，但最安全的做法是在玩它时退"
 "出 Ferret。"
 
-#: src/gui/mod.rs:631 src/gui/mod.rs:666
+#: src/gui/mod.rs:646 src/gui/mod.rs:681
 msgid "Keep Ferret Open"
 msgstr "保持 Ferret 打开"
 
-#: src/gui/mod.rs:650
+#: src/gui/mod.rs:665
 #, rust-format
 msgid "{anticheat} is running"
 msgstr "{anticheat} 正在运行"
 
-#: src/gui/mod.rs:651
+#: src/gui/mod.rs:666
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while it runs."
 msgstr "有些反作弊会在整台电脑上查找作弊工具。它运行期间请退出 Ferret。"
 
-#: src/gui/mod.rs:660
+#: src/gui/mod.rs:675
 #, rust-format
 msgid "Quit Ferret While {anticheat} Runs?"
 msgstr "在 {anticheat} 运行期间退出 Ferret？"
 
-#: src/gui/mod.rs:662
+#: src/gui/mod.rs:677
 #, rust-format
 msgid ""
 "{anticheat} is running on your computer. Some anti-cheat looks for cheat "
 "tools anywhere on your computer, even ones that don't touch its game, and "
 "may ban for them. Ferret won't open any game while it runs, but it's safest "
 "to quit Ferret."
-msgstr "{anticheat} 正在你的电脑上运行。有些反作弊会在整台电脑上查找作弊工具，即使是不碰它们游戏的工具，并可能因此封号。它运行期间 Ferret 不会打开任何游戏，但最安全的做法是退出 Ferret。"
+msgstr ""
+"{anticheat} 正在你的电脑上运行。有些反作弊会在整台电脑上查找作弊工具，即使是"
+"不碰它们游戏的工具，并可能因此封号。它运行期间 Ferret 不会打开任何游戏，但最"
+"安全的做法是退出 Ferret。"
 
-#: src/gui/mod.rs:686
+#: src/gui/mod.rs:701
 #, rust-format
 msgid "{name} started again: opening it"
 msgstr "{name} 再次启动了:正在打开"
 
-#: src/gui/mod.rs:708
+#: src/gui/mod.rs:723
 #, rust-format
 msgid "Process {pid}"
 msgstr "进程 {pid}"
 
-#: src/gui/mod.rs:710
+#: src/gui/mod.rs:725
 #, rust-format
 msgid "Steam app {id}"
 msgstr "Steam 应用 {id}"
 
-#: src/gui/mod.rs:723
+#: src/gui/mod.rs:738
 msgid "Needs your password"
 msgstr "需要你的密码"
 
-#: src/gui/mod.rs:724
+#: src/gui/mod.rs:739
 msgid "Blocked by your system until it restarts"
 msgstr "被系统阻止，重启前无法使用"
 
-#: src/gui/mod.rs:731
+#: src/gui/mod.rs:746
 #, rust-format
 msgid "{anticheat} is running. Ferret won't attach while anti-cheat runs."
 msgstr "{anticheat} 正在运行。反作弊运行期间 Ferret 不会连接。"
 
-#: src/gui/mod.rs:733
+#: src/gui/mod.rs:748
 #, rust-format
 msgid ""
 "{anticheat} is running on your computer. Ferret won't attach to any game "
 "while it runs."
 msgstr "{anticheat} 正在你的电脑上运行。它运行期间 Ferret 不会连接任何游戏。"
 
-#: src/gui/mod.rs:735
+#: src/gui/mod.rs:750
 msgid "Online-only game. Ferret won't attach to online games."
 msgstr "仅限联网的游戏。Ferret 不会连接联网游戏。"
 
-#: src/gui/mod.rs:737
+#: src/gui/mod.rs:752
 msgid ""
 "Uses Valve Anti-Cheat. Ferret won't attach to it. Source games started with "
 "-insecure in their launch options are allowed."
@@ -2516,41 +2525,41 @@ msgstr ""
 "使用 Valve Anti-Cheat。Ferret 不会连接它。允许在启动选项中带 -insecure 启动"
 "的 Source 游戏。"
 
-#: src/gui/mod.rs:740
+#: src/gui/mod.rs:755
 msgid ""
 "This game flags edited characters when they go online. Ferret won't attach "
 "to it."
 msgstr "这个游戏会在角色联网时标记被修改过的角色。Ferret 不会连接它。"
 
-#: src/gui/mod.rs:749
+#: src/gui/mod.rs:764
 msgid "Online features"
 msgstr "联网功能"
 
-#: src/gui/mod.rs:770 src/gui/phase.rs:44
+#: src/gui/mod.rs:785 src/gui/phase.rs:44
 #, rust-format
 msgid "Opening {game}…"
 msgstr "正在打开 {game}……"
 
-#: src/gui/mod.rs:845
+#: src/gui/mod.rs:860
 #, rust-format
 msgid "{name} closed. Ferret opens it again when it starts."
 msgstr "{name} 已关闭。它再次启动时 Ferret 会重新打开它。"
 
-#: src/gui/mod.rs:846
+#: src/gui/mod.rs:861
 #, rust-format
 msgid "{name} closed"
 msgstr "{name} 已关闭"
 
-#: src/gui/mod.rs:846
+#: src/gui/mod.rs:861
 msgid "Ferret opens it again when it starts."
 msgstr "它再次启动时 Ferret 会重新打开它。"
 
-#: src/gui/mod.rs:858
+#: src/gui/mod.rs:873
 #, rust-format
 msgid "Ferret let go of {name}"
 msgstr "Ferret 已放开 {name}"
 
-#: src/gui/mod.rs:861
+#: src/gui/mod.rs:876
 #, rust-format
 msgid ""
 "{anticheat} started in {name}. Ferret stopped keeping values in range and "
@@ -2559,171 +2568,173 @@ msgstr ""
 "{anticheat} 在 {name} 中启动了。Ferret 已停止让数值保持在范围内,并且在反作弊"
 "运行期间不会修改游戏中的任何东西。"
 
-#: src/gui/mod.rs:867
+#: src/gui/mod.rs:882
 #, rust-format
 msgid ""
 "{anticheat} started on your computer. Ferret stopped keeping values in range "
 "and won't change anything in {name} while the anti-cheat runs."
-msgstr "{anticheat} 在你的电脑上启动了。Ferret 已停止让数值保持在范围内，并且在反作弊运行期间不会修改 {name} 中的任何东西。"
+msgstr ""
+"{anticheat} 在你的电脑上启动了。Ferret 已停止让数值保持在范围内，并且在反作弊"
+"运行期间不会修改 {name} 中的任何东西。"
 
-#: src/gui/mod.rs:923
+#: src/gui/mod.rs:938
 msgid "Saved"
 msgstr "已保存"
 
-#: src/gui/mod.rs:931
+#: src/gui/mod.rs:946
 msgid "More like this"
 msgstr "更多同类"
 
-#: src/gui/mod.rs:932
+#: src/gui/mod.rs:947
 msgid "Nothing saved"
 msgstr "未保存任何内容"
 
-#: src/gui/mod.rs:945
+#: src/gui/mod.rs:960
 msgid "Limits on"
 msgstr "限制已开启"
 
-#: src/gui/mod.rs:945
+#: src/gui/mod.rs:960
 #, rust-format
 msgid "Ferret keeps {values} in range again."
 msgstr "Ferret 会再次让 {values} 保持在范围内。"
 
-#: src/gui/mod.rs:946
+#: src/gui/mod.rs:961
 msgid "Limits off"
 msgstr "限制已关闭"
 
-#: src/gui/mod.rs:946
+#: src/gui/mod.rs:961
 #, rust-format
 msgid "{values} can change freely until you turn limits on again."
 msgstr "在你重新开启限制之前,{values} 可以自由变化。"
 
-#: src/gui/mod.rs:954
+#: src/gui/mod.rs:969
 msgid "Limits"
 msgstr "限制"
 
-#: src/gui/mod.rs:971
+#: src/gui/mod.rs:986
 msgid "Ferret Can't Open This Game"
 msgstr "Ferret 无法打开这个游戏"
 
-#: src/gui/mod.rs:993
+#: src/gui/mod.rs:1008
 msgid "Running games"
 msgstr "正在运行的游戏"
 
-#: src/gui/mod.rs:994
+#: src/gui/mod.rs:1009
 msgid "Pick the game to attach to. Ferret only works with single-player games."
 msgstr "选择要连接的游戏。Ferret 只适用于单人游戏。"
 
-#: src/gui/mod.rs:1012
+#: src/gui/mod.rs:1027
 msgid "No Games Running"
 msgstr "没有正在运行的游戏"
 
-#: src/gui/mod.rs:1013
+#: src/gui/mod.rs:1028
 msgid "Start a game and it shows up here."
 msgstr "启动一个游戏,它就会显示在这里。"
 
-#: src/gui/mod.rs:1261
+#: src/gui/mod.rs:1276
 msgid "Values"
 msgstr "数值"
 
-#: src/gui/mod.rs:1262
+#: src/gui/mod.rs:1277
 msgid "Find Value"
 msgstr "查找数值"
 
-#: src/gui/mod.rs:1264
+#: src/gui/mod.rs:1279
 msgid "Browse"
 msgstr "浏览"
 
-#: src/gui/mod.rs:1281
+#: src/gui/mod.rs:1296
 msgid "A newer version of Ferret is installed"
 msgstr "已安装更新版本的 Ferret"
 
-#: src/gui/mod.rs:1281
+#: src/gui/mod.rs:1296
 msgid "Restart"
 msgstr "重启"
 
-#: src/gui/mod.rs:1305
+#: src/gui/mod.rs:1320
 msgid "Game"
 msgstr "游戏"
 
-#: src/gui/mod.rs:1311
+#: src/gui/mod.rs:1326
 msgid "Ferret Could Not Start"
 msgstr "Ferret 无法启动"
 
-#: src/gui/mod.rs:1314
+#: src/gui/mod.rs:1329
 msgid "Refresh"
 msgstr "刷新"
 
-#: src/gui/mod.rs:1507
+#: src/gui/mod.rs:1522
 #, rust-format
 msgid "{names} and {last}"
 msgstr "{names}和{last}"
 
-#: src/gui/mod.rs:1528
+#: src/gui/mod.rs:1543
 msgid "whole number"
 msgstr "整数"
 
-#: src/gui/mod.rs:1529
+#: src/gui/mod.rs:1544
 msgid "float"
 msgstr "单浮点"
 
-#: src/gui/mod.rs:1530
+#: src/gui/mod.rs:1545
 msgid "double"
 msgstr "双浮点"
 
-#: src/gui/mod.rs:1531
+#: src/gui/mod.rs:1546
 msgid "encoded whole number"
 msgstr "编码整数"
 
-#: src/gui/mod.rs:1532
+#: src/gui/mod.rs:1547
 msgid "2-byte whole number"
 msgstr "2 字节整数"
 
-#: src/gui/mod.rs:1533
+#: src/gui/mod.rs:1548
 msgid "GameMaker number"
 msgstr "GameMaker 数字"
 
-#: src/gui/mod.rs:1534
+#: src/gui/mod.rs:1549
 msgid "Lua number"
 msgstr "Lua 数字"
 
-#: src/gui/mod.rs:1535
+#: src/gui/mod.rs:1550
 msgid "Python number"
 msgstr "Python 数字"
 
-#: src/gui/mod.rs:1543
+#: src/gui/mod.rs:1558
 #, rust-format
 msgid "at most {max}"
 msgstr "至多 {max}"
 
-#: src/gui/mod.rs:1544
+#: src/gui/mod.rs:1559
 #, rust-format
 msgid "at least {min}"
 msgstr "至少 {min}"
 
-#: src/gui/mod.rs:1545
+#: src/gui/mod.rs:1560
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "在 {min} 到 {max} 之间"
 
-#: src/gui/mod.rs:1546
+#: src/gui/mod.rs:1561
 msgid "unlimited"
 msgstr "无限制"
 
-#: src/gui/mod.rs:1552
+#: src/gui/mod.rs:1567
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
 msgstr[0] "{n} 类位置"
 
-#: src/gui/mod.rs:1559
+#: src/gui/mod.rs:1574
 msgid "It can be played with other people."
 msgstr "可以和其他人一起玩。"
 
-#: src/gui/mod.rs:1562
+#: src/gui/mod.rs:1577
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "它自带 {anticheat},目前没有运行。"
 
-#: src/gui/mod.rs:1566
+#: src/gui/mod.rs:1581
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
@@ -2731,18 +2742,20 @@ msgstr ""
 "发行商会标记存档被修改过的账号：被标记的账号可能会被排除在排行榜、活动或合作"
 "模式之外。"
 
-#: src/gui/mod.rs:1571
+#: src/gui/mod.rs:1586
 msgid "Its scores go on online leaderboards that other players see."
 msgstr "它的分数会上传到其他玩家能看到的在线排行榜。"
 
-#: src/gui/mod.rs:1575
+#: src/gui/mod.rs:1590
 #, rust-format
 msgid ""
 "{anticheat} runs on your computer all the time, for other games. It may take "
 "Ferret for a cheat tool: quit Ferret before you play those games."
-msgstr "{anticheat} 一直在你的电脑上运行，为其他游戏服务。它可能把 Ferret 当成作弊工具：玩那些游戏之前请退出 Ferret。"
+msgstr ""
+"{anticheat} 一直在你的电脑上运行，为其他游戏服务。它可能把 Ferret 当成作弊工"
+"具：玩那些游戏之前请退出 Ferret。"
 
-#: src/gui/notify.rs:166
+#: src/gui/notify.rs:245
 msgid "Show Ferret"
 msgstr "显示 Ferret"
 

@@ -3,7 +3,9 @@
 // server with critical urgency: while a fullscreen window is focused Plasma turns on Do Not
 // Disturb and shows only critical ones (over the game, without taking focus); the portal can't
 // send those (its "urgent" came out as a normal popup on KDE). One at a time: each replaces the
-// last, and Ferret closes it itself (Plasma keeps critical ones until dismissed).
+// last, and Ferret closes it itself (Plasma keeps critical ones until dismissed). On Windows
+// they are Windows' own notifications (toasts, `toast` below), the same way: one at a time,
+// with the same buttons.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -31,6 +33,8 @@ pub struct Notifier {
     /// The activation token the server sends before a click, to bring the window to the front.
     token: RefCell<Option<String>>,
     signals: RefCell<Vec<gio::SignalSubscription>>,
+    #[cfg(windows)]
+    toasts: Option<toast::Toasts>,
 }
 
 /// Notifications and focus changes go to the log file too, to see afterwards what reached the
@@ -44,6 +48,15 @@ fn log(line: &str) {
 
 impl Notifier {
     pub fn new() -> Rc<Self> {
+        #[cfg(windows)]
+        let bus = None;
+        #[cfg(windows)]
+        let (answers, toasts) = {
+            let (tx, rx) = async_channel::unbounded();
+            let toasts = toast::Toasts::new(super::APP_ID, tx).inspect_err(|e| log(&format!("notifications: {e}"))).ok();
+            (rx, toasts)
+        };
+        #[cfg(not(windows))]
         let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
             .inspect_err(|e| eprintln!("notifications: {e}"))
             .ok();
@@ -57,9 +70,52 @@ impl Notifier {
             this_button: RefCell::default(),
             token: RefCell::default(),
             signals: RefCell::default(),
+            #[cfg(windows)]
+            toasts,
         });
+        #[cfg(windows)]
+        n.listen_windows(answers);
         n.listen();
         n
+    }
+
+    /// Windows: a click or a dismissal of the toast on screen (`toast::Answer`; ones for an
+    /// older toast are ignored).
+    #[cfg(windows)]
+    fn listen_windows(self: &Rc<Self>, answers: async_channel::Receiver<toast::Answer>) {
+        let n = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(answer) = answers.recv().await {
+                let Some(n) = n.upgrade() else { return };
+                if let toast::Answer::Clicked(sent, action) = &answer {
+                    log(&format!("notification clicked: {action} ({sent}, showing {})", n.id.get()));
+                }
+                match answer {
+                    toast::Answer::Clicked(sent, action) if sent == n.id.get() => n.clicked(&action),
+                    toast::Answer::Gone(sent) if sent == n.id.get() => n.forget(),
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    /// A click on the notification (`action` "button": its button; anything else: its body or
+    /// Show Ferret, which bring the window up).
+    fn clicked(&self, action: &str) {
+        self.forget();
+        if action == "button" {
+            let f = self.this_button.borrow().clone().or_else(|| self.on_button.borrow().clone());
+            if let Some(f) = f {
+                f();
+            }
+            return;
+        }
+        if let Some(w) = self.window.borrow().as_ref() {
+            if let Some(token) = self.token.take() {
+                w.set_startup_id(&token);
+            }
+            w.present();
+        }
     }
 
     /// The window: notifications only go out while it isn't in front, and leave when it comes.
@@ -104,20 +160,7 @@ impl Notifier {
                 "ActionInvoked",
                 Box::new(|n, _, p| {
                     let action = p.try_child_value(1).and_then(|v| v.get::<String>()).unwrap_or_default();
-                    n.forget();
-                    if action == "button" {
-                        let f = n.this_button.borrow().clone().or_else(|| n.on_button.borrow().clone());
-                        if let Some(f) = f {
-                            f();
-                        }
-                        return;
-                    }
-                    if let Some(w) = n.window.borrow().as_ref() {
-                        if let Some(token) = n.token.take() {
-                            w.set_startup_id(&token);
-                        }
-                        w.present();
-                    }
+                    n.clicked(&action);
                 }),
             ),
             subscribe("NotificationClosed", Box::new(|n, _, _| n.forget())),
@@ -155,6 +198,45 @@ impl Notifier {
     }
 
     fn notify(self: &Rc<Self>, title: &str, body: &str, button: Option<&str>, secs: Option<u32>) {
+        #[cfg(windows)]
+        return self.toast(title, body, button, secs);
+        #[cfg(not(windows))]
+        self.notify_dbus(title, body, button, secs);
+    }
+
+    /// Windows: the same as a toast, which replaces the one on screen.
+    #[cfg(windows)]
+    fn toast(self: &Rc<Self>, title: &str, body: &str, button: Option<&str>, secs: Option<u32>) {
+        let Some(toasts) = &self.toasts else { return };
+        if !self.away() {
+            return;
+        }
+        log(&format!("notification: {title}"));
+        let sent = self.sent.get() + 1;
+        self.sent.set(sent);
+        self.waiting.set(secs.is_none());
+        let show = crate::i18n::tr!("Show Ferret");
+        let mut actions = vec![("default", show.as_str())];
+        if let Some(label) = button {
+            actions.push(("button", label));
+        }
+        if let Err(e) = toasts.show(sent, title, body, &actions, secs.is_none()) {
+            return log(&format!("notification failed: {e}"));
+        }
+        // The id is what was sent: answers carry it.
+        self.id.set(sent);
+        if let Some(secs) = secs {
+            let weak = Rc::downgrade(self);
+            glib::timeout_add_local_once(Duration::from_secs(secs as u64), move || {
+                if let Some(n) = weak.upgrade().filter(|n| n.sent.get() == sent) {
+                    n.withdraw();
+                }
+            });
+        }
+    }
+
+    #[cfg_attr(windows, allow(dead_code))]
+    fn notify_dbus(self: &Rc<Self>, title: &str, body: &str, button: Option<&str>, secs: Option<u32>) {
         let Some(bus) = &self.bus else { return };
         if !self.away() {
             return;
@@ -228,6 +310,11 @@ impl Notifier {
     }
 
     fn close(&self, id: u32) {
+        #[cfg(windows)]
+        if let Some(toasts) = &self.toasts {
+            let _ = id;
+            return toasts.hide();
+        }
         let Some(bus) = &self.bus else { return };
         bus.call(
             Some(SERVER),
@@ -241,5 +328,173 @@ impl Notifier {
             gio::Cancellable::NONE,
             |_| {},
         );
+    }
+}
+
+/// Windows' notifications ("toasts", WinRT). Ferret registers its app ID for them under the
+/// player's account (HKCU\Software\Classes\AppUserModelId\<id>: name and icon), the way Windows
+/// App SDK apps without an installer do. Clicks come through a COM "notification activator"
+/// (`Activator`, CLSID `ACTIVATOR`, registered there too and as the running process's class
+/// object): an app without a package gets no in-process Activated event for them (tried: the
+/// toast went away and nothing came). Each button's arguments carry the toast's number
+/// ("button:12"), so a click on an older toast is told apart. A click with Ferret closed starts it.
+#[cfg(windows)]
+mod toast {
+    use std::cell::RefCell;
+
+    use gtk::prelude::TextureExt;
+    use windows::core::{implement, IUnknown, Interface, Ref, BOOL, GUID, HSTRING, PCWSTR};
+    use windows::Win32::System::Com::{CoInitializeEx, CoRegisterClassObject, IClassFactory, IClassFactory_Impl, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, REGCLS_AGILE, REGCLS_MULTIPLEUSE};
+    use windows::Win32::UI::Notifications::{INotificationActivationCallback, INotificationActivationCallback_Impl, NOTIFICATION_USER_INPUT_DATA};
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::Notifications::{ToastDismissalReason, ToastDismissedEventArgs, ToastNotification, ToastNotificationManager, ToastNotifier};
+
+    /// Ferret's notification activator.
+    const ACTIVATOR: GUID = GUID::from_u128(0x2B2DC977_6813_4EBF_A7EC_13982956FEA9);
+
+    /// What Windows calls when a toast is clicked: its arguments ("button:12") to the window.
+    #[implement(INotificationActivationCallback)]
+    struct Activator(async_channel::Sender<Answer>);
+
+    impl INotificationActivationCallback_Impl for Activator_Impl {
+        fn Activate(&self, _app: &PCWSTR, args: &PCWSTR, _data: *const NOTIFICATION_USER_INPUT_DATA, _count: u32) -> windows::core::Result<()> {
+            let args = unsafe { args.to_string() }.unwrap_or_default();
+            let (action, sent) = args.split_once(':').unwrap_or((&args, "0"));
+            self.0.send_blocking(Answer::Clicked(sent.parse().unwrap_or(0), action.to_owned())).ok();
+            Ok(())
+        }
+    }
+
+    #[implement(IClassFactory)]
+    struct Factory(async_channel::Sender<Answer>);
+
+    impl IClassFactory_Impl for Factory_Impl {
+        fn CreateInstance(&self, outer: Ref<IUnknown>, iid: *const GUID, object: *mut *mut core::ffi::c_void) -> windows::core::Result<()> {
+            if outer.is_some() {
+                return Err(windows::Win32::Foundation::CLASS_E_NOAGGREGATION.into());
+            }
+            let activator: INotificationActivationCallback = Activator(self.0.clone()).into();
+            unsafe { activator.query(iid, object).ok() }
+        }
+
+        fn LockServer(&self, _lock: BOOL) -> windows::core::Result<()> {
+            Ok(())
+        }
+    }
+    use windows::Win32::System::Registry::{RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ};
+
+    pub enum Answer {
+        /// The toast `sent` was clicked: "button", or anything else for its body / Show Ferret.
+        Clicked(u32, String),
+        /// The player dismissed it, or it timed out into the notification centre.
+        Gone(u32),
+    }
+
+    pub struct Toasts {
+        notifier: ToastNotifier,
+        shown: RefCell<Option<ToastNotification>>,
+        tx: async_channel::Sender<Answer>,
+    }
+
+    fn set(key: HKEY, name: &str, value: &str) {
+        let data: Vec<u8> = value.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        unsafe { RegSetValueExW(key, &HSTRING::from(name), None, REG_SZ, Some(&data)) }.ok().ok();
+    }
+
+    /// The app's name and icon for its notifications (a PNG made from Ferret's SVG icon once).
+    fn register(app_id: &str) {
+        let mut key = HKEY::default();
+        let path = HSTRING::from(format!("Software\\Classes\\AppUserModelId\\{app_id}"));
+        let made = unsafe { RegCreateKeyExW(HKEY_CURRENT_USER, &path, None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None) };
+        if made.is_err() {
+            return;
+        }
+        set(key, "DisplayName", "Ferret");
+        let clsid = format!("{{{ACTIVATOR:?}}}");
+        set(key, "CustomActivator", &clsid);
+        let png = crate::core::cache_dir().join("ferret-icon.png");
+        let svg = crate::core::share_dir().join(format!("icons/hicolor/scalable/apps/{app_id}.svg"));
+        if !png.exists() {
+            if let Ok(t) = gtk::gdk::Texture::from_filename(&svg) {
+                t.save_to_png(&png).ok();
+            }
+        }
+        if png.exists() {
+            set(key, "IconUri", &png.to_string_lossy());
+        }
+        unsafe { windows::Win32::System::Registry::RegCloseKey(key) }.ok().ok();
+        // Started by Windows when a toast is clicked while Ferret isn't running.
+        let mut server = HKEY::default();
+        let path = HSTRING::from(format!("Software\\Classes\\CLSID\\{clsid}\\LocalServer32"));
+        if unsafe { RegCreateKeyExW(HKEY_CURRENT_USER, &path, None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut server, None) }.is_ok() {
+            if let Ok(exe) = std::env::current_exe() {
+                set(server, "", &format!("\"{}\"", exe.display()));
+            }
+            unsafe { windows::Win32::System::Registry::RegCloseKey(server) }.ok().ok();
+        }
+    }
+
+    fn escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+
+    impl Toasts {
+        pub fn new(app_id: &str, tx: async_channel::Sender<Answer>) -> Result<Self, String> {
+            register(app_id);
+            // Agile: Windows calls the activator on a COM thread of its own, not through the
+            // window thread's messages (the window's thread is an STA, and GTK's loop never let
+            // the calls through: Windows App SDK registers it so for the same reason). Ferret's
+            // class object lives as long as the process.
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok().ok();
+            let factory: IClassFactory = Factory(tx.clone()).into();
+            let reg = unsafe { CoRegisterClassObject(&ACTIVATOR, &factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE | REGCLS_AGILE) };
+            reg.map_err(|e| e.message())?;
+            let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id)).map_err(|e| e.message())?;
+            Ok(Self { notifier, shown: RefCell::default(), tx })
+        }
+
+        /// Shows a toast in place of the last one. `actions`: (argument, label) per button.
+        /// `long`: it waits for the player (Your turn): it stays up longer.
+        pub fn show(&self, sent: u32, title: &str, body: &str, actions: &[(&str, &str)], long: bool) -> Result<(), String> {
+            let buttons: String = actions
+                .iter()
+                .map(|(arg, label)| format!(r#"<action content="{}" arguments="{arg}:{sent}" activationType="foreground"/>"#, escape(label)))
+                .collect();
+            // "urgent": shown over Do Not Disturb, which Windows turns on in fullscreen games,
+            // where the player allows important notifications for Ferret (Windows 11).
+            let xml = format!(
+                r#"<toast launch="default:{sent}" scenario="urgent"{}><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual><actions>{buttons}</actions></toast>"#,
+                if long { r#" duration="long""# } else { "" },
+                escape(title),
+                escape(body)
+            );
+            let doc = XmlDocument::new().map_err(|e| e.message())?;
+            doc.LoadXml(&HSTRING::from(xml)).map_err(|e| e.message())?;
+            let toast = ToastNotification::CreateToastNotification(&doc).map_err(|e| e.message())?;
+            toast.SetTag(&HSTRING::from("ferret")).ok();
+            toast.SetGroup(&HSTRING::from("ferret")).ok();
+            let tx = self.tx.clone();
+            toast
+                .Dismissed(&TypedEventHandler::<ToastNotification, ToastDismissedEventArgs>::new(move |_, args| {
+                    let reason = args.as_ref().and_then(|a| a.Reason().ok());
+                    if reason != Some(ToastDismissalReason::ApplicationHidden) {
+                        tx.send_blocking(Answer::Gone(sent)).ok();
+                    }
+                    Ok(())
+                }))
+                .map_err(|e| e.message())?;
+            self.hide();
+            self.notifier.Show(&toast).map_err(|e| e.message())?;
+            self.shown.replace(Some(toast));
+            Ok(())
+        }
+
+        /// Takes the one on screen away (also from the notification centre).
+        pub fn hide(&self) {
+            if let Some(t) = self.shown.take() {
+                self.notifier.Hide(&t).ok();
+            }
+        }
     }
 }

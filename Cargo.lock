@@ -395,6 +395,7 @@ dependencies = [
  "rten-tensor",
  "ureq",
  "windows",
+ "windows-core",
  "zbus",
 ]
 

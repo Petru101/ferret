@@ -3,7 +3,9 @@
 // it isn't in front). On by default (the user's call): Ferret binds them at start, the desktop
 // asks the player to accept them the first time and keeps them for later runs (Set Up Hotkeys
 // asks again after a refusal); a portal session binds its shortcuts only once, so the set is
-// fixed. What a hotkey did is told by a notification (`notify.rs`).
+// fixed. What a hotkey did is told by a notification (`notify.rs`). On Windows the same keys
+// through RegisterHotKey (`start_windows`): no dialog, nothing to accept, and no way to change
+// them; a key another program holds already gets none.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -41,6 +43,7 @@ pub struct Hotkeys {
     keys: Vec<gtk::Label>,
     note: gtk::Label,
     setup: gtk::Button,
+    #[cfg_attr(windows, allow(dead_code))]
     signals: RefCell<Vec<gio::SignalSubscription>>,
 }
 
@@ -104,8 +107,13 @@ impl Hotkeys {
             });
         }
         h.show_state(None);
-        h.listen();
-        h.start();
+        #[cfg(windows)]
+        h.start_windows();
+        #[cfg(not(windows))]
+        {
+            h.listen();
+            h.start();
+        }
         h
     }
 
@@ -130,6 +138,11 @@ impl Hotkeys {
         }
         let (note, setup) = match (error, self.active.get()) {
             (Some(_), _) => (tr!("This desktop doesn't offer hotkeys to apps."), None),
+            // Windows: nothing to set up or change; a key another program holds gets none.
+            (None, true) if cfg!(windows) && keyless => {
+                (tr!("Another program has some of these keys already, so those don't work. Close it and start Ferret again."), None)
+            }
+            (None, true) if cfg!(windows) => (tr!("They work while the game is in front. A notification says what they did."), None),
             (None, true) if keyless => (
                 tr!("Your desktop gave some of them no key, likely because another shortcut has it already: pick one in Change Hotkeys."),
                 Some(tr!("Change Hotkeys…")),
@@ -148,6 +161,58 @@ impl Hotkeys {
         self.setup.set_label(&setup.unwrap_or_default());
     }
 
+    /// Windows: the hotkeys registered on a thread of their own, which gets their key presses
+    /// (WM_HOTKEY in its message queue) and passes them to the window.
+    #[cfg(windows)]
+    fn start_windows(self: &Rc<Self>) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT};
+        use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+        // The keys asked for elsewhere: Ctrl+Shift and F9, F10, F11, F6, F7.
+        const VK: [u32; 5] = [0x78, 0x79, 0x7A, 0x75, 0x76];
+        let (tx, rx) = async_channel::unbounded::<Result<String, Vec<bool>>>();
+        std::thread::spawn(move || {
+            let mods: HOT_KEY_MODIFIERS = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
+            let got: Vec<bool> = VK.iter().enumerate().map(|(i, vk)| unsafe { RegisterHotKey(None, i as i32 + 1, mods, *vk) }.is_ok()).collect();
+            if tx.send_blocking(Err(got)).is_err() {
+                return;
+            }
+            let mut msg = MSG::default();
+            while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+                if msg.message == WM_HOTKEY {
+                    if let Some((id, _, _)) = KEYS.get(msg.wParam.0.wrapping_sub(1)) {
+                        if tx.send_blocking(Ok(id.to_string())).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        let h = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(m) = rx.recv().await {
+                let Some(h) = h.upgrade() else { return };
+                match m {
+                    Err(got) => {
+                        let label = |key: &str| key.split('+').map(|p| p[..1].to_owned() + &p[1..].to_lowercase()).collect::<Vec<_>>().join("+");
+                        let bound = KEYS.iter().zip(got).map(|((id, _, key), ok)| (id.to_string(), if ok { label(key) } else { String::new() })).collect();
+                        eprintln!("hotkeys: registered {bound:?}");
+                        h.bound.replace(bound);
+                        h.active.set(true);
+                        h.show_state(None);
+                    }
+                    Ok(id) => {
+                        let f = h.on_key.borrow().clone();
+                        if let Some(f) = f {
+                            eprintln!("hotkey: {id}");
+                            f(&id);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[cfg_attr(windows, allow(dead_code))]
     fn listen(self: &Rc<Self>) {
         let Some(bus) = &self.bus else { return };
         let h = Rc::downgrade(self);
@@ -207,6 +272,7 @@ impl Hotkeys {
     }
 
     /// A session, then the hotkeys (accepted in an earlier run: bound again without asking).
+    #[cfg_attr(windows, allow(dead_code))]
     fn start(self: &Rc<Self>) {
         self.request(
             "CreateSession",
