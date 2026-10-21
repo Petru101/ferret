@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-21 01:19+0100\n"
+"POT-Creation-Date: 2026-10-21 02:02+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -51,7 +51,6 @@ msgstr "看起来是图标,但没有一个是满的:请在至少有一个满的�
 msgid "Party"
 msgstr "队伍"
 
-#
 #: src/core.rs:257
 msgid "Global variables"
 msgstr "全局变量"
@@ -146,7 +145,6 @@ msgstr ""
 msgid "To allow it, run this in a terminal and restart:"
 msgstr "要允许,请在终端中运行以下命令并重启:"
 
-#
 #: src/core.rs:1147
 msgid ""
 "Java game: Ferret only shows this value. Java moves its objects around, so a "
@@ -572,18 +570,12 @@ msgid ""
 "Try again once you're playing."
 msgstr "你的角色现在不在游戏中（菜单或加载画面？）。开始游戏后再试一次。"
 
-#
-#
-#
-#
-#
-#
 #: src/core.rs:3767
-#
 msgid ""
 "Ferret can list a game's numbers by name only in Unreal Engine, Unity, "
-"Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java and Python games so far."
-msgstr "目前 Ferret 只能在 Unreal Engine、Unity、Godot、GameMaker、RPG Maker MV、Lua（LuaJIT）、Java 和 Python 游戏中按名称列出游戏的数字。"
+"Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java, Python and Adobe AIR "
+"games so far."
+msgstr "目前 Ferret 只能在 Unreal Engine、Unity、Godot、GameMaker、RPG Maker MV、Lua（LuaJIT）、Java、Python 和 Adobe AIR 游戏中按名称列出游戏的数字。"
 
 #: src/core.rs:3826
 #, rust-format
@@ -750,7 +742,6 @@ msgstr "在缩小范围前就停止了。在它自己变化时按“在变化”
 msgid "Ferret only knows that it moved when you said it did."
 msgstr "Ferret 只知道它在你说的时候变化了。"
 
-#
 #: src/core.rs:5090
 msgid ""
 "Almost everything in the game's memory is 0: type the number once the game "
@@ -827,14 +818,12 @@ msgstr "查找名称：health、ammo、gold…"
 msgid "Only What Changes"
 msgstr "只看变化的"
 
-#
 #: src/gui/browse.rs:75
 msgid ""
 "Turn this on, then change the number in the game: only the numbers that "
 "moved stay in the list."
 msgstr "打开它，然后在游戏中改变这个数字：列表中只保留变化过的数字。"
 
-#
 #: src/gui/browse.rs:79
 msgid "Show Everything"
 msgstr "显示全部"
@@ -845,7 +834,6 @@ msgid ""
 "systems, the controller and the settings."
 msgstr "还包括游戏的内部机制：每个技能的设置、游戏自身的系统、控制器和设置。"
 
-#
 #: src/gui/browse.rs:82
 msgid "List Again"
 msgstr "重新列出"
@@ -858,17 +846,14 @@ msgstr ""
 "你的角色的数字，使用游戏给它们起的名称。不知道是哪一个？打开“只看变化的”，然"
 "后在游戏中改变它。"
 
-#
 #: src/gui/browse.rs:121
 msgid "Reading the game's objects…"
 msgstr "正在读取游戏的对象…"
 
-#
 #: src/gui/browse.rs:124
 msgid "Try Again"
 msgstr "重试"
 
-#
 #: src/gui/browse.rs:128
 msgid "Nothing to List Yet"
 msgstr "暂时没有可列出的内容"
@@ -882,7 +867,6 @@ msgstr "Ferret 在你的角色的对象中没有找到数字。"
 msgid "Save"
 msgstr "保存"
 
-#
 #: src/gui/browse.rs:338
 msgid "Nothing changed yet: change the number in the game."
 msgstr "还没有变化：请在游戏中改变这个数字。"
@@ -908,7 +892,6 @@ msgstr[0] "{n} 个数字"
 msgid "Save {name}"
 msgstr "保存 {name}"
 
-#
 #: src/gui/browse.rs:360
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr "每次你打开游戏时，Ferret 都会按这个名称再次找到它。"
@@ -2656,13 +2639,11 @@ msgstr "2 字节整数"
 msgid "GameMaker number"
 msgstr "GameMaker 数字"
 
-#
 #: src/gui/mod.rs:1480
 msgid "Lua number"
 msgstr "Lua 数字"
 
 #: src/gui/mod.rs:1481
-#
 msgid "Python number"
 msgstr "Python 数字"
 

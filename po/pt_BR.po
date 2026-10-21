@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-21 01:19+0100\n"
+"POT-Creation-Date: 2026-10-21 02:02+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Brazilian Portuguese\n"
 "Language: pt_BR\n"
@@ -55,7 +55,6 @@ msgstr ""
 msgid "Party"
 msgstr "Grupo"
 
-#
 #: src/core.rs:257
 msgid "Global variables"
 msgstr "Variáveis globais"
@@ -155,7 +154,6 @@ msgstr ""
 msgid "To allow it, run this in a terminal and restart:"
 msgstr "Para permitir, execute isto em um terminal e reinicie:"
 
-#
 #: src/core.rs:1147
 msgid ""
 "Java game: Ferret only shows this value. Java moves its objects around, so a "
@@ -617,18 +615,12 @@ msgstr ""
 "Seu personagem não está no jogo agora (um menu ou uma tela de "
 "carregamento?). Tente de novo quando estiver jogando."
 
-#
-#
-#
-#
-#
-#
 #: src/core.rs:3767
-#
 msgid ""
 "Ferret can list a game's numbers by name only in Unreal Engine, Unity, "
-"Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java and Python games so far."
-msgstr "Por enquanto, o Ferret só consegue listar os números de um jogo pelo nome em jogos de Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java e Python."
+"Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java, Python and Adobe AIR "
+"games so far."
+msgstr "Por enquanto, o Ferret só consegue listar os números de um jogo pelo nome em jogos de Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java, Python e Adobe AIR."
 
 #: src/core.rs:3826
 #, rust-format
@@ -824,7 +816,6 @@ msgstr ""
 msgid "Ferret only knows that it moved when you said it did."
 msgstr "O Ferret só sabe que ele mudou quando você disse."
 
-#
 #: src/core.rs:5090
 msgid ""
 "Almost everything in the game's memory is 0: type the number once the game "
@@ -907,7 +898,6 @@ msgstr "Procure um nome: health, ammo, gold…"
 msgid "Only What Changes"
 msgstr "Só o que muda"
 
-#
 #: src/gui/browse.rs:75
 msgid ""
 "Turn this on, then change the number in the game: only the numbers that "
@@ -916,7 +906,6 @@ msgstr ""
 "Ative isto e depois mude o número no jogo: só os números que mudaram ficam "
 "na lista."
 
-#
 #: src/gui/browse.rs:79
 msgid "Show Everything"
 msgstr "Mostrar tudo"
@@ -929,7 +918,6 @@ msgstr ""
 "Também o funcionamento interno do jogo: as configurações de cada habilidade, "
 "os sistemas do próprio jogo, o controle e as configurações."
 
-#
 #: src/gui/browse.rs:82
 msgid "List Again"
 msgstr "Listar de novo"
@@ -942,17 +930,14 @@ msgstr ""
 "Os números do seu personagem, com os nomes que o jogo dá a eles. Não sabe "
 "qual é? Ative “Só o que muda” e mude-o no jogo."
 
-#
 #: src/gui/browse.rs:121
 msgid "Reading the game's objects…"
 msgstr "Lendo os objetos do jogo…"
 
-#
 #: src/gui/browse.rs:124
 msgid "Try Again"
 msgstr "Tentar de novo"
 
-#
 #: src/gui/browse.rs:128
 msgid "Nothing to List Yet"
 msgstr "Nada para listar ainda"
@@ -966,7 +951,6 @@ msgstr "O Ferret não encontrou números nos objetos do seu personagem."
 msgid "Save"
 msgstr "Salvar"
 
-#
 #: src/gui/browse.rs:338
 msgid "Nothing changed yet: change the number in the game."
 msgstr "Nada mudou ainda: mude o número no jogo."
@@ -994,7 +978,6 @@ msgstr[1] "{n} números"
 msgid "Save {name}"
 msgstr "Salvar {name}"
 
-#
 #: src/gui/browse.rs:360
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr ""
@@ -2898,13 +2881,11 @@ msgstr "número inteiro de 2 bytes"
 msgid "GameMaker number"
 msgstr "Número do GameMaker"
 
-#
 #: src/gui/mod.rs:1480
 msgid "Lua number"
 msgstr "Número Lua"
 
 #: src/gui/mod.rs:1481
-#
 msgid "Python number"
 msgstr "Número do Python"
 

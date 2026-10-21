@@ -22,6 +22,7 @@ use crate::mono::{self, MonoPath};
 use crate::js::{self, JsPath};
 use crate::gml::{self, GmlPath};
 use crate::lua::{self, LuaPath};
+use crate::air::{self, AirPath};
 use crate::java::{self, JavaPath};
 use crate::python::{self, PyPath};
 use crate::trace;
@@ -311,6 +312,11 @@ fn scrambler(pid: u32, regions: &[Region]) -> Option<&'static str> {
 /// The program a process runs (`program_path`).
 fn program_of(pid: u32) -> Option<PathBuf> {
     maps(pid).ok().and_then(|m| program_path(pid, &m))
+}
+
+/// Adobe AIR games (air.rs): the AIR runtime mapped.
+fn is_air(pid: u32) -> bool {
+    maps(pid).is_ok_and(|r| air::runs_air(&r))
 }
 
 /// Python games (python.rs): CPython mapped (libpython, Ren'Py's librenpython) or running.
@@ -857,6 +863,7 @@ enum Named {
     Lua(LuaPath),
     Java(JavaPath),
     Py(PyPath),
+    Air(AirPath),
 }
 
 impl Named {
@@ -885,6 +892,9 @@ impl Named {
         if text.starts_with("py:") {
             return PyPath::parse(text).map(Named::Py);
         }
+        if text.starts_with("air:") {
+            return AirPath::parse(text).map(Named::Air);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -892,7 +902,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:") || text.starts_with("py:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:") || text.starts_with("py:") || text.starts_with("air:")
     }
 
     /// Walked again right before every write (not only every `LIMIT_FIND_EVERY`): Java moves
@@ -914,6 +924,7 @@ impl Named {
             Named::Lua(p) => lua::walk(heap, roots, p),
             Named::Java(p) => java::walk(heap, roots, p),
             Named::Py(p) => python::walk(heap, roots, p),
+            Named::Air(p) => air::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.walk(heap.file(), roots, p)).unwrap_or_default(),
         }
     }
@@ -930,6 +941,7 @@ impl Named {
             Named::Lua(p) => lua::find_roots(heap, p),
             Named::Java(p) => java::find_roots(heap, p),
             Named::Py(p) => python::find_roots(heap, p),
+            Named::Air(p) => air::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.file()).map(|ue| ue.roots(heap.file(), p)).unwrap_or_default(),
         }
     }
@@ -3785,6 +3797,13 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         }
         return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
     }
+    // A field of an AIR game's ActionScript objects, by its path from a class's static field.
+    if is_air(s.pid) {
+        if let Some((p, leads)) = air::discover(&heap, target) {
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        }
+    }
     // A number of a Python game, by its namespace and the names from there (its slot).
     if is_python_game(s.pid, &s.exe) {
         if let Some((p, leads)) = python::discover(&heap, target) {
@@ -3945,6 +3964,12 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
                     None => writeln!(out, "none engine Java classes not found (only HotSpot JVMs are read)"),
                 };
             }
+            if is_air(s.pid) {
+                return match air::player(&heap) {
+                    Some(list) => print_player(out, s, &list, t),
+                    None => writeln!(out, "none engine ActionScript objects not found (only 32-bit AIR runtimes are read)"),
+                };
+            }
             if is_python_game(s.pid, &s.exe) && !mono::runs_csharp(s.pid) && !is_godot(s.pid) {
                 return match python::player(&heap) {
                     Some(list) => print_player(out, s, &list, t),
@@ -3983,7 +4008,7 @@ fn print_player(out: &mut impl Write, s: &Session, list: &[ue::ListedObject], t:
     writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
 }
 
-/// browsable: "browsable unreal|unity|godot|rpgmaker|gamemaker|lua|java|python" when `player` can list the game's numbers, else "browsable no".
+/// browsable: "browsable unreal|unity|godot|rpgmaker|gamemaker|lua|java|python|air" when `player` can list the game's numbers, else "browsable no".
 fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -3994,6 +4019,7 @@ fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
         Err(_) if is_rpgmaker(s.pid) => "rpgmaker",
         Err(_) if s.doubles_only && gml::data_file(s.pid, program_of(s.pid).as_deref()).is_some() => "gamemaker",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
+        Err(_) if is_air(s.pid) && s.width == 4 => "air",
         Err(_) if is_python_game(s.pid, &s.exe) => "python",
         Err(_) if is_lua(s.pid) => "lua",
         Err(_) if s.java && java::shared(s.pid, mem).is_some() => "java",
@@ -4010,6 +4036,20 @@ fn cmd_jvm(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let t = Instant::now();
     let heap = Heap::new(s.pid, mem, s.width)?;
     for l in java::diagnose(&heap, arg.trim()) {
+        writeln!(out, "{l}")?;
+    }
+    writeln!(out, "in {} ms", t.elapsed().as_millis())
+}
+
+/// airdump [class[#path]]: an AIR game's VM as Ferret reads it, a class's statics or the object
+/// at a path (`air::diagnose`).
+fn cmd_airdump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let t = Instant::now();
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    for l in air::diagnose(&heap, arg.trim()) {
         writeln!(out, "{l}")?;
     }
     writeln!(out, "in {} ms", t.elapsed().as_millis())
@@ -4180,6 +4220,7 @@ pub fn run(as_user: Option<&str>) {
             "luadump" => cmd_luadump(&mut out, &session, arg),
             "jvm" => cmd_jvm(&mut out, &session, arg),
             "pydump" => cmd_pydump(&mut out, &session, arg),
+            "airdump" => cmd_airdump(&mut out, &session, arg),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),
             "unlimit" => cmd_unlimit(&mut out, &limiter, arg),

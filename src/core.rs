@@ -242,10 +242,10 @@ impl Helper {
 }
 
 /// A named path through the engine's own names (Unreal objects, Unity classes, Godot scripts and
-/// dictionaries, RPG Maker's globals, GameMaker's variables, Lua tables): nothing better to
-/// upgrade it to.
+/// dictionaries, RPG Maker's globals, GameMaker's variables, Lua tables, Java's, Python's and
+/// ActionScript's objects): nothing better to upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "java:", "py:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "java:", "py:", "air:", "{"].iter().any(|p| text.starts_with(p))
 }
 
 /// A name the helper lists in Ferret's words rather than the game's ("@gold": RPG Maker's
@@ -3764,7 +3764,7 @@ impl Core {
         }
         if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java and Python games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java, Python and Adobe AIR games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {
