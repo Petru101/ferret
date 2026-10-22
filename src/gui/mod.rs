@@ -926,8 +926,9 @@ impl Ui {
             Event::Player(list) => self.browse.show(list),
             Event::Browsable(pid, can) => self.browsable(pid, can),
             Event::Risky(games) => self.warn_risky(&games),
-            Event::BrowseSaved(Ok((_, msg))) => {
+            Event::BrowseSaved(Ok((name, msg))) => {
                 self.toast(&msg);
+                self.values.show_when_listed(&name);
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));
             }

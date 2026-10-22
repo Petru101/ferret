@@ -64,8 +64,12 @@ pub fn confirm_value(worker: &Worker, name: &str) {
 pub struct ValuesView {
     pub root: gtk::Stack,
     list: gtk::Box,
+    scroll: gtk::ScrolledWindow,
     rows: RefCell<HashMap<String, ValueWidgets>>,
     worker: Worker,
+    /// A value just saved: its card is scrolled to once the list has it (new cards go at the
+    /// end, out of sight below a few others: a save from Browse looked like it did nothing).
+    show_next: RefCell<Option<String>>,
 }
 
 /// "fixed 1 times, restored 0 times, active" -> "fixed 1 time · active"
@@ -191,7 +195,12 @@ impl ValuesView {
         let root = gtk::Stack::new();
         root.add_named(&empty, Some("empty"));
         root.add_named(&scroll, Some("list"));
-        Rc::new(Self { root, list, rows: RefCell::default(), worker })
+        Rc::new(Self { root, list, scroll, rows: RefCell::default(), worker, show_next: RefCell::default() })
+    }
+
+    /// Scrolls to this value's card when the list next has it.
+    pub fn show_when_listed(&self, name: &str) {
+        *self.show_next.borrow_mut() = Some(name.to_owned());
     }
 
     /// Keep It on a value by name (the D-Bus `keep` action).
@@ -204,6 +213,7 @@ impl ValuesView {
 
     pub fn update(&self, values: Vec<ValueRow>) {
         self.root.set_visible_child_name(if values.is_empty() { "empty" } else { "list" });
+        self.scroll_to_saved(&values);
         let mut rows = self.rows.borrow_mut();
         rows.retain(|name, w| {
             let keep = values.iter().any(|v| v.name == *name);
@@ -280,6 +290,19 @@ impl ValuesView {
                 });
             }
         }
+    }
+
+    /// After `update` has made the card (an idle callback): scrolls to the value just saved.
+    fn scroll_to_saved(&self, values: &[ValueRow]) {
+        let Some(name) = self.show_next.borrow().clone().filter(|n| values.iter().any(|v| v.name == *n)) else { return };
+        self.show_next.take();
+        let (scroll, list) = (self.scroll.clone(), self.list.clone());
+        let group = move || list.observe_children().into_iter().filter_map(|c| c.ok()?.downcast::<adw::PreferencesGroup>().ok()).find(|g| g.title() == name);
+        glib::idle_add_local_once(move || {
+            if let (Some(viewport), Some(group)) = (scroll.child().and_downcast::<gtk::Viewport>(), group()) {
+                viewport.scroll_to(&group, None);
+            }
+        });
     }
 
     fn create(&self, v: &ValueRow) -> ValueWidgets {

@@ -186,6 +186,13 @@ static STATICS: Mutex<Vec<(u32, u64, u64)>> = Mutex::new(Vec::new());
 /// Static paths found this run (field left empty): the next value of the same object (mana
 /// after life) is tried there first, in a moment instead of three passes over memory.
 static FOUND: Mutex<Vec<(u32, u64, u64, MonoPath)>> = Mutex::new(Vec::new());
+/// Live objects found for a class lately: (pid, namespace::class, objects, when). Saving a
+/// value finds its class's objects, and following the new path a moment later (the Values tab
+/// right after a save) found them again: another pass over memory, 20 s on Particle Fleet's
+/// 1.6 GB under Windows, while the new value stayed off the list. Reused while young and live.
+static RECENT: Mutex<Vec<(u32, String, Vec<u64>, std::time::Instant)>> = Mutex::new(Vec::new());
+const RECENT_FOR: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Fields looked up this run (a walk runs 4 times a second for a limit; Terraria's Main
 /// declares 1178 fields): (pid, class, name, static) -> offset and type.
 #[allow(clippy::type_complexity)]
@@ -936,13 +943,23 @@ pub fn find_roots(heap: &Heap, path: &MonoPath) -> Vec<u64> {
     if !path.via.is_empty() {
         return find_static(heap, path).map(|(_, data)| vec![data]).unwrap_or_default();
     }
+    let key = format!("{}::{}", path.namespace, path.class);
+    let live_of = |m: &Mono, obj: u64| m.class_of(obj).is_some_and(|k| m.is(k, path) && m.live(obj, k));
+    if let Some(lay) = known_layout(heap.pid) {
+        let m = Mono::new(heap, lay);
+        let recent = RECENT.lock().unwrap().iter().find(|r| r.0 == heap.pid && r.1 == key && r.3.elapsed() < RECENT_FOR).map(|r| r.2.clone());
+        if let Some(objs) = recent.filter(|o| !o.is_empty() && o.iter().all(|&obj| live_of(&m, obj))) {
+            return objs;
+        }
+    }
     let vts = vtables(heap, path);
     let (Some(lay), false) = (known_layout(heap.pid), vts.is_empty()) else { return Vec::new() };
     let m = Mono::new(heap, lay);
-    heap.referrers(&vts)
-        .into_iter()
-        .filter(|&obj| m.class_of(obj).is_some_and(|k| m.is(k, path) && m.live(obj, k)))
-        .collect()
+    let objs: Vec<u64> = heap.referrers(&vts).into_iter().filter(|&obj| live_of(&m, obj)).collect();
+    let mut recent = RECENT.lock().unwrap();
+    recent.retain(|r| r.0 == heap.pid && r.1 != key && r.3.elapsed() < RECENT_FOR);
+    recent.push((heap.pid, key, objs.clone(), std::time::Instant::now()));
+    objs
 }
 
 /// Where the path leads from the objects found before (no search), the newest first (the one
