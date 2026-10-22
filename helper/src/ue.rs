@@ -1451,8 +1451,29 @@ impl Ue {
         }
         let game_state = world.and_then(|w| self.object_in(mem, w, "GameState"));
 
+        // A pawn that only steers another (Hell Pie possesses a camera rig, a plain Pawn, whose
+        // ControlledPawn is the demon the player moves): that Character is theirs too, first.
+        // Only through a field made to hold a pawn (the rig's AdditionalInputActor, an Actor
+        // field, holds Cupid, also a Character), only a Character, and only when one is pointed
+        // to: a field could be an enemy it targets.
+        let pawn_class = self.class_of(mem, pawn).unwrap_or(0);
+        let driven = if is_a(pawn_class, &["Character"]) {
+            None
+        } else {
+            let mut found: Vec<u64> = Vec::new();
+            let fields: Vec<Prop> = self.props(mem, pawn_class).iter().filter(|p| p.kind == "ObjectProperty" && p.dim == 1 && p.extra != 0).cloned().collect();
+            let pawn_fields: Vec<Prop> = fields.into_iter().filter(|p| is_a(p.extra, &["Pawn"])).collect();
+            for p in &pawn_fields {
+                let Some(o) = ptr_at(mem, pawn + p.offset).filter(|&o| o != pawn && !found.contains(&o)) else { continue };
+                if !self.is_template(mem, o) && self.class_of(mem, o).is_some_and(|c| is_a(c, &["Character"])) {
+                    found.push(o);
+                }
+            }
+            (found.len() == 1).then(|| found[0])
+        };
         // (object, role, the group it belongs to)
-        let mut groups: Vec<(u64, &'static str, Option<usize>)> = vec![(pawn, "character", None)];
+        let mut groups: Vec<(u64, &'static str, Option<usize>)> = driven.into_iter().map(|d| (d, "character", None)).collect();
+        groups.push((pawn, "character", None));
         let roots = [(state, "state"), (Some(controller), "controller"), (instance, "game"), (game_state, "game")];
         groups.extend(roots.into_iter().filter_map(|(o, role)| Some((o?, role, None))));
         let mut index: HashMap<u64, usize> = groups.iter().enumerate().map(|(i, g)| (g.0, i)).collect();
