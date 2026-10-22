@@ -335,6 +335,9 @@ pub fn run() {
         if let Err(e) = run_command(&mut core, &line) {
             println!("error: {e}");
         }
+        // And one the command found gone: killed while Windows didn't report it ended yet, it
+        // answered nothing, and its limits waited for the next command to hold again.
+        core.check_helper();
         io::stdout().flush().ok();
     }
 }
