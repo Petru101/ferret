@@ -130,6 +130,29 @@ const LAYOUTS: [Layout; 7] = [
     Layout { offset: 0x50, extra: 0x78, inner: 0x78, value: 0x80, ..UPROPERTY },
     Layout { offset: 0x44, extra: 0x70, inner: 0x70, value: 0x78, ..UPROPERTY_OLD },
 ];
+impl Layout {
+    /// The same in a build with stats compiled in (development builds: Injected, a 4.15 jam
+    /// game's NGJ17.exe): UObjectBase gets a TStatId after Outer, so everything a UObject keeps
+    /// after its header is 8 bytes later (UStruct's fields; all of a UProperty's).
+    const fn with_stats(self) -> Layout {
+        let prop = if self.class == OBJ_CLASS { 8 } else { 0 };
+        Layout {
+            sup: self.sup + 8,
+            props: self.props + 8,
+            struct_size: self.struct_size + 8,
+            align: self.align + 8,
+            next: self.next + prop,
+            dim: self.dim + prop,
+            size: self.size + prop,
+            offset: self.offset + prop,
+            extra: self.extra + prop,
+            inner: self.inner + prop,
+            value: self.value + prop,
+            ..self
+        }
+    }
+}
+
 /// Properties per struct followed (a misread link can't make a walk take forever).
 const MAX_PROPS: usize = 2000;
 const MAX_NAME: usize = 1024;
@@ -249,7 +272,7 @@ impl Ue {
         // then loses it).
         // The error to tell: the layout that read the most of Guid.
         let (mut why, mut fallback) = ((0, String::new()), None);
-        for layout in LAYOUTS {
+        for layout in LAYOUTS.iter().flat_map(|l| [*l, l.with_stats()]) {
             ue.layout = layout;
             ue.props.lock().unwrap().clear();
             match ue.check_layout(mem) {
