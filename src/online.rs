@@ -73,12 +73,12 @@ pub fn delete(path: &str) -> Result<Reply, String> {
 /// O, U: Crockford's base 32).
 const ID_CHARS: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Random bytes from the kernel.
+/// Random bytes from the system (getrandom on Linux, ProcessPrng on Windows). Reading
+/// /dev/urandom gave zeros on Windows: every install had the same id, owning every other
+/// Windows player's uploads.
 fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    if let Ok(mut f) = fs::File::open("/dev/urandom") {
-        std::io::Read::read_exact(&mut f, &mut bytes).ok();
-    }
+    getrandom::getrandom(&mut bytes).expect("the system's random numbers");
     bytes
 }
 
@@ -99,7 +99,9 @@ pub fn parse_id(text: &str) -> Option<String> {
 /// else is tied to it.
 pub fn install_id() -> String {
     let path = gtk::glib::user_config_dir().join("install-id");
-    if let Some(id) = fs::read_to_string(&path).ok().map(|s| s.trim().to_owned()).filter(|s| s.len() == 32) {
+    // All zeros: made by a Windows build before `random` worked there, and shared by every such
+    // install. A new one.
+    if let Some(id) = fs::read_to_string(&path).ok().map(|s| s.trim().to_owned()).filter(|s| s.len() == 32 && s.bytes().any(|b| b != b'0')) {
         return id;
     }
     let id: String = random::<16>().iter().map(|b| format!("{b:02x}")).collect();

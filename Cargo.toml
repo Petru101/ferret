@@ -14,6 +14,8 @@ gtk = { version = "0.11.5", package = "gtk4", features = ["v4_14"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Feedback and bug reports (feedback.rs): HTTPS with its own certificates, no system TLS.
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+# Random ids (online.rs) from the system on every platform (the one rustls's ring uses).
+getrandom = "0.2"
 rten = "0.26"
 rten-tensor = "0.26"
 
