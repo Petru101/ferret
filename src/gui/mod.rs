@@ -1517,12 +1517,19 @@ fn build(app: &adw::Application) {
         show.connect_activate(move |_, _| window.present());
     }
     app.add_action(&show);
+    // Quit Ferret (the main menu, Ctrl+Q, the background notification): the only way out
+    // while it keeps values in range, since closing the window then hides it.
     let quit = gio::SimpleAction::new("quit", None);
     {
-        let app = app.clone();
-        quit.connect_activate(move |_, _| app.quit());
+        let ui = Rc::downgrade(&ui);
+        quit.connect_activate(move |_, _| {
+            if let Some(ui) = ui.upgrade() {
+                ui.quit();
+            }
+        });
     }
     app.add_action(&quit);
+    app.set_accels_for_action("app.quit", &["<Control>q"]);
     {
         let ui2 = Rc::downgrade(&ui);
         ui.hotkeys.on_key(move |id| {

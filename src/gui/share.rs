@@ -58,9 +58,12 @@ pub fn menu_button() -> gtk::MenuButton {
         .build()
 }
 
+/// Send Feedback, and Quit Ferret: closing the window keeps Ferret running hidden while it
+/// keeps values in range, and Windows has no place listing background apps to stop it from.
 fn feedback_section() -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some(&tr!("Send Feedback…")), Some("app.feedback"));
+    menu.append(Some(&tr!("Quit Ferret")), Some("app.quit"));
     menu
 }
 
