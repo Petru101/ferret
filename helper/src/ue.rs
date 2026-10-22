@@ -124,7 +124,8 @@ const LAYOUTS: [Layout; 7] = [
     // Minecraft Dungeons II.
     Layout { name: 0x20, next: 0x18, dim: 0x30, size: 0x34, offset: 0x48, extra: 0x78, inner: 0x80, value: 0x80, ..FFIELD },
     // UProperty games (4.11 to 4.24), the struct and property halves of 4.22 and Styx's 4.13 in
-    // each combination: which version moved which isn't known.
+    // each combination. Seen: 4.13, 4.15 and 4.17 `UPROPERTY_OLD`; 4.18 (Zombielicious) the
+    // last one; 4.22 `UPROPERTY`.
     UPROPERTY,
     UPROPERTY_OLD,
     Layout { offset: 0x50, extra: 0x78, inner: 0x78, value: 0x80, ..UPROPERTY },
