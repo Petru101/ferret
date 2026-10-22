@@ -56,11 +56,24 @@ pub fn profile_text(exe: &str) -> Option<String> {
     Some(scrub(&kept)).filter(|t| !t.trim().is_empty())
 }
 
-/// The home folder's path out of a text: it holds the player's user name. Every way it shows
-/// up: Bazzite's /home is a link to /var/home (the helper sees the real path), and Wine
-/// writes it with backslashes ("Z:\\var\\home\\...").
+/// The home folder's path out of a text: it holds the player's user name. On Windows that's
+/// USERPROFILE (Windows sets no HOME, and the log went out with C:\Users\<name> in it).
 fn scrub(text: &str) -> String {
-    let Some(home) = std::env::var("HOME").ok().filter(|h| h.len() > 1) else { return text.to_owned() };
+    #[cfg(windows)]
+    let (home, scrub_home) = (std::env::var("USERPROFILE"), scrub_windows as fn(&str, &str) -> String);
+    #[cfg(not(windows))]
+    let (home, scrub_home) = (std::env::var("HOME"), scrub_unix as fn(&str, &str) -> String);
+    // Not a bare "/" or "C:\": that would take out every path.
+    match home.ok().filter(|h| h.trim_end_matches(['/', '\\']).len() > 2) {
+        Some(home) => scrub_home(text, &home),
+        None => text.to_owned(),
+    }
+}
+
+/// Every way a Linux home shows up: Bazzite's /home is a link to /var/home (the helper sees the
+/// real path), and Wine writes it with backslashes ("Z:\var\home\...").
+#[cfg_attr(windows, allow(dead_code))]
+fn scrub_unix(text: &str, home: &str) -> String {
     let home = home.trim_end_matches('/');
     let real = home.strip_prefix("/var").unwrap_or(home);
     let mut text = text.to_owned();
@@ -68,6 +81,37 @@ fn scrub(text: &str) -> String {
         text = text.replace(&path.replace('/', "\\"), "~").replace(&path, "~");
     }
     text
+}
+
+/// Every way Windows writes a profile folder (C:\Users\<name>): any case, with \, / or the \\ of
+/// an escaped path ("C:\\games\\..." in the log). Only the whole name: C:\Users\Pat leaves
+/// C:\Users\Patricia alone.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn scrub_windows(text: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['\\', '/']);
+    let mut text = text.to_owned();
+    for sep in ["\\\\", "\\", "/"] {
+        text = replace_path(&text, &home.replace('\\', sep), "~");
+    }
+    text
+}
+
+/// `text` with each `path` in it (ASCII letters in any case, not followed by more of a name)
+/// replaced by `with`.
+fn replace_path(text: &str, path: &str, with: &str) -> String {
+    // ASCII lowercasing keeps every byte where it was: indices in `low` are indices in `text`.
+    let (low, path) = (text.to_ascii_lowercase(), path.to_ascii_lowercase());
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(i) = low[at..].find(&path) {
+        let end = at + i + path.len();
+        let more_name = low.as_bytes().get(end).is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80);
+        out.push_str(&text[at..at + i]);
+        out.push_str(if more_name { &text[at + i..end] } else { with });
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 impl Report {
@@ -129,11 +173,19 @@ mod tests {
 
     #[test]
     fn takes_the_home_folder_out() {
-        let home = std::env::var("HOME").unwrap();
-        let real = home.strip_prefix("/var").unwrap_or(&home).to_owned();
-        let wine = format!("Z:/var{real}/Steam").replace('/', "\\");
-        let text = format!("profile {real}/.var/app/x and /var{real}/Games/y, {wine}");
-        assert_eq!(scrub(&text), "profile ~/.var/app/x and ~/Games/y, Z:~\\Steam");
+        let text = "profile /home/pat/.var/app/x and /var/home/pat/Games/y, Z:\\var\\home\\pat\\Steam";
+        assert_eq!(scrub_unix(text, "/home/pat"), "profile ~/.var/app/x and ~/Games/y, Z:~\\Steam");
+        assert_eq!(scrub_unix(text, "/var/home/pat/"), "profile ~/.var/app/x and ~/Games/y, Z:~\\Steam");
+    }
+
+    #[test]
+    fn takes_the_windows_profile_out() {
+        let text = "attached to 7: C:\\Users\\Pat\\Games\\x.exe, saved to c:\\users\\pat\\AppData\\Local\\Ferret, \
+                    C:\\\\Users\\\\Pat\\\\z, C:/Users/Pat/w, C:\\Users\\Patricia\\v, C:\\Users\\Pat";
+        assert_eq!(
+            scrub_windows(text, "C:\\Users\\Pat\\"),
+            "attached to 7: ~\\Games\\x.exe, saved to ~\\AppData\\Local\\Ferret, ~\\\\z, ~/w, C:\\Users\\Patricia\\v, ~"
+        );
     }
 
     #[test]
