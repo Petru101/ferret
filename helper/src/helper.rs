@@ -1615,19 +1615,34 @@ fn launcher_folder(pid: u32, program: &Path) -> bool {
     program.ancestors().skip(1).take(2).any(ships_toolkit)
 }
 
-/// A library only desktop apps load: GTK, Qt, Chromium Embedded (Linux names and Windows DLLs).
-/// GDK 3 alone too: GNOME's ibus-x11 loads it and Mesa without GTK, and showed up as a game.
+/// A library only desktop apps load: GTK, Qt, Chromium Embedded, WinUI (Linux names and Windows
+/// DLLs: GTK's are libgtk-4-1.dll there). GDK 3 alone too: GNOME's ibus-x11 loads it and Mesa
+/// without GTK, and showed up as a game; so did Windows 11's Notepad (WinUI).
 fn desktop_toolkit(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    ["libgtk-3.", "libgdk-3.", "libgtk-4.", "libqt5core.", "libqt6core.", "libcef.", "qt5core.dll", "qt6core.dll", "chrome_elf.dll", "msedge_elf.dll"]
-        .iter()
-        .any(|t| name.starts_with(t))
+    [
+        "libgtk-3.", "libgdk-3.", "libgtk-4.", "libgtk-3-", "libgtk-4-", "libqt5core.", "libqt6core.", "libcef.", "qt5core.dll", "qt6core.dll",
+        "chrome_elf.dll", "msedge_elf.dll", "microsoft.ui.xaml.dll",
+    ]
+    .iter()
+    .any(|t| name.starts_with(t))
+}
+
+/// An Electron app (Discord, VS Code, the Claude app): Chromium is built into its own .exe, so
+/// no toolkit DLL tells it (the Claude app showed up as a game on Windows), but Chromium's V8
+/// snapshot sits beside it and the app in resources\app.asar (or resources\app). An Electron
+/// game's values are in its renderers, which aren't listed either (`--type=`).
+fn electron_app(pid: u32, program: &Path) -> bool {
+    let Some(dir) = program.parent() else { return false };
+    let has = |p: &str| os::inside(pid, &dir.join(p)).exists();
+    has("v8_context_snapshot.bin") && (has("resources/app.asar") || has("resources/app"))
 }
 
 /// Windows programs under Wine that aren't games: Wine's own (csrss.exe, lsass.exe, ... from
 /// its lib/wine folder), Chromium helpers, and launchers' windows and services (the EA app's
 /// use Chromium Embedded and Qt; it showed up as ten games), also their helpers that load
-/// neither and don't draw (the EA app starts compatibility32\EADesktop.exe next to every game).
+/// neither and don't draw (the EA app starts compatibility32\EADesktop.exe next to every game),
+/// and Electron apps.
 fn windows_non_game(pid: u32) -> bool {
     if cmdline(pid).contains(" --type=") {
         return true;
@@ -1646,6 +1661,7 @@ fn windows_non_game(pid: u32) -> bool {
     let lower = program.to_string_lossy().to_ascii_lowercase();
     ["/lib/wine/", "/lib64/wine/", "/drive_c/windows/"].iter().any(|d| lower.contains(d))
         || !names().any(gpu_driver) && launcher_folder(pid, &program)
+        || electron_app(pid, &program)
 }
 
 /// Running games, one per line: pid, program name, Steam app ID, why it's refused (`Refusal::code`),
