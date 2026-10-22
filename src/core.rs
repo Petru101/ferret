@@ -1342,6 +1342,9 @@ struct Game {
     votes: Vec<(String, Votes)>,
     /// How often each value's confirmed paths led to it this run (see `Steady`).
     steady: Vec<(String, Steady)>,
+    /// The places those paths led to before each value moved, for the helper's vote to pass over
+    /// (freed memory stays readable on Windows, so many paths still lead there).
+    left: Vec<(String, Vec<u64>)>,
     /// Values found through code patterns whose object the game reads from a static pointer:
     /// that pointer as a path (good for this run only), for the helper to follow.
     via: Vec<(String, String)>,
@@ -1908,6 +1911,7 @@ impl Core {
             paths: Vec::new(),
             votes: Vec::new(),
             steady: Vec::new(),
+            left: Vec::new(),
             via: Vec::new(),
             named: Vec::new(),
             named_doubt: Vec::new(),
@@ -2424,7 +2428,21 @@ impl Core {
 
     /// `follow`, plus how strongly the paths agree.
     fn follow_votes(&mut self, kind: Kind, paths: &[String]) -> (Vec<Option<u64>>, Option<(Loc, Option<i64>)>, Option<Votes>) {
-        let reply = self.helper.call(&format!("follow {} {}", kind.name(), paths.join(" ")));
+        self.follow_from(kind, paths, 0, &[])
+    }
+
+    /// `follow_votes` for a value last found at `at` in this run (0: not yet) that moved away from
+    /// the places in `left`: the helper passes over the paths still leading to those.
+    fn follow_from(&mut self, kind: Kind, paths: &[String], at: u64, left: &[u64]) -> (Vec<Option<u64>>, Option<(Loc, Option<i64>)>, Option<Votes>) {
+        let mut was = String::new();
+        if at != 0 {
+            was += &format!("at=0x{at:x} ");
+        }
+        if !left.is_empty() {
+            let left: Vec<String> = left.iter().map(|a| format!("0x{a:x}")).collect();
+            was += &format!("left={} ", left.join(","));
+        }
+        let reply = self.helper.call(&format!("follow {} {was}{}", kind.name(), paths.join(" ")));
         let ends = (0..paths.len())
             .map(|i| {
                 let line = reply.iter().find_map(|l| l.strip_prefix(&format!("{i}: ")))?;
@@ -2464,14 +2482,31 @@ impl Core {
         let Some(game) = self.game.as_ref() else { return };
         let followed = game.paths.clone();
         for (name, paths) in followed {
-            let Some(kind) = self.game.as_ref().and_then(|g| g.entries.iter().find(|(n, _)| *n == name)).map(|(_, l)| l.kind) else {
+            let Some(game) = self.game.as_ref() else { return };
+            let Some(&(_, Loc { kind, addr: at })) = game.entries.iter().find(|(n, _)| *n == name) else {
                 continue;
             };
-            let (ends, best, votes) = self.follow_votes(kind, &paths);
+            let left = game.left.iter().find(|(n, _)| *n == name).map(|(_, l)| l.clone()).unwrap_or_default();
+            let (ends, best, votes) = self.follow_from(kind, &paths, at, &left);
             let clear = votes.as_ref().is_some_and(|v| v.clear);
             self.set_votes(&name, votes);
-            if let Some(e) = self.game.as_mut().and_then(|g| g.entries.iter_mut().find(|(n, _)| *n == name)) {
+            let Some(game) = self.game.as_mut() else { return };
+            if let Some(e) = game.entries.iter_mut().find(|(n, _)| *n == name) {
                 e.1.addr = best.map_or(0, |(loc, _)| loc.addr);
+            }
+            // Moved: the paths still leading where it was (into freed memory, on Windows) are
+            // passed over from now on.
+            if let (true, Some((loc, _)), true) = (clear, best, at != 0) {
+                if loc.addr != at {
+                    if !game.left.iter().any(|(n, _)| *n == name) {
+                        game.left.push((name.clone(), Vec::new()));
+                    }
+                    let l = &mut game.left.iter_mut().find(|(n, _)| *n == name).unwrap().1;
+                    l.retain(|&a| a != loc.addr);
+                    if !l.contains(&at) {
+                        l.push(at);
+                    }
+                }
             }
             if let (true, Some((loc, _))) = (clear, best) {
                 self.count_steady(&name, loc, &paths, &ends);
@@ -2569,7 +2604,11 @@ impl Core {
             .chain(followed)
             .chain(entry.named.iter().cloned())
             .collect();
-        let reply = self.helper.call(&format!("limit {} {loc} {limit} {}", entry.name, sites.join(" ")));
+        let left = match game.left.iter().find(|(n, _)| *n == entry.name) {
+            Some((_, l)) => format!(" left={}", l.iter().map(|a| format!("0x{a:x}")).collect::<Vec<_>>().join(",")),
+            None => String::new(),
+        };
+        let reply = self.helper.call(&format!("limit {} {loc} {limit} {}{left}", entry.name, sites.join(" ")));
         self.limits();
         first_error(&reply).map_or(Ok(()), Err)
     }

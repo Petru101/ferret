@@ -212,10 +212,28 @@ impl Vote {
     }
 }
 
+/// How many times more paths may still lead to where a value was than to the new place it moved
+/// to (see `tally`). paths-test on Windows: 2866 to the freed old gems, 125 to the new ones.
+const MOVED_SHARE: usize = 32;
+
 /// The address most of `paths` lead to now, and which paths lead there. Paths that stopped
-/// working or lead elsewhere went through something that changed.
-pub fn vote(mem: &Mem, mods: &[Module], width: usize, paths: &[PtrPath]) -> Option<Vote> {
+/// working or lead elsewhere went through something that changed. `at`: where the value was
+/// last found in this run (0: not yet), `left`: the places it moved away from in this run.
+pub fn vote(mem: &Mem, mods: &[Module], width: usize, paths: &[PtrPath], at: u64, left: &[u64]) -> Option<Vote> {
     let ends: Vec<Option<u64>> = paths.iter().map(|p| p.follow(mem, mods, width)).collect();
+    // Only Windows' heap (and Wine's) leaves freed objects readable; elsewhere paths through
+    // them break, and the most paths lead to where the value is now.
+    let windows = mods.iter().any(|m| m.name.eq_ignore_ascii_case("ntdll.dll"));
+    if windows { tally(paths, &ends, at, left) } else { tally(paths, &ends, 0, &[]) }
+}
+
+/// `vote` on where the paths lead now. Windows keeps freed memory readable, so after the game
+/// moves a value the paths that ran through the old object still lead to it, often far more of
+/// them than follow the game (paths-test: 2866 of 2998, through the leftovers of ntdll's, the C
+/// runtime's and the game's own bookkeeping). So a place the value moved away from only wins when
+/// nothing else does, and a new place beats where it was when the paths leading there clearly
+/// agree, start in more than one module and are more than a stray few.
+fn tally(paths: &[PtrPath], ends: &[Option<u64>], at: u64, left: &[u64]) -> Option<Vote> {
     let mut counts: Vec<(u64, usize)> = Vec::new();
     for e in ends.iter().flatten() {
         match counts.iter_mut().find(|(a, _)| a == e) {
@@ -223,13 +241,39 @@ pub fn vote(mem: &Mem, mods: &[Module], width: usize, paths: &[PtrPath]) -> Opti
             None => counts.push((*e, 1)),
         }
     }
-    // Ties go to the address of the earliest path (paths come best first).
-    let best = counts.iter().fold(None, |best: Option<(u64, usize)>, &(a, n)| match best {
+    let live: Vec<(u64, usize)> = counts.iter().copied().filter(|(a, _)| *a == at || !left.contains(a)).collect();
+    let pool = if live.is_empty() { &counts } else { &live };
+    let vote = |addr: u64, next: usize| Vote { addr, leads: ends.iter().map(|e| *e == Some(addr)).collect(), next };
+    let stayed = pool.iter().find(|(a, _)| at != 0 && *a == at).map_or(0, |(_, n)| *n);
+    if let Some((addr, n)) = top(pool, &[at]).filter(|_| stayed > 0) {
+        let next = top(pool, &[at, addr]).map_or(0, |(_, n)| n);
+        let mut modules: Vec<&str> = paths.iter().zip(ends).filter(|(_, e)| **e == Some(addr)).map(|(p, _)| p.module.as_str()).collect();
+        modules.sort_unstable();
+        modules.dedup();
+        if n >= 2 && n > 2 * next && n * MOVED_SHARE >= stayed && modules.len() >= 2 {
+            return Some(vote(addr, next));
+        }
+    }
+    let best = top(pool, &[])?;
+    Some(vote(best.0, top(pool, &[best.0]).map_or(0, |(_, n)| n)))
+}
+
+/// Notes that a value moved from `from` (0: not found before) to `to` in `left`, the places it
+/// moved away from (`vote`).
+pub fn moved_away(left: &mut Vec<u64>, from: u64, to: u64) {
+    left.retain(|&a| a != to);
+    if from != 0 && from != to && !left.contains(&from) {
+        left.push(from);
+    }
+}
+
+/// The address most paths lead to, but for `except`, and how many; ties go to the address of the
+/// earliest path (paths come best first).
+fn top(counts: &[(u64, usize)], except: &[u64]) -> Option<(u64, usize)> {
+    counts.iter().filter(|(a, _)| !except.contains(a)).fold(None, |best, &(a, n)| match best {
         Some((_, bn)) if bn >= n => best,
         _ => Some((a, n)),
-    })?;
-    let next = counts.iter().filter(|(a, _)| *a != best.0).map(|(_, n)| *n).max().unwrap_or(0);
-    Some(Vote { addr: best.0, leads: ends.iter().map(|e| *e == Some(best.0)).collect(), next })
+    })
 }
 
 /// Every aligned pointer-sized word in writable memory that points (aligned) into writable memory, as
@@ -549,5 +593,38 @@ mod tests {
         assert!(temporary("/tmp/.mount_x/lib.so"));
         assert!(!temporary("/run/media/u/Games/FEAR/FEAR.exe"));
         assert!(!temporary("/usr/lib/libtmpfiles.so"));
+    }
+
+    #[test]
+    fn moved_beats_stayed() {
+        let (old, new, junk) = (0x1000, 0x2000, 0x3000);
+        let paths: Vec<PtrPath> = ["ntdll.dll+10,8", "ntdll.dll+18,8", "ucrtbase.dll+20,8", "target.exe+30,8", "target.exe+40,8", "msvcrt.dll+50,8", "ntdll.dll+60,8"]
+            .iter()
+            .map(|t| PtrPath::parse(t).unwrap())
+            .collect();
+        let ends = [Some(old), Some(old), Some(old), Some(new), Some(old), Some(new), Some(junk)];
+        // Not knowing where it was, the most paths win.
+        assert_eq!(tally(&paths, &ends, 0, &[]).unwrap().addr, old);
+        // Half as many again leading somewhere else: no clear move.
+        assert_eq!(tally(&paths, &ends, old, &[]).unwrap().addr, old);
+        // The game moved it: the paths that followed win, clearly.
+        let ends = [Some(old), Some(old), Some(old), Some(new), Some(old), Some(new), None];
+        let v = tally(&paths, &ends, old, &[]).unwrap();
+        assert_eq!((v.addr, v.clear()), (new, true));
+        // Next time it's at the new place, and the old one is a place it left.
+        let v = tally(&paths, &ends, new, &[old]).unwrap();
+        assert_eq!((v.addr, v.clear()), (new, true));
+        // Paths from one module agreeing on a new place are no move.
+        let ends = [Some(old), Some(old), Some(old), Some(old), Some(old), Some(junk), Some(junk)];
+        let paths: Vec<PtrPath> = ["a.exe+1,0", "a.exe+2,0", "a.exe+3,0", "a.exe+4,0", "a.exe+5,0", "ntdll.dll+6,0", "ntdll.dll+7,0"]
+            .iter()
+            .map(|t| PtrPath::parse(t).unwrap())
+            .collect();
+        assert_eq!(tally(&paths, &ends, old, &[]).unwrap().addr, old);
+        // Nor are a stray few against thousands.
+        let many: Vec<PtrPath> = (0..100).map(|i| PtrPath::parse(&format!("m{}.dll+{i:x},0", i % 3)).unwrap()).collect();
+        let mut ends = vec![Some(old); 100];
+        (ends[0], ends[1]) = (Some(junk), Some(junk));
+        assert_eq!(tally(&many, &ends, old, &[]).unwrap().addr, old);
     }
 }

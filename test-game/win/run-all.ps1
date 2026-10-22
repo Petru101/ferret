@@ -2,9 +2,6 @@
 # at once) and sums them up. Each test's transcript: run\win-tests\<test>.log.
 #   run-all.ps1 [test names...]   e.g. run-all.ps1 limit-test names-test
 # Known to fail on Windows (2026-10-22), Windows' heap against Ferret's heuristics:
-# - paths-test: freed memory stays readable, and most saved pointer paths (2868 of 3000, most
-#   through ntdll's and the C runtime's heap bookkeeping) still lead to the freed old gems after
-#   "newroom", outvoting the 125 that follow the game to the new one.
 # - shapes-test: a learned shape keeps the 8 bytes after the record, the next heap block's header,
 #   which Windows encodes and which changes with the neighbouring block: the newest stack's
 #   doesn't match.

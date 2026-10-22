@@ -731,6 +731,8 @@ struct Limit {
     /// Pointer paths to the value; when there are any, the value is found through them on
     /// every check instead of through `sites` and the guard.
     paths: Vec<PtrPath>,
+    /// The places `paths` led to before the value moved (see `pointers::vote`).
+    left: Vec<u64>,
     /// A named path to every place the value is kept (all of an item's stacks): when there is
     /// one, all of them are found through it on every check and kept in range.
     named: Option<NamedLimit>,
@@ -989,7 +991,7 @@ fn limiter_loop(shared: SharedLimiter) {
                 *modules = pointers::modules(*pid, mem);
             }
             for l in limits.iter_mut().filter(|l| find && !l.paths.is_empty() && (l.paused.is_none() || l.retry_at <= now)) {
-                match pointers::vote(mem, modules, *width, &l.paths) {
+                match pointers::vote(mem, modules, *width, &l.paths, l.addr, &l.left) {
                     Some(v) if !v.clear() => {
                         l.paused = Some("its pointer paths don't agree on where it is, not writing");
                         l.retry_at = now + Duration::from_secs(1);
@@ -1000,6 +1002,7 @@ fn limiter_loop(shared: SharedLimiter) {
                         }
                         if v.addr != l.addr {
                             (l.changed, l.unchanged) = (false, None);
+                            pointers::moved_away(&mut l.left, l.addr, v.addr);
                         }
                         l.addr = v.addr;
                         l.paused = None;
@@ -1225,10 +1228,11 @@ fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
 /// "pattern:offset:register:displacement" as saved in the profile, a path
 /// "module+offset,offset,..." ("+static,disp" from resolve), and a named path starts with a
 /// quote (see names.rs; it keeps every place it leads to in range); `key=<offset>:<number>`
-/// goes with the sites (see `Site.key`). No bounds: only keeps the address current (see
-/// `limiter_loop`).
+/// goes with the sites (see `Site.key`), `left=<addr>,...` with the paths (see `Limit.left`). No
+/// bounds: only keeps the address current (see `limiter_loop`).
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
-    let f: Vec<&str> = arg.split_whitespace().collect();
+    let (f, left): (Vec<&str>, Vec<&str>) = arg.split_whitespace().partition(|s| !s.starts_with("left="));
+    let mut left: Vec<u64> = left.iter().flat_map(|s| s["left=".len()..].split(',')).filter_map(parse_addr).collect();
     let (key, rest) = take_key(f.get(4..).unwrap_or_default());
     let is_named = |s: &&&str| Named::is_named(s);
     let named: Option<Vec<Named>> = rest.iter().filter(is_named).map(|s| Named::parse(s)).collect();
@@ -1267,6 +1271,11 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
     };
     // Found again or given new bounds: a limit the player turned off stays off.
     let off = l.limits.iter().any(|l| l.name == *name && l.off);
+    for a in l.limits.iter().filter(|l| l.name == *name).flat_map(|l| l.left.clone()) {
+        if a != addr && !left.contains(&a) {
+            left.push(a);
+        }
+    }
     l.limits.retain(|l| l.name != *name);
     let changed = paths.is_empty();
     l.limits.push(Limit {
@@ -1277,6 +1286,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         max,
         sites,
         paths,
+        left,
         named: named.pop().map(|path| NamedLimit { path, roots: Vec::new(), found_at: None, addrs: Vec::new(), searching: false }),
         guard_addr,
         guard,
@@ -3616,9 +3626,22 @@ fn cmd_ptrscan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<(
 /// follow <type> <path>...: where each path leads now ("<n>: 0x<addr>:<type> = <value>" or
 /// "<n>: broken"), then the address most of them agree on: "best 0x<addr>:<type> = <value>",
 /// and "votes <paths leading there> <most leading elsewhere> <paths> clear|unclear".
+/// "at=<addr>" and "left=<addr>,..." before the paths: where the value was last found in this run,
+/// and the places it moved away from (see `pointers::vote`).
 fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
-    let mut it = arg.split_whitespace();
+    let mut it = arg.split_whitespace().peekable();
     let kind = it.next().and_then(Kind::parse);
+    let (mut at, mut left) = (0, Vec::new());
+    while let Some(t) = it.peek() {
+        if let Some(a) = t.strip_prefix("at=") {
+            at = parse_addr(a).unwrap_or(0);
+        } else if let Some(l) = t.strip_prefix("left=") {
+            left = l.split(',').filter_map(parse_addr).collect();
+        } else {
+            break;
+        }
+        it.next();
+    }
     let paths: Option<Vec<PtrPath>> = it.map(PtrPath::parse).collect();
     let (Some(kind), Some(paths), Some(mem)) = (kind, paths, s.mem.as_ref()) else {
         return writeln!(out, "error: usage: follow <type> <module+offset,offset,...>... (after attach)");
@@ -3630,7 +3653,7 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
             None => writeln!(out, "{i}: broken")?,
         }
     }
-    match pointers::vote(mem, &mods, s.width, &paths) {
+    match pointers::vote(mem, &mods, s.width, &paths, at, &left) {
         Some(v) => {
             writeln!(out, "best {}", s.describe(v.addr, kind))?;
             let clear = if v.clear() { "clear" } else { "unclear" };
