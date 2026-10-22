@@ -29,6 +29,12 @@ pub fn maps(pid: u32) -> io::Result<Vec<Region>> {
         .collect())
 }
 
+/// Windows' heap key (see windows.rs): glibc's chunk headers are plain sizes, the same for
+/// records of one kind, and Wine's heap is its own.
+pub fn heap_key(_pid: u32, _addr: u64) -> Option<u64> {
+    None
+}
+
 pub fn environ(pid: u32) -> HashMap<String, String> {
     fs::read(format!("/proc/{pid}/environ"))
         .unwrap_or_default()

@@ -55,6 +55,29 @@ fn params(p: &Handle) -> Option<u64> {
     read_u64(p, pbi.PebBaseAddress as u64 + 0x20)
 }
 
+/// The key the 64-bit heap holding `addr` encodes its block headers with (the second half of its
+/// HEAP's `Encoding`; see `helper::heap_block`). Found from the heap segment the address lies in
+/// (its reservation starts with one, pointing to its heap), not the PEB's list of heaps: the C
+/// runtime's own heap isn't always in it (the stand-in's isn't). None: not in an NT heap (the
+/// newer segment heap has no such headers).
+pub fn heap_key(pid: u32, addr: u64) -> Option<u64> {
+    let p = open(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
+    let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    let n = unsafe { VirtualQueryEx(p.0, addr as *const c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+    if n == 0 {
+        return None;
+    }
+    let segment = mbi.AllocationBase as u64;
+    if read_u64(&p, segment + 0x10)? as u32 != 0xFFEE_FFEE {
+        return None;
+    }
+    let heap = read_u64(&p, segment + 0x28)?;
+    // An NT heap (its signature) that encodes headers (EncodeFlagMask).
+    let nt = read_u64(&p, heap + 0x98)? as u32 == 0xEEFF_EEFF;
+    let encodes = read_u64(&p, heap + 0x78)? >> 32 != 0;
+    (nt && encodes).then(|| read_u64(&p, heap + 0x88)).flatten()
+}
+
 /// Device paths ("\Device\HarddiskVolume3") to drive letters ("C:").
 fn drives() -> &'static Vec<(String, String)> {
     static DRIVES: OnceLock<Vec<(String, String)>> = OnceLock::new();

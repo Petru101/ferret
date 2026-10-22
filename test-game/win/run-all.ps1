@@ -1,10 +1,6 @@
 # Runs the Windows feature tests one after another (they share the stand-in's profile, so never
 # at once) and sums them up. Each test's transcript: run\win-tests\<test>.log.
 #   run-all.ps1 [test names...]   e.g. run-all.ps1 limit-test names-test
-# Known to fail on Windows (2026-10-22), Windows' heap against Ferret's heuristics:
-# - shapes-test: a learned shape keeps the 8 bytes after the record, the next heap block's header,
-#   which Windows encodes and which changes with the neighbouring block: the newest stack's
-#   doesn't match.
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Only)
 $tests = 'limit-test', 'names-test', 'copy-test', 'decimal-test', 'doubt-test', 'move-test', 'paths-test', 'probe-test', 'shapes-test', 'shared-test', 'types-test'
 if ($Only) { $tests = $tests | Where-Object { $Only -contains $_ } }

@@ -2751,13 +2751,48 @@ fn read_le(mem: &Mem, addr: u64, n: usize) -> Option<u64> {
     Some(u64::from_le_bytes(w))
 }
 
+/// How far before a value its Windows heap block's header is looked for.
+const HEAP_LOOK_BACK: u64 = 0x1000;
+
+/// Where the data of the Windows heap block holding `addr` lies: from its first byte to where the
+/// next block's header starts. A 64-bit NT heap block starts with 16 bytes whose second half is
+/// XORed with its heap's key (os::heap_key): its size in 16-byte units, flags (1: in use), a
+/// checksum byte (the XOR of the three before it) and the size of the block before it, which the
+/// next block's header must repeat. `read` reads 8 bytes. None: not in such a block (the
+/// low-fragmentation heap encodes its headers otherwise, but those differ from block to block,
+/// so shapes drop them on their own).
+fn heap_block(read: impl Fn(u64) -> Option<u64>, key: u64, addr: u64) -> Option<(u64, u64)> {
+    // The header before data starting at `data`, decoded: (size in bytes, in use, size before).
+    let header = |data: u64| {
+        let b = (read(data.checked_sub(8)?)? ^ key).to_le_bytes();
+        let size = u16::from_le_bytes([b[0], b[1]]) as u64 * 16;
+        (b[3] == b[0] ^ b[1] ^ b[2] && size >= 32).then(|| (size, b[2] & 1 != 0, u16::from_le_bytes([b[4], b[5]]) as u64 * 16))
+    };
+    let mut data = addr & !15;
+    while addr - data < HEAP_LOOK_BACK && data >= 16 {
+        if let Some((size, true, _)) = header(data) {
+            // The next block's encoded half ends this one's data (the first half is this one's).
+            let end = data + size - 8;
+            if addr < end && header(data + size).is_some_and(|(_, _, before)| before == size) {
+                return Some((data, end));
+            }
+        }
+        data -= 16;
+    }
+    None
+}
+
 /// shape <hex addr[:type]>: the memory around the value as a shape, every word in it (the
-/// caller keeps what other finds agree on).
+/// caller keeps what other finds agree on). On Windows only the words of its heap block: past
+/// it is the next block's encoded header, which changes with its neighbours.
 fn cmd_shape(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let (Some((addr, kind)), Some(mem)) = (parse_loc(arg), s.mem.as_ref()) else {
         return writeln!(out, "error: usage: shape <hex addr[:type]> (after attach)");
     };
     let mapped = Mapped::new(&maps(s.pid)?);
+    let key = os::heap_key(s.pid, addr).filter(|_| s.width == 8);
+    let block = key.and_then(|key| heap_block(|a| read_le(mem, a, 8), key, addr));
+    let inside = |at: u64, n: i64| block.is_none_or(|(start, end)| at >= start && at.wrapping_add(n as u64) <= end);
     let size = kind.size() as i64;
     let mut words = Vec::new();
     let mut off = -SHAPE_SPAN;
@@ -2767,10 +2802,15 @@ fn cmd_shape(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
             continue;
         }
         let at = addr.wrapping_add_signed(off);
+        if !inside(at, 4) {
+            off += 4;
+            continue;
+        }
         let width = s.width as i64;
         // A pointer: aligned, clear of the value, into mapped memory.
         let pointer = at % s.width as u64 == 0
             && (off + width <= 0 || off >= size)
+            && inside(at, width)
             && read_le(mem, at, s.width).is_some_and(|p| mapped.contains(p));
         if pointer {
             words.push(format!("{off}=p"));
@@ -4207,7 +4247,31 @@ fn exit_untraced() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{dosbox_game, parse_pattern, run_game, wine_launcher, Patterns};
+    use super::{dosbox_game, heap_block, parse_pattern, run_game, wine_launcher, Patterns};
+
+    #[test]
+    fn finds_the_heap_block_around_a_value() {
+        let key = 0x1600_f8f8_08d5_05e1u64;
+        // A Windows heap header: size and size before in 16-byte units, in use or free.
+        let header = |size: u16, used: bool, before: u16| {
+            let [s0, s1] = size.to_le_bytes();
+            let [b0, b1] = before.to_le_bytes();
+            let flags = used as u8;
+            u64::from_le_bytes([s0, s1, flags, s0 ^ s1 ^ flags, b0, b1, 0, 0x18]) ^ key
+        };
+        // A record's block (data at 0x1010, 0x70 bytes with its header), then the next one's.
+        let mem = [(0x1008, header(7, true, 3)), (0x1078, header(5, true, 7)), (0x1030, 0x1234_5678), (0x1060, 0xdead_beef)];
+        let read = |a: u64| Some(mem.iter().find(|(at, _)| *at == a).map_or(0, |(_, v)| *v));
+        assert_eq!(heap_block(read, key, 0x1040), Some((0x1010, 0x1078)));
+        assert_eq!(heap_block(read, key, 0x1010), Some((0x1010, 0x1078)));
+        // The next block's header isn't in it, and another heap's key finds nothing.
+        assert_eq!(heap_block(read, key, 0x1078), None);
+        assert_eq!(heap_block(read, 0x0000_af93_e9b8_2212, 0x1040), None);
+        // A next header that doesn't name this block's size: not a heap block after all.
+        let mem = [(0x1008, header(7, true, 3)), (0x1078, header(5, true, 6))];
+        let read = |a: u64| Some(mem.iter().find(|(at, _)| *at == a).map_or(0, |(_, v)| *v));
+        assert_eq!(heap_block(read, key, 0x1040), None);
+    }
 
     #[test]
     fn finds_code_patterns_together() {
