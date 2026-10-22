@@ -222,13 +222,11 @@ fn nwjs_name(pid: u32, dir: &Path) -> String {
 }
 
 /// GameMaker games keep every number as a double; they ship their assets as data.win (or
-/// game.unx on Linux) next to the program.
+/// game.unx on Linux) next to the program, or packed into it (`gml::is_runner`).
 fn is_gamemaker(pid: u32, exe: &str) -> bool {
     let Ok(regions) = maps(pid) else { return false };
-    regions.iter().filter(|r| r.path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(exe))).any(|r| {
-        let dir = std::path::Path::new(&r.path).with_file_name("");
-        ["data.win", "game.unx", "assets/game.unx"].iter().any(|f| dir.join(f).exists())
-    })
+    let program = regions.iter().find(|r| r.path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(exe)));
+    program.is_some_and(|r| gml::is_runner(pid, Some(std::path::Path::new(&r.path))))
 }
 
 /// Java games run on a JVM (HotSpot's libjvm.so, or jvm.dll under Proton). Its garbage collector
@@ -3915,7 +3913,7 @@ fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
         Ok(_) => "unreal",
         Err(_) if is_godot(s.pid) => "godot",
         Err(_) if is_rpgmaker(s.pid) => "rpgmaker",
-        Err(_) if s.doubles_only && gml::data_file(s.pid, program_of(s.pid).as_deref()).is_some() => "gamemaker",
+        Err(_) if s.doubles_only && gml::is_runner(s.pid, program_of(s.pid).as_deref()) => "gamemaker",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
         Err(_) if is_air(s.pid) && s.width == 4 => "air",
         Err(_) if is_python_game(s.pid, &s.exe) => "python",
