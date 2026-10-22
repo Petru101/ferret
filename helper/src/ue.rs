@@ -24,6 +24,13 @@
 //   Minecraft Dungeons II (a 5.x with Utf8Str/AnsiStr properties) has the 5.4 FField, but its
 //   Offset is at 0x48, its type words at 0x78 (struct, class, map key) and 0x80 (map value),
 //   and an ArrayProperty's inner property at 0x80 (its flags first): `LAYOUTS`.
+// Older engines (4.11 to 4.24) keep properties as UObjects (UProperty) in a struct's Children
+// (UField.Next @0x28, with functions and enums: only "...Property" classes count), their type
+// being their class's name; 4.22 and older keep names in TNameEntryArray (heap: the exe holds a
+// pointer to it; chunks of 16384 FNameEntry pointers; an entry holds its index shifted left by
+// one, bit 0 wide, then the NUL-terminated characters) and 4.20 and older objects in one flat
+// array. Offsets move between minor versions (UStruct has FStructBaseChain from 4.21 or so,
+// UProperty's Offset_Internal moved): every known form is tried. Epic's source, 4.13 and 4.22.
 // The layout is checked on the engine's own structs: Guid (A, B, C, D: four ints), Transform
 // (Quat, Vector, Vector) and Actor's Tags (an array of names), in each known form.
 
@@ -39,14 +46,21 @@ const ITEM: u64 = 24;
 const OBJ_CLASS: u64 = 0x10;
 const OBJ_NAME: u64 = 0x18;
 const OBJ_OUTER: u64 = 0x20;
-const STRUCT_SUPER: u64 = 0x40;
-const STRUCT_PROPS: u64 = 0x50;
-const STRUCT_SIZE: u64 = 0x58;
-const FIELD_CLASS: u64 = 0x8;
+/// Names per chunk of TNameEntryArray.
+const NAME_CHUNK: u64 = 16384;
 
-/// Where an FField (and FProperty) keeps its fields.
+/// Where a UStruct keeps its parent, properties, size and alignment, and an FField (or
+/// UProperty) its fields.
 #[derive(Clone, Copy, Debug)]
 struct Layout {
+    sup: u64,
+    /// ChildProperties (FField), or Children (UField: properties among functions and enums).
+    props: u64,
+    struct_size: u64,
+    align: u64,
+    /// The field's class, and where that class keeps its name ("IntProperty").
+    class: u64,
+    class_name: u64,
     name: u64,
     next: u64,
     dim: u64,
@@ -62,13 +76,59 @@ struct Layout {
 
 /// Tried in this order at attach (`check_layout` picks the first that reads the engine's own
 /// structs right).
-const LAYOUTS: [Layout; 3] = [
+const FFIELD: Layout = Layout {
+    sup: 0x40,
+    props: 0x50,
+    struct_size: 0x58,
+    align: 0x5C,
+    class: 0x8,
+    class_name: 0,
+    name: 0x28,
+    next: 0x20,
+    dim: 0x38,
+    size: 0x3C,
+    offset: 0x4C,
+    extra: 0x78,
+    inner: 0x78,
+    value: 0x80,
+};
+/// 4.22: UStruct { UField (Next @0x28), FStructBaseChain, SuperStruct @0x40, Children @0x48,
+/// PropertiesSize @0x50, MinAlignment @0x54 }; UProperty { UField, ArrayDim @0x30, ElementSize
+/// @0x34, Offset_Internal @0x44, ..., 0x70 bytes }, then Struct/PropertyClass/Inner/KeyProp,
+/// ValueProp.
+const UPROPERTY: Layout = Layout {
+    sup: 0x40,
+    props: 0x48,
+    struct_size: 0x50,
+    align: 0x54,
+    class: OBJ_CLASS,
+    class_name: OBJ_NAME,
+    name: OBJ_NAME,
+    next: 0x28,
+    dim: 0x30,
+    size: 0x34,
+    offset: 0x44,
+    extra: 0x70,
+    inner: 0x70,
+    value: 0x78,
+};
+/// Styx: Shards of Darkness (4.13.1): no FStructBaseChain, and UProperty's RepNotifyFunc @0x48,
+/// Offset_Internal @0x50, 0x78 bytes in all (Epic's 4.13.2 source would put the offset at 0x4C).
+const UPROPERTY_OLD: Layout = Layout { sup: 0x30, props: 0x38, struct_size: 0x40, align: 0x44, offset: 0x50, extra: 0x78, inner: 0x78, value: 0x80, ..UPROPERTY };
+
+const LAYOUTS: [Layout; 7] = [
     // 4.25 to 5.3.
-    Layout { name: 0x28, next: 0x20, dim: 0x38, size: 0x3C, offset: 0x4C, extra: 0x78, inner: 0x78, value: 0x80 },
+    FFIELD,
     // 5.4 and later: FField's Owner is one tagged pointer, everything after it 8 bytes earlier.
-    Layout { name: 0x20, next: 0x18, dim: 0x30, size: 0x34, offset: 0x44, extra: 0x70, inner: 0x70, value: 0x78 },
+    Layout { name: 0x20, next: 0x18, dim: 0x30, size: 0x34, offset: 0x44, extra: 0x70, inner: 0x70, value: 0x78, ..FFIELD },
     // Minecraft Dungeons II.
-    Layout { name: 0x20, next: 0x18, dim: 0x30, size: 0x34, offset: 0x48, extra: 0x78, inner: 0x80, value: 0x80 },
+    Layout { name: 0x20, next: 0x18, dim: 0x30, size: 0x34, offset: 0x48, extra: 0x78, inner: 0x80, value: 0x80, ..FFIELD },
+    // UProperty games (4.11 to 4.24), the struct and property halves of 4.22 and Styx's 4.13 in
+    // each combination: which version moved which isn't known.
+    UPROPERTY,
+    UPROPERTY_OLD,
+    Layout { offset: 0x50, extra: 0x78, inner: 0x78, value: 0x80, ..UPROPERTY },
+    Layout { offset: 0x44, extra: 0x70, inner: 0x70, value: 0x78, ..UPROPERTY_OLD },
 ];
 /// Properties per struct followed (a misread link can't make a walk take forever).
 const MAX_PROPS: usize = 2000;
@@ -114,11 +174,23 @@ pub struct Prop {
     pub value: Option<Arc<Prop>>,
 }
 
+/// Where the game keeps its names.
+#[derive(Clone, Copy, Debug)]
+enum Names {
+    /// FNamePool's blocks (4.23 and later).
+    Pool(u64),
+    /// TNameEntryArray (4.22 and older): its chunk table, and where an entry keeps its index
+    /// and its characters.
+    Array { table: u64, index: u64, chars: u64 },
+}
+
 /// Where the game keeps its objects and names (found once per attach).
 pub struct Ue {
     objects: u64,
-    blocks: u64,
-    /// Where its FFields keep their fields (one of `LAYOUTS`).
+    /// The objects in one array (FFixedUObjectArray, 4.20 and older), not in chunks.
+    flat: bool,
+    names_at: Names,
+    /// Where its structs and properties keep their fields (one of `LAYOUTS`).
     layout: Layout,
     names: Mutex<HashMap<u32, Option<String>>>,
     props: Mutex<HashMap<u64, Arc<Vec<Prop>>>>,
@@ -139,8 +211,9 @@ impl Ue {
         if data.is_empty() {
             return Err(format!("no writable data in {exe}"));
         }
-        let (mut objects, mut blocks) = (None, None);
-        for (start, end) in data {
+        let (mut objects, mut flat, mut names) = (None, None, None);
+        let mut words_of = Vec::new();
+        for &(start, end) in &data {
             let mut buf = vec![0u8; (end - start) as usize];
             let Ok(n) = mem.read_at(&mut buf, start) else { continue };
             let words: Vec<u64> = buf[..n].chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
@@ -149,25 +222,40 @@ impl Ue {
                 if objects.is_none() && is_object_array(mem, &words[i..]) {
                     objects = Some(at);
                 }
-                if blocks.is_none() && i >= 1 && is_name_blocks(mem, &words[i - 1..]) {
-                    blocks = Some(at);
+                if objects.is_none() && flat.is_none() && is_flat_object_array(mem, &words[i..]) {
+                    flat = Some(at);
+                }
+                if names.is_none() && i >= 1 && is_name_blocks(mem, &words[i - 1..]) {
+                    names = Some(Names::Pool(at));
                 }
             }
+            words_of.push((start, words));
         }
-        let objects = objects.ok_or("no Unreal object list found")?;
-        let blocks = blocks.ok_or("no Unreal name pool found")?;
-        let mut ue = Ue { objects, blocks, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
+        // TNameEntryArray is on the heap: a pointer to it among the static data. Looked for only
+        // when there's no name pool (one more read for every heap pointer there).
+        if names.is_none() {
+            let (lo, hi) = data.iter().fold((u64::MAX, 0), |(lo, hi), &(s, e)| (lo.min(s), hi.max(e)));
+            names = words_of.iter().flat_map(|(_, w)| w.iter().copied()).filter(|&p| (p < lo || p >= hi) && ptr_at_ok(p)).find_map(|p| name_array(mem, p));
+        }
+        let (objects, flat) = match (objects, flat) {
+            (Some(o), _) => (o, false),
+            (None, Some(o)) => (o, true),
+            (None, None) => return Err("no Unreal object list found".into()),
+        };
+        let names_at = names.ok_or("no Unreal name pool found")?;
+        let mut ue = Ue { objects, flat, names_at, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
         // The first layout that reads all three right; else the first that reads Guid right (all
         // a layout had to pass before Transform and Tags were checked: no game that worked
         // then loses it).
-        let (mut why, mut fallback) = (String::new(), None);
+        // The error to tell: the layout that read the most of Guid.
+        let (mut why, mut fallback) = ((0, String::new()), None);
         for layout in LAYOUTS {
             ue.layout = layout;
             ue.props.lock().unwrap().clear();
             match ue.check_layout(mem) {
                 Ok(true) => return Ok(ue),
                 Ok(false) => fallback = fallback.or(Some(layout)),
-                Err(e) if why.is_empty() => why = e,
+                Err(e) if why.1.is_empty() || e.0 > why.0 => why = e,
                 Err(_) => {}
             }
         }
@@ -177,7 +265,7 @@ impl Ue {
                 ue.props.lock().unwrap().clear();
                 Ok(ue)
             }
-            None => Err(why),
+            None => Err(why.1),
         }
     }
 
@@ -185,17 +273,17 @@ impl Ue {
     /// Then whether the types are where the layout says: Transform's fields must lead to the
     /// Quat and Vector structs, and Actor's Tags to an array of names (checked when the game
     /// has them).
-    fn check_layout(&self, mem: &Mem) -> Result<bool, String> {
+    fn check_layout(&self, mem: &Mem) -> Result<bool, (usize, String)> {
         let objects = self.objects(mem);
         let find = |name: &str, class: &str| {
             objects.iter().copied().find(|&o| self.object_name(mem, o).as_deref() == Some(name) && self.class_name(mem, o).as_deref() == Some(class))
         };
-        let guid = find("Guid", "ScriptStruct").ok_or("no Guid struct among the objects (another engine version?)")?;
+        let guid = find("Guid", "ScriptStruct").ok_or((0, "no Guid struct among the objects (another engine version?)".to_string()))?;
         let props = self.props(mem, guid);
         let got: Vec<(String, u64)> = props.iter().map(|p| (p.name.clone(), p.offset)).collect();
         let want: Vec<(String, u64)> = ["A", "B", "C", "D"].iter().zip([0, 4, 8, 12]).map(|(n, o)| (n.to_string(), o)).collect();
         if got != want {
-            return Err(format!("unknown property layout (Guid reads as {got:?})"));
+            return Err((got.len(), format!("unknown property layout (Guid at 0x{guid:x} reads as {got:?})")));
         }
         if let Some(t) = find("Transform", "ScriptStruct") {
             let got: Vec<Option<String>> = self.props(mem, t).iter().map(|p| self.object_name(mem, p.extra)).collect();
@@ -214,7 +302,7 @@ impl Ue {
     }
 
     pub fn object_count(&self, mem: &Mem) -> usize {
-        i32_at(mem, self.objects + 20).unwrap_or(0).max(0) as usize
+        i32_at(mem, self.objects + if self.flat { 12 } else { 20 }).unwrap_or(0).max(0) as usize
     }
 
     /// Every object alive now.
@@ -222,6 +310,13 @@ impl Ue {
         let num = self.object_count(mem) as u64;
         let Some(table) = ptr_at(mem, self.objects) else { return Vec::new() };
         let mut out = Vec::with_capacity(num as usize);
+        if self.flat {
+            let mut buf = vec![0u8; (num * ITEM) as usize];
+            if let Ok(n) = mem.read_at(&mut buf, table) {
+                out.extend(buf[..n].chunks_exact(ITEM as usize).map(|i| u64::from_le_bytes(i[..8].try_into().unwrap())).filter(|&p| p != 0));
+            }
+            return out;
+        }
         for c in 0..num.div_ceil(CHUNK_ITEMS) {
             let Some(chunk) = ptr_at(mem, table + 8 * c) else { continue };
             let n = (num - c * CHUNK_ITEMS).min(CHUNK_ITEMS);
@@ -245,7 +340,16 @@ impl Ue {
     }
 
     fn read_name(&self, mem: &Mem, index: u32) -> Option<String> {
-        let block = ptr_at(mem, self.blocks + 8 * (index >> 16) as u64)?;
+        let blocks = match self.names_at {
+            Names::Pool(blocks) => blocks,
+            Names::Array { table, index: at, chars } => {
+                let chunk = ptr_at(mem, table + 8 * (index as u64 / NAME_CHUNK))?;
+                let entry = ptr_at(mem, chunk + 8 * (index as u64 % NAME_CHUNK))?;
+                let wide = u32_at(mem, entry + at)? & 1 == 1;
+                return entry_text(mem, entry + chars, wide);
+            }
+        };
+        let block = ptr_at(mem, blocks + 8 * (index >> 16) as u64)?;
         let at = block + 2 * (index & 0xFFFF) as u64;
         let mut h = [0u8; 2];
         mem.read_exact_at(&mut h, at).ok()?;
@@ -291,7 +395,12 @@ impl Ue {
     }
 
     pub fn struct_size(&self, mem: &Mem, st: u64) -> u64 {
-        i32_at(mem, st + STRUCT_SIZE).unwrap_or(0).max(0) as u64
+        i32_at(mem, st + self.layout.struct_size).unwrap_or(0).max(0) as u64
+    }
+
+    /// The struct or class `st` derives from.
+    pub fn super_of(&self, mem: &Mem, st: u64) -> Option<u64> {
+        ptr_at(mem, st + self.layout.sup)
     }
 
     /// The properties of a class or struct, its parents' first.
@@ -303,15 +412,15 @@ impl Ue {
         let mut cur = Some(st);
         while let Some(s) = cur.filter(|_| chain.len() < 64) {
             chain.push(s);
-            cur = ptr_at(mem, s + STRUCT_SUPER);
+            cur = self.super_of(mem, s);
         }
         let mut out = Vec::new();
         for s in chain.into_iter().rev() {
-            let mut f = ptr_at(mem, s + STRUCT_PROPS);
+            let mut f = ptr_at(mem, s + self.layout.props);
             let mut n = 0;
             while let Some(field) = f.filter(|_| n < MAX_PROPS) {
                 n += 1;
-                if let Some(mut p) = self.prop(mem, field) {
+                if let Some(mut p) = self.prop(mem, field).filter(|p| p.kind.ends_with("Property")) {
                     if matches!(p.kind.as_str(), "ArrayProperty" | "SetProperty" | "MapProperty") {
                         p.inner = self.prop(mem, p.extra).map(Arc::new);
                     }
@@ -330,8 +439,8 @@ impl Ue {
 
     /// The property described by the FField at `field`.
     pub fn prop(&self, mem: &Mem, field: u64) -> Option<Prop> {
-        let kind = self.fname(mem, ptr_at(mem, field + FIELD_CLASS)?)?;
         let l = self.layout;
+        let kind = self.fname(mem, ptr_at(mem, field + l.class)? + l.class_name)?;
         let extra = if matches!(kind.as_str(), "ArrayProperty" | "SetProperty") { l.inner } else { l.extra };
         Some(Prop {
             name: self.fname(mem, field + l.name)?,
@@ -372,6 +481,69 @@ fn is_object_array(mem: &Mem, w: &[u64]) -> bool {
     let first = ptr_at(mem, w[0]).and_then(|chunk| Some((ptr_at(mem, chunk)?, ptr_at(mem, chunk + ITEM)?)));
     let Some((a, b)) = first else { return false };
     u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
+}
+
+/// FFixedUObjectArray (4.20 and older): { items, i32 max, i32 num }, its first two objects
+/// with indices 0 and 1.
+fn is_flat_object_array(mem: &Mem, w: &[u64]) -> bool {
+    let (max, num) = (w[1] as u32 as u64, w[1] >> 32);
+    if num < 2 || num > max || max > 1 << 26 {
+        return false;
+    }
+    let first = Some(w[0]).filter(|&p| ptr_at_ok(p)).and_then(|items| Some((ptr_at(mem, items)?, ptr_at(mem, items + ITEM)?)));
+    let Some((a, b)) = first else { return false };
+    u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
+}
+
+/// Whether `p` can be a pointer (`ptr_at`'s rule), before reading anything.
+fn ptr_at_ok(p: u64) -> bool {
+    p >= 0x10000 && p < 1 << 47 && p % 8 == 0
+}
+
+/// TNameEntryArray at `p` (4.22 and older): { FNameEntry **Chunks[N]; i32 NumElements, NumChunks }
+/// with N = 128 (4.13: 2M names) or 256 (4.22: 4M), chunks as many as the count needs, and its
+/// first entries "None" and "ByteProperty", in either entry layout: { HashNext, Index, chars }
+/// (4.22) or { Index, HashNext, chars } (4.13).
+fn name_array(mem: &Mem, p: u64) -> Option<Names> {
+    let chunk = ptr_at(mem, p)?;
+    for slots in [128u64, 256] {
+        let (Some(num), Some(chunks)) = (i32_at(mem, p + 8 * slots), i32_at(mem, p + 8 * slots + 4)) else { continue };
+        let chunks = chunks as u64;
+        if num < 2 || chunks == 0 || chunks > slots || chunks != (num as u64).div_ceil(NAME_CHUNK) {
+            continue;
+        }
+        if ptr_at(mem, p + 8 * (chunks - 1)).is_none() || (chunks < slots && u64_at(mem, p + 8 * chunks) != Some(0)) {
+            continue;
+        }
+        let (Some(none), Some(byte)) = (ptr_at(mem, chunk), ptr_at(mem, chunk + 8)) else { continue };
+        for (index, chars) in [(8, 0xC), (0, 0x10)] {
+            let indices = (u32_at(mem, none + index).map(|i| i >> 1), u32_at(mem, byte + index).map(|i| i >> 1));
+            if indices == (Some(0), Some(1))
+                && entry_text(mem, none + chars, false).as_deref() == Some("None")
+                && entry_text(mem, byte + chars, false).as_deref() == Some("ByteProperty")
+            {
+                return Some(Names::Array { table: p, index, chars });
+            }
+        }
+    }
+    None
+}
+
+/// A TNameEntryArray entry's NUL-terminated characters (Latin-1, or UTF-16 when wide).
+fn entry_text(mem: &Mem, at: u64, wide: bool) -> Option<String> {
+    let unit = if wide { 2 } else { 1 };
+    let mut b = vec![0u8; unit * MAX_NAME];
+    let n = mem.read_at(&mut b, at).ok()?;
+    let b = &b[..n - n % unit];
+    let text = if wide {
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let len = units.iter().position(|&u| u == 0)?;
+        String::from_utf16_lossy(&units[..len])
+    } else {
+        let len = b.iter().position(|&c| c == 0)?;
+        b[..len].iter().map(|&c| c as char).collect()
+    };
+    Some(text).filter(|t| !t.is_empty())
 }
 
 /// The name pool's blocks (`w[1..]`, after CurrentBlock and CurrentByteCursor in `w[0]`): as
@@ -485,9 +657,11 @@ impl Ue {
             }
             _ => writeln!(
                 out,
-                "objects 0x{:x}, names 0x{:x}, {} objects",
+                "objects 0x{:x}{}, names {:x?}, layout {:x?}, {} objects",
                 self.objects,
-                self.blocks,
+                if self.flat { " (flat)" } else { "" },
+                self.names_at,
+                self.layout,
                 self.object_count(mem)
             ),
         }
@@ -524,7 +698,6 @@ impl Ue {
 const OBJ_FLAGS: u64 = 0x8;
 /// Class default objects and archetypes: templates, not things in the game.
 const TEMPLATE_FLAGS: u32 = 0x10 | 0x20;
-const STRUCT_ALIGN: u64 = 0x5C;
 const MAX_ELEMENTS: u64 = 1 << 16;
 /// Places a path leads to at most (a wrong root can't make a walk take forever).
 const MAX_LEADS: usize = 4096;
@@ -754,7 +927,7 @@ impl Ue {
 
     fn align(&self, mem: &Mem, p: &Prop) -> u64 {
         match p.kind.as_str() {
-            "StructProperty" => i32_at(mem, p.extra + STRUCT_ALIGN).map_or(8, |a| a.clamp(1, 16) as u64),
+            "StructProperty" => i32_at(mem, p.extra + self.layout.align).map_or(8, |a| a.clamp(1, 16) as u64),
             "BoolProperty" => 1,
             _ => match p.size {
                 1 | 2 | 4 => p.size,
@@ -1003,7 +1176,7 @@ impl Ue {
             if self.object_name(mem, s).as_deref() == Some("GameplayAttributeData") {
                 return true;
             }
-            cur = ptr_at(mem, s + STRUCT_SUPER);
+            cur = self.super_of(mem, s);
         }
         false
     }
@@ -1278,7 +1451,7 @@ impl Lister<'_> {
     /// its package.
     fn fields(&mut self, at: u64, st: u64, prefix: &str, depth: usize, links: bool) {
         let mut chain = vec![st];
-        while let Some(s) = ptr_at(self.mem, chain[chain.len() - 1] + STRUCT_SUPER).filter(|_| chain.len() < 64) {
+        while let Some(s) = self.ue.super_of(self.mem, chain[chain.len() - 1]).filter(|_| chain.len() < 64) {
             chain.push(s);
         }
         // `props` lists parents' properties first: a struct's own come after its parent's.
@@ -1391,7 +1564,7 @@ impl Ue {
             if self.object_name(mem, s).as_deref() == Some("GameplayAttributeData") {
                 return true;
             }
-            cur = ptr_at(mem, s + STRUCT_SUPER);
+            cur = self.super_of(mem, s);
         }
         false
     }
@@ -1402,7 +1575,7 @@ impl Ue {
         let mut cur = Some(class);
         while let Some(c) = cur.filter(|_| out.len() < 64) {
             out.push(self.object_name(mem, c).unwrap_or_default());
-            cur = ptr_at(mem, c + STRUCT_SUPER);
+            cur = self.super_of(mem, c);
         }
         out
     }
