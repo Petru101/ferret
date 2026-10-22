@@ -95,11 +95,13 @@ pub struct Guide {
     /// The places matching, for the texts that follow.
     count: Cell<usize>,
     notify: Rc<Notifier>,
-    /// What the bar asks of the player now (title, text, button, seconds): sent again when they
-    /// switch to the game (`remind`); "Ready" usually comes while Ferret is still in front.
+    /// What the bar asks of the player now (title, text, button, seconds): sent when they switch
+    /// to the game (`remind`), unless they saw it already.
     away: RefCell<Option<(String, String, Option<String>, Option<u32>)>>,
-    /// `away` went out already: once is enough (the player switching back and forth got the
-    /// same one every time, until Plasma refused them as too many).
+    /// `away` went out already, or came while Ferret was in front (the player read it there:
+    /// sending it again when they switched to the game told them what they knew). Once is
+    /// enough (the player switching back and forth got the same one every time, until Plasma
+    /// refused them as too many).
     reminded: Cell<bool>,
     /// The search follows a bar or a row of icons, not a number: the texts say so.
     pub follows: Cell<Option<GaugeKind>>,
@@ -253,6 +255,7 @@ impl Guide {
             let body = tr!("{step}. Ferret tells you when it's your turn.", step = title);
             if still {
                 self.away.replace(Some((hands_off_notice(), body, None, None)));
+                self.seen_in_front();
             } else {
                 self.tell(&hands_off_notice(), &body, None, None, true);
                 self.hands_off.set(self.notify.away());
@@ -314,8 +317,15 @@ impl Guide {
         if send {
             self.notify.send(title, text, button.as_deref(), secs);
         }
-        self.reminded.set(send && self.notify.away());
+        self.reminded.set(send || !self.notify.away());
         self.away.replace(Some((title.to_owned(), text.to_owned(), button, secs)));
+    }
+
+    /// What `away` holds now is on the bar while Ferret is in front: the player saw it.
+    fn seen_in_front(&self) {
+        if !self.notify.away() {
+            self.reminded.set(true);
+        }
     }
 
     /// Ferret's window lost the front: what the bar asks of the player, as a notification.
@@ -471,6 +481,7 @@ impl Guide {
             self.note(&hint);
         }
         self.away.replace(Some((title.clone(), hint, None, Some(4))));
+        self.seen_in_front();
         if before > n && n > 0 {
             self.pulse();
             let told = self.told.get();
