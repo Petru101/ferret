@@ -2140,9 +2140,10 @@ impl Core {
     }
 
     /// Whether a Java game's saved value can be written: saved by name, walked again before
-    /// every write.
+    /// every write. With no game open there's no Java to refuse: `set` and `limit` then say no
+    /// game is open (they said "Java game" with the helper gone).
     pub fn java_writable(&self, name: &str) -> bool {
-        self.game.as_ref().is_some_and(|g| !g.java || g.named.iter().any(|(n, t, _)| n == name && t.starts_with("java:")))
+        self.game.as_ref().is_none_or(|g| !g.java || g.named.iter().any(|(n, t, _)| n == name && t.starts_with("java:")))
     }
 
     /// Whether the attached game runs on Java (values not saved by name are only shown).
