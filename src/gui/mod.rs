@@ -791,8 +791,12 @@ impl Ui {
                 row.connect_activated(move |_| {
                     waiting_for.replace(None);
                     // Back to the same game: everything (a search in progress too) is still there.
+                    // Not pushed twice: the list can still be clicked while the page slides in
+                    // (libadwaita: "Page is already in navigation stack").
                     if attached.get() == Some(pid) {
-                        nav.push(&page);
+                        if nav.find_page("game").is_none() {
+                            nav.push(&page);
+                        }
                         return;
                     }
                     if attaching.get() == Some(pid) {
