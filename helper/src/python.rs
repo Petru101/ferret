@@ -43,15 +43,24 @@ const MANAGED_DICT: u64 = 1 << 4;
 const LIST_SUBCLASS: u64 = 1 << 25;
 const TUPLE_SUBCLASS: u64 = 1 << 26;
 const DICT_SUBCLASS: u64 = 1 << 29;
-// PyTypeObject fields (the same from 2.7 to 3.14 on 64-bit).
-const TP_NAME: u64 = 24;
-const TP_BASICSIZE: u64 = 32;
-const TP_FLAGS: u64 = 168;
-const TP_DICTOFFSET: u64 = 288;
+// PyTypeObject fields, in words (the same from 2.7 to 3.14: every field before them is a
+// pointer or a C long padded to one).
+const TP_NAME: u64 = 3;
+const TP_BASICSIZE: u64 = 4;
+const TP_FLAGS: u64 = 21;
+const TP_DICTOFFSET: u64 = 36;
 
 fn word(mem: &Mem, at: u64) -> Option<u64> {
     let mut b = [0u8; 8];
     mem.read_exact_at(&mut b, at).ok().map(|_| u64::from_le_bytes(b))
+}
+
+/// A little-endian number of `n` bytes (4 or 8), sign-extended when `signed`.
+fn sized(mem: &Mem, at: u64, n: u64, signed: bool) -> Option<u64> {
+    if n == 8 {
+        return word(mem, at);
+    }
+    half(mem, at).map(|v| if signed { v as i32 as i64 as u64 } else { u64::from(v) })
 }
 
 fn half(mem: &Mem, at: u64) -> Option<u32> {
@@ -80,8 +89,14 @@ fn version(pid: u32, regions: &[crate::helper::Region]) -> Option<(u8, u8)> {
     let from_name = |n: &str| {
         let i = n.find("python")? + 6;
         let rest = &n[i..];
-        let (maj, rest) = rest.split_once('.')?;
-        let min: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        // "2.7.so", "3.14", or Windows' "27.dll", "312.dll".
+        let (maj, min): (String, String) = match rest.split_once('.') {
+            Some((maj, rest)) if !maj.is_empty() && maj.len() <= 1 => (maj.into(), rest.chars().take_while(|c| c.is_ascii_digit()).collect()),
+            _ => {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                (digits.get(..1)?.into(), digits.get(1..)?.into())
+            }
+        };
         Some((maj.parse().ok()?, min.parse().ok()?))
     };
     let names: Vec<&str> = regions.iter().map(|r| r.path.rsplit('/').next().unwrap_or_default()).collect();
@@ -119,11 +134,15 @@ fn memchr_all(data: &[u8], needle: &[u8]) -> Vec<usize> {
 /// Whether the game runs CPython: a libpython or Ren'Py's librenpython mapped, or a python
 /// program.
 pub fn runs_python(regions: &[crate::helper::Region], exe: &str) -> bool {
-    let python = |n: &str| n.strip_prefix("python").is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'));
+    // python, python3.14; Windows' python27.dll, python312.dll.
+    let python = |n: &str| {
+        let n = n.strip_suffix(".dll").unwrap_or(n);
+        n.strip_prefix("python").is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    };
     python(&exe.to_ascii_lowercase())
         || regions.iter().any(|r| {
             let n = r.path.rsplit('/').next().unwrap_or_default();
-            n.starts_with("libpython2") || n.starts_with("libpython3") || n.starts_with("librenpython") || python(n)
+            n.starts_with("libpython2") || n.starts_with("libpython3") || n.starts_with("librenpython") || python(&n.to_ascii_lowercase())
         })
 }
 
@@ -147,19 +166,29 @@ struct Types {
     list: u64,
     tuple: u64,
     store: u64,
+    /// Python 2's old-style classes' objects (`class Player:` with no base) and those classes.
+    instance: u64,
+    classobj: u64,
+    /// Python 2's text strings (Ren'Py 7 keys its volumes and more by them).
+    unicode: u64,
 }
 
 /// A located game: its Python's version and types, and its namespaces by name.
 pub struct Py {
     pid: u32,
     ver: (u8, u8),
+    /// Bytes in a pointer (8; 4 for 32-bit Python 2.7, Ren'Py 7's Windows builds) and in a C
+    /// long (4 on Windows and 32-bit: 2.7's ints and string hashes).
+    w: u64,
+    long: u64,
     t: Types,
     /// Where a compact ASCII string's characters start (40 in 3.12+, 48 in 3.3-3.11).
     str_at: u64,
     roots: Mutex<(HashMap<String, u64>, Instant)>,
     /// Where a heap type keeps `ht_name` (then `ht_slots`, `ht_qualname`, `ht_cached_keys`).
     ht_name_at: Mutex<Option<u64>>,
-    /// The cached small ints: the object for 0 (they're consecutive) and its size.
+    /// The cached small ints: the object for 0 and their size when they're consecutive
+    /// objects (3.11+), else the table of pointers to them (2.7, 3.9-3.10) with size 0.
     small: Mutex<Option<(u64, u64)>>,
 }
 
@@ -175,22 +204,30 @@ enum Val {
 
 impl Py {
     fn locate(heap: &Heap) -> Option<Py> {
-        if heap.width() != 8 {
-            return None;
-        }
         let mem = heap.mem();
         let regions = crate::helper::maps(heap.pid).ok()?;
         let ver = version(heap.pid, &regions)?;
+        let w = heap.width() as u64;
+        // 32-bit: Python 2.7 only (3.x's dicts differ more than in width).
+        if w == 4 && ver.0 != 2 {
+            return None;
+        }
+        let windows = regions.iter().any(|r| r.path.to_ascii_lowercase().ends_with(".dll"));
+        let long = if w == 4 || windows { 4 } else { 8 };
+        let ptr = |at: u64| sized(mem, at, w, false);
         // The `type` type: its own type, named "type".
         let mut ty = 0;
+        let ws = w as usize;
         heap.each_chunk(0, |addr, b, fresh| {
             if ty != 0 {
                 return;
             }
-            for off in (0..fresh.saturating_sub(16)).step_by(8) {
-                let w = u64::from_le_bytes(b[off + 8..off + 16].try_into().unwrap());
-                if w == addr + off as u64 && word(mem, w + TP_NAME).and_then(|n| cstr(mem, n)).as_deref() == Some("type") {
-                    ty = w;
+            for off in (0..fresh.saturating_sub(2 * ws)).step_by(ws) {
+                let mut x = [0u8; 8];
+                x[..ws].copy_from_slice(&b[off + ws..off + 2 * ws]);
+                let t = u64::from_le_bytes(x);
+                if t == addr + off as u64 && ptr(t + TP_NAME * w).and_then(|n| cstr(mem, n)).as_deref() == Some("type") {
+                    ty = t;
                     return;
                 }
             }
@@ -201,9 +238,9 @@ impl Py {
         // The builtin types: objects of type `type` by name, not made by Python code (heap types).
         let mut t = Types::default();
         for r in heap.referrers(&[ty]) {
-            let o = r - 8;
-            let Some(name) = word(mem, o + TP_NAME).and_then(|n| cstr(mem, n)) else { continue };
-            let heap_type = word(mem, o + TP_FLAGS).is_some_and(|f| f & HEAPTYPE != 0);
+            let o = r - w;
+            let Some(name) = ptr(o + TP_NAME * w).and_then(|n| cstr(mem, n)) else { continue };
+            let heap_type = half(mem, o + TP_FLAGS * w).is_some_and(|f| u64::from(f) & HEAPTYPE != 0);
             let slot = match name.as_str() {
                 "module" => &mut t.module,
                 "dict" => &mut t.dict,
@@ -215,6 +252,9 @@ impl Py {
                 "list" => &mut t.list,
                 "tuple" => &mut t.tuple,
                 "StoreDict" => &mut t.store,
+                "instance" if ver.0 == 2 => &mut t.instance,
+                "classobj" if ver.0 == 2 => &mut t.classobj,
+                "unicode" if ver.0 == 2 => &mut t.unicode,
                 _ => continue,
             };
             if *slot == 0 && (!heap_type || name == "StoreDict") {
@@ -227,6 +267,8 @@ impl Py {
         let mut py = Py {
             pid: heap.pid,
             ver,
+            w,
+            long,
             t,
             str_at: if ver >= (3, 12) { 40 } else { 48 },
             roots: Mutex::new((HashMap::new(), Instant::now())),
@@ -248,9 +290,9 @@ impl Py {
         let targets: Vec<u64> = [self.t.module, self.t.store].into_iter().filter(|&x| x != 0).collect();
         let mut roots = HashMap::new();
         for r in heap.referrers(&targets) {
-            let o = r - 8;
-            let Some(ty) = word(mem, r) else { continue };
-            let d = if ty == self.t.module { word(mem, o + 16).unwrap_or(0) } else { o };
+            let o = r - self.w;
+            let Some(ty) = self.ptr(mem, r) else { continue };
+            let d = if ty == self.t.module { self.ptr(mem, o + 2 * self.w).unwrap_or(0) } else { o };
             if d == 0 || !self.is_dict(mem, d) {
                 continue;
             }
@@ -262,29 +304,40 @@ impl Py {
         *self.roots.lock().unwrap() = (roots, Instant::now());
     }
 
-    fn type_of(&self, mem: &Mem, o: u64) -> Option<u64> {
-        word(mem, o + 8).filter(|&t| t > 0x10000)
+    /// A pointer-sized word (also Py_ssize_t: sizes, counts).
+    fn ptr(&self, mem: &Mem, at: u64) -> Option<u64> {
+        sized(mem, at, self.w, false)
     }
 
+    fn type_of(&self, mem: &Mem, o: u64) -> Option<u64> {
+        self.ptr(mem, o + self.w).filter(|&t| t > 0x10000)
+    }
+
+    /// tp_flags: a C long (4 bytes on Windows; no flag is past bit 31).
     fn flags(&self, mem: &Mem, t: u64) -> u64 {
-        word(mem, t + TP_FLAGS).unwrap_or(0)
+        half(mem, t + TP_FLAGS * self.w).map_or(0, u64::from)
     }
 
     fn is_dict(&self, mem: &Mem, o: u64) -> bool {
         self.type_of(mem, o).is_some_and(|t| t == self.t.dict || t == self.t.store || self.flags(mem, t) & DICT_SUBCLASS != 0)
     }
 
-    /// A str's text (3.x compact strings; 2.7's byte strings).
+    /// A str's text (3.x compact strings; 2.7's byte strings and unicode strings).
     fn text(&self, mem: &Mem, o: u64) -> Option<String> {
-        if self.type_of(mem, o)? != self.t.str_ {
+        let t = self.type_of(mem, o)?;
+        if self.t.unicode != 0 && t == self.t.unicode {
+            return self.unicode_text(mem, o);
+        }
+        if t != self.t.str_ {
             return None;
         }
-        let len = word(mem, o + 16)?;
+        let len = self.ptr(mem, o + 2 * self.w)?;
         if len > 256 {
             return None;
         }
         let (at, width) = if self.ver.0 == 2 {
-            (36, 1)
+            // {head, ob_size, long ob_shash, int ob_sstate, chars}
+            (3 * self.w + self.long + 4, 1)
         } else {
             let state = half(mem, o + 32)?;
             let (kind, compact, ascii) = ((state >> 2) & 7, state >> 5 & 1 == 1, state >> 6 & 1 == 1);
@@ -303,33 +356,65 @@ impl Py {
         })
     }
 
+    /// Python 2's unicode string: {head, length, Py_UNICODE *str, ...}, characters of 2 bytes
+    /// (Windows) or 4 (most Linux builds): 4 tried first, unless they don't make text.
+    fn unicode_text(&self, mem: &Mem, o: u64) -> Option<String> {
+        let len = self.ptr(mem, o + 2 * self.w)?;
+        let at = self.ptr(mem, o + 3 * self.w)?;
+        if len > 256 || at == 0 {
+            return None;
+        }
+        let mut b = vec![0u8; 4 * len as usize];
+        let n = mem.read_at(&mut b, at).ok()?;
+        if n >= b.len() {
+            let wide: Option<String> = b.chunks(4).map(|c| char::from_u32(u32::from_le_bytes(c.try_into().unwrap())).filter(|&c| c != '\0')).collect();
+            if wide.is_some() {
+                return wide;
+            }
+        }
+        b.truncate(2 * len as usize);
+        if n < b.len() {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()))
+    }
+
     /// An int's digits (30 bits each) and sign, as the version keeps them.
     fn int_value(&self, mem: &Mem, o: u64, ty: u64) -> Option<i64> {
+        let w = self.w;
         if self.ver.0 == 2 && ty == self.t.int {
-            return word(mem, o + 16).map(|v| v as i64);
+            return sized(mem, o + 2 * w, self.long, true).map(|v| v as i64);
         }
         let (ndigits, negative) = if self.ver >= (3, 12) {
-            let tag = word(mem, o + 16)?;
+            let tag = self.ptr(mem, o + 2 * w)?;
             (tag >> 3, tag & 3 == 2)
         } else {
-            let size = word(mem, o + 16)? as i64;
+            let size = sized(mem, o + 2 * w, w, true)? as i64;
             (size.unsigned_abs(), size < 0)
         };
-        if ndigits > 2 {
+        // 32-bit Python 2.7 keeps 15-bit digits in 2 bytes.
+        let (bits, bytes) = if w == 4 { (15, 2) } else { (30, 4) };
+        if ndigits * bits > 62 {
             return None;
         }
         let mut v: i64 = 0;
         for i in 0..ndigits {
-            v |= i64::from(half(mem, o + 24 + 4 * i)? & 0x3fff_ffff) << (30 * i);
+            let d = if bytes == 2 { u32::from(u16::from_le_bytes(self.bytes::<2>(mem, o + 3 * w + 2 * i)?)) } else { half(mem, o + 3 * w + 4 * i)? };
+            v |= i64::from(d & ((1 << bits) - 1)) << (bits * i);
         }
         Some(if negative { -v } else { v })
+    }
+
+    fn bytes<const N: usize>(&self, mem: &Mem, at: u64) -> Option<[u8; N]> {
+        let mut b = [0u8; N];
+        mem.read_exact_at(&mut b, at).ok().map(|_| b)
     }
 
     /// What an object is, for listing.
     fn val(&self, mem: &Mem, o: u64) -> Val {
         let Some(t) = self.type_of(mem, o) else { return Val::Other };
         if t == self.t.float {
-            return word(mem, o + 16).map_or(Val::Other, |b| Val::Float(f64::from_bits(b)));
+            return word(mem, o + 2 * self.w).map_or(Val::Other, |b| Val::Float(f64::from_bits(b)));
         }
         if t == self.t.bool_ {
             return Val::Other;
@@ -338,7 +423,12 @@ impl Py {
             return self.int_value(mem, o, t).map_or(Val::Other, Val::Int);
         }
         let flags = self.flags(mem, t);
-        if flags & (DICT_SUBCLASS | LIST_SUBCLASS | TUPLE_SUBCLASS) != 0 || t == self.t.dict || t == self.t.store || flags & HEAPTYPE != 0 {
+        if flags & (DICT_SUBCLASS | LIST_SUBCLASS | TUPLE_SUBCLASS) != 0
+            || t == self.t.dict
+            || t == self.t.store
+            || flags & HEAPTYPE != 0
+            || (self.t.instance != 0 && t == self.t.instance)
+        {
             return Val::Obj(o);
         }
         Val::Other
@@ -358,20 +448,23 @@ impl Py {
     fn dict_entries(&self, mem: &Mem, d: u64) -> Vec<(Key, u64, u64)> {
         let mut out = Vec::new();
         let mut push = |k: u64, slot: u64| {
-            if let (Some(v), Some(key)) = (word(mem, slot).filter(|&v| v != 0), (k != 0).then(|| self.key(mem, k)).flatten()) {
+            if let (Some(v), Some(key)) = (self.ptr(mem, slot).filter(|&v| v != 0), (k != 0).then(|| self.key(mem, k)).flatten()) {
                 out.push((key, v, slot));
             }
         };
         if self.ver.0 == 2 {
-            let (Some(mask), Some(table)) = (word(mem, d + 32), word(mem, d + 40)) else { return out };
+            // {head, ma_fill, ma_used, ma_mask, ma_table}, entries {hash, key, value}.
+            let w = self.w as usize;
+            let (Some(mask), Some(table)) = (self.ptr(mem, d + 4 * self.w), self.ptr(mem, d + 5 * self.w)) else { return out };
             let n = (mask + 1).min(MAX_ENTRIES);
-            let mut b = vec![0u8; 24 * n as usize];
+            let mut b = vec![0u8; 3 * w * n as usize];
             if mem.read_exact_at(&mut b, table).is_err() {
                 return out;
             }
             for i in 0..n as usize {
-                let k = u64::from_le_bytes(b[24 * i + 8..24 * i + 16].try_into().unwrap());
-                push(k, table + 24 * i as u64 + 16);
+                let mut x = [0u8; 8];
+                x[..w].copy_from_slice(&b[3 * w * i + w..3 * w * i + 2 * w]);
+                push(u64::from_le_bytes(x), table + (3 * w * i + 2 * w) as u64);
             }
             return out;
         }
@@ -425,7 +518,7 @@ impl Py {
     fn cached_keys(&self, mem: &Mem, t: u64) -> Option<u64> {
         let mut at = self.ht_name_at.lock().unwrap();
         if at.is_none() {
-            let name = word(mem, t + TP_NAME).and_then(|n| cstr(mem, n))?;
+            let name = word(mem, t + TP_NAME * self.w).and_then(|n| cstr(mem, n))?;
             let short = name.rsplit('.').next().unwrap_or(&name).to_owned();
             *at = (400..1600).step_by(8).find(|&o| word(mem, t + o).and_then(|s| self.text(mem, s)).as_deref() == Some(short.as_str()));
         }
@@ -458,15 +551,19 @@ impl Py {
                 (3, 12) => if w != 0 { self.dict_entries(mem, w) } else { Vec::new() },
                 _ if w != 0 => self.dict_entries(mem, w),
                 _ if flags & INLINE_VALUES != 0 => {
-                    let values = o + word(mem, t + TP_BASICSIZE).unwrap_or(0);
+                    let values = o + word(mem, t + TP_BASICSIZE * self.w).unwrap_or(0);
                     if byte(mem, values + 3) == Some(1) { split(values + 8) } else { Vec::new() }
                 }
                 _ => Vec::new(),
             };
         }
-        let off = word(mem, t + TP_DICTOFFSET).unwrap_or(0) as i64;
+        // Python 2's old-style objects: {head, in_class, in_dict}.
+        if self.t.instance != 0 && t == self.t.instance {
+            return self.ptr(mem, o + 3 * self.w).filter(|&d| self.is_dict(mem, d)).map(|d| self.dict_entries(mem, d)).unwrap_or_default();
+        }
+        let off = sized(mem, t + TP_DICTOFFSET * self.w, self.w, true).unwrap_or(0) as i64;
         if off > 0 {
-            if let Some(d) = word(mem, o + off as u64).filter(|&d| d != 0 && self.is_dict(mem, d)) {
+            if let Some(d) = self.ptr(mem, o + off as u64).filter(|&d| d != 0 && self.is_dict(mem, d)) {
                 return self.dict_entries(mem, d);
             }
         }
@@ -477,18 +574,19 @@ impl Py {
     fn elements(&self, mem: &Mem, o: u64) -> Vec<(i64, u64, u64)> {
         let Some(t) = self.type_of(mem, o) else { return Vec::new() };
         let flags = self.flags(mem, t);
-        let Some(n) = word(mem, o + 16).filter(|&n| n <= MAX_ENTRIES) else { return Vec::new() };
+        let w = self.w;
+        let Some(n) = self.ptr(mem, o + 2 * w).filter(|&n| n <= MAX_ENTRIES) else { return Vec::new() };
         let items = if flags & LIST_SUBCLASS != 0 || t == self.t.list {
-            word(mem, o + 24).unwrap_or(0)
+            self.ptr(mem, o + 3 * w).unwrap_or(0)
         } else if flags & TUPLE_SUBCLASS != 0 || t == self.t.tuple {
-            o + 24
+            o + 3 * w
         } else {
             return Vec::new();
         };
         if items == 0 {
             return Vec::new();
         }
-        (0..n.min(MAX_ELEMENTS)).filter_map(|i| Some((i as i64, word(mem, items + 8 * i).filter(|&v| v != 0)?, items + 8 * i))).collect()
+        (0..n.min(MAX_ELEMENTS)).filter_map(|i| Some((i as i64, self.ptr(mem, items + w * i).filter(|&v| v != 0)?, items + w * i))).collect()
     }
 
     /// An object's entries by name or index: a dict's, a list's or an object's attributes.
@@ -504,37 +602,57 @@ impl Py {
     }
 
     fn type_name(&self, mem: &Mem, o: u64) -> String {
-        self.type_of(mem, o).and_then(|t| word(mem, t + TP_NAME)).and_then(|n| cstr(mem, n)).unwrap_or_default()
+        let Some(t) = self.type_of(mem, o) else { return String::new() };
+        // An old-style object: its class's name ({head, cl_bases, cl_dict, cl_name}).
+        if self.t.instance != 0 && t == self.t.instance {
+            let class = self.ptr(mem, o + 2 * self.w).filter(|&c| self.type_of(mem, c) == Some(self.t.classobj));
+            if let Some(name) = class.and_then(|c| self.ptr(mem, c + 4 * self.w)).and_then(|n| self.text(mem, n)) {
+                return name;
+            }
+        }
+        self.ptr(mem, t + TP_NAME * self.w).and_then(|n| cstr(mem, n)).unwrap_or_default()
     }
 
     /// Reference count: the low 32 bits in 3.12+ (the rest are flags), the whole word before.
     fn refcount(&self, mem: &Mem, o: u64) -> Option<u64> {
-        let w = word(mem, o)?;
+        let w = self.ptr(mem, o)?;
         Some(if self.ver >= (3, 12) { w & 0xffff_ffff } else { w })
     }
 
-    /// The cached small int for `v` (-5..256): the int objects next to the one for 0, found from
-    /// any small int's place.
+    /// Writes a pointer-sized word.
+    fn put(&self, mem: &Mem, at: u64, v: u64) -> std::io::Result<()> {
+        mem.write_all_at(&v.to_le_bytes()[..self.w as usize], at)
+    }
+
+    /// The cached small int for `v` (-5..256), found from any small int's place: the int
+    /// objects next to the one for 0 (3.11+: one array), else the interpreter's table of
+    /// pointers to them (2.7 takes them from blocks of ints, 3.9-3.10 allocates each).
     fn small_int(&self, mem: &Mem, v: i64, near: Option<u64>) -> Option<u64> {
         if !(-5..=256).contains(&v) {
             return None;
         }
+        let is = |at: u64, v: i64| self.type_of(mem, at).is_some_and(|t| t == self.t.int && self.int_value(mem, at, t) == Some(v));
         let mut small = self.small.lock().unwrap();
         if small.is_none() {
             let o = near?;
-            let ty = self.type_of(mem, o)?;
-            let have = self.int_value(mem, o, ty)?;
-            if !(-5..=256).contains(&have) {
-                return None;
-            }
-            let size = if self.ver.0 == 2 { 24 } else { 32 };
+            let have = self.type_of(mem, o).and_then(|t| self.int_value(mem, o, t)).filter(|h| (-5..=256).contains(h))?;
+            let size = if self.ver.0 == 2 { 2 * self.w + self.long.max(self.w) } else { 32 };
             let zero = o.wrapping_add_signed(-have * size as i64);
-            *small = Some((zero, size));
+            let checks = [-5, 0, 1, 7, 100, 256];
+            if checks.iter().all(|&k| is(zero.wrapping_add_signed(k * size as i64), k)) {
+                *small = Some((zero, size));
+            } else {
+                // The table: a pointer to `o` with pointers to the others around it.
+                let heap = Heap::new(self.pid, mem, self.w as usize).ok()?;
+                let table = heap.referrers(&[o]).into_iter().map(|r| r - (have + 5) as u64 * self.w).find(|&t| {
+                    checks.iter().all(|&k| self.ptr(mem, t + (k + 5) as u64 * self.w).is_some_and(|p| is(p, k)))
+                })?;
+                *small = Some((table, 0));
+            }
         }
-        let (zero, size) = (*small)?;
-        let at = zero.wrapping_add_signed(v * size as i64);
-        let ty = self.type_of(mem, at)?;
-        (ty == self.t.int && self.int_value(mem, at, ty) == Some(v)).then_some(at)
+        let (base, size) = (*small)?;
+        let at = if size == 0 { self.ptr(mem, base + (v + 5) as u64 * self.w)? } else { base.wrapping_add_signed(v * size as i64) };
+        is(at, v).then_some(at)
     }
 }
 
@@ -562,7 +680,7 @@ fn current() -> Option<Arc<Py>> {
 /// The number a slot's object holds now (the `py` value type).
 pub fn read_slot(mem: &Mem, slot: u64) -> Option<f64> {
     let py = current()?;
-    match py.val(mem, word(mem, slot)?) {
+    match py.val(mem, py.ptr(mem, slot)?) {
         Val::Int(i) => Some(i as f64),
         Val::Float(f) => Some(f),
         _ => None,
@@ -575,14 +693,14 @@ pub fn read_slot(mem: &Mem, slot: u64) -> Option<f64> {
 pub fn write_slot(mem: &Mem, slot: u64, v: f64) -> std::io::Result<()> {
     let refused = |why: &str| Err(std::io::Error::other(why.to_owned()));
     let Some(py) = current() else { return refused("not a Python game") };
-    let Some(o) = word(mem, slot) else { return refused("unreadable") };
+    let Some(o) = py.ptr(mem, slot) else { return refused("unreadable") };
     let Some(t) = py.type_of(mem, o) else { return refused("unreadable") };
     let own = py.refcount(mem, o) == Some(1);
     if t == py.t.float {
         if !own {
             return refused("the game shares this number with something else, not written");
         }
-        return mem.write_all_at(&v.to_bits().to_le_bytes(), o + 16);
+        return mem.write_all_at(&v.to_bits().to_le_bytes(), o + 2 * py.w);
     }
     let is_int = t == py.t.int || (py.t.long != 0 && t == py.t.long);
     let Some(have) = is_int.then(|| py.int_value(mem, o, t)).flatten() else { return refused("not a Python number now") };
@@ -592,7 +710,13 @@ pub fn write_slot(mem: &Mem, slot: u64, v: f64) -> std::io::Result<()> {
     }
     if own && !(-5..=256).contains(&have) {
         if py.ver.0 == 2 && t == py.t.int {
-            return mem.write_all_at(&v.to_le_bytes(), o + 16);
+            if py.long == 4 && i32::try_from(v).is_err() {
+                return refused("the number doesn't fit the game's number object, not written");
+            }
+            return mem.write_all_at(&v.to_le_bytes()[..py.long as usize], o + 2 * py.w);
+        }
+        if py.w == 4 {
+            return refused("not written (a long number of 32-bit Python)");
         }
         // 30-bit digits, as many as the object has room for (a value never grows it).
         let ndigits = if py.ver >= (3, 12) { word(mem, o + 16).unwrap_or(0) >> 3 } else { (word(mem, o + 16).unwrap_or(0) as i64).unsigned_abs() };
@@ -623,10 +747,10 @@ pub fn write_slot(mem: &Mem, slot: u64, v: f64) -> std::io::Result<()> {
     if py.ver < (3, 12) {
         // Not immortal before 3.12: the slot's new reference is counted (a small int is held
         // by thousands, a count one off never frees it).
-        let Some(n) = word(mem, target).filter(|&n| n > 100) else { return refused("not written") };
-        mem.write_all_at(&(n + 1).to_le_bytes(), target)?;
+        let Some(n) = py.ptr(mem, target).filter(|&n| n > 100) else { return refused("not written") };
+        py.put(mem, target, n + 1)?;
     }
-    mem.write_all_at(&target.to_le_bytes(), slot)
+    py.put(mem, slot, target)
 }
 
 /// One step of a path: a name (a dict key or an attribute) or an index (a list's element or a
@@ -838,10 +962,19 @@ fn game_roots(py: &Py, mem: &Mem) -> Vec<(String, u64)> {
             if name.starts_with('_') || name.starts_with("renpy") || name.starts_with("pygame") || name.starts_with("encodings") {
                 return false;
             }
-            let file = py.dict_get(mem, *d, &Key::Name("__file__".into())).and_then(|(v, _)| py.text(mem, v));
+            // Windows' paths with forward slashes.
+            let file = py.dict_get(mem, *d, &Key::Name("__file__".into())).and_then(|(v, _)| py.text(mem, v)).map(|f| f.replace('\\', "/").to_ascii_lowercase());
             match file {
                 None => false,
-                Some(f) => !["/lib/python", "site-packages", "dist-packages", "/lib/py", "pythonlib", "/renpy/", ".zip/", "/usr/lib"].iter().any(|p| f.contains(p)),
+                Some(f) => {
+                    // Python's own library: lib/python2.7/ (Linux), lib/windows-i686/lib/ (Ren'Py
+                    // 7 on Windows), C:/Python27/Lib/.
+                    let stdlib = f.rsplit_once("/lib/").is_some_and(|(before, _)| {
+                        let dir = before.rsplit('/').next().unwrap_or_default();
+                        dir.starts_with("python") || dir.starts_with("windows-") || dir.starts_with("py2-") || dir.starts_with("py3-")
+                    });
+                    !stdlib && !["/lib/python", "site-packages", "dist-packages", "/lib/py", "pythonlib", "/renpy/", ".zip/", "/usr/lib"].iter().any(|p| f.contains(p))
+                }
             }
         })
         .collect();
@@ -950,10 +1083,10 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(PyPath, Vec<u64>)> {
 /// path leads to (a namespace's or object's entries).
 pub fn diagnose(heap: &Heap, at: &str) -> Vec<String> {
     let t = Instant::now();
-    let Some(py) = shared(heap) else { return vec!["no Python objects found (only 64-bit CPython 2.7 and 3.x)".into()] };
+    let Some(py) = shared(heap) else { return vec!["no Python objects found (only CPython 2.7 and 3.x, 64-bit; 2.7 also 32-bit)".into()] };
     let mem = heap.mem();
     let roots = py.roots.lock().unwrap().0.clone();
-    let mut out = vec![format!("Python {}.{}, {} namespaces, str at +{}, types {:x?} ({} ms)", py.ver.0, py.ver.1, roots.len(), py.str_at, py.t, t.elapsed().as_millis())];
+    let mut out = vec![format!("Python {}.{} ({}-bit, long {}), {} namespaces, str at +{}, types {:x?} ({} ms)", py.ver.0, py.ver.1, py.w * 8, py.long, roots.len(), py.str_at, py.t, t.elapsed().as_millis())];
     let _ = py.pid;
     if at.is_empty() {
         let mut names: Vec<String> = game_roots(&py, mem).into_iter().map(|(n, _)| n).collect();
@@ -976,7 +1109,7 @@ pub fn diagnose(heap: &Heap, at: &str) -> Vec<String> {
         let Some((_, v, _)) = py.children(mem, cur).into_iter().find(|(k, _, _)| *k == key) else { return vec![format!("{at}: not found")] };
         cur = v;
     }
-    out.push(format!("{} at {cur:#x}", py.type_name(mem, cur)));
+    out.push(format!("{} at {cur:#x}{}", py.type_name(mem, cur), py.text(mem, cur).map(|t| format!(" = {t:?}")).unwrap_or_default()));
     for (k, v, slot) in py.children(mem, cur) {
         let shown = match py.val(mem, v) {
             Val::Int(i) => format!("{i} (refs {})", py.refcount(mem, v).unwrap_or(0)),
@@ -1006,6 +1139,16 @@ mod tests {
         assert!(PyPath::parse("py:#x").is_none());
         assert!(PyPath::parse("py:store#a..b").is_none());
         assert!(PyPath::parse("py:store#a[x]").is_none());
+    }
+
+    #[test]
+    fn python_libraries() {
+        let lib = |path: &str| crate::helper::Region { start: 0, end: 0, perms: "r--p".into(), path: path.into() };
+        assert!(runs_python(&[lib("C:/games/tv/lib/windows-i686/python27.dll")], "tunnelvision.exe"));
+        assert!(runs_python(&[lib("C:/Python312/PYTHON312.DLL")], "game.exe"));
+        assert!(runs_python(&[lib("/usr/lib/libpython3.14.so.1.0")], "game"));
+        assert!(runs_python(&[], "python3.14"));
+        assert!(!runs_python(&[lib("C:/games/x/pythonnet.dll")], "game.exe"));
     }
 
     #[test]
