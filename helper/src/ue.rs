@@ -216,8 +216,9 @@ enum Names {
 enum ObjectList {
     /// FChunkedFixedUObjectArray (4.21 and later): a pointer to chunks of FUObjectItems.
     Chunked,
-    /// FFixedUObjectArray (4.11 to 4.20): one array of FUObjectItems.
-    Flat,
+    /// FFixedUObjectArray (4.11 to 4.20): one array of FUObjectItems, 24 bytes each (16 in 4.11
+    /// and 4.12: { Object, ClusterAndFlags, SerialNumber }, Epic's 4.12 source; Rollio 2D).
+    Flat(u64),
     /// TStaticIndirectArrayThreadSafeRead<UObjectBase> (4.10 and older): { UObjectBase
     /// **Chunks[512]; i32 NumElements, NumChunks }, 16384 object pointers a chunk, all in the
     /// exe's static data (Epic's 4.8 and 4.10 UObjectArray.h).
@@ -264,8 +265,8 @@ impl Ue {
                 if objects.is_none() && is_object_array(mem, &words[i..]) {
                     objects = Some(at);
                 }
-                if objects.is_none() && flat.is_none() && is_flat_object_array(mem, &words[i..]) {
-                    flat = Some(at);
+                if objects.is_none() && flat.is_none() {
+                    flat = [ITEM, 16].into_iter().find(|&item| is_flat_object_array(mem, &words[i..], item)).map(|item| (at, item));
                 }
                 if objects.is_none() && flat.is_none() && pointers.is_none() && is_pointer_chunks(mem, &words[i..]) {
                     pointers = Some(at);
@@ -284,7 +285,7 @@ impl Ue {
         }
         let (objects, list) = match (objects, flat, pointers) {
             (Some(o), _, _) => (o, ObjectList::Chunked),
-            (None, Some(o), _) => (o, ObjectList::Flat),
+            (None, Some((o, item)), _) => (o, ObjectList::Flat(item)),
             (None, None, Some(o)) => (o, ObjectList::Pointers),
             (None, None, None) => return Err("no Unreal object list found".into()),
         };
@@ -350,7 +351,7 @@ impl Ue {
     pub fn object_count(&self, mem: &Mem) -> usize {
         let at = match self.list {
             ObjectList::Chunked => 20,
-            ObjectList::Flat => 12,
+            ObjectList::Flat(_) => 12,
             ObjectList::Pointers => 8 * POINTER_SLOTS as u64,
         };
         i32_at(mem, self.objects + at).unwrap_or(0).max(0) as usize
@@ -373,10 +374,10 @@ impl Ue {
         }
         let Some(table) = ptr_at(mem, self.objects) else { return Vec::new() };
         let mut out = Vec::with_capacity(num as usize);
-        if self.list == ObjectList::Flat {
-            let mut buf = vec![0u8; (num * ITEM) as usize];
+        if let ObjectList::Flat(item) = self.list {
+            let mut buf = vec![0u8; (num * item) as usize];
             if let Ok(n) = mem.read_at(&mut buf, table) {
-                out.extend(buf[..n].chunks_exact(ITEM as usize).map(|i| u64::from_le_bytes(i[..8].try_into().unwrap())).filter(|&p| p != 0));
+                out.extend(buf[..n].chunks_exact(item as usize).map(|i| u64::from_le_bytes(i[..8].try_into().unwrap())).filter(|&p| p != 0));
             }
             return out;
         }
@@ -547,13 +548,13 @@ fn is_object_array(mem: &Mem, w: &[u64]) -> bool {
 }
 
 /// FFixedUObjectArray (4.20 and older): { items, i32 max, i32 num }, its first two objects
-/// with indices 0 and 1.
-fn is_flat_object_array(mem: &Mem, w: &[u64]) -> bool {
+/// with indices 0 and 1, the items `item` bytes apart.
+fn is_flat_object_array(mem: &Mem, w: &[u64], item: u64) -> bool {
     let (max, num) = (w[1] as u32 as u64, w[1] >> 32);
     if num < 2 || num > max || max > 1 << 26 {
         return false;
     }
-    let first = Some(w[0]).filter(|&p| ptr_at_ok(p)).and_then(|items| Some((ptr_at(mem, items)?, ptr_at(mem, items + ITEM)?)));
+    let first = Some(w[0]).filter(|&p| ptr_at_ok(p)).and_then(|items| Some((ptr_at(mem, items)?, ptr_at(mem, items + item)?)));
     let Some((a, b)) = first else { return false };
     u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
 }
