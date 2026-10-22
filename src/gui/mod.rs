@@ -6,6 +6,7 @@ mod browse;
 mod feedback;
 mod find;
 mod hotkeys;
+mod monkey;
 mod notify;
 mod guide;
 mod phase;
@@ -1546,6 +1547,9 @@ fn build(app: &adw::Application) {
     add_debug_actions(app, &ui);
     share::add_actions(app, &ui);
     ui.window.present();
+    if monkey::on() {
+        monkey::start();
+    }
 }
 
 /// "a", "a and b", "a, b and c".

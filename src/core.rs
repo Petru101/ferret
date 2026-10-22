@@ -1857,6 +1857,13 @@ impl Core {
     }
 
     fn attach_inner(&mut self, pid: u32) -> Result<String, AttachError> {
+        // The window's test mode (gui/monkey.rs) presses random buttons: only the test game it
+        // was given may be opened, never one of the player's.
+        if let Some(only) = std::env::var_os("FERRET_MONKEY").and(std::env::var("FERRET_MONKEY_GAME").ok()) {
+            if only.parse() != Ok(pid) {
+                return Err(format!("test mode: only the test game ({only}) may be opened").into());
+            }
+        }
         let reply = self.helper.call(&format!("attach {pid}"));
         for l in &reply {
             self.say(l);

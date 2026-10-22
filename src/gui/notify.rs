@@ -232,6 +232,10 @@ impl Notifier {
     }
 
     fn notify(self: &Rc<Self>, title: &str, body: &str, button: Option<&str>, secs: Option<u32>) {
+        // The test mode's random presses go on while the tester works elsewhere: not on their screen.
+        if super::monkey::on() {
+            return super::monkey::log(&format!("        notification (not shown): {title}"));
+        }
         #[cfg(windows)]
         return self.toast(title, body, button, secs);
         #[cfg(not(windows))]
