@@ -214,8 +214,9 @@ enum Names {
 /// How the game lists its objects.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ObjectList {
-    /// FChunkedFixedUObjectArray (4.21 and later): a pointer to chunks of FUObjectItems.
-    Chunked,
+    /// FChunkedFixedUObjectArray (4.20 and later): a pointer to chunks of FUObjectItems, 65536 a
+    /// chunk (66560 in 4.20: Shoot'n'Slaughter).
+    Chunked(u64),
     /// FFixedUObjectArray (4.11 to 4.20): one array of FUObjectItems, 24 bytes each (16 in 4.11
     /// and 4.12: { Object, ClusterAndFlags, SerialNumber }, Epic's 4.12 source; Rollio 2D).
     Flat(u64),
@@ -223,6 +224,9 @@ enum ObjectList {
     /// **Chunks[512]; i32 NumElements, NumChunks }, 16384 object pointers a chunk, all in the
     /// exe's static data (Epic's 4.8 and 4.10 UObjectArray.h).
     Pointers,
+    /// TArray<UObjectBase*> (4.7 and older): { UObjectBase **Data; i32 Num, Max } in the exe's
+    /// static data (Epic's 4.7 UObjectArray.h; Ghost Defender).
+    Array,
 }
 /// Object pointers per chunk of `ObjectList::Pointers`, and its chunk slots.
 const POINTER_CHUNK: u64 = 16384;
@@ -254,7 +258,7 @@ impl Ue {
         if data.is_empty() {
             return Err(format!("no writable data in {exe}"));
         }
-        let (mut objects, mut flat, mut pointers, mut names) = (None, None, None, None);
+        let (mut objects, mut flat, mut pointers, mut array, mut names) = (None, None, None, None, None);
         let mut words_of = Vec::new();
         for &(start, end) in &data {
             let mut buf = vec![0u8; (end - start) as usize];
@@ -262,14 +266,17 @@ impl Ue {
             let words: Vec<u64> = buf[..n].chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
             for i in 0..words.len().saturating_sub(4) {
                 let at = start + 8 * i as u64;
-                if objects.is_none() && is_object_array(mem, &words[i..]) {
-                    objects = Some(at);
+                if objects.is_none() {
+                    objects = [CHUNK_ITEMS, 65 * 1024].into_iter().find(|&n| is_object_array(mem, &words[i..], n)).map(|n| (at, n));
                 }
                 if objects.is_none() && flat.is_none() {
                     flat = [ITEM, 16].into_iter().find(|&item| is_flat_object_array(mem, &words[i..], item)).map(|item| (at, item));
                 }
                 if objects.is_none() && flat.is_none() && pointers.is_none() && is_pointer_chunks(mem, &words[i..]) {
                     pointers = Some(at);
+                }
+                if objects.is_none() && flat.is_none() && pointers.is_none() && array.is_none() && is_pointer_array(mem, &words[i..]) {
+                    array = Some(at);
                 }
                 if names.is_none() && i >= 1 && is_name_blocks(mem, &words[i - 1..]) {
                     names = Some(Names::Pool(at));
@@ -283,12 +290,13 @@ impl Ue {
             let (lo, hi) = data.iter().fold((u64::MAX, 0), |(lo, hi), &(s, e)| (lo.min(s), hi.max(e)));
             names = words_of.iter().flat_map(|(_, w)| w.iter().copied()).filter(|&p| (p < lo || p >= hi) && ptr_at_ok(p)).find_map(|p| name_array(mem, p));
         }
-        let (objects, list) = match (objects, flat, pointers) {
-            (Some(o), _, _) => (o, ObjectList::Chunked),
-            (None, Some((o, item)), _) => (o, ObjectList::Flat(item)),
-            (None, None, Some(o)) => (o, ObjectList::Pointers),
-            (None, None, None) => return Err("no Unreal object list found".into()),
-        };
+        let list = [
+            objects.map(|(o, n)| (o, ObjectList::Chunked(n))),
+            flat.map(|(o, item)| (o, ObjectList::Flat(item))),
+            pointers.map(|o| (o, ObjectList::Pointers)),
+            array.map(|o| (o, ObjectList::Array)),
+        ];
+        let (objects, list) = list.into_iter().flatten().next().ok_or("no Unreal object list found")?;
         let names_at = names.ok_or("no Unreal name pool found")?;
         let mut ue = Ue { objects, list, names_at, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
         // The first layout that reads all three right; else the first that reads Guid right (all
@@ -325,7 +333,10 @@ impl Ue {
         let find = |name: &str, class: &str| {
             objects.iter().copied().find(|&o| self.object_name(mem, o).as_deref() == Some(name) && self.class_name(mem, o).as_deref() == Some(class))
         };
-        let guid = find("Guid", "ScriptStruct").ok_or((0, "no Guid struct among the objects (another engine version?)".to_string()))?;
+        let Some(guid) = find("Guid", "ScriptStruct") else {
+            let seen: Vec<String> = objects.iter().take(4).map(|&o| format!("{:?} of {:?}", self.object_name(mem, o), self.class_name(mem, o))).collect();
+            return Err((0, format!("no Guid struct among the {} objects (another engine version?; {:?} at 0x{:x}), first: {}", objects.len(), self.list, self.objects, seen.join(", "))));
+        };
         let props = self.props(mem, guid);
         let got: Vec<(String, u64)> = props.iter().map(|p| (p.name.clone(), p.offset)).collect();
         let want: Vec<(String, u64)> = ["A", "B", "C", "D"].iter().zip([0, 4, 8, 12]).map(|(n, o)| (n.to_string(), o)).collect();
@@ -350,9 +361,10 @@ impl Ue {
 
     pub fn object_count(&self, mem: &Mem) -> usize {
         let at = match self.list {
-            ObjectList::Chunked => 20,
+            ObjectList::Chunked(_) => 20,
             ObjectList::Flat(_) => 12,
             ObjectList::Pointers => 8 * POINTER_SLOTS as u64,
+            ObjectList::Array => 8,
         };
         i32_at(mem, self.objects + at).unwrap_or(0).max(0) as usize
     }
@@ -374,6 +386,13 @@ impl Ue {
         }
         let Some(table) = ptr_at(mem, self.objects) else { return Vec::new() };
         let mut out = Vec::with_capacity(num as usize);
+        if self.list == ObjectList::Array {
+            let mut buf = vec![0u8; (8 * num) as usize];
+            if let Ok(n) = mem.read_at(&mut buf, table) {
+                out.extend(buf[..n].chunks_exact(8).map(|p| u64::from_le_bytes(p.try_into().unwrap())).filter(|&p| p != 0));
+            }
+            return out;
+        }
         if let ObjectList::Flat(item) = self.list {
             let mut buf = vec![0u8; (num * item) as usize];
             if let Ok(n) = mem.read_at(&mut buf, table) {
@@ -381,9 +400,10 @@ impl Ue {
             }
             return out;
         }
-        for c in 0..num.div_ceil(CHUNK_ITEMS) {
+        let ObjectList::Chunked(per) = self.list else { return out };
+        for c in 0..num.div_ceil(per) {
             let Some(chunk) = ptr_at(mem, table + 8 * c) else { continue };
-            let n = (num - c * CHUNK_ITEMS).min(CHUNK_ITEMS);
+            let n = (num - c * per).min(per);
             let mut buf = vec![0u8; (n * ITEM) as usize];
             if mem.read_exact_at(&mut buf, chunk).is_err() {
                 continue;
@@ -532,14 +552,15 @@ impl Ue {
     }
 }
 
-/// The object array's header: counts that fit together, and its first object has index 0.
-fn is_object_array(mem: &Mem, w: &[u64]) -> bool {
+/// The object array's header: counts that fit together with `per` objects a chunk, and its first
+/// object has index 0.
+fn is_object_array(mem: &Mem, w: &[u64], per: u64) -> bool {
     let (max, num) = (w[2] as u32 as u64, w[2] >> 32);
     let (max_chunks, num_chunks) = (w[3] as u32 as u64, w[3] >> 32);
     if num == 0 || num > max || max > 1 << 26 || num_chunks == 0 {
         return false;
     }
-    if max_chunks != max.div_ceil(CHUNK_ITEMS) || num_chunks != num.div_ceil(CHUNK_ITEMS) {
+    if max_chunks != max.div_ceil(per) || num_chunks != num.div_ceil(per) {
         return false;
     }
     let first = ptr_at(mem, w[0]).and_then(|chunk| Some((ptr_at(mem, chunk)?, ptr_at(mem, chunk + ITEM)?)));
@@ -575,6 +596,17 @@ fn is_pointer_chunks(mem: &Mem, w: &[u64]) -> bool {
     }
     let Some((a, b)) = ptr_at(mem, w[0]).zip(ptr_at(mem, w[0] + 8)) else { return false };
     u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
+}
+
+/// The object list of 4.7 and older (`ObjectList::Array`): TArray { data, i32 num, i32 max },
+/// its first three objects with indices 0, 1 and 2. A plain TArray is common: it must hold at
+/// least 1000 objects (Ghost Defender: 21918; a stray one in Shoot'n'Slaughter had 6).
+fn is_pointer_array(mem: &Mem, w: &[u64]) -> bool {
+    let (num, max) = (w[1] as u32 as u64, w[1] >> 32);
+    if num < 1000 || num > max || max > 1 << 26 || !ptr_at_ok(w[0]) {
+        return false;
+    }
+    (0..3).all(|i| ptr_at(mem, w[0] + 8 * i).is_some_and(|o| u32_at(mem, o + 0xC) == Some(i as u32)))
 }
 
 /// Whether `p` can be a pointer (`ptr_at`'s rule), before reading anything.
