@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::glib;
 
 use crate::i18n::tr;
 
@@ -43,7 +42,10 @@ impl Tip {
 
 /// Ferret's settings, one per line; lines this build doesn't know are kept.
 fn settings_path() -> PathBuf {
-    glib::user_config_dir().join("settings")
+    crate::core::config_file("settings", |text| {
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty()).peekable();
+        lines.peek().is_some() && lines.all(|l| ["hide-tip ", "warned-online ", "warned-scrambled "].iter().any(|k| l.starts_with(k)))
+    })
 }
 
 /// Whether the settings file has this line.

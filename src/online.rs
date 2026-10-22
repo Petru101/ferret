@@ -98,7 +98,10 @@ pub fn parse_id(text: &str) -> Option<String> {
 /// player's reports and votes from another's, and it marks the player's own uploads. Nothing
 /// else is tied to it.
 pub fn install_id() -> String {
-    let path = gtk::glib::user_config_dir().join("install-id");
+    let path = crate::core::config_file("install-id", |text| {
+        let id = text.trim();
+        id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+    });
     // All zeros: made by a Windows build before `random` worked there, and shared by every such
     // install. A new one.
     if let Some(id) = fs::read_to_string(&path).ok().map(|s| s.trim().to_owned()).filter(|s| s.len() == 32 && s.bytes().any(|b| b != b'0')) {

@@ -119,6 +119,37 @@ fn local_app_data() -> PathBuf {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Ferret")
 }
 
+/// Where one of Ferret's small files goes (`settings`, `install-id`): the flatpak's config
+/// (XDG_CONFIG_HOME); on Windows %LOCALAPPDATA%\Ferret. Earlier builds put them in GLib's config
+/// folder, which on Windows is %LOCALAPPDATA% itself, every program's: one found there that
+/// `is_ours` (another program may have a file of that name) is moved in, so the install id stays.
+pub fn config_file(name: &str, is_ours: impl Fn(&str) -> bool) -> PathBuf {
+    #[cfg(windows)]
+    return moved_in(name, is_ours);
+    #[cfg(not(windows))]
+    {
+        let _ = is_ours;
+        gtk::glib::user_config_dir().join(name)
+    }
+}
+
+#[cfg(windows)]
+fn moved_in(name: &str, is_ours: impl Fn(&str) -> bool) -> PathBuf {
+    move_from(std::env::var_os("LOCALAPPDATA").map(PathBuf::from), &local_app_data(), name, is_ours)
+}
+
+/// `dir`/`name`, moved there from `old_dir` first when only that one has it and `is_ours`.
+#[cfg(windows)]
+fn move_from(old_dir: Option<PathBuf>, dir: &Path, name: &str, is_ours: impl Fn(&str) -> bool) -> PathBuf {
+    let path = dir.join(name);
+    let old = old_dir.map(|d| d.join(name));
+    if let Some(old) = old.filter(|o| !path.exists() && fs::read_to_string(o).is_ok_and(|t| is_ours(&t))) {
+        fs::create_dir_all(dir).ok();
+        fs::rename(&old, &path).ok();
+    }
+    path
+}
+
 /// The files Ferret ships (OCR models, translations): /app/share in the flatpak; on Windows
 /// the `share` folder beside the `bin` folder Ferret runs from.
 pub fn share_dir() -> PathBuf {
@@ -5400,6 +5431,26 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn moves_its_own_files_in_only() {
+        let old = std::env::temp_dir().join(format!("ferret-move-{}", std::process::id()));
+        let dir = old.join("Ferret");
+        fs::create_dir_all(&old).unwrap();
+        let ours = |t: &str| t.starts_with("hide-tip ");
+        fs::write(old.join("settings"), "hide-tip save-first\n").unwrap();
+        fs::write(old.join("other"), "theme=dark\n").unwrap();
+        assert_eq!(move_from(Some(old.clone()), &dir, "settings", ours), dir.join("settings"));
+        assert_eq!(fs::read_to_string(dir.join("settings")).unwrap(), "hide-tip save-first\n");
+        assert!(!old.join("settings").exists());
+        move_from(Some(old.clone()), &dir, "other", ours);
+        assert!(old.join("other").exists() && !dir.join("other").exists(), "another program's file stays");
+        fs::write(old.join("settings"), "hide-tip slots\n").unwrap();
+        move_from(Some(old.clone()), &dir, "settings", ours);
+        assert_eq!(fs::read_to_string(dir.join("settings")).unwrap(), "hide-tip save-first\n", "the moved one wins");
+        fs::remove_dir_all(&old).ok();
+    }
 
     #[test]
     fn free_names() {
