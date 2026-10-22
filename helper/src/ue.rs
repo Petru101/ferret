@@ -29,7 +29,7 @@
 // being their class's name; 4.22 and older keep names in TNameEntryArray (heap: the exe holds a
 // pointer to it; chunks of 16384 FNameEntry pointers; an entry holds its index shifted left by
 // one, bit 0 wide, then the NUL-terminated characters) and 4.20 and older objects in one flat
-// array. Offsets move between minor versions (UStruct has FStructBaseChain from 4.21 or so,
+// array (4.10 and older: chunks of 16384 UObject pointers, `ObjectList::Pointers`). Offsets move between minor versions (UStruct has FStructBaseChain from 4.21 or so,
 // UProperty's Offset_Internal moved): every known form is tried. Epic's source, 4.13 and 4.22.
 // The layout is checked on the engine's own structs: Guid (A, B, C, D: four ints), Transform
 // (Quat, Vector, Vector) and Actor's Tags (an array of names), in each known form.
@@ -116,7 +116,7 @@ const UPROPERTY: Layout = Layout {
 /// Offset_Internal @0x50, 0x78 bytes in all (Epic's 4.13.2 source would put the offset at 0x4C).
 const UPROPERTY_OLD: Layout = Layout { sup: 0x30, props: 0x38, struct_size: 0x40, align: 0x44, offset: 0x50, extra: 0x78, inner: 0x78, value: 0x80, ..UPROPERTY };
 
-const LAYOUTS: [Layout; 7] = [
+const LAYOUTS: [Layout; 8] = [
     // 4.25 to 5.3.
     FFIELD,
     // 5.4 and later: FField's Owner is one tagged pointer, everything after it 8 bytes earlier.
@@ -125,11 +125,14 @@ const LAYOUTS: [Layout; 7] = [
     Layout { name: 0x20, next: 0x18, dim: 0x30, size: 0x34, offset: 0x48, extra: 0x78, inner: 0x80, value: 0x80, ..FFIELD },
     // UProperty games (4.11 to 4.24), the struct and property halves of 4.22 and Styx's 4.13 in
     // each combination. Seen: 4.13, 4.15 and 4.17 `UPROPERTY_OLD`; 4.18 (Zombielicious) the
-    // last one; 4.22 `UPROPERTY`.
+    // fourth; 4.22 `UPROPERTY`.
     UPROPERTY,
     UPROPERTY_OLD,
     Layout { offset: 0x50, extra: 0x78, inner: 0x78, value: 0x80, ..UPROPERTY },
     Layout { offset: 0x44, extra: 0x70, inner: 0x70, value: 0x78, ..UPROPERTY_OLD },
+    // Epic's 4.8-4.13 source as written: Offset_Internal 0x4C, 0x70 bytes (TwinStickShooterDemo,
+    // 4.10).
+    Layout { offset: 0x4C, extra: 0x70, inner: 0x70, value: 0x78, ..UPROPERTY_OLD },
 ];
 impl Layout {
     /// The same in a build with stats compiled in (development builds: Injected, a 4.15 jam
@@ -208,11 +211,26 @@ enum Names {
     Array { table: u64, index: u64, chars: u64 },
 }
 
+/// How the game lists its objects.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ObjectList {
+    /// FChunkedFixedUObjectArray (4.21 and later): a pointer to chunks of FUObjectItems.
+    Chunked,
+    /// FFixedUObjectArray (4.11 to 4.20): one array of FUObjectItems.
+    Flat,
+    /// TStaticIndirectArrayThreadSafeRead<UObjectBase> (4.10 and older): { UObjectBase
+    /// **Chunks[512]; i32 NumElements, NumChunks }, 16384 object pointers a chunk, all in the
+    /// exe's static data (Epic's 4.8 and 4.10 UObjectArray.h).
+    Pointers,
+}
+/// Object pointers per chunk of `ObjectList::Pointers`, and its chunk slots.
+const POINTER_CHUNK: u64 = 16384;
+const POINTER_SLOTS: usize = 512;
+
 /// Where the game keeps its objects and names (found once per attach).
 pub struct Ue {
     objects: u64,
-    /// The objects in one array (FFixedUObjectArray, 4.20 and older), not in chunks.
-    flat: bool,
+    list: ObjectList,
     names_at: Names,
     /// Where its structs and properties keep their fields (one of `LAYOUTS`).
     layout: Layout,
@@ -235,7 +253,7 @@ impl Ue {
         if data.is_empty() {
             return Err(format!("no writable data in {exe}"));
         }
-        let (mut objects, mut flat, mut names) = (None, None, None);
+        let (mut objects, mut flat, mut pointers, mut names) = (None, None, None, None);
         let mut words_of = Vec::new();
         for &(start, end) in &data {
             let mut buf = vec![0u8; (end - start) as usize];
@@ -249,6 +267,9 @@ impl Ue {
                 if objects.is_none() && flat.is_none() && is_flat_object_array(mem, &words[i..]) {
                     flat = Some(at);
                 }
+                if objects.is_none() && flat.is_none() && pointers.is_none() && is_pointer_chunks(mem, &words[i..]) {
+                    pointers = Some(at);
+                }
                 if names.is_none() && i >= 1 && is_name_blocks(mem, &words[i - 1..]) {
                     names = Some(Names::Pool(at));
                 }
@@ -261,13 +282,14 @@ impl Ue {
             let (lo, hi) = data.iter().fold((u64::MAX, 0), |(lo, hi), &(s, e)| (lo.min(s), hi.max(e)));
             names = words_of.iter().flat_map(|(_, w)| w.iter().copied()).filter(|&p| (p < lo || p >= hi) && ptr_at_ok(p)).find_map(|p| name_array(mem, p));
         }
-        let (objects, flat) = match (objects, flat) {
-            (Some(o), _) => (o, false),
-            (None, Some(o)) => (o, true),
-            (None, None) => return Err("no Unreal object list found".into()),
+        let (objects, list) = match (objects, flat, pointers) {
+            (Some(o), _, _) => (o, ObjectList::Chunked),
+            (None, Some(o), _) => (o, ObjectList::Flat),
+            (None, None, Some(o)) => (o, ObjectList::Pointers),
+            (None, None, None) => return Err("no Unreal object list found".into()),
         };
         let names_at = names.ok_or("no Unreal name pool found")?;
-        let mut ue = Ue { objects, flat, names_at, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
+        let mut ue = Ue { objects, list, names_at, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
         // The first layout that reads all three right; else the first that reads Guid right (all
         // a layout had to pass before Transform and Tags were checked: no game that worked
         // then loses it).
@@ -326,15 +348,32 @@ impl Ue {
     }
 
     pub fn object_count(&self, mem: &Mem) -> usize {
-        i32_at(mem, self.objects + if self.flat { 12 } else { 20 }).unwrap_or(0).max(0) as usize
+        let at = match self.list {
+            ObjectList::Chunked => 20,
+            ObjectList::Flat => 12,
+            ObjectList::Pointers => 8 * POINTER_SLOTS as u64,
+        };
+        i32_at(mem, self.objects + at).unwrap_or(0).max(0) as usize
     }
 
     /// Every object alive now.
     pub fn objects(&self, mem: &Mem) -> Vec<u64> {
         let num = self.object_count(mem) as u64;
+        if self.list == ObjectList::Pointers {
+            let mut out = Vec::with_capacity(num as usize);
+            for c in 0..num.div_ceil(POINTER_CHUNK) {
+                let Some(chunk) = ptr_at(mem, self.objects + 8 * c) else { continue };
+                let n = (num - c * POINTER_CHUNK).min(POINTER_CHUNK);
+                let mut buf = vec![0u8; (8 * n) as usize];
+                if mem.read_exact_at(&mut buf, chunk).is_ok() {
+                    out.extend(buf.chunks_exact(8).map(|p| u64::from_le_bytes(p.try_into().unwrap())).filter(|&p| p != 0));
+                }
+            }
+            return out;
+        }
         let Some(table) = ptr_at(mem, self.objects) else { return Vec::new() };
         let mut out = Vec::with_capacity(num as usize);
-        if self.flat {
+        if self.list == ObjectList::Flat {
             let mut buf = vec![0u8; (num * ITEM) as usize];
             if let Ok(n) = mem.read_at(&mut buf, table) {
                 out.extend(buf[..n].chunks_exact(ITEM as usize).map(|i| u64::from_le_bytes(i[..8].try_into().unwrap())).filter(|&p| p != 0));
@@ -519,6 +558,24 @@ fn is_flat_object_array(mem: &Mem, w: &[u64]) -> bool {
     u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
 }
 
+/// The object list of 4.10 and older (`ObjectList::Pointers`) at `w[0]`: as many chunk pointers
+/// as its count needs, then none up to its 512 slots, then the counts; its first two objects
+/// with indices 0 and 1.
+fn is_pointer_chunks(mem: &Mem, w: &[u64]) -> bool {
+    if w.len() <= POINTER_SLOTS || !ptr_at_ok(w[0]) {
+        return false;
+    }
+    let (num, chunks) = (w[POINTER_SLOTS] as u32 as u64, (w[POINTER_SLOTS] >> 32) as usize);
+    if num < 2 || num > 1 << 26 || chunks == 0 || chunks as u64 != num.div_ceil(POINTER_CHUNK) {
+        return false;
+    }
+    if w[..chunks].iter().any(|&c| !ptr_at_ok(c)) || w[chunks..POINTER_SLOTS].iter().any(|&c| c != 0) {
+        return false;
+    }
+    let Some((a, b)) = ptr_at(mem, w[0]).zip(ptr_at(mem, w[0] + 8)) else { return false };
+    u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
+}
+
 /// Whether `p` can be a pointer (`ptr_at`'s rule), before reading anything.
 fn ptr_at_ok(p: u64) -> bool {
     p >= 0x10000 && p < 1 << 47 && p % 8 == 0
@@ -681,9 +738,9 @@ impl Ue {
             }
             _ => writeln!(
                 out,
-                "objects 0x{:x}{}, names {:x?}, layout {:x?}, {} objects",
+                "objects 0x{:x} ({:?}), names {:x?}, layout {:x?}, {} objects",
                 self.objects,
-                if self.flat { " (flat)" } else { "" },
+                self.list,
                 self.names_at,
                 self.layout,
                 self.object_count(mem)
