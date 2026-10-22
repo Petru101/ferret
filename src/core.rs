@@ -1440,6 +1440,11 @@ fn path_arg(p: &str) -> String {
 const PROBE_STEP: i64 = 100;
 const PROBE_NEAR: i64 = 49;
 
+/// A box that went away since the pick (a pop-up fading in and out) is misread while it fades
+/// (Particle Fleet's gems bar read 0 and 10 while showing 12): a new number there counts only
+/// once it reads the same this long, the box in view all along.
+const STEADY: Duration = Duration::from_millis(500);
+
 /// A candidate's test write: its exact original and its test value.
 #[derive(Clone)]
 struct Probe {
@@ -4751,6 +4756,9 @@ impl Core {
         // A number nothing fits: a misread or something covering the number, unless it's read
         // again right after.
         let mut unfit = None;
+        // A new number read in a box that comes and goes, since when, and the box's `hides`
+        // then (`STEADY`).
+        let mut pending: Option<(Shown, Instant, u32)> = None;
         while (count > 1 || confirm) && start.elapsed() < limit && !cancelled(&self.cancel) {
             std::thread::sleep(Duration::from_millis(300));
             self.run_side_jobs();
@@ -4760,8 +4768,23 @@ impl Core {
             let still = now == last;
             let again = self.scan_now.swap(false, Ordering::Relaxed);
             if still && !again {
+                pending = None;
                 continue;
             }
+            if self.hides > 0 && !again {
+                match &pending {
+                    Some((n, since, hides)) if *n == now && *hides == self.hides => {
+                        if since.elapsed() < STEADY {
+                            continue;
+                        }
+                    }
+                    _ => {
+                        pending = Some((now, Instant::now(), self.hides));
+                        continue;
+                    }
+                }
+            }
+            pending = None;
             let reply = self.helper.call(&format!("next {}", now.search()));
             let new_count = match_count(&reply).unwrap_or(0);
             self.say(&format!("screen {} {now}: {}", if still { "still shows" } else { "shows" }, reply.join(" ")));
