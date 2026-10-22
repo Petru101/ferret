@@ -16,3 +16,4 @@ images 2/
 .claude/rules/
 notes/
 /target-win
+/dist/

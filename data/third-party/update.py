@@ -2,7 +2,13 @@
 # Writes THIRD-PARTY-LICENSES.txt: every Rust crate built into ferret and ferret-helper, with the
 # license texts their licenses ask to ship with binaries. Run from the repo root after changing
 # dependencies (needs vendor/, see the README's Building): python3 data/third-party/update.py
-import hashlib, os, re, subprocess
+# With --windows: the Windows build's crates, to THIRD-PARTY-LICENSES-windows.txt (the Windows
+# package also ships the licenses of its MSYS2 libraries, run/win/package.sh).
+import hashlib, os, re, subprocess, sys
+
+WINDOWS = '--windows' in sys.argv
+TARGET = 'x86_64-pc-windows-gnu' if WINDOWS else 'x86_64-unknown-linux-gnu'
+OUTPUT = 'THIRD-PARTY-LICENSES-windows.txt' if WINDOWS else 'THIRD-PARTY-LICENSES.txt'
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HERE = os.path.join(ROOT, 'data', 'third-party')
@@ -37,7 +43,7 @@ def crates():
     for pkg in ('ferret', 'ferret-helper'):
         out = subprocess.run(
             [os.path.join(ROOT, 'run', 'cargo.sh'), 'tree', '-p', pkg, '-e', 'normal', '--prefix', 'none',
-             '--target', 'x86_64-unknown-linux-gnu', '-f', '{p}|{l}'],
+             '--target', TARGET, '-f', '{p}|{l}'],
             cwd=ROOT, capture_output=True, text=True, check=True).stdout
         for line in out.splitlines():
             line = line.replace(' (*)', '').replace(' (proc-macro)', '').strip()
@@ -109,6 +115,12 @@ def main():
         'under". Their license texts follow, each with the crates it covers. The OCR models',
         "(PaddleOCR, Apache-2.0) and AreWeAntiCheatYet's game list (MIT) have their own license",
         'files next to this one.',
+        *([
+            '',
+            "The Windows build also ships GTK, libadwaita, GLib and the other libraries it runs on,",
+            "from MSYS2 (https://www.msys2.org, their sources at https://github.com/msys2/MINGW-packages):",
+            "their licenses are in the msys2 folder next to this one, by package.",
+        ] if WINDOWS else []),
         '',
         'Crates',
         '------',
@@ -120,7 +132,7 @@ def main():
     ]
     for lic, text, users in sorted(groups.values(), key=lambda g: (g[0], g[2][0])):
         out += ['', '=' * 78, f'{lic}: {", ".join(users)}', '=' * 78, '', text.rstrip('\n')]
-    with open(os.path.join(HERE, 'THIRD-PARTY-LICENSES.txt'), 'w') as f:
+    with open(os.path.join(HERE, OUTPUT), 'w') as f:
         f.write('\n'.join(out) + '\n')
     print(f'{len(rows)} crates, {len(groups)} license texts')
 
