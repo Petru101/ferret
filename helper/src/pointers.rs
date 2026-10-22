@@ -218,13 +218,14 @@ const MOVED_SHARE: usize = 32;
 
 /// The address most of `paths` lead to now, and which paths lead there. Paths that stopped
 /// working or lead elsewhere went through something that changed. `at`: where the value was
-/// last found in this run (0: not yet), `left`: the places it moved away from in this run.
-pub fn vote(mem: &Mem, mods: &[Module], width: usize, paths: &[PtrPath], at: u64, left: &[u64]) -> Option<Vote> {
+/// last found in this run (0: not yet), `left`: the places it moved away from in this run,
+/// `came`: which paths led to `at` when last followed (empty: not known).
+pub fn vote(mem: &Mem, mods: &[Module], width: usize, paths: &[PtrPath], at: u64, left: &[u64], came: &[bool]) -> Option<Vote> {
     let ends: Vec<Option<u64>> = paths.iter().map(|p| p.follow(mem, mods, width)).collect();
     // Only Windows' heap (and Wine's) leaves freed objects readable; elsewhere paths through
     // them break, and the most paths lead to where the value is now.
     let windows = mods.iter().any(|m| m.name.eq_ignore_ascii_case("ntdll.dll"));
-    if windows { tally(paths, &ends, at, left) } else { tally(paths, &ends, 0, &[]) }
+    if windows { tally(paths, &ends, at, left, came) } else { tally(paths, &ends, 0, &[], &[]) }
 }
 
 /// `vote` on where the paths lead now. Windows keeps freed memory readable, so after the game
@@ -232,8 +233,11 @@ pub fn vote(mem: &Mem, mods: &[Module], width: usize, paths: &[PtrPath], at: u64
 /// them than follow the game (paths-test: 2866 of 2998, through the leftovers of ntdll's, the C
 /// runtime's and the game's own bookkeeping). So a place the value moved away from only wins when
 /// nothing else does, and a new place beats where it was when the paths leading there clearly
-/// agree, start in more than one module and are more than a stray few.
-fn tally(paths: &[PtrPath], ends: &[Option<u64>], at: u64, left: &[u64]) -> Option<Vote> {
+/// agree, start in more than one module and are more than a stray few. A place it left counts
+/// again when more of the paths that led to `at` (`came`) lead there now than still lead to
+/// `at`: the heap gave the value back a freed block (Wine's did, paths-test on Proton: the room's
+/// third block was its first one).
+fn tally(paths: &[PtrPath], ends: &[Option<u64>], at: u64, left: &[u64], came: &[bool]) -> Option<Vote> {
     let mut counts: Vec<(u64, usize)> = Vec::new();
     for e in ends.iter().flatten() {
         match counts.iter_mut().find(|(a, _)| a == e) {
@@ -241,7 +245,9 @@ fn tally(paths: &[PtrPath], ends: &[Option<u64>], at: u64, left: &[u64]) -> Opti
             None => counts.push((*e, 1)),
         }
     }
-    let live: Vec<(u64, usize)> = counts.iter().copied().filter(|(a, _)| *a == at || !left.contains(a)).collect();
+    let followed = |a: u64| came.iter().zip(ends).filter(|(c, e)| **c && **e == Some(a)).count();
+    let back: Vec<u64> = left.iter().copied().filter(|&a| a != at && followed(a) > followed(at)).collect();
+    let live: Vec<(u64, usize)> = counts.iter().copied().filter(|(a, _)| *a == at || !left.contains(a) || back.contains(a)).collect();
     let pool = if live.is_empty() { &counts } else { &live };
     let vote = |addr: u64, next: usize| Vote { addr, leads: ends.iter().map(|e| *e == Some(addr)).collect(), next };
     let stayed = pool.iter().find(|(a, _)| at != 0 && *a == at).map_or(0, |(_, n)| *n);
@@ -604,15 +610,15 @@ mod tests {
             .collect();
         let ends = [Some(old), Some(old), Some(old), Some(new), Some(old), Some(new), Some(junk)];
         // Not knowing where it was, the most paths win.
-        assert_eq!(tally(&paths, &ends, 0, &[]).unwrap().addr, old);
+        assert_eq!(tally(&paths, &ends, 0, &[], &[]).unwrap().addr, old);
         // Half as many again leading somewhere else: no clear move.
-        assert_eq!(tally(&paths, &ends, old, &[]).unwrap().addr, old);
+        assert_eq!(tally(&paths, &ends, old, &[], &[]).unwrap().addr, old);
         // The game moved it: the paths that followed win, clearly.
         let ends = [Some(old), Some(old), Some(old), Some(new), Some(old), Some(new), None];
-        let v = tally(&paths, &ends, old, &[]).unwrap();
+        let v = tally(&paths, &ends, old, &[], &[]).unwrap();
         assert_eq!((v.addr, v.clear()), (new, true));
         // Next time it's at the new place, and the old one is a place it left.
-        let v = tally(&paths, &ends, new, &[old]).unwrap();
+        let v = tally(&paths, &ends, new, &[old], &[]).unwrap();
         assert_eq!((v.addr, v.clear()), (new, true));
         // Paths from one module agreeing on a new place are no move.
         let ends = [Some(old), Some(old), Some(old), Some(old), Some(old), Some(junk), Some(junk)];
@@ -620,11 +626,28 @@ mod tests {
             .iter()
             .map(|t| PtrPath::parse(t).unwrap())
             .collect();
-        assert_eq!(tally(&paths, &ends, old, &[]).unwrap().addr, old);
+        assert_eq!(tally(&paths, &ends, old, &[], &[]).unwrap().addr, old);
         // Nor are a stray few against thousands.
         let many: Vec<PtrPath> = (0..100).map(|i| PtrPath::parse(&format!("m{}.dll+{i:x},0", i % 3)).unwrap()).collect();
         let mut ends = vec![Some(old); 100];
         (ends[0], ends[1]) = (Some(junk), Some(junk));
-        assert_eq!(tally(&many, &ends, old, &[]).unwrap().addr, old);
+        assert_eq!(tally(&many, &ends, old, &[], &[]).unwrap().addr, old);
+    }
+
+    #[test]
+    fn comes_back_to_a_reused_block() {
+        let (old, at, new, junk) = (0x1000, 0x2000, 0x3000, 0x4000);
+        let paths: Vec<PtrPath> = ["a.dll+1,8", "b.dll+2,8", "c.exe+3,8", "a.dll+4,8", "b.dll+5,8", "c.exe+6,8", "a.dll+7,8", "b.dll+8,8", "c.exe+9,8", "a.dll+a,8"]
+            .iter()
+            .map(|t| PtrPath::parse(t).unwrap())
+            .collect();
+        // The first three paths led to `at`; the game put the value back where it was first.
+        let came = [true, true, true, false, false, false, false, false, false, false];
+        let ends = [Some(old), Some(old), Some(old), Some(old), Some(old), Some(old), Some(old), Some(old), Some(junk), Some(junk)];
+        assert_eq!(tally(&paths, &ends, at, &[old], &[]).unwrap().addr, junk);
+        assert_eq!(tally(&paths, &ends, at, &[old], &came).unwrap().addr, old);
+        // They followed it somewhere new instead: the old place's leftovers still don't count.
+        let ends = [Some(new), Some(new), Some(new), Some(old), Some(old), Some(old), Some(old), Some(old), Some(at), Some(at)];
+        assert_eq!(tally(&paths, &ends, at, &[old], &came).unwrap().addr, new);
     }
 }

@@ -14,7 +14,7 @@ GitHub `master`.
 | CLI restart and exit checks (`run/win/cli-tests.ps1 both`) | ✅ 5/5 |
 | GUI monkey (`FERRET_MONKEY`, random clicks on the stand-in) | ✅ no crash or stall after the fixes below |
 | Unreal Engine 4.27 (Hell Pie Demo, GOG) | ✅ see below |
-| Linux after these changes | ❓ not run yet: pull, build, run `test-game/*.sh` |
+| Linux after these changes | ✅ unit tests; every `test-game/*-test.sh` (native, x87, Proton 64/32-bit) after one fix to the moved-value vote, see "Windows' heap" |
 
 ## Fixed
 
@@ -63,6 +63,12 @@ where the value was last found and where it moved away from in this run: a new p
 paths clearly agree, start in more than one module and are at least 1 in 32 of those still at the
 old place. Ferret's refresh and the helper's limiter each keep those places. Elsewhere voting is
 as before.
+
+On Linux, Proton's stand-in showed a case this missed: Wine's heap gave the room its first block
+back on the second `newroom`. That block was on the list of places the value had left, so the
+vote passed over the value's real place and chose junk holding 0, and the limit stopped working
+(nothing wrong was written). Now a place it left counts again when more of the paths that led
+to the value last time lead there than still lead to where it was (`came=` in `follow`).
 
 Risk: paths through something like "the last enemy hit" could look like a move if they start in
 two modules and are numerous enough. Ferret already drops paths that don't keep leading to the

@@ -733,6 +733,8 @@ struct Limit {
     paths: Vec<PtrPath>,
     /// The places `paths` led to before the value moved (see `pointers::vote`).
     left: Vec<u64>,
+    /// Which of `paths` led to `addr` when last followed.
+    came: Vec<bool>,
     /// A named path to every place the value is kept (all of an item's stacks): when there is
     /// one, all of them are found through it on every check and kept in range.
     named: Option<NamedLimit>,
@@ -991,7 +993,7 @@ fn limiter_loop(shared: SharedLimiter) {
                 *modules = pointers::modules(*pid, mem);
             }
             for l in limits.iter_mut().filter(|l| find && !l.paths.is_empty() && (l.paused.is_none() || l.retry_at <= now)) {
-                match pointers::vote(mem, modules, *width, &l.paths, l.addr, &l.left) {
+                match pointers::vote(mem, modules, *width, &l.paths, l.addr, &l.left, &l.came) {
                     Some(v) if !v.clear() => {
                         l.paused = Some("its pointer paths don't agree on where it is, not writing");
                         l.retry_at = now + Duration::from_secs(1);
@@ -1005,6 +1007,7 @@ fn limiter_loop(shared: SharedLimiter) {
                             pointers::moved_away(&mut l.left, l.addr, v.addr);
                         }
                         l.addr = v.addr;
+                        l.came = v.leads;
                         l.paused = None;
                     }
                     None => {
@@ -1287,6 +1290,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         sites,
         paths,
         left,
+        came: Vec::new(),
         named: named.pop().map(|path| NamedLimit { path, roots: Vec::new(), found_at: None, addrs: Vec::new(), searching: false }),
         guard_addr,
         guard,
@@ -3666,17 +3670,21 @@ fn cmd_ptrscan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<(
 /// follow <type> <path>...: where each path leads now ("<n>: 0x<addr>:<type> = <value>" or
 /// "<n>: broken"), then the address most of them agree on: "best 0x<addr>:<type> = <value>",
 /// and "votes <paths leading there> <most leading elsewhere> <paths> clear|unclear".
-/// "at=<addr>" and "left=<addr>,..." before the paths: where the value was last found in this run,
-/// and the places it moved away from (see `pointers::vote`).
+/// "at=<addr>", "left=<addr>,..." and "came=<hex>" before the paths: where the value was last found
+/// in this run, the places it moved away from, and which paths led to it then (path i is bit i % 4
+/// of hex digit i / 4; see `pointers::vote`).
 fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let mut it = arg.split_whitespace().peekable();
     let kind = it.next().and_then(Kind::parse);
-    let (mut at, mut left) = (0, Vec::new());
+    let (mut at, mut left, mut came) = (0, Vec::new(), Vec::new());
     while let Some(t) = it.peek() {
         if let Some(a) = t.strip_prefix("at=") {
             at = parse_addr(a).unwrap_or(0);
         } else if let Some(l) = t.strip_prefix("left=") {
             left = l.split(',').filter_map(parse_addr).collect();
+        } else if let Some(c) = t.strip_prefix("came=") {
+            let digits = c.chars().map(|d| d.to_digit(16).unwrap_or(0));
+            came = digits.flat_map(|d| (0..4).map(move |b| d >> b & 1 == 1)).collect();
         } else {
             break;
         }
@@ -3693,7 +3701,7 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
             None => writeln!(out, "{i}: broken")?,
         }
     }
-    match pointers::vote(mem, &mods, s.width, &paths, at, &left) {
+    match pointers::vote(mem, &mods, s.width, &paths, at, &left, &came) {
         Some(v) => {
             writeln!(out, "best {}", s.describe(v.addr, kind))?;
             let clear = if v.clear() { "clear" } else { "unclear" };
