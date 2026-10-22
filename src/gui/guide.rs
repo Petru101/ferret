@@ -81,7 +81,9 @@ pub struct Guide {
     steps: Vec<gtk::Label>,
     icon: gtk::Image,
     tag: gtk::Label,
-    spinner: gtk::Spinner,
+    /// Turns while shown. Not a gtk::Spinner: on Windows (GTK 4.24) one hidden once never turned
+    /// again, and every scan after the first looked stuck.
+    spinner: adw::Spinner,
     title: gtk::Label,
     hint: gtk::Label,
     bar: gtk::ProgressBar,
@@ -145,7 +147,7 @@ impl Guide {
         steps.iter().for_each(|s| steps_row.append(s));
         let icon = gtk::Image::builder().pixel_size(22).valign(gtk::Align::Start).css_classes(["guide-icon"]).build();
         let tag = gtk::Label::builder().css_classes(["guide-tag"]).build();
-        let spinner = gtk::Spinner::new();
+        let spinner = adw::Spinner::new();
         let head = gtk::Box::builder().spacing(10).build();
         head.append(&tag);
         head.append(&spinner);
@@ -236,7 +238,6 @@ impl Guide {
         }
         self.icon.set_icon_name(Some(look.icon()));
         self.tag.set_label(&look.tag());
-        self.spinner.set_spinning(look == Look::Wait);
         self.spinner.set_visible(look == Look::Wait);
         self.title.set_label(title);
         self.hint.set_label(hint);
