@@ -91,10 +91,28 @@ PowerShell 5.1 note: in a UTF-8 console .NET writes a BOM before the first line 
 `ferret.exe --cli`; set `[Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false`
 first (common.ps1 does).
 
+## Games installed here, by engine
+
+Earlier Windows work used these for its engine support (`9a7d50d` Java, `01f4d07` RPG Maker MV on
+32-bit NW.js, `4e15701`/`a12fa6e` 32-bit and packed GameMaker, `ed1e19f` Ren'Py 7); none of them
+were re-run after today's heap fixes.
+
+| Engine | Games (`C:\games` unless noted) |
+|---|---|
+| Unity Mono, 64-bit | into-darkness |
+| Unity Mono, 32-bit (old Unity, engine inside the .exe) | flight-380; Particle Fleet Emergence (Steam) |
+| Unity IL2CPP, 64-bit | digital-logic-sim; Low-Budget Repairs (`D:\Games`, don't run its `definetely_not_virus.exe`) |
+| GameMaker, 32-bit | mobility; spelunky-sd (packed into the .exe) |
+| RPG Maker MV/MZ on NW.js | lilac-and-her-light |
+| Ren'Py | first-kiss-at-a-spooky-soiree; tunnel-vision |
+| Java | astro-defend, dimensions-reality, double-down, dungeon-colony, pixel-dungeon (`jre`) |
+| LÖVE | whatdoweeatfordinner |
+| Unreal 4.27 / 4.22 | hell-pie-demo / the-mammoth |
+| Godot 4 | godot4-standin (a stand-in) |
+
 ## Not tested on Windows yet
 
 - The two heap fixes on real games: a game that moves a value on a level change (pointer paths),
-  and finding two or three inventory items in a row (shapes).
-- 32-bit games on real titles (only the 32-bit stand-in so far), Unity/Mono, GameMaker, Ren'Py,
-  RPG Maker, Java games.
+  and finding two or three inventory items in a row (shapes). Pointer paths matter most for the
+  32-bit Unity games and GameMaker; shapes only cut on 64-bit games (into-darkness).
 - The installer and portable zip (`e6a54e1`).
