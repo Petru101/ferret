@@ -46,6 +46,37 @@ fn log(line: &str) {
     }
 }
 
+/// FERRET_FOCUS_LOG=1: every focus change of the window and the focus when a notification goes
+/// out, timed, to find why Windows got notifications while Ferret was in front.
+fn focus_log() -> bool {
+    std::env::var_os("FERRET_FOCUS_LOG").is_some()
+}
+
+/// Whether the window Windows has in front is one of Ferret's.
+#[cfg(windows)]
+fn foreground_is_ours() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid)) };
+    pid == std::process::id()
+}
+
+/// The time, the window's focus as GTK and Windows see it, and Ferret's other windows.
+fn focus_state(window: &gtk::Window) -> String {
+    let time = glib::DateTime::now_local().ok().and_then(|d| d.format("%H:%M:%S.%f").ok()).map_or_else(String::new, |t| t.get(..12).unwrap_or(&t).to_owned());
+    #[cfg(windows)]
+    let front = format!(" in_front={}", foreground_is_ours());
+    #[cfg(not(windows))]
+    let front = String::new();
+    let others: Vec<String> = gtk::Window::list_toplevels()
+        .iter()
+        .filter_map(|w| w.downcast_ref::<gtk::Window>())
+        .filter(|w| *w != window)
+        .map(|w| format!("{}{}{}", w.type_().name(), if w.is_visible() { "" } else { "(hidden)" }, if w.is_active() { "(ACTIVE)" } else { "" }))
+        .collect();
+    format!("{time} active={}{front} others=[{}]", window.is_active(), others.join(" "))
+}
+
 impl Notifier {
     pub fn new() -> Rc<Self> {
         #[cfg(windows)]
@@ -124,6 +155,9 @@ impl Notifier {
         // Only logged when it closes a notification: every switch to and from the game filled
         // half the log (and bug reports) with "in front" / "left the front".
         window.connect_is_active_notify(move |w| {
+            if focus_log() {
+                log(&format!("focus: {}", focus_state(w.upcast_ref())));
+            }
             if let (true, Some(n)) = (w.is_active(), n.upgrade()) {
                 if n.id.get() != 0 {
                     log("Ferret's window came to the front: its notification closed");
@@ -212,6 +246,9 @@ impl Notifier {
             return;
         }
         log(&format!("notification: {title}"));
+        if let Some(w) = self.window.borrow().as_ref().filter(|_| focus_log()) {
+            log(&format!("focus at notification: {}", focus_state(w)));
+        }
         let sent = self.sent.get() + 1;
         self.sent.set(sent);
         self.waiting.set(secs.is_none());
