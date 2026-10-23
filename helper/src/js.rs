@@ -84,6 +84,15 @@ pub struct Js {
     /// V8 8.x: where an external string's resource keeps its Blink string, from the resource
     /// (Blink's string: {refs, length, hash, characters}).
     ext: i64,
+    /// V8 8.x and newer: the word of a cell holding its name, its details and value after it:
+    /// 1 in 8.x {map, name, details, value}, 2 in 14.x {map, dependent code, name, details,
+    /// value}.
+    cell_name: u64,
+    /// V8 14.x (NW.js 0.10x, Chromium 146): elements kinds in bits 2-7 of bit_field2 (3-7
+    /// before), the dictionary kind 13 (12 in 8.x: a shared-array kind came between), and a
+    /// property's details {kind, constness, attributes (3), location, ...} (location bit 5;
+    /// bit 1 in 8.x). Each native context has its own meta map then (`is_map`).
+    modern: bool,
 }
 
 fn word(mem: &Mem, at: u64) -> Option<u64> {
@@ -281,7 +290,7 @@ impl Js {
             }
         }
         let field_shift = if cells == Cells::Named { 20 } else { 19 };
-        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0 };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0, cell_name: 1, modern: false };
         js.calibrate(mem);
         Some(js)
     }
@@ -357,13 +366,14 @@ impl Js {
             (l.word(mem, meta - 1) == Some(meta)).then_some(meta)
         };
         names.retain(|&(_, s)| meta_of(s).is_some());
-        let mut targets: Vec<(u32, u64, usize)> = names.iter().map(|&(g, s)| ((s + 1) as u32, cage(s), g)).collect();
+        let mut targets: Vec<(u32, u64, usize, u64)> = names.iter().filter_map(|&(g, s)| Some(((s + 1) as u32, cage(s), g, meta_of(s)?))).collect();
         targets.sort_unstable();
         targets.dedup();
         let cages: Vec<u64> = targets.iter().map(|t| t.1).collect();
-        // The cells: {map, name, details (a Smi), value}; each way found (its cell map), with
+        // The cells: {map, name, details (a Smi), value}, or {map, dependent code, name,
+        // details, value} (V8 14.x); each way found (its cell map and where the name is), with
         // the globals it holds.
-        let mut found: Vec<(u64, Vec<(usize, u64)>)> = Vec::new();
+        let mut found: Vec<((u64, u64), Vec<(usize, u64)>)> = Vec::new();
         heap.each_chunk(8, |addr, b, fresh| {
             if !cages.contains(&cage(addr)) {
                 return;
@@ -374,25 +384,28 @@ impl Js {
                     continue;
                 }
                 let from = targets.partition_point(|t| t.0 < v);
-                for &(_, base, g) in targets[from..].iter().take_while(|t| t.0 == v) {
+                for &(_, base, g, meta) in targets[from..].iter().take_while(|t| t.0 == v) {
                     if base != cage(addr) || u32_at(b, off + 4).is_none_or(|d| d & 1 == 1) {
                         continue;
                     }
-                    let Some(m) = u32_at(b, off - 4).filter(|m| m & 1 == 1) else { continue };
                     let l = Layout { w: 4, base };
-                    let m = l.decompress(m);
-                    if l.word(mem, m - 1).and_then(|x| meta_of(x - 1).filter(|&meta| meta == x)).is_none() {
-                        continue;
-                    }
-                    let cell = addr + off as u64 - 4;
-                    match found.iter_mut().find(|(k, _)| *k == m) {
-                        Some((_, v)) => v.push((g, cell)),
-                        None => found.push((m, vec![(g, cell)])),
+                    for k in [1u64, 2] {
+                        let Some(at) = off.checked_sub(4 * k as usize) else { continue };
+                        let Some(m) = u32_at(b, at).filter(|m| m & 1 == 1).map(|m| l.decompress(m)) else { continue };
+                        // A map: its map is the meta map.
+                        if l.word(mem, m - 1) != Some(meta) {
+                            continue;
+                        }
+                        let cell = addr + at as u64;
+                        match found.iter_mut().find(|(key, _)| *key == (m, k)) {
+                            Some((_, v)) => v.push((g, cell)),
+                            None => found.push(((m, k), vec![(g, cell)])),
+                        }
                     }
                 }
             }
         });
-        let (cell_map, got) = found.into_iter().max_by_key(|(_, v)| {
+        let ((cell_map, cell_name), got) = found.into_iter().max_by_key(|(_, v)| {
             let mut gs: Vec<usize> = v.iter().map(|(g, _)| *g).collect();
             gs.sort_unstable();
             gs.dedup();
@@ -411,7 +424,7 @@ impl Js {
                 globals[g].1.push(cell);
             }
         }
-        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext };
+        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext, cell_name, modern: false };
         js.calibrate(mem);
         Some(js)
     }
@@ -419,6 +432,13 @@ impl Js {
     /// Checks the field index's place on an object every MV game has: Game_Party's first
     /// fields are `_inBattle`, `_gold`, `_steps`, set in that order.
     fn calibrate(&mut self, mem: &Mem) {
+        // A plain object's elements are holey (kind 3): where that kind sits tells V8 14.x
+        // from 8.x (looked at with V8 14.x's maps allowed).
+        if self.cells == Cells::Compressed {
+            self.modern = true;
+            let b2 = self.global(mem, "$gameParty").and_then(|p| self.map_of(mem, p)).and_then(|m| byte(mem, m - 1 + self.l.map_bit_field2()));
+            self.modern = b2.is_some_and(|b2| b2 >> 3 != 3 && (b2 >> 2) & 0x3f == 3);
+        }
         let Some(party) = self.global(mem, "$gameParty") else { return };
         let Some(m) = self.map_of(mem, party) else { return };
         let descs: Vec<(Option<String>, u32)> = self.descriptors(mem, m).into_iter().map(|(k, d)| (self.text(mem, k), d)).collect();
@@ -448,8 +468,21 @@ impl Js {
         if self.l.w == 8 { "i32" } else { "smi" }
     }
 
+    /// A map: its map is the meta map (V8 14.x: or its native context's own, a map of itself).
     fn is_map(&self, mem: &Mem, m: u64) -> bool {
-        tagged(m) && self.word(mem, m - 1) == Some(self.meta)
+        if !tagged(m) {
+            return false;
+        }
+        match self.word(mem, m - 1) {
+            Some(mm) if mm == self.meta => true,
+            Some(mm) => self.modern && tagged(mm) && self.word(mem, mm - 1) == Some(mm),
+            None => false,
+        }
+    }
+
+    /// The elements kind kept in a map's bit_field2.
+    fn elements_kind(&self, mem: &Mem, m: u64) -> Option<u8> {
+        byte(mem, m - 1 + self.l.map_bit_field2()).map(|b| if self.modern { b >> 2 & 0x3f } else { b >> 3 })
     }
 
     fn map_of(&self, mem: &Mem, o: u64) -> Option<u64> {
@@ -490,11 +523,11 @@ impl Js {
             }
             Cells::InDictionary => self.word(mem, cell + w)?,
             Cells::Compressed => {
-                let n = self.word(mem, cell + w)?;
+                let n = self.word(mem, cell + self.cell_name * w)?;
                 if self.text(mem, n).as_deref() != Some(name) {
                     return None;
                 }
-                self.word(mem, cell + 3 * w)?
+                self.word(mem, cell + (self.cell_name + 2) * w)?
             }
         };
         self.map_of(mem, v).map(|_| v)
@@ -509,7 +542,9 @@ impl Js {
         let Some(d) = self.word(mem, m - 1 + l.map_descriptors()).filter(|&d| tagged(d)) else { return Vec::new() };
         let ws = l.w as usize;
         let mut b = vec![0u8; 3 * ws * own as usize];
-        if mem.read_exact_at(&mut b, d - 1 + 4 * l.w).is_err() {
+        // Entries after {map, counts, marked count, enum cache} (V8 14.x: a word more).
+        let first = if self.modern { 20 } else { 4 * l.w };
+        if mem.read_exact_at(&mut b, d - 1 + first).is_err() {
             return Vec::new();
         }
         let w = |i: usize| {
@@ -615,7 +650,8 @@ impl Js {
         let Some(m) = self.map_of(mem, o) else { return Vec::new() };
         let Some(bits) = half(mem, m - 1 + l.map_bit_field3()) else { return Vec::new() };
         let props = self.word(mem, o - 1 + l.obj_props()).unwrap_or(0);
-        if bits >> 20 & 1 == 1 {
+        // A dictionary-mode object: bit 20 of bit_field3 (21 in V8 8.x and later).
+        if bits >> if self.cells == Cells::Compressed { 21 } else { 20 } & 1 == 1 {
             return self.dictionary(mem, props, 5).into_iter().filter_map(|(k, v)| Some((self.text(mem, k)?, v))).collect();
         }
         let (Some(words), Some(b9)) = (byte(mem, m - 1 + l.map_words()), byte(mem, m - 1 + l.map_words() + 1)) else { return Vec::new() };
@@ -633,7 +669,11 @@ impl Js {
         let mut out = Vec::new();
         for (k, det) in self.descriptors(mem, m) {
             // Constants and accessors aren't fields.
-            if det & 3 != 0 {
+            let not_field = match self.modern {
+                true => det & 1 != 0 || det >> 5 & 1 != 0,
+                false => det & 3 != 0,
+            };
+            if not_field {
                 continue;
             }
             let index = u64::from((det >> self.field_shift) & 0x3ff);
@@ -701,7 +741,7 @@ impl Js {
     pub fn elements(&self, mem: &Mem, o: u64) -> Vec<(u32, Val)> {
         let l = self.l;
         let Some(m) = self.map_of(mem, o) else { return Vec::new() };
-        let Some(kind) = byte(mem, m - 1 + l.map_bit_field2()).map(|b| b >> 3) else { return Vec::new() };
+        let Some(kind) = self.elements_kind(mem, m) else { return Vec::new() };
         let Some(e) = self.word(mem, o - 1 + l.obj_elements()).filter(|&e| tagged(e)) else { return Vec::new() };
         let Some(n) = self.word(mem, e - 1 + l.w).and_then(|x| l.smi(x)) else { return Vec::new() };
         let n = (n.max(0) as usize).min(MAX_ELEMENTS);
@@ -709,7 +749,11 @@ impl Js {
         // Kinds: Smis or anything, packed or with holes (0-3), doubles (4-5), then a
         // dictionary of numbers (6; V8 8.x has non-extensible, sealed and frozen kinds of the
         // first sort before it: 6-11, the dictionary 12).
-        let dictionary = if self.cells == Cells::Compressed { 12 } else { 6 };
+        let dictionary = match (self.cells, self.modern) {
+            (_, true) => 13,
+            (Cells::Compressed, false) => 12,
+            _ => 6,
+        };
         match kind {
             4 | 5 => (0..n)
                 .filter_map(|i| {
@@ -750,11 +794,19 @@ pub fn diagnose(heap: &Heap, global: &str) -> Vec<String> {
     let mem = heap.mem();
     let l = js.l;
     let mut out = vec![match l.compressed() {
-        true => format!("compressed (cage {:#x}), field shift {}, Blink's strings at resource {:+}", l.base, js.field_shift, js.ext),
+        true => format!(
+            "compressed (cage {:#x}{}), field shift {}, Blink's strings at resource {:+}, cells' names at word {}",
+            l.base,
+            if js.modern { ", V8 14.x" } else { "" },
+            js.field_shift,
+            js.ext,
+            js.cell_name
+        ),
         false => format!("{}-bit, cells {:?}, field shift {}", l.w * 8, js.cells, js.field_shift),
     }];
     for (g, cells) in &js.globals {
-        out.push(format!("{g}: {} cells, value {:?}", cells.len(), js.global(mem, g).map(|v| format!("{v:#x}"))));
+        let at: Vec<String> = cells.iter().map(|c| format!("{c:#x}")).collect();
+        out.push(format!("{g}: cells {}, value {:?}", at.join(" "), js.global(mem, g).map(|v| format!("{v:#x}"))));
     }
     let name = if global.is_empty() { "$gameParty" } else { global };
     let Some(o) = js.global(mem, name) else { return out };

@@ -858,11 +858,20 @@ impl Named {
         text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:") || text.starts_with("py:") || text.starts_with("air:")
     }
 
-    /// Walked again right before every write (not only every `LIMIT_FIND_EVERY`): Java moves
-    /// its objects, and the old copy's memory is reused; Python makes a new number object at
-    /// every change (`hp -= 1`) and frees the old one.
+    /// Walked again right before every write (not only every `LIMIT_FIND_EVERY`): Java and
+    /// V8 (RPG Maker) move their objects when they compact memory, and the old place is
+    /// reused; Python makes a new number object at every change (`hp -= 1`) and frees the old
+    /// one.
     fn fresh(&self) -> bool {
-        matches!(self, Named::Java(_) | Named::Py(_))
+        matches!(self, Named::Java(_) | Named::Py(_) | Named::Js(_))
+    }
+
+    /// Walked again before a write only when one is due (the number at its last place is out
+    /// of range): a walk of an RPG Maker path 20 times a second took ~3% of a core (reading
+    /// the game's memory map each time). A number that moved and stayed in range waits for
+    /// the next `LIMIT_FIND_EVERY` walk; a write always follows a walk.
+    fn walk_when_due(&self) -> bool {
+        matches!(self, Named::Js(_))
     }
 
     /// Where it leads from the roots found before (no search).
@@ -1057,11 +1066,22 @@ fn limiter_loop(shared: SharedLimiter) {
                     }
                 }
             }
-            let fresh = limits.iter().any(|l| l.named.as_ref().is_some_and(|n| n.path.fresh()));
-            let heap = ((find || fresh) && limits.iter().any(|l| l.named.is_some())).then(|| Heap::new(*pid, mem, *width).ok()).flatten();
-            for l in limits.iter_mut() {
+            // A write is due: the number at its places is out of range, or unreadable.
+            let write_due = |l: &Limit, n: &NamedLimit| {
+                let interim = [l.addr];
+                let addrs = if n.addrs.is_empty() { &interim[..] } else { &n.addrs[..] };
+                !l.off
+                    && addrs.iter().any(|&a| match read_value(mem, a, l.kind) {
+                        Some(v) => l.min.is_some_and(|min| v < min) || l.max.is_some_and(|max| v > max),
+                        None => true,
+                    })
+            };
+            let fresh_now = |l: &Limit| l.named.as_ref().is_some_and(|n| n.path.fresh() && (!n.path.walk_when_due() || write_due(l, n)));
+            let fresh: Vec<bool> = limits.iter().map(fresh_now).collect();
+            let heap = ((find || fresh.contains(&true)) && limits.iter().any(|l| l.named.is_some())).then(|| Heap::new(*pid, mem, *width).ok()).flatten();
+            for (l, fresh) in limits.iter_mut().zip(fresh) {
                 let (Some(n), Some(heap)) = (l.named.as_mut(), heap.as_ref()) else { continue };
-                if !find && !n.path.fresh() {
+                if !find && !fresh {
                     continue;
                 }
                 // Searching memory for its objects again takes seconds: done without the lock.
