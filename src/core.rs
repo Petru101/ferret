@@ -590,8 +590,8 @@ pub enum Kind {
     /// A Python value (the helper's python.rs): the slot pointing to a number object, written
     /// in place or by pointing it to a cached small int. Values saved by a Python path.
     Py,
-    /// A small integer of 32-bit V8 (the helper's js.rs: RPG Maker MV on 32-bit NW.js), kept
-    /// as the number times two. Values saved by a JavaScript path on such a game.
+    /// A small integer of 32-bit V8 or V8 8.x (the helper's js.rs: RPG Maker MV on 32-bit
+    /// NW.js, MZ), kept as the number times two. Values saved by a JavaScript path on such a game.
     Smi,
 }
 
@@ -4057,7 +4057,7 @@ impl Core {
     }
 
     /// Whether the Browse tab can list this game's numbers by name (an Unreal game whose objects
-    /// Ferret reads, a Unity, Godot, RPG Maker MV, GameMaker or Lua game).
+    /// Ferret reads, a Unity, Godot, RPG Maker MV/MZ, GameMaker or Lua game).
     pub fn browsable(&mut self) -> bool {
         self.game.is_some() && self.helper.call("browsable").iter().any(|l| l.starts_with("browsable ") && l != "browsable no")
     }
@@ -4075,7 +4075,7 @@ impl Core {
         }
         if let Some(why) = reply.iter().find_map(|l| l.strip_prefix("none engine ")) {
             self.say(&format!("no list by name: {why}"));
-            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Lua (LuaJIT), Java, Python and Adobe AIR games so far."));
+            return Err(tr!("Ferret can list a game's numbers by name only in Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV/MZ, Lua (LuaJIT), Java, Python and Adobe AIR games so far."));
         }
         let mut list: Vec<PlayerObject> = Vec::new();
         for l in &reply {

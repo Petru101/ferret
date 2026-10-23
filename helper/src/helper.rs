@@ -216,15 +216,17 @@ fn dosbox_game(argv0: &str, cwd: &str, home: &str) -> Option<String> {
     game(parts(cwd))
 }
 
-/// The folder of the NW.js app a process belongs to (RPG Maker MV, Construct and other HTML5
-/// games): its program sits next to package.json or package.nw and NW.js's own files.
-/// Native programs only (Wine's are told apart by their .exe, not looked at yet).
+/// The folder of the NW.js app a process belongs to (RPG Maker MV and MZ, Construct and other
+/// HTML5 games): its program sits next to package.json or package.nw and NW.js's own files.
+/// Under Wine the program is the .exe it maps (RPG Maker MZ games ship for Windows only).
 fn nwjs_app(pid: u32) -> Option<PathBuf> {
-    let program = os::exe(pid)?;
+    let windows = exe_name(pid).to_ascii_lowercase().ends_with(".exe");
+    let program = if windows { program_of(pid)? } else { os::exe(pid)? };
     let dir = program.parent()?;
     let inside = os::inside(pid, dir);
     let has = |f: &str| inside.join(f).exists();
-    ((has("package.json") || has("package.nw")) && (has("nw.pak") || has("resources.pak") || has("lib/libnw.so"))).then(|| dir.to_path_buf())
+    let nw = has("nw.pak") || has("resources.pak") || has("lib/libnw.so") || has("nw.dll");
+    ((has("package.json") || has("package.nw")) && nw).then(|| dir.to_path_buf())
 }
 
 /// An NW.js game runs its JavaScript, and keeps its values, in a Chromium renderer process
@@ -236,11 +238,13 @@ fn nwjs_renderer(pid: u32) -> bool {
     cmd.contains(" --type=renderer") || cmd.contains(" --type=zygote") && parent.is_some_and(|p| cmdline(p).contains(" --type=zygote"))
 }
 
-/// An NW.js game's name: an RPG Maker game's title (`www/data/System.json`), else its folder's.
+/// An NW.js game's name: an RPG Maker game's title (`www/data/System.json`, MZ's
+/// `data/System.json`), else its folder's.
 fn nwjs_name(pid: u32, dir: &Path) -> String {
     let inside = os::inside(pid, dir);
-    let title = fs::read_to_string(inside.join("www/data/System.json"))
-        .ok()
+    let title = ["www/data/System.json", "data/System.json"]
+        .iter()
+        .find_map(|f| fs::read_to_string(inside.join(f)).ok())
         .and_then(|t| crate::json::parse(&t))
         .and_then(|v| v.get("gameTitle").and_then(|t| t.str()).map(|t| t.trim().replace('\t', " ")))
         .filter(|t| !t.is_empty());
@@ -311,7 +315,8 @@ fn is_lua(pid: u32) -> bool {
     lua::runs_lua(pid, &regions, program_path(pid, &regions).as_deref())
 }
 
-/// RPG Maker MV games (js.rs): NW.js running `www/js/rpg_core.js` from next to the program.
+/// RPG Maker MV and MZ games (js.rs): NW.js running `www/js/rpg_core.js` (MV) or
+/// `js/rmmz_core.js` (MZ) from next to the program.
 fn is_rpgmaker(pid: u32) -> bool {
     let program = maps(pid).ok().and_then(|m| program_path(pid, &m));
     js::is_rpgmaker(pid, program.as_deref())
@@ -574,9 +579,9 @@ pub(crate) enum Kind {
     /// immutable objects), read as the number it points to, written in place or by pointing
     /// the slot to a cached small int (`python::write_slot`). Values saved by a Python path.
     Py,
-    /// A small integer of 32-bit V8 (js.rs, RPG Maker MV on 32-bit NW.js): 4 bytes holding the
-    /// number times two (bit 0 clear; set, it's a pointer: not a number now). Values saved by a
-    /// JavaScript path on a 32-bit game.
+    /// A small integer of 32-bit V8 or of V8 8.x (js.rs, RPG Maker MV on 32-bit NW.js, MZ): 4
+    /// bytes holding the number times two (bit 0 clear; set, it's a pointer: not a number now).
+    /// Values saved by a JavaScript path on such a game.
     Smi,
 }
 
@@ -797,7 +802,7 @@ struct Limit {
 /// A named path of any kind: through objects the game names (Unity, names.rs), to an entry of
 /// the game's dictionaries (Godot, godot.rs), through its scripts' variables (Godot,
 /// gdscript.rs), through its Unreal objects (ue.rs), to a field of a Mono class's live
-/// objects (Unity, Mono or IL2CPP; mono.rs), from an RPG Maker MV game's globals (js.rs) or
+/// objects (Unity, Mono or IL2CPP; mono.rs), from an RPG Maker MV or MZ game's globals (js.rs) or
 /// to a GameMaker instance's or the global object's variable (gml.rs).
 #[derive(Clone)]
 enum Named {
@@ -909,7 +914,8 @@ const MAX_NAMED_PLACES: usize = 32;
 /// no named objects; a path through two random characters led to 95 places, and a write went
 /// to all of them). Places of one value are the same field of objects of one kind: few, lined
 /// up alike, holding plausible numbers.
-fn named_doubt(mem: &Mem, leads: &[u64], kind: Kind, path: &Named) -> Option<String> {
+fn named_doubt(heap: &Heap, leads: &[u64], kind: Kind, path: &Named) -> Option<String> {
+    let mem = heap.mem();
     if leads.len() > MAX_NAMED_PLACES {
         return Some(format!("it leads to {} places, more than one value is kept in", leads.len()));
     }
@@ -917,6 +923,15 @@ fn named_doubt(mem: &Mem, leads: &[u64], kind: Kind, path: &Named) -> Option<Str
     // tally of it may sit at different alignments).
     if !matches!(path, Named::Unreal(_)) && leads.iter().any(|a| a % 8 != leads[0] % 8) {
         return Some("its places don't line up like the same field of objects".into());
+    }
+    // An RPG Maker whole number is a plain i32 in 64-bit V8 and doubled ("smi") in 32-bit V8
+    // and V8 8.x (MZ): written as the other, half or twice the number lands there, an odd
+    // word a pointer to nowhere (the game crashed: an MZ game's HP limit saved as i32).
+    if let Named::Js(_) = path {
+        let ints = js::int_kind(heap);
+        if matches!(kind, Kind::I32 | Kind::Smi) && ints.is_some_and(|k| k != kind.name()) {
+            return Some(format!("this game keeps whole numbers as {}, not {}", ints.unwrap_or_default(), kind.name()));
+        }
     }
     let plausible = |v: f64| v.is_finite() && v.abs() < 1e9 && (v == 0.0 || v.abs() >= 1e-6);
     if !leads.iter().all(|&a| read_value(mem, a, kind).is_some_and(plausible)) {
@@ -1059,7 +1074,7 @@ fn limiter_loop(shared: SharedLimiter) {
                         None => "looking for it by name",
                         Some(_) => "it isn't anywhere right now (none in the game?), waiting",
                     });
-                } else if named_doubt(mem, &leads, l.kind, &n.path).is_some() {
+                } else if named_doubt(heap, &leads, l.kind, &n.path).is_some() {
                     l.paused = Some("its name leads to places that aren't one value, not written");
                 } else {
                     if leads != n.addrs || l.paused.is_some_and(|p| p != PY_SHARED) {
@@ -3791,7 +3806,7 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
             return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
         }
     }
-    // A number of an RPG Maker MV game, by its path from the game's globals.
+    // A number of an RPG Maker MV or MZ game, by its path from the game's globals.
     if is_rpgmaker(s.pid) {
         if let Some((p, leads)) = js::discover(&heap, target) {
             writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
@@ -3914,7 +3929,7 @@ fn cmd_named(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     let (mut roots, mut found_at) = s.named_roots.remove(text).unwrap_or_default();
     let leads = named_walk(&heap, &path, &mut roots, &mut found_at);
     s.named_roots.insert(text.to_owned(), (roots, found_at));
-    if let Some(why) = named_doubt(mem, &leads, kind, &path) {
+    if let Some(why) = named_doubt(&heap, &leads, kind, &path) {
         writeln!(out, "doubtful {why}")?;
     }
     for a in &leads {
@@ -3940,7 +3955,7 @@ fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 /// <role>\t<owner or ->\t<class>\t<main|more>\t<name>" line (more: shown on asking for everything), then its "field 0x<addr>:<type> = <value>\t<label>"
 /// lines, for each object; "none character" while the player has no character (a menu; an RPG
 /// Maker game that hasn't made its objects yet), "none engine <why>" for games whose objects
-/// Ferret can't read so (not Unreal, Unity, Godot or RPG Maker MV).
+/// Ferret can't read so (not Unreal, Unity, Godot or RPG Maker MV/MZ).
 fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let t = Instant::now();
     let Some(mem) = s.mem.as_ref() else {
@@ -3952,7 +3967,7 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
             Err(_) => return writeln!(out, "none character"),
         },
         // Unity: every live object of the game's own classes; Godot: every node running a
-        // script; RPG Maker MV: the party, heroes and variables. The player's first.
+        // script; RPG Maker MV/MZ: the party, heroes and variables. The player's first.
         Err(e) => {
             let heap = Heap::new(s.pid, mem, s.width)?;
             if s.doubles_only {
@@ -4078,7 +4093,7 @@ fn cmd_pydump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     writeln!(out, "in {} ms", t.elapsed().as_millis())
 }
 
-/// jsdump [global]: an RPG Maker MV game's V8 layout and a global's fields ($gameParty).
+/// jsdump [global]: an RPG Maker MV or MZ game's V8 layout and a global's fields ($gameParty).
 fn cmd_jsdump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");

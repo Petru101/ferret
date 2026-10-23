@@ -46,7 +46,7 @@ its menu, or an issue here).
 6. **More like this**: found one power's timer or one unit's health? Find Them on its card
    watches the game's code that changes it while you use the others, and saves each one with
    the same range.
-7. **Browse by name** (Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV, Java, Python (Ren'Py, pygame), Adobe AIR and Lua games such as LÖVE's): the Browse tab lists your character's numbers by
+7. **Browse by name** (Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV and MZ, Java, Python (Ren'Py, pygame), Adobe AIR and Lua games such as LÖVE's): the Browse tab lists your character's numbers by
    the names the game gives them (health, ammo, run speed, jump height; in RPG Maker games the
    party's gold and items, each hero's HP, MP and level, the game's variables), no search needed.
    Turn on Only What Changes, change one in the game, and save the one that moved.
@@ -69,7 +69,7 @@ anti-cheat files.
 
 Native Linux games and Windows games under Proton or Wine, from Steam, Heroic, Lutris or anywhere
 else. Ferret finds values again by the game's own code, by the names Unreal, Unity (Mono and
-IL2CPP), Godot, GameMaker, RPG Maker MV, Java, Python, Adobe AIR (32-bit) and Lua (LuaJIT: LÖVE, Defold) games give their objects, or by pointer paths. Tried so far, among others:
+IL2CPP), Godot, GameMaker, RPG Maker MV and MZ, Java, Python, Adobe AIR (32-bit) and Lua (LuaJIT: LÖVE, Defold) games give their objects, or by pointer paths. Tried so far, among others:
 SuperTux, Terraria, Valheim, ULTRAKILL, Creeper World 4, Brotato, Lumencraft, Forager, Prey,
 Mass Effect: Andromeda, Starship Troopers: Ultimate Bug War!, Quake II RTX, Skyrim Special Edition,
 Shattered Pixel Dungeon (Java), Creeper World Anniversary Edition (Adobe AIR), and Flash games in Ruffle.

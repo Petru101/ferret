@@ -3,7 +3,8 @@
 //! `$gameVariables`...), so a value is named by its path from one of them:
 //! `js:$gameParty._gold`, `js:$gameActors._data[1]._hp`, `js:$gameParty._items[7]`.
 //! 64-bit V8 without pointer compression: NW.js 0.12 (V8 4.1, RPG Maker MV up to 1.5) and
-//! 0.25-0.29 (V8 6.x, MV 1.6). MZ's newer NW.js isn't handled.
+//! 0.25-0.29 (V8 6.x, MV 1.6); 32-bit V8 6.x; and V8 8.x with pointer compression (RPG Maker MZ's
+//! NW.js 0.44-0.48, Chromium 80-85: 4-byte references into a 4 GiB cage).
 //!
 //! V8 basics used here: a tagged word with bit 0 set points to an object (address + 1),
 //! with the low 32 bits clear it is a small integer (Smi) kept in the upper half (so a Smi
@@ -49,6 +50,9 @@ enum Cells {
     /// V8 4.x: an entry of the global object's dictionary {name, cell, details}, the cell
     /// {map, value, ...}.
     InDictionary,
+    /// V8 8.x with pointer compression: {map, name, details, value}. The names are external
+    /// strings whose text is Blink's (`Js::ext`).
+    Compressed,
 }
 
 /// A value as a field or element holds it.
@@ -77,6 +81,9 @@ pub struct Js {
     field_shift: u32,
     /// The cells of each of `GLOBALS` (several when stale copies are left around).
     globals: Vec<(&'static str, Vec<u64>)>,
+    /// V8 8.x: where an external string's resource keeps its Blink string, from the resource
+    /// (Blink's string: {refs, length, hash, characters}).
+    ext: i64,
 }
 
 fn word(mem: &Mem, at: u64) -> Option<u64> {
@@ -100,10 +107,14 @@ fn tagged(w: u64) -> bool {
 
 /// Where V8 keeps things, 64-bit or 32-bit (NW.js on Windows often is: Lilac and Her Light).
 /// 32-bit V8 has 4-byte words, keeps a small integer as the number times two (bit 0 clear)
-/// and never keeps a double inside an object (always in a box of the field's own).
+/// and never keeps a double inside an object (always in a box of the field's own). V8 8.x with
+/// pointer compression is laid out the same way (`base`: references are 4-byte offsets into
+/// its cage), with a few places moved.
 #[derive(Clone, Copy)]
 struct Layout {
     w: u64,
+    /// The pointer cage's start (compressed references), else 0.
+    base: u64,
 }
 
 impl Layout {
@@ -115,8 +126,20 @@ impl Layout {
     fn word(self, mem: &Mem, at: u64) -> Option<u64> {
         match self.w {
             8 => word(mem, at),
-            _ => half(mem, at).map(u64::from),
+            _ => half(mem, at).map(|x| self.decompress(x)),
         }
+    }
+
+    /// A 4-byte word as V8 means it: a reference (bit 0 set) is an offset into the cage.
+    fn decompress(self, x: u32) -> u64 {
+        match x & 1 {
+            1 => self.base | u64::from(x),
+            _ => u64::from(x),
+        }
+    }
+
+    fn compressed(self) -> bool {
+        self.base != 0
     }
 
     fn is_smi(self, x: u64) -> bool {
@@ -162,7 +185,10 @@ impl Layout {
         self.at(16, 12)
     }
     fn map_descriptors(self) -> u64 {
-        self.at(48, 28)
+        match self.compressed() {
+            true => 24,
+            false => self.at(48, 28),
+        }
     }
     // Objects: {map, properties, elements, in-object fields...}; arrays {map, length, data}.
     fn obj_props(self) -> u64 {
@@ -182,7 +208,7 @@ impl Layout {
 
 /// The layout of the game attached to: its pointer width.
 fn layout_of(heap: &Heap) -> Layout {
-    Layout { w: heap.width() as u64 }
+    Layout { w: heap.width() as u64, base: 0 }
 }
 
 impl Js {
@@ -255,7 +281,137 @@ impl Js {
             }
         }
         let field_shift = if cells == Cells::Named { 20 } else { 19 };
-        let mut js = Js { l, cells, meta, cell_map, field_shift, globals };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0 };
+        js.calibrate(mem);
+        Some(js)
+    }
+
+    /// V8 8.x with pointer compression (64-bit only): the globals' names are external strings
+    /// made from Blink's own strings, so they're found from those, in four passes over memory:
+    /// Blink's strings with the globals' texts ({refs, length, hash, characters}; V8's own
+    /// {map, hash, length, characters} are taken too), the resources pointing to them, V8's
+    /// external strings pointing to those ({map, hash, length, resource}), and the cells
+    /// holding those names ({map, name, details, value}).
+    fn locate_compressed(heap: &Heap) -> Option<Js> {
+        if heap.width() != 8 {
+            return None;
+        }
+        let mem = heap.mem();
+        let u32_at = |b: &[u8], i: usize| b.get(i..i + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
+        let u64_at = |b: &[u8], i: usize| b.get(i..i + 8).map(|x| u64::from_le_bytes(x.try_into().unwrap()));
+        let texts: Vec<&[u8]> = GLOBALS.iter().map(|g| g.as_bytes()).collect();
+        let longest = texts.iter().map(|t| t.len()).max().unwrap_or(0);
+        // (global, address) of Blink's strings and of V8's own.
+        let (mut blink, mut names) = (Vec::new(), Vec::new());
+        heap.each_chunk(12 + longest, |addr, b, fresh| {
+            for off in (0..fresh).step_by(4) {
+                if b.get(off + 12) != Some(&b'$') {
+                    continue;
+                }
+                for (g, t) in texts.iter().enumerate() {
+                    if b.get(off + 12..off + 12 + t.len()) != Some(t) {
+                        continue;
+                    }
+                    let len = Some(t.len() as u32);
+                    if u32_at(b, off + 4) == len {
+                        blink.push((g, addr + off as u64));
+                    }
+                    if u32_at(b, off + 8) == len && u32_at(b, off).is_some_and(|m| m & 1 == 1) {
+                        names.push((g, addr + off as u64));
+                    }
+                }
+            }
+        });
+        // Where Blink's strings are held (in resources), by address.
+        let held: Vec<u64> = blink.iter().map(|&(_, a)| a).collect();
+        let mut fields: Vec<(u64, usize)> =
+            heap.referrers(&held).into_iter().filter_map(|f| Some((f, blink.iter().find(|&&(_, a)| Some(a) == word(mem, f))?.0))).collect();
+        fields.sort_unstable();
+        // V8's external strings whose resource is near one of those fields: {map, hash, length,
+        // resource}, the resource within `NEAR` of the field.
+        const NEAR: u64 = 64;
+        let mut ext: Vec<(usize, u64, i64)> = Vec::new();
+        if let (Some(&(lo, _)), Some(&(hi, _))) = (fields.first(), fields.last()) {
+            heap.each_chunk(0, |addr, b, fresh| {
+                for off in (12..fresh.saturating_sub(8)).step_by(4) {
+                    let Some(v) = u64_at(b, off) else { break };
+                    if v + NEAR < lo || v > hi + NEAR {
+                        continue;
+                    }
+                    let from = fields.partition_point(|&(f, _)| f + NEAR < v);
+                    for &(f, g) in fields[from..].iter().take_while(|&&(f, _)| f <= v + NEAR) {
+                        if u32_at(b, off - 4) == Some(texts[g].len() as u32) && u32_at(b, off - 12).is_some_and(|m| m & 1 == 1) {
+                            ext.push((g, addr + off as u64 - 12, f as i64 - v as i64));
+                        }
+                    }
+                }
+            });
+        }
+        names.extend(ext.iter().map(|&(g, s, _)| (g, s)));
+        // A string's map's map is the meta map, its own map; the cage is the 4 GiB holding it.
+        let cage = |a: u64| a & !0xffff_ffff;
+        let meta_of = |s: u64| {
+            let l = Layout { w: 4, base: cage(s) };
+            let m = l.word(mem, s).filter(|&m| tagged(m))?;
+            let meta = l.word(mem, m - 1).filter(|&x| tagged(x))?;
+            (l.word(mem, meta - 1) == Some(meta)).then_some(meta)
+        };
+        names.retain(|&(_, s)| meta_of(s).is_some());
+        let mut targets: Vec<(u32, u64, usize)> = names.iter().map(|&(g, s)| ((s + 1) as u32, cage(s), g)).collect();
+        targets.sort_unstable();
+        targets.dedup();
+        let cages: Vec<u64> = targets.iter().map(|t| t.1).collect();
+        // The cells: {map, name, details (a Smi), value}; each way found (its cell map), with
+        // the globals it holds.
+        let mut found: Vec<(u64, Vec<(usize, u64)>)> = Vec::new();
+        heap.each_chunk(8, |addr, b, fresh| {
+            if !cages.contains(&cage(addr)) {
+                return;
+            }
+            for off in (4..fresh).step_by(4) {
+                let Some(v) = u32_at(b, off) else { break };
+                if v & 1 == 0 {
+                    continue;
+                }
+                let from = targets.partition_point(|t| t.0 < v);
+                for &(_, base, g) in targets[from..].iter().take_while(|t| t.0 == v) {
+                    if base != cage(addr) || u32_at(b, off + 4).is_none_or(|d| d & 1 == 1) {
+                        continue;
+                    }
+                    let Some(m) = u32_at(b, off - 4).filter(|m| m & 1 == 1) else { continue };
+                    let l = Layout { w: 4, base };
+                    let m = l.decompress(m);
+                    if l.word(mem, m - 1).and_then(|x| meta_of(x - 1).filter(|&meta| meta == x)).is_none() {
+                        continue;
+                    }
+                    let cell = addr + off as u64 - 4;
+                    match found.iter_mut().find(|(k, _)| *k == m) {
+                        Some((_, v)) => v.push((g, cell)),
+                        None => found.push((m, vec![(g, cell)])),
+                    }
+                }
+            }
+        });
+        let (cell_map, got) = found.into_iter().max_by_key(|(_, v)| {
+            let mut gs: Vec<usize> = v.iter().map(|(g, _)| *g).collect();
+            gs.sort_unstable();
+            gs.dedup();
+            gs.len()
+        })?;
+        let base = cage(cell_map);
+        let l = Layout { w: 4, base };
+        let meta = l.word(mem, cell_map - 1)?;
+        // Where the resources keep Blink's string: the place most of the names agree on.
+        let mut places: Vec<i64> = ext.iter().filter(|e| cage(e.1) == base).map(|e| e.2).collect();
+        places.sort_unstable();
+        let ext = places.chunk_by(|a, b| a == b).max_by_key(|c| c.len()).map_or(0, |c| c[0]);
+        let mut globals: Vec<(&'static str, Vec<u64>)> = GLOBALS.iter().map(|g| (*g, Vec::new())).collect();
+        for (g, cell) in got {
+            if !globals[g].1.contains(&cell) {
+                globals[g].1.push(cell);
+            }
+        }
+        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext };
         js.calibrate(mem);
         Some(js)
     }
@@ -306,7 +462,7 @@ impl Js {
     fn instance_type(&self, mem: &Mem, m: u64) -> Option<u16> {
         let at = m - 1 + self.l.map_type();
         match self.cells {
-            Cells::Named => half(mem, at).map(|t| t as u16),
+            Cells::Named | Cells::Compressed => half(mem, at).map(|t| t as u16),
             Cells::InDictionary => byte(mem, at).map(u16::from),
         }
     }
@@ -333,6 +489,13 @@ impl Js {
                 self.word(mem, cell + 3 * w)?
             }
             Cells::InDictionary => self.word(mem, cell + w)?,
+            Cells::Compressed => {
+                let n = self.word(mem, cell + w)?;
+                if self.text(mem, n).as_deref() != Some(name) {
+                    return None;
+                }
+                self.word(mem, cell + 3 * w)?
+            }
         };
         self.map_of(mem, v).map(|_| v)
     }
@@ -357,6 +520,7 @@ impl Js {
         let mut out = Vec::with_capacity(own as usize);
         for i in 0..own as usize {
             let (k, det) = (w(3 * ws * i), w(3 * ws * i + ws));
+            let k = if ws == 4 { l.decompress(k as u32) } else { k };
             let Some(det) = l.smi(det).filter(|_| tagged(k)) else { return Vec::new() };
             out.push((k, det as u32));
         }
@@ -376,10 +540,15 @@ impl Js {
         let l = self.l;
         let m = self.map_of(mem, s)?;
         let t = self.instance_type(mem, m)?;
-        if t >= 0x80 {
+        // Strings' types are the lowest: below 0x80 (0x40 in V8 8.x).
+        if t >= if l.compressed() { 0x40 } else { 0x80 } {
             return None;
         }
-        let len = l.smi(self.word(mem, s - 1 + l.str_len())?)? as u32;
+        // The length: a Smi, a plain int in V8 8.x.
+        let len = match l.compressed() {
+            true => half(mem, s - 1 + l.str_len())?,
+            false => l.smi(self.word(mem, s - 1 + l.str_len())?)? as u32,
+        };
         if len > MAX_TEXT {
             return None;
         }
@@ -387,17 +556,24 @@ impl Js {
         // (thin strings came), bit 3.
         let (one_byte, rep) = match self.cells {
             Cells::InDictionary => (t & 0x4 != 0, t & 0x3),
-            Cells::Named => (t & 0x8 != 0, t & 0x7),
+            Cells::Named | Cells::Compressed => (t & 0x8 != 0, t & 0x7),
         };
         let (o, body) = (s - 1, l.str_body());
+        let chars = |at: u64| {
+            let mut b = vec![0u8; if one_byte { len } else { 2 * len } as usize];
+            mem.read_exact_at(&mut b, at).ok()?;
+            Some(match one_byte {
+                true => b.iter().map(|&c| c as char).collect(),
+                false => String::from_utf16_lossy(&b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()),
+            })
+        };
         match rep {
-            0 => {
-                let mut b = vec![0u8; if one_byte { len } else { 2 * len } as usize];
-                mem.read_exact_at(&mut b, o + body).ok()?;
-                Some(match one_byte {
-                    true => b.iter().map(|&c| c as char).collect(),
-                    false => String::from_utf16_lossy(&b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()),
-                })
+            0 => chars(o + body),
+            // External (V8 8.x: Blink's names): {.., resource}; the resource holds Blink's
+            // string {refs, length, hash, characters}.
+            2 if self.cells == Cells::Compressed => {
+                let resource = word(mem, o + body)?;
+                chars(word(mem, resource.checked_add_signed(self.ext)?)? + 12)
             }
             1 => {
                 let a = self.text_in(mem, self.word(mem, o + body)?, depth + 1)?;
@@ -447,7 +623,7 @@ impl Js {
         // V8 4.x keeps the count of in-object fields, 6.x where they start.
         let inside = match self.cells {
             Cells::InDictionary => b9,
-            Cells::Named => words.saturating_sub(b9),
+            Cells::Named | Cells::Compressed => words.saturating_sub(b9),
         };
         let start = (words.saturating_sub(inside)) * l.w;
         // 64-bit: doubles kept in the object itself (no box), a bit each in the layout
@@ -461,9 +637,12 @@ impl Js {
                 continue;
             }
             let index = u64::from((det >> self.field_shift) & 0x3ff);
-            let rep = (det >> (self.field_shift - 14)) & 0xf;
-            // Representations: ..., Smi 5, Integer32 6, Double 7, HeapObject 8, Tagged 9.
-            let double = rep == 7;
+            // Representations: ..., Smi 5, Integer32 6, Double 7, HeapObject 8, Tagged 9; in
+            // V8 8.x 3 bits 13 lower: None 0, Smi 1, Double 2, HeapObject 3, Tagged 4.
+            let double = match self.cells {
+                Cells::Compressed => (det >> (self.field_shift - 13)) & 0x7 == 2,
+                _ => (det >> (self.field_shift - 14)) & 0xf == 7,
+            };
             let val = if index < inside {
                 let at = o - 1 + start + index * l.w;
                 let raw = match (l.w, l.smi(layout)) {
@@ -527,18 +706,19 @@ impl Js {
         let Some(n) = self.word(mem, e - 1 + l.w).and_then(|x| l.smi(x)) else { return Vec::new() };
         let n = (n.max(0) as usize).min(MAX_ELEMENTS);
         let data = e - 1 + l.array_data();
+        // Kinds: Smis or anything, packed or with holes (0-3), doubles (4-5), then a
+        // dictionary of numbers (6; V8 8.x has non-extensible, sealed and frozen kinds of the
+        // first sort before it: 6-11, the dictionary 12).
+        let dictionary = if self.cells == Cells::Compressed { 12 } else { 6 };
         match kind {
-            // Smis or anything, packed or with holes.
-            0..=3 => (0..n).map(|i| (i as u32, self.slot(mem, data + l.w * i as u64, false))).filter(|(_, v)| *v != Val::Other).collect(),
-            // Doubles, packed or with holes.
             4 | 5 => (0..n)
                 .filter_map(|i| {
                     let at = data + 8 * i as u64;
                     (word(mem, at)? != DOUBLE_HOLE).then_some((i as u32, Val::Real(at)))
                 })
                 .collect(),
-            // A dictionary of numbers.
-            6 => self.dictionary(mem, e, 4).into_iter().filter_map(|(k, v)| Some((l.smi(k)?.try_into().ok()?, v))).filter(|(_, v)| *v != Val::Other).collect(),
+            k if k < dictionary => (0..n).map(|i| (i as u32, self.slot(mem, data + l.w * i as u64, false))).filter(|(_, v)| *v != Val::Other).collect(),
+            k if k == dictionary => self.dictionary(mem, e, 4).into_iter().filter_map(|(k, v)| Some((l.smi(k)?.try_into().ok()?, v))).filter(|(_, v)| *v != Val::Other).collect(),
             _ => Vec::new(),
         }
     }
@@ -569,7 +749,10 @@ pub fn diagnose(heap: &Heap, global: &str) -> Vec<String> {
     let Some(js) = shared(heap) else { return vec!["no RPG Maker MV globals found".into()] };
     let mem = heap.mem();
     let l = js.l;
-    let mut out = vec![format!("{}-bit, cells {:?}, field shift {}", l.w * 8, js.cells, js.field_shift)];
+    let mut out = vec![match l.compressed() {
+        true => format!("compressed (cage {:#x}), field shift {}, Blink's strings at resource {:+}", l.base, js.field_shift, js.ext),
+        false => format!("{}-bit, cells {:?}, field shift {}", l.w * 8, js.cells, js.field_shift),
+    }];
     for (g, cells) in &js.globals {
         out.push(format!("{g}: {} cells, value {:?}", cells.len(), js.global(mem, g).map(|v| format!("{v:#x}"))));
     }
@@ -594,6 +777,11 @@ pub fn diagnose(heap: &Heap, global: &str) -> Vec<String> {
     out
 }
 
+/// The value type of the game's whole numbers (`Js::int_kind`), once its globals are found.
+pub fn int_kind(heap: &Heap) -> Option<&'static str> {
+    shared(heap).map(|js| js.int_kind())
+}
+
 /// The located layout of the game attached to, per pid; a failed search is tried again after
 /// `RETRY`.
 pub fn shared(heap: &Heap) -> Option<Arc<Js>> {
@@ -607,16 +795,17 @@ pub fn shared(heap: &Heap) -> Option<Arc<Js>> {
             return js.clone();
         }
     }
-    let js = Js::locate(heap).map(Arc::new);
+    let js = Js::locate(heap).or_else(|| Js::locate_compressed(heap)).map(Arc::new);
     *found = Some((heap.pid, js.clone(), Instant::now()));
     js
 }
 
-/// Whether the game is an RPG Maker MV game: its program sits next to `www/js/rpg_core.js`.
+/// Whether the game is an RPG Maker MV or MZ game: its program sits next to
+/// `www/js/rpg_core.js` (MV) or `js/rmmz_core.js` (MZ).
 pub fn is_rpgmaker(pid: u32, program: Option<&std::path::Path>) -> bool {
     let Some(dir) = program.and_then(|p| p.parent()) else { return false };
     let inside = crate::os::inside(pid, dir);
-    inside.join("www/js/rpg_core.js").exists() || dir.join("www/js/rpg_core.js").exists()
+    ["www/js/rpg_core.js", "js/rmmz_core.js"].iter().any(|f| inside.join(f).exists() || dir.join(f).exists())
 }
 
 /// One step of a path: a property by name, or an element by index (an array's, or an object
