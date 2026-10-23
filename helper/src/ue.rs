@@ -58,9 +58,13 @@ struct Header {
     /// An FUObjectItem in the chunked and the flat object lists (4.13 and later; 4.11-4.12's
     /// is a word shorter).
     item: u64,
+    /// The flags of class defaults and archetypes (templates, not things in the game); 0 for
+    /// UE3, whose flags sit where each game puts them: its templates go by their name,
+    /// "Default__...".
+    template: u32,
 }
-const HEAD64: Header = Header { w: 8, flags: 0x8, index: 0xC, class: OBJ_CLASS, name: OBJ_NAME, outer: 0x20, item: 24 };
-const HEAD32: Header = Header { w: 4, flags: 0x4, index: 0x8, class: 0xC, name: 0x10, outer: 0x18, item: 16 };
+const HEAD64: Header = Header { w: 8, flags: 0x8, index: 0xC, class: OBJ_CLASS, name: OBJ_NAME, outer: 0x20, item: 24, template: TEMPLATE_FLAGS };
+const HEAD32: Header = Header { w: 4, flags: 0x4, index: 0x8, class: 0xC, name: 0x10, outer: 0x18, item: 16, template: TEMPLATE_FLAGS };
 /// Names per chunk of TNameEntryArray.
 const NAME_CHUNK: u64 = 16384;
 
@@ -288,6 +292,9 @@ enum Names {
     /// TNameEntryArray (4.22 and older): its chunk table, and where an entry keeps its index
     /// and its characters.
     Array { table: u64, index: u64, chars: u64 },
+    /// UE3's GNames: a TArray of FNameEntry pointers in the exe's static data (`at`), entries
+    /// packed byte to byte (Dishonored: { flags 8 bytes, index << 1 | wide, hash next, chars }).
+    Table { at: u64, index: u64, chars: u64 },
 }
 
 /// How the game lists its objects.
@@ -365,13 +372,13 @@ impl Ue {
                     names = Some(Names::Pool(at));
                 }
             }
-            words_of.push(buf);
+            words_of.push((start, buf));
         }
         // TNameEntryArray is on the heap: a pointer to it among the static data. Looked for only
         // when there's no name pool (one more read for every heap pointer there).
         if names.is_none() {
             let (lo, hi) = data.iter().fold((u64::MAX, 0), |(lo, hi), &(s, e)| (lo.min(s), hi.max(e)));
-            let words = words_of.iter().flat_map(|b| (0..b.len() / w).map(move |i| Raw { b, w }.p(i * w)));
+            let words = words_of.iter().flat_map(|(_, b)| (0..b.len() / w).map(move |i| Raw { b, w }.p(i * w)));
             names = words.filter(|&p| (p < lo || p >= hi) && ptr_ok(p, h.w)).find_map(|p| name_array(mem, p, h));
         }
         let list = [
@@ -380,8 +387,14 @@ impl Ue {
             pointers.map(|o| (o, ObjectList::Pointers)),
             array.map(|o| (o, ObjectList::Array)),
         ];
-        let (objects, list) = list.into_iter().flatten().next().ok_or("no Unreal object list found")?;
-        let names_at = names.ok_or("no Unreal name pool found")?;
+        let found = list.into_iter().flatten().next().zip(names);
+        let Some(((objects, list), names_at)) = found else {
+            // Neither UE4 form: Unreal Engine 3, whose header and layout each game sets.
+            return Ue::locate_ue3(mem, h.w, &words_of).map_err(|e| match (objects, names) {
+                (None, _) => format!("no Unreal object list found ({e})"),
+                _ => format!("no Unreal name pool found ({e})"),
+            });
+        };
         let mut ue = Ue { h, objects, list, names_at, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
         // The first layout that reads all three right; else the first that reads Guid right (all
         // a layout had to pass before Transform and Tags were checked: no game that worked
@@ -407,6 +420,126 @@ impl Ue {
             }
             None => Err(why.1),
         }
+    }
+
+    /// Unreal Engine 3: GObjects and GNames are TArrays in the exe's static data (`data`: its rw
+    /// parts, read), and each game puts the object header's fields and its structs' and
+    /// properties' fields where it likes (Dishonored: Index @4, Outer @0x24, Name @0x28, Class
+    /// @0x30). All of it is worked out from the objects themselves: the object list is the one
+    /// whose first objects hold their own index somewhere; the name of a class's class is
+    /// "Class"; the layout comes from the engine's own structs (`ue3_layout`).
+    fn locate_ue3(mem: &Mem, w: u64, data: &[(u64, Vec<u8>)]) -> Result<Ue, String> {
+        let wu = w as usize;
+        let ok = |p: u64| ptr_ok(p, w);
+        // A TArray at a static place: { data, num, max } with at least 1000 entries.
+        let arrays = data.iter().flat_map(|(start, b)| {
+            (0..b.len().saturating_sub(wu + 8)).step_by(wu).filter_map(move |off| {
+                let r = Raw { b: &b[off..], w: wu };
+                let (d, num, max) = (r.p(0), r.int(wu), r.int(wu + 4));
+                (ok(d) && num >= 1000 && num <= max && max <= 1 << 24).then_some((start + off as u64, d, num))
+            })
+        });
+        let (mut objects, mut names) = (None, None);
+        for (at, d, num) in arrays {
+            if objects.is_none() {
+                let first: Vec<u64> = (0..3).filter_map(|i| ptr_w(mem, d + w * i, w)).collect();
+                let index = (first.len() == 3).then(|| (w..0x60).step_by(4).find(|&k| (0..3).all(|i| u32_at(mem, first[i] + k) == Some(i as u32)))).flatten();
+                objects = index.map(|k| (at, k, num));
+            }
+            if names.is_none() {
+                let (Some(e0), Some(e1)) = (word_at(mem, d, w), word_at(mem, d + w, w)) else { continue };
+                if e0 < 0x10000 || e1 < 0x10000 {
+                    continue;
+                }
+                let chars = (0..0x30u64).find(|&c| {
+                    entry_text(mem, e0 + c, false).as_deref() == Some("None") && entry_text(mem, e1 + c, false).as_deref() == Some("ByteProperty")
+                });
+                let index = chars.and_then(|c| (0..c).step_by(4).find(|&k| u32_at(mem, e0 + k) == Some(0) && u32_at(mem, e1 + k).map(|i| i >> 1) == Some(1)));
+                names = chars.zip(index).map(|(chars, index)| Names::Table { at, index, chars });
+            }
+            if objects.is_some() && names.is_some() {
+                break;
+            }
+        }
+        let (Some((objects, index, num)), Some(names_at)) = (objects, names) else {
+            return Err("no UE3 object and name tables either".into());
+        };
+        let h = Header { w, flags: index + 4, index, class: 0, name: 0, outer: 0, item: 0, template: 0 };
+        let mut ue = Ue { h, objects, list: ObjectList::Array, names_at, layout: LAYOUTS32[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
+        // The header: Name and Class are the fields after Index where every object has a name
+        // and a class that is an object, and "Class" is its own class. Outer is just before Name.
+        let objs = ue.objects(mem);
+        let set: std::collections::HashSet<u64> = objs.iter().copied().collect();
+        let sample: Vec<u64> = objs.iter().copied().step_by((num as usize / 200).max(1)).take(200).collect();
+        // Most of them: an object can be on its way out, and instance numbers run high (654685).
+        let most = |n: usize| n * 20 >= sample.len() * 19;
+        let names_ok = |ue: &Ue, k: u64| most(sample.iter().filter(|&&o| ue.fname(mem, o + k).is_some()).count());
+        let mut header = None;
+        'found: for name in (index + 4..0x60).step_by(4) {
+            if !names_ok(&ue, name) {
+                continue;
+            }
+            for class in (index + 4..0x60).step_by(wu).filter(|&c| c != name && c != name + 4) {
+                if !most(sample.iter().filter(|&&o| ptr_w(mem, o + class, w).is_some_and(|c| set.contains(&c))).count()) {
+                    continue;
+                }
+                ue.h.name = name;
+                let own = objs.iter().find(|&&o| ue.object_name(mem, o).as_deref() == Some("Class"));
+                if own.is_some_and(|&o| ptr_w(mem, o + class, w) == Some(o)) {
+                    header = Some((name, class));
+                    break 'found;
+                }
+            }
+        }
+        let (name, class) = header.ok_or("UE3 objects with no name and class field found")?;
+        ue.h = Header { name, class, outer: name - w, ..ue.h };
+        ue.layout = ue.ue3_layout(mem, &objs)?;
+        ue.props.lock().unwrap().clear();
+        match ue.check_layout(mem) {
+            Ok(_) => Ok(ue),
+            Err((_, why)) => Err(why),
+        }
+    }
+
+    /// A UE3 game's struct and property layout, from the engine's own structs: Guid's
+    /// properties A-D (Children, UField.Next, the offset, ArrayDim and ElementSize; Guid's size
+    /// 16), Box's Min (a StructProperty: where the struct is), Plane (its parent, Vector).
+    fn ue3_layout(&self, mem: &Mem, objs: &[u64]) -> Result<Layout, String> {
+        let w = self.h.w;
+        let named = |name: &str, class: &str| objs.iter().copied().find(|&o| self.object_name(mem, o).as_deref() == Some(name) && self.class_name(mem, o).as_deref() == Some(class));
+        let guid = named("Guid", "ScriptStruct").ok_or("no Guid struct among the UE3 objects")?;
+        let is_prop = |o: u64, n: &str| self.object_name(mem, o).as_deref() == Some(n) && self.class_name(mem, o).is_some_and(|c| c.ends_with("Property"));
+        let start = self.h.class + w;
+        let after = |o: u64, from: u64, test: &dyn Fn(u64) -> bool| (from..from + 0x80).step_by(w as usize).find(|&k| self.ptr(mem, o + k).is_some_and(|p| test(p)));
+        let props = after(guid, start, &|p| is_prop(p, "A")).ok_or("Guid's properties not found")?;
+        let a = self.ptr(mem, guid + props).unwrap();
+        let next = after(a, start, &|p| is_prop(p, "B")).ok_or("Guid's B not found after A")?;
+        let fields: Vec<u64> = std::iter::successors(Some(a), |&f| self.ptr(mem, f + next)).take(4).collect();
+        let column = |want: [u32; 4]| (start..start + 0x80).step_by(4).find(|&k| fields.iter().zip(want).all(|(&f, v)| u32_at(mem, f + k) == Some(v)));
+        let offset = column([0, 4, 8, 12]).ok_or("Guid's offsets not found")?;
+        let dim = column([1; 4]).ok_or("Guid's ArrayDims not found")?;
+        let size = column([4; 4]).filter(|&k| k > dim).ok_or("Guid's ElementSizes not found")?;
+        let struct_size = (props + w..props + 0x40).step_by(4).find(|&k| u32_at(mem, guid + k) == Some(16)).ok_or("Guid's size not found")?;
+        let vector = named("Vector", "ScriptStruct").ok_or("no Vector struct")?;
+        let sup = named("Plane", "ScriptStruct").and_then(|p| after(p, start, &|q| q == vector)).ok_or("Plane's parent not found")?;
+        let min = named("Box", "ScriptStruct").and_then(|b| self.ptr(mem, b + props)).filter(|&m| is_prop(m, "Min")).ok_or("Box's Min not found")?;
+        let extra = after(min, offset + 4, &|q| q == vector).ok_or("Box's Min doesn't lead to Vector")?;
+        Ok(Layout {
+            sup,
+            props,
+            struct_size,
+            align: struct_size,
+            class: self.h.class,
+            class_name: self.h.name,
+            name: self.h.name,
+            next,
+            dim,
+            size,
+            offset,
+            extra,
+            inner: extra,
+            value: extra + w,
+        })
     }
 
     /// The engine's Guid struct must read as four ints at 0, 4, 8 and 12 (else an error).
@@ -511,6 +644,11 @@ impl Ue {
     fn read_name(&self, mem: &Mem, index: u32) -> Option<String> {
         let blocks = match self.names_at {
             Names::Pool(blocks) => blocks,
+            Names::Table { at, index: idx, chars } => {
+                let entry = self.word(mem, self.ptr(mem, at)? + self.h.w * index as u64).filter(|&e| e >= 0x10000)?;
+                let wide = u32_at(mem, entry + idx)? & 1 == 1;
+                return entry_text(mem, entry + chars, wide);
+            }
             Names::Array { table, index: at, chars } => {
                 let chunk = self.ptr(mem, table + self.h.w * (index as u64 / NAME_CHUNK))?;
                 let entry = self.ptr(mem, chunk + self.h.w * (index as u64 % NAME_CHUNK))?;
@@ -1102,7 +1240,15 @@ fn numeric(kind: &str) -> bool {
 
 impl Ue {
     fn is_template(&self, mem: &Mem, obj: u64) -> bool {
-        u32_at(mem, obj + self.h.flags).is_none_or(|f| f & TEMPLATE_FLAGS != 0)
+        u32_at(mem, obj + self.h.flags).is_none_or(|f| self.templated(mem, obj, f))
+    }
+
+    /// Whether the object with these flags is a template (`Header::template`).
+    fn templated(&self, mem: &Mem, obj: u64, flags: u32) -> bool {
+        match self.h.template {
+            0 => self.object_name(mem, obj).is_none_or(|n| n.starts_with("Default__")),
+            t => flags & t != 0,
+        }
     }
 
     fn find_prop(&self, mem: &Mem, st: u64, name: &str) -> Option<Prop> {
@@ -1497,13 +1643,13 @@ impl Ue {
         let mut found: Vec<Vec<(UePath, Vec<u64>)>> = vec![Vec::new(); targets.len()];
         let mut sizes: HashMap<u64, u64> = HashMap::new();
         for obj in self.objects(mem) {
-            let mut head = [0u8; 0x18];
+            let mut head = [0u8; 0x80];
             if mem.read_exact_at(&mut head[..(self.h.class + self.h.w) as usize], obj).is_err() {
                 continue;
             }
             let raw = Raw { b: &head, w: self.h.w as usize };
             let (flags, class) = (raw.int(self.h.flags as usize) as u32, raw.p(self.h.class as usize));
-            if flags & TEMPLATE_FLAGS != 0 || class == 0 {
+            if class == 0 || self.templated(mem, obj, flags) {
                 continue;
             }
             let size = *sizes.entry(class).or_insert_with(|| self.struct_size(mem, class));
@@ -1555,6 +1701,14 @@ const ENGINE_PACKAGES: &[&str] = &[
 const ENGINE_FIELDS: &[&str] = &[
     "MaxWalkSpeed", "MaxWalkSpeedCrouched", "MaxSwimSpeed", "MaxFlySpeed", "MaxAcceleration", "JumpZVelocity", "GravityScale",
     "AirControl", "JumpMaxCount", "JumpMaxHoldTime", "Score",
+    // UE3's Pawn keeps health and movement in the engine's class.
+    "Health", "HealthMax", "GroundSpeed", "AirSpeed", "WaterSpeed", "LadderSpeed", "JumpZ", "AccelRate", "MaxFallSpeed",
+];
+/// UE3's engine packages (its packages have no "/Script/"): Core's Object class lists the
+/// object header itself as properties (VfTableObject, ObjectFlags, ...).
+const ENGINE_PACKAGES_UE3: &[&str] = &[
+    "Core", "Engine", "GameFramework", "IpDrv", "OnlineSubsystemSteamworks", "OnlineSubsystemGameSpy", "OnlineSubsystemLive",
+    "GFxUI", "GFxUIEditor", "WinDrv", "XAudio2", "AkAudio", "UDKBase", "UTGame", "UTGameContent",
 ];
 /// The character's own speed (every actor has one: only the character's is listed).
 const TIME_DILATION: &str = "CustomTimeDilation";
@@ -1641,7 +1795,10 @@ impl Lister<'_> {
         if let Some(&e) = self.engine.get(&st) {
             return e;
         }
-        let e = self.ue.package(self.mem, st).and_then(|p| p.strip_prefix("/Script/").map(|m| ENGINE_PACKAGES.contains(&m))).unwrap_or(false);
+        let e = self.ue.package(self.mem, st).is_some_and(|p| match p.strip_prefix("/Script/") {
+            Some(m) => ENGINE_PACKAGES.contains(&m),
+            None => ENGINE_PACKAGES_UE3.contains(&p.as_str()),
+        });
         self.engine.insert(st, e);
         e
     }
@@ -1791,13 +1948,13 @@ impl Ue {
         // Every live object's class and outer, read once.
         let mut heads: Vec<(u64, u64, u64)> = Vec::new();
         for obj in self.objects(mem) {
-            let mut head = [0u8; 0x28];
-            if mem.read_exact_at(&mut head[..(self.h.outer + self.h.w) as usize], obj).is_err() {
+            let mut head = [0u8; 0x80];
+            if mem.read_exact_at(&mut head[..(self.h.outer.max(self.h.class) + self.h.w) as usize], obj).is_err() {
                 continue;
             }
             let raw = Raw { b: &head, w: self.h.w as usize };
             let (flags, class) = (raw.int(self.h.flags as usize) as u32, raw.p(self.h.class as usize));
-            if flags & TEMPLATE_FLAGS == 0 && class != 0 {
+            if class != 0 && !self.templated(mem, obj, flags) {
                 heads.push((obj, class, raw.p(self.h.outer as usize)));
             }
         }
@@ -1810,10 +1967,13 @@ impl Ue {
             self.elements(mem, gi + p.offset, &p).into_iter().map(|(o, _)| o).find(|&o| o != 0)
         });
         let local = from_instance.or_else(|| heads.iter().find(|h| is_a(h.1, &["LocalPlayer"])).map(|h| h.0));
-        let controller = local.and_then(|l| self.object_in(mem, l, "PlayerController"));
+        // UE3: the LocalPlayer's PlayerController is its "Actor", the state "PlayerReplicationInfo".
+        let controller = local.and_then(|l| self.object_in(mem, l, "PlayerController").or_else(|| self.object_in(mem, l, "Actor")));
         let pawn = controller.and_then(|c| self.object_in(mem, c, "AcknowledgedPawn").or_else(|| self.object_in(mem, c, "Pawn")));
         let (Some(controller), Some(pawn)) = (controller, pawn) else { return Err(NoPlayer::NoCharacter) };
-        let state = self.object_in(mem, controller, "PlayerState").or_else(|| self.object_in(mem, pawn, "PlayerState"));
+        let state = ["PlayerState", "PlayerReplicationInfo"]
+            .iter()
+            .find_map(|n| self.object_in(mem, controller, n).or_else(|| self.object_in(mem, pawn, n)));
         let mut world = self.outer(mem, pawn);
         for _ in 0..4 {
             match world {
