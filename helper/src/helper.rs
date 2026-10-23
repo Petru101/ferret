@@ -78,8 +78,22 @@ pub fn game_name(pid: u32) -> String {
         let home = std::env::var("HOME").unwrap_or_default();
         return dosbox_game(&argv0(pid), &os::cwd(pid), &home).map_or(exe, |g| format!("{g} (DOSBox)"));
     }
+    if lower == "udk.exe" {
+        if let Some(game) = udk_game(&argv0(pid)) {
+            return game;
+        }
+    }
     let args: Vec<String> = os::argv(pid).into_iter().skip(1).collect();
     run_game(&lower, &args, || os::cwd(pid)).unwrap_or(exe)
+}
+
+/// A UDK game (Unreal Engine 3's free kit): every one runs `<game>\Binaries\Win32\UDK.exe`,
+/// with no arguments, so it goes by the folder that holds Binaries: "retrobikepark (UDK)".
+fn udk_game(argv0: &str) -> Option<String> {
+    let parts: Vec<&str> = argv0.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    let bin = parts.iter().rposition(|p| p.eq_ignore_ascii_case("Binaries"))?;
+    let game = parts.get(bin.checked_sub(1)?)?;
+    (!game.ends_with(':')).then(|| format!("{game} (UDK)"))
 }
 
 /// The program Unreal Engine 4 and 5 games without code of their own run (UE4Game.exe,
@@ -4267,7 +4281,7 @@ fn exit_untraced() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{dosbox_game, heap_block, parse_pattern, run_game, wine_launcher, Patterns};
+    use super::{dosbox_game, heap_block, parse_pattern, run_game, udk_game, wine_launcher, Patterns};
 
     #[test]
     fn finds_the_heap_block_around_a_value() {
@@ -4341,6 +4355,14 @@ mod tests {
         assert!(!launcher(&["/home/p/Games/ppu/src/main.py"]));
         assert_eq!(game("love", &[]), None);
         assert_eq!(game("SortTheCourt.x86", &["main.py"]), None);
+    }
+
+    #[test]
+    fn names_a_udk_game_by_its_folder() {
+        assert_eq!(udk_game("S:\\retrobikepark\\Binaries\\Win32\\UDK.exe"), Some("retrobikepark (UDK)".into()));
+        assert_eq!(udk_game("C:/Games/Retro Bike/Binaries/Win64/UDK.exe"), Some("Retro Bike (UDK)".into()));
+        assert_eq!(udk_game("D:\\Binaries\\Win32\\UDK.exe"), None);
+        assert_eq!(udk_game("UDK.exe"), None);
     }
 
     #[test]
