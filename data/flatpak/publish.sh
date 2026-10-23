@@ -22,9 +22,19 @@ BRANCH=stable
 REPO=flatpak-repo
 
 if [ "${1:-}" != push ]; then
+    # flatpak-builder signs what it exports, the store data (appstream branches, made while
+    # exporting) too: signed only afterwards, those stayed unsigned and Discover's pull of
+    # them failed ("GPG verification enabled, but no signatures found").
     flatpak run --user org.flatpak.Builder --user --force-clean --disable-rofiles-fuse \
-        --default-branch=$BRANCH --repo=$REPO build-dir $APP.yml
-    flatpak build-sign --gpg-sign=$KEY --gpg-homedir="$GNUPG" $REPO $APP $BRANCH
+        --default-branch=$BRANCH --gpg-sign=$KEY --gpg-homedir="$GNUPG" --repo=$REPO build-dir $APP.yml
+    # Anything still unsigned gets signed, and its deltas made again (a delta carries the
+    # signatures its commit had when it was made).
+    for ref in $(ostree refs --repo=$REPO); do
+        if ! ostree show --repo=$REPO "$ref" 2>&1 | grep -q 'Found [0-9]* signature'; then
+            ostree gpg-sign --repo=$REPO --gpg-homedir="$GNUPG" "$ref" $KEY
+            rm -rf "$REPO/deltas"
+        fi
+    done
     # Only the newest builds are kept (GitHub Pages serves about 1 GB).
     flatpak build-update-repo --title=Ferret --default-branch=$BRANCH --gpg-sign=$KEY \
         --gpg-homedir="$GNUPG" --generate-static-deltas --prune --prune-depth=4 $REPO

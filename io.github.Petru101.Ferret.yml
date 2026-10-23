@@ -70,6 +70,8 @@ modules:
       - install -d /app/share/applications
       - msgfmt --desktop -d po --template data/io.github.Petru101.Ferret.desktop -o /app/share/applications/io.github.Petru101.Ferret.desktop
       - install -Dm644 data/io.github.Petru101.Ferret.svg /app/share/icons/hicolor/scalable/apps/io.github.Petru101.Ferret.svg
+      # What software centres show (the repo's appstream data comes from it).
+      - install -Dm644 data/io.github.Petru101.Ferret.metainfo.xml /app/share/metainfo/io.github.Petru101.Ferret.metainfo.xml
       # The helper carries AreWeAntiCheatYet's list (MIT).
       - install -Dm644 data/areweanticheatyet/LICENSE /app/share/licenses/io.github.Petru101.Ferret/AreWeAntiCheatYet-LICENSE
       - install -Dm644 data/third-party/THIRD-PARTY-LICENSES.txt /app/share/licenses/io.github.Petru101.Ferret/THIRD-PARTY-LICENSES.txt
