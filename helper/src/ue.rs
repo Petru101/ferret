@@ -42,10 +42,25 @@ use crate::helper::{maps, Region};
 use crate::pointers::Module;
 
 const CHUNK_ITEMS: u64 = 65536;
-const ITEM: u64 = 24;
 const OBJ_CLASS: u64 = 0x10;
 const OBJ_NAME: u64 = 0x18;
-const OBJ_OUTER: u64 = 0x20;
+
+/// Where a UObject keeps its header fields, and a pointer's width: 64-bit games, or 32-bit ones
+/// (4-byte pointers: vtable, flags @4, InternalIndex @8, Class @0xC, Name @0x10, Outer @0x18).
+#[derive(Clone, Copy, Debug)]
+struct Header {
+    w: u64,
+    flags: u64,
+    index: u64,
+    class: u64,
+    name: u64,
+    outer: u64,
+    /// An FUObjectItem in the chunked and the flat object lists (4.13 and later; 4.11-4.12's
+    /// is a word shorter).
+    item: u64,
+}
+const HEAD64: Header = Header { w: 8, flags: 0x8, index: 0xC, class: OBJ_CLASS, name: OBJ_NAME, outer: 0x20, item: 24 };
+const HEAD32: Header = Header { w: 4, flags: 0x4, index: 0x8, class: 0xC, name: 0x10, outer: 0x18, item: 16 };
 /// Names per chunk of TNameEntryArray.
 const NAME_CHUNK: u64 = 16384;
 
@@ -134,17 +149,51 @@ const LAYOUTS: [Layout; 8] = [
     // 4.10).
     Layout { offset: 0x4C, extra: 0x70, inner: 0x70, value: 0x78, ..UPROPERTY_OLD },
 ];
+/// 32-bit UProperty games, from Epic's source with 4-byte pointers: UField.Next @0x1C; UStruct
+/// SuperStruct @0x20 (4.21 and older: no FStructBaseChain), Children @0x24, PropertiesSize
+/// @0x28, MinAlignment @0x2C; UProperty ArrayDim @0x20, ElementSize @0x24, PropertyFlags @0x28,
+/// Offset_Internal @0x3C (4.13) or @0x34 (4.18 on), 0x50 bytes.
+const UPROPERTY32: Layout = Layout {
+    sup: 0x20,
+    props: 0x24,
+    struct_size: 0x28,
+    align: 0x2C,
+    class: 0xC,
+    class_name: 0x10,
+    name: 0x10,
+    next: 0x1C,
+    dim: 0x20,
+    size: 0x24,
+    offset: 0x3C,
+    extra: 0x50,
+    inner: 0x50,
+    value: 0x54,
+};
+/// 4.22 on: FStructBaseChain (a pointer and a count) before SuperStruct.
+const UPROPERTY32_CHAIN: Layout = Layout { sup: 0x28, props: 0x2C, struct_size: 0x30, align: 0x34, ..UPROPERTY32 };
+const LAYOUTS32: [Layout; 7] = [
+    UPROPERTY32,
+    // XCOW (4.17): the source's offset, but 0x54 bytes in all.
+    Layout { extra: 0x54, inner: 0x54, value: 0x58, ..UPROPERTY32 },
+    Layout { offset: 0x34, ..UPROPERTY32 },
+    Layout { offset: 0x40, extra: 0x58, inner: 0x58, value: 0x5C, ..UPROPERTY32 },
+    Layout { offset: 0x34, ..UPROPERTY32_CHAIN },
+    UPROPERTY32_CHAIN,
+    Layout { offset: 0x40, extra: 0x58, inner: 0x58, value: 0x5C, ..UPROPERTY32_CHAIN },
+];
+
 impl Layout {
     /// The same in a build with stats compiled in (development builds: Injected, a 4.15 jam
-    /// game's NGJ17.exe): UObjectBase gets a TStatId after Outer, so everything a UObject keeps
-    /// after its header is 8 bytes later (UStruct's fields; all of a UProperty's).
-    const fn with_stats(self) -> Layout {
-        let prop = if self.class == OBJ_CLASS { 8 } else { 0 };
+    /// game's NGJ17.exe): UObjectBase gets a TStatId (a pointer) after Outer, so everything a
+    /// UObject keeps after its header is a pointer later (UStruct's fields; all of a UProperty's).
+    const fn with_stats(self, h: Header) -> Layout {
+        let prop = if self.class == h.class { h.w } else { 0 };
+        let w = h.w;
         Layout {
-            sup: self.sup + 8,
-            props: self.props + 8,
-            struct_size: self.struct_size + 8,
-            align: self.align + 8,
+            sup: self.sup + w,
+            props: self.props + w,
+            struct_size: self.struct_size + w,
+            align: self.align + w,
             next: self.next + prop,
             dim: self.dim + prop,
             size: self.size + prop,
@@ -177,8 +226,38 @@ fn u64_at(mem: &Mem, at: u64) -> Option<u64> {
     Some(u64::from_le_bytes(b))
 }
 
-fn ptr_at(mem: &Mem, at: u64) -> Option<u64> {
-    u64_at(mem, at).filter(|&p| p >= 0x10000 && p < 1 << 47 && p % 8 == 0)
+/// A pointer-sized word.
+fn word_at(mem: &Mem, at: u64, w: u64) -> Option<u64> {
+    if w == 4 { u32_at(mem, at).map(u64::from) } else { u64_at(mem, at) }
+}
+
+/// Whether `p` can be a pointer `w` bytes wide, before reading anything.
+fn ptr_ok(p: u64, w: u64) -> bool {
+    p >= 0x10000 && p % w == 0 && p < if w == 4 { 1 << 32 } else { 1 << 47 }
+}
+
+fn ptr_w(mem: &Mem, at: u64, w: u64) -> Option<u64> {
+    word_at(mem, at, w).filter(|&p| ptr_ok(p, w))
+}
+
+/// The static data around a candidate table, read once: words and ints by byte offset.
+struct Raw<'a> {
+    b: &'a [u8],
+    w: usize,
+}
+
+impl Raw<'_> {
+    fn p(&self, i: usize) -> u64 {
+        match self.b.get(i..i + self.w) {
+            Some(x) if self.w == 4 => u32::from_le_bytes(x.try_into().unwrap()) as u64,
+            Some(x) => u64::from_le_bytes(x.try_into().unwrap()),
+            None => 0,
+        }
+    }
+
+    fn int(&self, i: usize) -> u64 {
+        self.b.get(i..i + 4).map_or(0, |x| u32::from_le_bytes(x.try_into().unwrap()) as u64)
+    }
 }
 
 /// A property of a class or struct.
@@ -234,6 +313,7 @@ const POINTER_SLOTS: usize = 512;
 
 /// Where the game keeps its objects and names (found once per attach).
 pub struct Ue {
+    h: Header,
     objects: u64,
     list: ObjectList,
     names_at: Names,
@@ -258,37 +338,41 @@ impl Ue {
         if data.is_empty() {
             return Err(format!("no writable data in {exe}"));
         }
+        let h = if crate::pointers::pointer_width(pid, mem, mods, exe) == 4 { HEAD32 } else { HEAD64 };
+        let w = h.w as usize;
         let (mut objects, mut flat, mut pointers, mut array, mut names) = (None, None, None, None, None);
         let mut words_of = Vec::new();
         for &(start, end) in &data {
             let mut buf = vec![0u8; (end - start) as usize];
             let Ok(n) = mem.read_at(&mut buf, start) else { continue };
-            let words: Vec<u64> = buf[..n].chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
-            for i in 0..words.len().saturating_sub(4) {
-                let at = start + 8 * i as u64;
+            buf.truncate(n);
+            for off in (0..n.saturating_sub(4 * w)).step_by(w) {
+                let at = start + off as u64;
+                let r = Raw { b: &buf[off..], w };
                 if objects.is_none() {
-                    objects = [CHUNK_ITEMS, 65 * 1024].into_iter().find(|&n| is_object_array(mem, &words[i..], n)).map(|n| (at, n));
+                    objects = [CHUNK_ITEMS, 65 * 1024].into_iter().find(|&n| is_object_array(mem, &r, n, h)).map(|n| (at, n));
                 }
                 if objects.is_none() && flat.is_none() {
-                    flat = [ITEM, 16].into_iter().find(|&item| is_flat_object_array(mem, &words[i..], item)).map(|item| (at, item));
+                    flat = [h.item, h.item - h.w].into_iter().find(|&item| is_flat_object_array(mem, &r, item, h)).map(|item| (at, item));
                 }
-                if objects.is_none() && flat.is_none() && pointers.is_none() && is_pointer_chunks(mem, &words[i..]) {
+                if objects.is_none() && flat.is_none() && pointers.is_none() && is_pointer_chunks(mem, &r, h) {
                     pointers = Some(at);
                 }
-                if objects.is_none() && flat.is_none() && pointers.is_none() && array.is_none() && is_pointer_array(mem, &words[i..]) {
+                if objects.is_none() && flat.is_none() && pointers.is_none() && array.is_none() && is_pointer_array(mem, &r, h) {
                     array = Some(at);
                 }
-                if names.is_none() && i >= 1 && is_name_blocks(mem, &words[i - 1..]) {
+                if names.is_none() && off >= 8 && is_name_blocks(mem, &Raw { b: &buf[off - 8..], w }) {
                     names = Some(Names::Pool(at));
                 }
             }
-            words_of.push((start, words));
+            words_of.push(buf);
         }
         // TNameEntryArray is on the heap: a pointer to it among the static data. Looked for only
         // when there's no name pool (one more read for every heap pointer there).
         if names.is_none() {
             let (lo, hi) = data.iter().fold((u64::MAX, 0), |(lo, hi), &(s, e)| (lo.min(s), hi.max(e)));
-            names = words_of.iter().flat_map(|(_, w)| w.iter().copied()).filter(|&p| (p < lo || p >= hi) && ptr_at_ok(p)).find_map(|p| name_array(mem, p));
+            let words = words_of.iter().flat_map(|b| (0..b.len() / w).map(move |i| Raw { b, w }.p(i * w)));
+            names = words.filter(|&p| (p < lo || p >= hi) && ptr_ok(p, h.w)).find_map(|p| name_array(mem, p, h));
         }
         let list = [
             objects.map(|(o, n)| (o, ObjectList::Chunked(n))),
@@ -298,13 +382,14 @@ impl Ue {
         ];
         let (objects, list) = list.into_iter().flatten().next().ok_or("no Unreal object list found")?;
         let names_at = names.ok_or("no Unreal name pool found")?;
-        let mut ue = Ue { objects, list, names_at, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
+        let mut ue = Ue { h, objects, list, names_at, layout: LAYOUTS[0], names: Mutex::default(), props: Mutex::default(), containers: Mutex::default() };
         // The first layout that reads all three right; else the first that reads Guid right (all
         // a layout had to pass before Transform and Tags were checked: no game that worked
         // then loses it).
         // The error to tell: the layout that read the most of Guid.
         let (mut why, mut fallback) = ((0, String::new()), None);
-        for layout in LAYOUTS.iter().flat_map(|l| [*l, l.with_stats()]) {
+        let layouts: &[Layout] = if h.w == 4 { &LAYOUTS32 } else { &LAYOUTS };
+        for layout in layouts.iter().flat_map(|l| [*l, l.with_stats(h)]) {
             ue.layout = layout;
             ue.props.lock().unwrap().clear();
             match ue.check_layout(mem) {
@@ -360,57 +445,57 @@ impl Ue {
     }
 
     pub fn object_count(&self, mem: &Mem) -> usize {
+        let w = self.h.w;
         let at = match self.list {
-            ObjectList::Chunked(_) => 20,
-            ObjectList::Flat(_) => 12,
-            ObjectList::Pointers => 8 * POINTER_SLOTS as u64,
-            ObjectList::Array => 8,
+            ObjectList::Chunked(_) => 2 * w + 4,
+            ObjectList::Flat(_) => w + 4,
+            ObjectList::Pointers => w * POINTER_SLOTS as u64,
+            ObjectList::Array => w,
         };
         i32_at(mem, self.objects + at).unwrap_or(0).max(0) as usize
     }
 
     /// Every object alive now.
     pub fn objects(&self, mem: &Mem) -> Vec<u64> {
-        let num = self.object_count(mem) as u64;
-        if self.list == ObjectList::Pointers {
-            let mut out = Vec::with_capacity(num as usize);
-            for c in 0..num.div_ceil(POINTER_CHUNK) {
-                let Some(chunk) = ptr_at(mem, self.objects + 8 * c) else { continue };
-                let n = (num - c * POINTER_CHUNK).min(POINTER_CHUNK);
-                let mut buf = vec![0u8; (8 * n) as usize];
-                if mem.read_exact_at(&mut buf, chunk).is_ok() {
-                    out.extend(buf.chunks_exact(8).map(|p| u64::from_le_bytes(p.try_into().unwrap())).filter(|&p| p != 0));
+        let (num, w) = (self.object_count(mem) as u64, self.h.w);
+        // Every `stride` bytes from `at`, `n` times: the object pointer that starts each.
+        let firsts = |at: u64, n: u64, stride: u64, out: &mut Vec<u64>| {
+            let mut buf = vec![0u8; (n * stride) as usize];
+            let Ok(got) = mem.read_at(&mut buf, at) else { return };
+            let raw = Raw { b: &buf[..got], w: w as usize };
+            out.extend((0..got as u64 / stride).map(|i| raw.p((i * stride) as usize)).filter(|&p| p != 0));
+        };
+        let mut out = Vec::with_capacity(num as usize);
+        match self.list {
+            ObjectList::Pointers => {
+                for c in 0..num.div_ceil(POINTER_CHUNK) {
+                    if let Some(chunk) = self.ptr(mem, self.objects + w * c) {
+                        firsts(chunk, (num - c * POINTER_CHUNK).min(POINTER_CHUNK), w, &mut out);
+                    }
                 }
             }
-            return out;
-        }
-        let Some(table) = ptr_at(mem, self.objects) else { return Vec::new() };
-        let mut out = Vec::with_capacity(num as usize);
-        if self.list == ObjectList::Array {
-            let mut buf = vec![0u8; (8 * num) as usize];
-            if let Ok(n) = mem.read_at(&mut buf, table) {
-                out.extend(buf[..n].chunks_exact(8).map(|p| u64::from_le_bytes(p.try_into().unwrap())).filter(|&p| p != 0));
+            ObjectList::Array => firsts(self.ptr(mem, self.objects).unwrap_or(0), num, w, &mut out),
+            ObjectList::Flat(item) => firsts(self.ptr(mem, self.objects).unwrap_or(0), num, item, &mut out),
+            ObjectList::Chunked(per) => {
+                let Some(table) = self.ptr(mem, self.objects) else { return out };
+                for c in 0..num.div_ceil(per) {
+                    if let Some(chunk) = self.ptr(mem, table + w * c) {
+                        firsts(chunk, (num - c * per).min(per), self.h.item, &mut out);
+                    }
+                }
             }
-            return out;
-        }
-        if let ObjectList::Flat(item) = self.list {
-            let mut buf = vec![0u8; (num * item) as usize];
-            if let Ok(n) = mem.read_at(&mut buf, table) {
-                out.extend(buf[..n].chunks_exact(item as usize).map(|i| u64::from_le_bytes(i[..8].try_into().unwrap())).filter(|&p| p != 0));
-            }
-            return out;
-        }
-        let ObjectList::Chunked(per) = self.list else { return out };
-        for c in 0..num.div_ceil(per) {
-            let Some(chunk) = ptr_at(mem, table + 8 * c) else { continue };
-            let n = (num - c * per).min(per);
-            let mut buf = vec![0u8; (n * ITEM) as usize];
-            if mem.read_exact_at(&mut buf, chunk).is_err() {
-                continue;
-            }
-            out.extend(buf.chunks_exact(ITEM as usize).map(|i| u64::from_le_bytes(i[..8].try_into().unwrap())).filter(|&p| p != 0));
         }
         out
+    }
+
+    /// A pointer in the game, as wide as its pointers.
+    fn ptr(&self, mem: &Mem, at: u64) -> Option<u64> {
+        ptr_w(mem, at, self.h.w)
+    }
+
+    /// A pointer-sized word (0 for none).
+    fn word(&self, mem: &Mem, at: u64) -> Option<u64> {
+        word_at(mem, at, self.h.w)
     }
 
     /// The text of name pool entry `index`.
@@ -427,13 +512,13 @@ impl Ue {
         let blocks = match self.names_at {
             Names::Pool(blocks) => blocks,
             Names::Array { table, index: at, chars } => {
-                let chunk = ptr_at(mem, table + 8 * (index as u64 / NAME_CHUNK))?;
-                let entry = ptr_at(mem, chunk + 8 * (index as u64 % NAME_CHUNK))?;
+                let chunk = self.ptr(mem, table + self.h.w * (index as u64 / NAME_CHUNK))?;
+                let entry = self.ptr(mem, chunk + self.h.w * (index as u64 % NAME_CHUNK))?;
                 let wide = u32_at(mem, entry + at)? & 1 == 1;
                 return entry_text(mem, entry + chars, wide);
             }
         };
-        let block = ptr_at(mem, blocks + 8 * (index >> 16) as u64)?;
+        let block = self.ptr(mem, blocks + self.h.w * (index >> 16) as u64)?;
         let at = block + 2 * (index & 0xFFFF) as u64;
         let mut h = [0u8; 2];
         mem.read_exact_at(&mut h, at).ok()?;
@@ -463,11 +548,11 @@ impl Ue {
     }
 
     pub fn object_name(&self, mem: &Mem, obj: u64) -> Option<String> {
-        self.fname(mem, obj + OBJ_NAME)
+        self.fname(mem, obj + self.h.name)
     }
 
     pub fn class_of(&self, mem: &Mem, obj: u64) -> Option<u64> {
-        ptr_at(mem, obj + OBJ_CLASS)
+        self.ptr(mem, obj + self.h.class)
     }
 
     pub fn class_name(&self, mem: &Mem, obj: u64) -> Option<String> {
@@ -475,7 +560,7 @@ impl Ue {
     }
 
     pub fn outer(&self, mem: &Mem, obj: u64) -> Option<u64> {
-        ptr_at(mem, obj + OBJ_OUTER)
+        self.ptr(mem, obj + self.h.outer)
     }
 
     pub fn struct_size(&self, mem: &Mem, st: u64) -> u64 {
@@ -484,7 +569,7 @@ impl Ue {
 
     /// The struct or class `st` derives from.
     pub fn super_of(&self, mem: &Mem, st: u64) -> Option<u64> {
-        ptr_at(mem, st + self.layout.sup)
+        self.ptr(mem, st + self.layout.sup)
     }
 
     /// The properties of a class or struct, its parents' first.
@@ -500,7 +585,7 @@ impl Ue {
         }
         let mut out = Vec::new();
         for s in chain.into_iter().rev() {
-            let mut f = ptr_at(mem, s + self.layout.props);
+            let mut f = self.ptr(mem, s + self.layout.props);
             let mut n = 0;
             while let Some(field) = f.filter(|_| n < MAX_PROPS) {
                 n += 1;
@@ -513,7 +598,7 @@ impl Ue {
                     }
                     out.push(p);
                 }
-                f = ptr_at(mem, field + self.layout.next);
+                f = self.ptr(mem, field + self.layout.next);
             }
         }
         let out = Arc::new(out);
@@ -524,15 +609,15 @@ impl Ue {
     /// The property described by the FField at `field`.
     pub fn prop(&self, mem: &Mem, field: u64) -> Option<Prop> {
         let l = self.layout;
-        let kind = self.fname(mem, ptr_at(mem, field + l.class)? + l.class_name)?;
+        let kind = self.fname(mem, self.ptr(mem, field + l.class)? + l.class_name)?;
         let extra = if matches!(kind.as_str(), "ArrayProperty" | "SetProperty") { l.inner } else { l.extra };
         Some(Prop {
             name: self.fname(mem, field + l.name)?,
             offset: i32_at(mem, field + l.offset)?.max(0) as u64,
             size: i32_at(mem, field + l.size)?.max(0) as u64,
             dim: i32_at(mem, field + l.dim)?.max(1) as u64,
-            extra: u64_at(mem, field + extra).unwrap_or(0),
-            extra2: u64_at(mem, field + l.value).unwrap_or(0),
+            extra: self.word(mem, field + extra).unwrap_or(0),
+            extra2: self.word(mem, field + l.value).unwrap_or(0),
             kind,
             inner: None,
             value: None,
@@ -552,85 +637,84 @@ impl Ue {
     }
 }
 
-/// The object array's header: counts that fit together with `per` objects a chunk, and its first
-/// object has index 0.
-fn is_object_array(mem: &Mem, w: &[u64], per: u64) -> bool {
-    let (max, num) = (w[2] as u32 as u64, w[2] >> 32);
-    let (max_chunks, num_chunks) = (w[3] as u32 as u64, w[3] >> 32);
+/// The first `n` objects of a list in order: their indices (InternalIndex) are 0, 1, ...
+fn indexed(mem: &Mem, h: Header, objects: impl IntoIterator<Item = Option<u64>>) -> bool {
+    objects.into_iter().enumerate().all(|(i, o)| o.is_some_and(|o| u32_at(mem, o + h.index) == Some(i as u32)))
+}
+
+/// FChunkedFixedUObjectArray: { Objects (chunk table), PreAllocatedObjects, i32 Max, Num,
+/// MaxChunks, NumChunks }: counts that fit together with `per` objects a chunk, and its first
+/// two objects with indices 0 and 1.
+fn is_object_array(mem: &Mem, r: &Raw, per: u64, h: Header) -> bool {
+    let w = r.w;
+    let (max, num, max_chunks, num_chunks) = (r.int(2 * w), r.int(2 * w + 4), r.int(2 * w + 8), r.int(2 * w + 12));
     if num == 0 || num > max || max > 1 << 26 || num_chunks == 0 {
         return false;
     }
     if max_chunks != max.div_ceil(per) || num_chunks != num.div_ceil(per) {
         return false;
     }
-    let first = ptr_at(mem, w[0]).and_then(|chunk| Some((ptr_at(mem, chunk)?, ptr_at(mem, chunk + ITEM)?)));
-    let Some((a, b)) = first else { return false };
-    u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
+    let Some(chunk) = Some(r.p(0)).filter(|&p| ptr_ok(p, h.w)).and_then(|t| ptr_w(mem, t, h.w)) else { return false };
+    indexed(mem, h, [ptr_w(mem, chunk, h.w), ptr_w(mem, chunk + h.item, h.w)])
 }
 
 /// FFixedUObjectArray (4.20 and older): { items, i32 max, i32 num }, its first two objects
 /// with indices 0 and 1, the items `item` bytes apart.
-fn is_flat_object_array(mem: &Mem, w: &[u64], item: u64) -> bool {
-    let (max, num) = (w[1] as u32 as u64, w[1] >> 32);
-    if num < 2 || num > max || max > 1 << 26 {
+fn is_flat_object_array(mem: &Mem, r: &Raw, item: u64, h: Header) -> bool {
+    let (items, max, num) = (r.p(0), r.int(r.w), r.int(r.w + 4));
+    if num < 2 || num > max || max > 1 << 26 || !ptr_ok(items, h.w) {
         return false;
     }
-    let first = Some(w[0]).filter(|&p| ptr_at_ok(p)).and_then(|items| Some((ptr_at(mem, items)?, ptr_at(mem, items + item)?)));
-    let Some((a, b)) = first else { return false };
-    u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
+    indexed(mem, h, [ptr_w(mem, items, h.w), ptr_w(mem, items + item, h.w)])
 }
 
-/// The object list of 4.10 and older (`ObjectList::Pointers`) at `w[0]`: as many chunk pointers
-/// as its count needs, then none up to its 512 slots, then the counts; its first two objects
-/// with indices 0 and 1.
-fn is_pointer_chunks(mem: &Mem, w: &[u64]) -> bool {
-    if w.len() <= POINTER_SLOTS || !ptr_at_ok(w[0]) {
+/// The object list of 4.10 and older (`ObjectList::Pointers`): as many chunk pointers as its
+/// count needs, then none up to its 512 slots, then the counts; its first two objects with
+/// indices 0 and 1.
+fn is_pointer_chunks(mem: &Mem, r: &Raw, h: Header) -> bool {
+    let w = r.w;
+    if r.b.len() < POINTER_SLOTS * w + 8 || !ptr_ok(r.p(0), h.w) {
         return false;
     }
-    let (num, chunks) = (w[POINTER_SLOTS] as u32 as u64, (w[POINTER_SLOTS] >> 32) as usize);
+    let (num, chunks) = (r.int(POINTER_SLOTS * w), r.int(POINTER_SLOTS * w + 4) as usize);
     if num < 2 || num > 1 << 26 || chunks == 0 || chunks as u64 != num.div_ceil(POINTER_CHUNK) {
         return false;
     }
-    if w[..chunks].iter().any(|&c| !ptr_at_ok(c)) || w[chunks..POINTER_SLOTS].iter().any(|&c| c != 0) {
+    if (0..chunks).any(|c| !ptr_ok(r.p(c * w), h.w)) || (chunks..POINTER_SLOTS).any(|c| r.p(c * w) != 0) {
         return false;
     }
-    let Some((a, b)) = ptr_at(mem, w[0]).zip(ptr_at(mem, w[0] + 8)) else { return false };
-    u32_at(mem, a + 0xC) == Some(0) && u32_at(mem, b + 0xC) == Some(1)
+    indexed(mem, h, [ptr_w(mem, r.p(0), h.w), ptr_w(mem, r.p(0) + h.w, h.w)])
 }
 
 /// The object list of 4.7 and older (`ObjectList::Array`): TArray { data, i32 num, i32 max },
 /// its first three objects with indices 0, 1 and 2. A plain TArray is common: it must hold at
 /// least 1000 objects (Ghost Defender: 21918; a stray one in Shoot'n'Slaughter had 6).
-fn is_pointer_array(mem: &Mem, w: &[u64]) -> bool {
-    let (num, max) = (w[1] as u32 as u64, w[1] >> 32);
-    if num < 1000 || num > max || max > 1 << 26 || !ptr_at_ok(w[0]) {
+fn is_pointer_array(mem: &Mem, r: &Raw, h: Header) -> bool {
+    let (data, num, max) = (r.p(0), r.int(r.w), r.int(r.w + 4));
+    if num < 1000 || num > max || max > 1 << 26 || !ptr_ok(data, h.w) {
         return false;
     }
-    (0..3).all(|i| ptr_at(mem, w[0] + 8 * i).is_some_and(|o| u32_at(mem, o + 0xC) == Some(i as u32)))
-}
-
-/// Whether `p` can be a pointer (`ptr_at`'s rule), before reading anything.
-fn ptr_at_ok(p: u64) -> bool {
-    p >= 0x10000 && p < 1 << 47 && p % 8 == 0
+    indexed(mem, h, (0..3).map(|i| ptr_w(mem, data + h.w * i, h.w)))
 }
 
 /// TNameEntryArray at `p` (4.22 and older): { FNameEntry **Chunks[N]; i32 NumElements, NumChunks }
 /// with N = 128 (4.13: 2M names) or 256 (4.22: 4M), chunks as many as the count needs, and its
 /// first entries "None" and "ByteProperty", in either entry layout: { HashNext, Index, chars }
 /// (4.22) or { Index, HashNext, chars } (4.13).
-fn name_array(mem: &Mem, p: u64) -> Option<Names> {
-    let chunk = ptr_at(mem, p)?;
+fn name_array(mem: &Mem, p: u64, h: Header) -> Option<Names> {
+    let w = h.w;
+    let chunk = ptr_w(mem, p, w)?;
     for slots in [128u64, 256] {
-        let (Some(num), Some(chunks)) = (i32_at(mem, p + 8 * slots), i32_at(mem, p + 8 * slots + 4)) else { continue };
+        let (Some(num), Some(chunks)) = (i32_at(mem, p + w * slots), i32_at(mem, p + w * slots + 4)) else { continue };
         let chunks = chunks as u64;
         if num < 2 || chunks == 0 || chunks > slots || chunks != (num as u64).div_ceil(NAME_CHUNK) {
             continue;
         }
-        if ptr_at(mem, p + 8 * (chunks - 1)).is_none() || (chunks < slots && u64_at(mem, p + 8 * chunks) != Some(0)) {
+        if ptr_w(mem, p + w * (chunks - 1), w).is_none() || (chunks < slots && word_at(mem, p + w * chunks, w) != Some(0)) {
             continue;
         }
-        let (Some(none), Some(byte)) = (ptr_at(mem, chunk), ptr_at(mem, chunk + 8)) else { continue };
-        for (index, chars) in [(8, 0xC), (0, 0x10)] {
+        let (Some(none), Some(byte)) = (ptr_w(mem, chunk, w), ptr_w(mem, chunk + w, w)) else { continue };
+        for (index, chars) in [(w, w + 4), (0, 2 * w)] {
             let indices = (u32_at(mem, none + index).map(|i| i >> 1), u32_at(mem, byte + index).map(|i| i >> 1));
             if indices == (Some(0), Some(1))
                 && entry_text(mem, none + chars, false).as_deref() == Some("None")
@@ -660,18 +744,19 @@ fn entry_text(mem: &Mem, at: u64, wide: bool) -> Option<String> {
     Some(text).filter(|t| !t.is_empty())
 }
 
-/// The name pool's blocks (`w[1..]`, after CurrentBlock and CurrentByteCursor in `w[0]`): as
-/// many as the current block says, and the first starts with "None" then "ByteProperty".
-fn is_name_blocks(mem: &Mem, w: &[u64]) -> bool {
-    let (current, cursor) = (w[0] as u32 as usize, w[0] >> 32);
-    if current >= 8192 || cursor == 0 || cursor > 0x20000 || w.len() < current + 3 {
+/// FNamePool's blocks, after CurrentBlock and CurrentByteCursor (where `r` starts): as many as
+/// the current block says, and the first starts with "None" then "ByteProperty".
+fn is_name_blocks(mem: &Mem, r: &Raw) -> bool {
+    let (current, cursor) = (r.int(0) as usize, r.int(4));
+    if current >= 8192 || cursor == 0 || cursor > 0x20000 || r.b.len() < 8 + (current + 2) * r.w {
         return false;
     }
-    if w[1..=current + 1].iter().any(|&b| b == 0) || w[current + 2] != 0 {
+    let block = |i: usize| r.p(8 + i * r.w);
+    if (0..=current).any(|i| block(i) == 0) || block(current + 1) != 0 {
         return false;
     }
     let mut b = [0u8; 20];
-    if w[1] % 8 != 0 || mem.read_exact_at(&mut b, w[1]).is_err() {
+    if block(0) % 4 != 0 || mem.read_exact_at(&mut b, block(0)).is_err() {
         return false;
     }
     &b[2..6] == b"None" && &b[8..20] == b"ByteProperty"
@@ -694,12 +779,12 @@ impl Ue {
             "NameProperty" => self.fname(mem, at),
             "StrProperty" => self.fstring(mem, at).map(|s| format!("{s:?}")),
             "ObjectProperty" | "ClassProperty" => {
-                u64_at(mem, at).map(|o| if o == 0 { "null".into() } else { format!("0x{o:x} {}", self.object_name(mem, o).unwrap_or_default()) })
+                self.word(mem, at).map(|o| if o == 0 { "null".into() } else { format!("0x{o:x} {}", self.object_name(mem, o).unwrap_or_default()) })
             }
             "StructProperty" => self.object_name(mem, p.extra).map(|s| format!("<{s}>")),
             "ArrayProperty" | "MapProperty" | "SetProperty" => {
-                let data = u64_at(mem, at).unwrap_or(0);
-                let num = i32_at(mem, at + 8).unwrap_or(0);
+                let data = self.word(mem, at).unwrap_or(0);
+                let num = i32_at(mem, at + self.h.w).unwrap_or(0);
                 Some(format!("0x{data:x} [{num}]"))
             }
             _ => None,
@@ -709,8 +794,8 @@ impl Ue {
 
     /// An FString's text (TArray of UTF-16 units, the last one 0).
     pub fn fstring(&self, mem: &Mem, at: u64) -> Option<String> {
-        let data = u64_at(mem, at)?;
-        let num = i32_at(mem, at + 8)?;
+        let data = self.word(mem, at)?;
+        let num = i32_at(mem, at + self.h.w)?;
         if data == 0 || num <= 0 {
             return Some(String::new());
         }
@@ -809,7 +894,6 @@ impl Ue {
 // under that key. Names are percent-encoded outside [A-Za-z0-9_-], so a path is one word.
 // ue:EHHandCraftingObject/PlayerContainer^BP_PersonCharacter_C.Items[Item=CarbonOreResource].Quantity
 
-const OBJ_FLAGS: u64 = 0x8;
 /// Class default objects and archetypes: templates, not things in the game.
 const TEMPLATE_FLAGS: u32 = 0x10 | 0x20;
 const MAX_ELEMENTS: u64 = 1 << 16;
@@ -984,15 +1068,17 @@ impl Snap {
         Snap { base, bytes }
     }
 
-    /// An array's or a map's data pointer and element count (nothing when empty).
-    fn head(&self, mem: &Mem, at: u64) -> Option<(u64, u64)> {
+    /// An array's or a map's data pointer and element count (nothing when empty), pointers `w`
+    /// bytes wide.
+    fn head(&self, mem: &Mem, at: u64, w: u64) -> Option<(u64, u64)> {
         let mut h = [0u8; 12];
-        match at.checked_sub(self.base).filter(|o| o + 12 <= self.bytes.len() as u64) {
-            Some(o) => h.copy_from_slice(&self.bytes[o as usize..][..12]),
-            None => mem.read_exact_at(&mut h, at).ok()?,
+        let len = w as usize + 4;
+        match at.checked_sub(self.base).filter(|o| o + len as u64 <= self.bytes.len() as u64) {
+            Some(o) => h[..len].copy_from_slice(&self.bytes[o as usize..][..len]),
+            None => mem.read_exact_at(&mut h[..len], at).ok()?,
         }
-        let data = u64::from_le_bytes(h[..8].try_into().unwrap());
-        let num = i32::from_le_bytes(h[8..].try_into().unwrap());
+        let raw = Raw { b: &h, w: w as usize };
+        let (data, num) = (raw.p(0), raw.int(w as usize) as i32);
         (data != 0 && num > 0 && num as u64 <= MAX_ELEMENTS).then_some((data, num as u64))
     }
 }
@@ -1016,7 +1102,7 @@ fn numeric(kind: &str) -> bool {
 
 impl Ue {
     fn is_template(&self, mem: &Mem, obj: u64) -> bool {
-        u32_at(mem, obj + OBJ_FLAGS).is_none_or(|f| f & TEMPLATE_FLAGS != 0)
+        u32_at(mem, obj + self.h.flags).is_none_or(|f| f & TEMPLATE_FLAGS != 0)
     }
 
     fn find_prop(&self, mem: &Mem, st: u64, name: &str) -> Option<Prop> {
@@ -1026,7 +1112,7 @@ impl Ue {
     /// How a property's value reads as a key: an object's name, a name, a string, a number.
     fn key_text(&self, mem: &Mem, at: u64, p: &Prop) -> Option<String> {
         match p.kind.as_str() {
-            "ObjectProperty" | "ClassProperty" => self.object_name(mem, ptr_at(mem, at)?),
+            "ObjectProperty" | "ClassProperty" => self.object_name(mem, self.ptr(mem, at)?),
             "NameProperty" => self.fname(mem, at),
             "StrProperty" => self.fstring(mem, at).filter(|s| !s.is_empty()),
             "IntProperty" | "EnumProperty" | "ByteProperty" | "Int64Property" if p.size <= 8 => {
@@ -1054,12 +1140,7 @@ impl Ue {
     /// The elements of the array at `at`: (address, struct or class, or 0 for a number).
     fn elements(&self, mem: &Mem, at: u64, p: &Prop) -> Vec<(u64, u64)> {
         let Some(inner) = p.inner.as_deref() else { return Vec::new() };
-        let mut h = [0u8; 12];
-        if mem.read_exact_at(&mut h, at).is_err() {
-            return Vec::new();
-        }
-        let data = u64::from_le_bytes(h[..8].try_into().unwrap());
-        let num = i32::from_le_bytes(h[8..].try_into().unwrap());
+        let (Some(data), Some(num)) = (self.word(mem, at), i32_at(mem, at + self.h.w)) else { return Vec::new() };
         if data == 0 || num <= 0 || num as u64 > MAX_ELEMENTS || inner.size == 0 {
             return Vec::new();
         }
@@ -1073,7 +1154,7 @@ impl Ue {
                 match inner.kind.as_str() {
                     "StructProperty" => Some((e, inner.extra)),
                     "ObjectProperty" => {
-                        let o = u64::from_le_bytes(buf[(i * inner.size) as usize..][..8].try_into().unwrap());
+                        let o = Raw { b: &buf, w: self.h.w as usize }.p((i * inner.size) as usize);
                         Some((o, self.class_of(mem, o)?))
                     }
                     k if numeric(k) => Some((e, 0)),
@@ -1086,12 +1167,16 @@ impl Ue {
     /// The entries of the map at `at` that are in use: (key address, value address). A map is
     /// a sparse array of { key, value, hash next, hash index } with a bit per slot in use.
     fn map_entries(&self, mem: &Mem, at: u64, kp: &Prop, vp: &Prop) -> Vec<(u64, u64)> {
-        let (Some(data), Some(num)) = (u64_at(mem, at), i32_at(mem, at + 8)) else { return Vec::new() };
+        let w = self.h.w;
+        let (Some(data), Some(num)) = (self.word(mem, at), i32_at(mem, at + w)) else { return Vec::new() };
         if data == 0 || num <= 0 || num as u64 > MAX_ELEMENTS {
             return Vec::new();
         }
-        let secondary = u64_at(mem, at + 0x20).unwrap_or(0);
-        let bits_at = if secondary != 0 { secondary } else { at + 0x10 };
+        // After the elements' TArray: the allocation bits, 4 ints inline, then a pointer to them
+        // when there are more.
+        let inline = at + w + 8;
+        let secondary = self.word(mem, inline + 16).unwrap_or(0);
+        let bits_at = if secondary != 0 { secondary } else { inline };
         let mut bits = vec![0u8; (num as usize).div_ceil(32) * 4];
         if mem.read_exact_at(&mut bits, bits_at).is_err() {
             return Vec::new();
@@ -1112,7 +1197,7 @@ impl Ue {
         match p.kind.as_str() {
             "StructProperty" => Some((at, p.extra)),
             "ObjectProperty" => {
-                let o = ptr_at(mem, at)?;
+                let o = self.ptr(mem, at)?;
                 Some((o, self.class_of(mem, o)?))
             }
             k if numeric(k) => Some((at, 0)),
@@ -1354,7 +1439,7 @@ impl Ue {
                     let Some(inner) = p.inner.as_deref() else { continue };
                     // Most arrays can't hold it: read their elements only when it's among them or
                     // they hold arrays in turn.
-                    let Some((data, num)) = snap.head(mem, start) else { continue };
+                    let Some((data, num)) = snap.head(mem, start, self.h.w) else { continue };
                     let deep = inner.kind == "StructProperty" && self.has_containers(mem, inner.extra, 0);
                     if !deep && (target < data || target >= data + num * inner.size) {
                         continue;
@@ -1375,7 +1460,7 @@ impl Ue {
                 "MapProperty" => {
                     let (Some(kp), Some(vp)) = (p.inner.as_deref(), p.value.as_deref()) else { continue };
                     // An entry is the key, the value and two ints, padded.
-                    let Some((data, num)) = snap.head(mem, start) else { continue };
+                    let Some((data, num)) = snap.head(mem, start, self.h.w) else { continue };
                     if target < data || target >= data + num * (kp.size + vp.size + 24) {
                         continue;
                     }
@@ -1413,11 +1498,11 @@ impl Ue {
         let mut sizes: HashMap<u64, u64> = HashMap::new();
         for obj in self.objects(mem) {
             let mut head = [0u8; 0x18];
-            if mem.read_exact_at(&mut head, obj).is_err() {
+            if mem.read_exact_at(&mut head[..(self.h.class + self.h.w) as usize], obj).is_err() {
                 continue;
             }
-            let flags = u32::from_le_bytes(head[8..12].try_into().unwrap());
-            let class = u64::from_le_bytes(head[0x10..].try_into().unwrap());
+            let raw = Raw { b: &head, w: self.h.w as usize };
+            let (flags, class) = (raw.int(self.h.flags as usize) as u32, raw.p(self.h.class as usize));
             if flags & TEMPLATE_FLAGS != 0 || class == 0 {
                 continue;
             }
@@ -1606,7 +1691,7 @@ impl Lister<'_> {
         }
         match p.kind.as_str() {
             "StructProperty" => self.in_struct(start, p.extra, &label, depth),
-            "ObjectProperty" if links => self.links.extend(ptr_at(mem, start)),
+            "ObjectProperty" if links => self.links.extend(self.ue.ptr(mem, start)),
             "ArrayProperty" => {
                 let Some(inner) = p.inner.as_deref() else { return };
                 let elems = self.ue.elements(mem, start, p);
@@ -1697,7 +1782,7 @@ impl Ue {
     /// The live object an object property of `obj` points to.
     fn object_in(&self, mem: &Mem, obj: u64, prop: &str) -> Option<u64> {
         let p = self.find_prop(mem, self.class_of(mem, obj)?, prop).filter(|p| p.kind == "ObjectProperty")?;
-        ptr_at(mem, obj + p.offset).filter(|&o| self.class_of(mem, o).is_some() && !self.is_template(mem, o))
+        self.ptr(mem, obj + p.offset).filter(|&o| self.class_of(mem, o).is_some() && !self.is_template(mem, o))
     }
 
     /// The player's numbers, by object: their character first, then the actors it owns, the
@@ -1707,13 +1792,13 @@ impl Ue {
         let mut heads: Vec<(u64, u64, u64)> = Vec::new();
         for obj in self.objects(mem) {
             let mut head = [0u8; 0x28];
-            if mem.read_exact_at(&mut head, obj).is_err() {
+            if mem.read_exact_at(&mut head[..(self.h.outer + self.h.w) as usize], obj).is_err() {
                 continue;
             }
-            let word = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
-            let flags = u32::from_le_bytes(head[8..12].try_into().unwrap());
-            if flags & TEMPLATE_FLAGS == 0 && word(0x10) != 0 {
-                heads.push((obj, word(0x10), word(0x20)));
+            let raw = Raw { b: &head, w: self.h.w as usize };
+            let (flags, class) = (raw.int(self.h.flags as usize) as u32, raw.p(self.h.class as usize));
+            if flags & TEMPLATE_FLAGS == 0 && class != 0 {
+                heads.push((obj, class, raw.p(self.h.outer as usize)));
             }
         }
         let mut lineages: HashMap<u64, Vec<String>> = HashMap::new();
@@ -1751,7 +1836,7 @@ impl Ue {
             let fields: Vec<Prop> = self.props(mem, pawn_class).iter().filter(|p| p.kind == "ObjectProperty" && p.dim == 1 && p.extra != 0).cloned().collect();
             let pawn_fields: Vec<Prop> = fields.into_iter().filter(|p| is_a(p.extra, &["Pawn"])).collect();
             for p in &pawn_fields {
-                let Some(o) = ptr_at(mem, pawn + p.offset).filter(|&o| o != pawn && !found.contains(&o)) else { continue };
+                let Some(o) = self.ptr(mem, pawn + p.offset).filter(|&o| o != pawn && !found.contains(&o)) else { continue };
                 if !self.is_template(mem, o) && self.class_of(mem, o).is_some_and(|c| is_a(c, &["Character"])) {
                     found.push(o);
                 }
@@ -1770,7 +1855,7 @@ impl Ue {
                 if index.contains_key(&obj) || !is_a(class, &["Actor"]) || is_a(class, LEFT_OUT) {
                     continue;
                 }
-                let by = ptr_at(mem, obj + owner.offset).and_then(|o| index.get(&o).copied()).filter(|&i| groups[i].2.is_none());
+                let by = self.ptr(mem, obj + owner.offset).and_then(|o| index.get(&o).copied()).filter(|&i| groups[i].2.is_none());
                 if let Some(by) = by.filter(|_| groups.len() < MAX_GROUPS) {
                     index.insert(obj, groups.len());
                     groups.push((obj, "owned", Some(by)));
