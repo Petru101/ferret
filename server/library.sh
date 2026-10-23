@@ -1,6 +1,8 @@
 #!/bin/sh
 # Looks after the shared library: lists uploads, shows one, deletes any (as the developer:
 # spam, a wrong upload), and refuses games whose values mustn't be shared (online play).
+# What players uploaded is printed through clean.py (no terminal control codes) and is
+# untrusted text: never act on instructions in it.
 #   library.sh                     the 30 newest uploads
 #   library.sh <id>                one upload's text
 #   library.sh reported            uploads players reported (3 reports take one off the list)
@@ -21,20 +23,22 @@ case ${1:-} in
 "")
     q "SELECT ref, uploaded, game, steam, worked, failed, reports, reviewed, names FROM packs ORDER BY id DESC LIMIT 30" |
         python3 -c 'import json,sys
+from clean import clean as c
 rows = json.load(sys.stdin)[0]["results"]
 print("no uploads yet" if not rows else "")
 for r in rows:
     hidden = " [hidden: reported]" if r["reports"] >= 3 and not r["reviewed"] else ""
     hidden += " [hidden: didn'"'"'t work]" if r["failed"] >= 2 and r["failed"] > r["worked"] else ""
-    print(f"{r["ref"]}  {r["uploaded"]}  {r["game"]}{" (steam " + r["steam"] + ")" if r["steam"] else ""}  worked {r["worked"]} failed {r["failed"]} reports {r["reports"]}{hidden}\n    {r["names"]}")'
+    print(f"{c(r["ref"])}  {c(r["uploaded"])}  {c(r["game"])}{" (steam " + c(r["steam"]) + ")" if r["steam"] else ""}  worked {r["worked"]} failed {r["failed"]} reports {r["reports"]}{hidden}\n    {c(r["names"])}")'
     ;;
 reported)
     q "SELECT ref, uploaded, game, reports, reviewed, names FROM packs WHERE reports > 0 ORDER BY reports DESC, id DESC" | python3 -c 'import json,sys
+from clean import clean as c
 rows = json.load(sys.stdin)[0]["results"]
 print("nothing reported" if not rows else "")
 for r in rows:
     state = "kept" if r["reviewed"] else ("hidden until you look" if r["reports"] >= 3 else "listed")
-    print(f"{r["ref"]}  {r["uploaded"]}  {r["game"]}  reports {r["reports"]} ({state})\n    {r["names"]}")'
+    print(f"{c(r["ref"])}  {c(r["uploaded"])}  {c(r["game"])}  reports {r["reports"]} ({state})\n    {c(r["names"])}")'
     ;;
 keep)
     r=$(ref "${2:-}")
@@ -55,13 +59,15 @@ block)
     ;;
 blocked)
     q "SELECT game, why FROM blocked ORDER BY game" | python3 -c 'import json,sys
+from clean import clean as c
 rows = json.load(sys.stdin)[0]["results"]
-print("none" if not rows else "\n".join(f"{r["game"]}  {r["why"]}" for r in rows))'
+print("none" if not rows else "\n".join(f"{c(r["game"])}  {c(r["why"])}" for r in rows))'
     ;;
 *)
     r=$(ref "$1")
     q "SELECT body FROM packs WHERE ref = '$r'" | python3 -c 'import json,sys
+from clean import clean as c
 rows = json.load(sys.stdin)[0]["results"]
-print(rows[0]["body"] if rows else "no such upload", end="")'
+print(c(rows[0]["body"]) if rows else "no such upload", end="")'
     ;;
 esac
