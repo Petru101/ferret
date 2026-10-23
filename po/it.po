@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-23 07:36+0100\n"
+"POT-Creation-Date: 2026-10-23 11:34+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Italian\n"
 "Language: it\n"
@@ -2947,95 +2947,100 @@ msgstr "È installata una versione più recente di Ferret"
 msgid "Restart"
 msgstr "Riavvia"
 
-#: src/gui/mod.rs:1345
+#: src/gui/mod.rs:1356
 msgid "Game"
 msgstr "Gioco"
 
-#: src/gui/mod.rs:1351
+#: src/gui/mod.rs:1362
 msgid "Ferret Could Not Start"
 msgstr "Ferret non è riuscito ad avviarsi"
 
-#: src/gui/mod.rs:1354
+#: src/gui/mod.rs:1365
 msgid "Refresh"
 msgstr "Aggiorna"
 
-#: src/gui/mod.rs:1559
+#: src/gui/mod.rs:1498
+#, rust-format
+msgid "Ferret {version} is ready to install"
+msgstr "Ferret {version} è pronto per l’installazione"
+
+#: src/gui/mod.rs:1587
 #, rust-format
 msgid "{names} and {last}"
 msgstr "{names} e {last}"
 
-#: src/gui/mod.rs:1580
+#: src/gui/mod.rs:1608
 msgid "whole number"
 msgstr "numero intero"
 
-#: src/gui/mod.rs:1581
+#: src/gui/mod.rs:1609
 msgid "float"
 msgstr "float"
 
-#: src/gui/mod.rs:1582
+#: src/gui/mod.rs:1610
 msgid "double"
 msgstr "double"
 
-#: src/gui/mod.rs:1583
+#: src/gui/mod.rs:1611
 msgid "encoded whole number"
 msgstr "numero intero codificato"
 
-#: src/gui/mod.rs:1584
+#: src/gui/mod.rs:1612
 msgid "2-byte whole number"
 msgstr "numero intero a 2 byte"
 
-#: src/gui/mod.rs:1585
+#: src/gui/mod.rs:1613
 msgid "GameMaker number"
 msgstr "Numero GameMaker"
 
-#: src/gui/mod.rs:1586
+#: src/gui/mod.rs:1614
 msgid "Lua number"
 msgstr "Numero Lua"
 
-#: src/gui/mod.rs:1587
+#: src/gui/mod.rs:1615
 msgid "Python number"
 msgstr "Numero Python"
 
-#: src/gui/mod.rs:1588
+#: src/gui/mod.rs:1616
 msgid "JavaScript whole number"
 msgstr "Numero intero JavaScript"
 
-#: src/gui/mod.rs:1596
+#: src/gui/mod.rs:1624
 #, rust-format
 msgid "at most {max}"
 msgstr "al massimo {max}"
 
-#: src/gui/mod.rs:1597
+#: src/gui/mod.rs:1625
 #, rust-format
 msgid "at least {min}"
 msgstr "almeno {min}"
 
-#: src/gui/mod.rs:1598
+#: src/gui/mod.rs:1626
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "tra {min} e {max}"
 
-#: src/gui/mod.rs:1599
+#: src/gui/mod.rs:1627
 msgid "unlimited"
 msgstr "senza limiti"
 
-#: src/gui/mod.rs:1605
+#: src/gui/mod.rs:1633
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
 msgstr[0] "un tipo di posizione"
 msgstr[1] "{n} tipi di posizioni"
 
-#: src/gui/mod.rs:1612
+#: src/gui/mod.rs:1640
 msgid "It can be played with other people."
 msgstr "Si può giocare con altre persone."
 
-#: src/gui/mod.rs:1615
+#: src/gui/mod.rs:1643
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "Include {anticheat}, che ora non è in esecuzione."
 
-#: src/gui/mod.rs:1619
+#: src/gui/mod.rs:1647
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
@@ -3043,12 +3048,12 @@ msgstr ""
 "Il suo editore segnala gli account i cui salvataggi sono stati modificati: "
 "un account segnalato può essere escluso da classifiche, eventi o cooperativa."
 
-#: src/gui/mod.rs:1624
+#: src/gui/mod.rs:1652
 msgid "Its scores go on online leaderboards that other players see."
 msgstr ""
 "I suoi punteggi finiscono in classifiche online che vedono altri giocatori."
 
-#: src/gui/mod.rs:1628
+#: src/gui/mod.rs:1656
 #, rust-format
 msgid ""
 "{anticheat} runs on your computer all the time, for other games. It may take "

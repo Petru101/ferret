@@ -18,6 +18,7 @@ VENDOR = os.path.join(ROOT, 'vendor')
 MISSING = {
     'flatbuffers': {'Apache-2.0': 'flatbuffers-LICENSE'},
     'rten*': {'MIT': 'rten-LICENSE-MIT', 'Apache-2.0': 'rten-LICENSE-APACHE'},
+    'velopack': {'MIT': 'velopack-LICENSE-MIT'},
 }
 
 # License files outside a crate's top folder that its LICENSE points to.

@@ -13,16 +13,26 @@ under its own free licenses. The GIF is sped up.</sub>
 
 ## Install
 
-Download the `.flatpak` file from the [latest release](https://github.com/Petru101/ferret/releases/latest)
-and install it (Ferret uses the GNOME runtime from Flathub, already set up on most distros):
+**Linux:** open [ferret.flatpakref](https://petru101.github.io/ferret-updates/ferret.flatpakref)
+with your software centre, or run (Ferret uses the GNOME runtime from Flathub, already set up on
+most distros):
 
 ```sh
-flatpak install --user ferret-0.1.0-x86_64.flatpak
+flatpak install --user https://petru101.github.io/ferret-updates/ferret.flatpakref
 ```
 
-There are no automatic updates yet: install the new file when a new release comes out. Ferret is
-young: it works on the games listed below, and feedback on others is welcome (Send Feedback in
-its menu, or an issue here).
+New versions then come with your other Flatpak updates. The `.flatpak` file on the
+[latest release](https://github.com/Petru101/ferret/releases/latest) installs the same way
+(`flatpak install --user ferret-<version>-x86_64.flatpak`) and gets updates too.
+
+**Windows:** download `Ferret-<version>-setup.exe` from the
+[latest release](https://github.com/Petru101/ferret/releases/latest) and run it (installs for
+your account, no administrator needed; Windows may warn about an unknown publisher, since it
+isn't signed). Ferret downloads new versions by itself and installs them at its next start, or
+right away with Restart. The portable zip updates itself the same way.
+
+Ferret is young: it works on the games listed below, and feedback on others is welcome (Send
+Feedback in its menu, or an issue here).
 
 ## How it works
 

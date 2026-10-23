@@ -1329,6 +1329,17 @@ fn build(app: &adw::Application) {
         });
     }
     app.add_action(&restart);
+    // Windows: a downloaded build installed after the window closes (`update::apply_if_asked`).
+    #[cfg(windows)]
+    {
+        let update = gio::SimpleAction::new("update", None);
+        let quit = app.clone();
+        update.connect_activate(move |_, _| {
+            crate::update::ask_to_apply();
+            quit.quit();
+        });
+        app.add_action(&update);
+    }
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&banners[0]);
@@ -1473,6 +1484,23 @@ fn build(app: &adw::Application) {
                 });
             }
             glib::ControlFlow::Continue
+        });
+    }
+    // Windows: a newer build downloaded in the background, once per start; the banner offers
+    // to install it now (else the next start does).
+    #[cfg(windows)]
+    {
+        let banners = banners.clone();
+        glib::timeout_add_seconds_local_once(5, move || {
+            glib::spawn_future_local(async move {
+                if let Ok(Some(version)) = gio::spawn_blocking(crate::update::download).await {
+                    for b in &banners {
+                        b.set_title(&tr!("Ferret {version} is ready to install", version = version));
+                        b.set_action_name(Some("app.update"));
+                        b.set_revealed(true);
+                    }
+                }
+            });
         });
     }
     // Notice a newer install: when the window comes back to the front (after installing from a

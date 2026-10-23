@@ -16,8 +16,12 @@ mod online;
 mod reader;
 mod shapes;
 mod share;
+#[cfg(windows)]
+mod update;
 
 fn main() {
+    #[cfg(windows)]
+    update::on_start();
     if std::env::args().any(|a| a == "--cli") {
         #[cfg(windows)]
         attach_console();
@@ -25,6 +29,8 @@ fn main() {
     } else {
         i18n::init();
         gui::run();
+        #[cfg(windows)]
+        update::apply_if_asked();
     }
 }
 

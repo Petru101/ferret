@@ -1,12 +1,14 @@
 #!/bin/bash
-# Makes Ferret's Windows package from a release build, in MSYS2 UCRT64 (needs ntldd and nsis:
-# pacman -S mingw-w64-ucrt-x86_64-ntldd mingw-w64-ucrt-x86_64-nsis), from the repo's root after
-# `cargo build --release --workspace` and with the OCR models in target/share/ferret/ocr:
+# Makes Ferret's Windows package from a release build, in MSYS2 UCRT64 (needs ntldd:
+# pacman -S mingw-w64-ucrt-x86_64-ntldd), from the repo's root after
+# `cargo build --release --workspace` and with the OCR models in target/share/ferret/ocr, and
+# Velopack's vpk in C:\dev\vpk with .NET in C:\dev\dotnet (run/win/vpk-setup.ps1):
 #   bash data/windows/package.sh
 # Out: dist/Ferret (bin: the programs and the DLLs they load; share: OCR models, translations,
-# GTK's icons and settings schemas, licenses), dist/Ferret-<version>-windows.zip (unzip and run
-# bin\ferret.exe) and dist/Ferret-<version>-setup.exe (installs for the current user, no
-# administrator needed). GTK finds its files from its DLLs' folder: <package>/share.
+# GTK's icons and settings schemas, licenses), dist/Ferret-<version>-setup.exe (installs for
+# the current user, no administrator needed, and updates itself), dist/Ferret-<version>-
+# portable.zip (unzip anywhere; updates itself too) and the update feed in VPK_RELEASES. GTK
+# finds its files from its DLLs' folder: <package>/share.
 set -euo pipefail
 export PATH=/ucrt64/bin:$PATH
 cd "$(dirname "$0")/../.."
@@ -68,7 +70,15 @@ cp data/windows/PaddleOCR-LICENSE $licenses/PaddleOCR-LICENSE
 cp data/areweanticheatyet/LICENSE $licenses/AreWeAntiCheatYet-LICENSE
 cp data/windows/ferret.ico $out/
 
-# The portable zip and the installer.
-powershell -NoProfile -Command "Compress-Archive -Path '$(cygpath -w "$PWD/$out")' -DestinationPath '$(cygpath -w "$PWD/dist/Ferret-$ver-windows.zip")'"
-makensis -V2 -DVERSION="$ver" -DSRC="$(cygpath -w "$PWD/$out")" -DOUT="$(cygpath -w "$PWD/dist/Ferret-$ver-setup.exe")" data/windows/ferret.nsi
-ls -la dist
+# The installer, the portable zip and the update feed, by Velopack's vpk (update.rs): installs
+# per user into %LOCALAPPDATA%\Petru101.Ferret (not Ferret's data folder: an uninstall deletes
+# its own), a Start menu shortcut. The feed's folder keeps earlier releases (VPK_RELEASES), so
+# each pack adds a delta from the one before; it is copied to the update site's windows/.
+releases=${VPK_RELEASES:-/c/dev/velopack-releases}
+mkdir -p "$releases"
+DOTNET_ROOT='C:\dev\dotnet' /c/dev/vpk/vpk.exe pack --packId Petru101.Ferret --packVersion "$ver" \
+    --runtime win-x64 --packDir "$(cygpath -w "$PWD/$out")" --mainExe 'bin\ferret.exe' --packTitle Ferret --packAuthors 'Petru Mare' \
+    --icon "$(cygpath -w "$PWD/data/windows/ferret.ico")" --shortcuts StartMenuRoot --outputDir "$(cygpath -w "$releases")"
+cp "$releases/Petru101.Ferret-win-Setup.exe" "dist/Ferret-$ver-setup.exe"
+cp "$releases/Petru101.Ferret-win-Portable.zip" "dist/Ferret-$ver-portable.zip"
+ls -la dist "$releases"

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-23 07:36+0100\n"
+"POT-Creation-Date: 2026-10-23 11:34+0100\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -2682,94 +2682,99 @@ msgstr "已安装更新版本的 Ferret"
 msgid "Restart"
 msgstr "重启"
 
-#: src/gui/mod.rs:1345
+#: src/gui/mod.rs:1356
 msgid "Game"
 msgstr "游戏"
 
-#: src/gui/mod.rs:1351
+#: src/gui/mod.rs:1362
 msgid "Ferret Could Not Start"
 msgstr "Ferret 无法启动"
 
-#: src/gui/mod.rs:1354
+#: src/gui/mod.rs:1365
 msgid "Refresh"
 msgstr "刷新"
 
-#: src/gui/mod.rs:1559
+#: src/gui/mod.rs:1498
+#, rust-format
+msgid "Ferret {version} is ready to install"
+msgstr "Ferret {version} 已可安装"
+
+#: src/gui/mod.rs:1587
 #, rust-format
 msgid "{names} and {last}"
 msgstr "{names}和{last}"
 
-#: src/gui/mod.rs:1580
+#: src/gui/mod.rs:1608
 msgid "whole number"
 msgstr "整数"
 
-#: src/gui/mod.rs:1581
+#: src/gui/mod.rs:1609
 msgid "float"
 msgstr "单浮点"
 
-#: src/gui/mod.rs:1582
+#: src/gui/mod.rs:1610
 msgid "double"
 msgstr "双浮点"
 
-#: src/gui/mod.rs:1583
+#: src/gui/mod.rs:1611
 msgid "encoded whole number"
 msgstr "编码整数"
 
-#: src/gui/mod.rs:1584
+#: src/gui/mod.rs:1612
 msgid "2-byte whole number"
 msgstr "2 字节整数"
 
-#: src/gui/mod.rs:1585
+#: src/gui/mod.rs:1613
 msgid "GameMaker number"
 msgstr "GameMaker 数字"
 
-#: src/gui/mod.rs:1586
+#: src/gui/mod.rs:1614
 msgid "Lua number"
 msgstr "Lua 数字"
 
-#: src/gui/mod.rs:1587
+#: src/gui/mod.rs:1615
 msgid "Python number"
 msgstr "Python 数字"
 
-#: src/gui/mod.rs:1588
+#: src/gui/mod.rs:1616
 msgid "JavaScript whole number"
 msgstr "JavaScript 整数"
 
-#: src/gui/mod.rs:1596
+#: src/gui/mod.rs:1624
 #, rust-format
 msgid "at most {max}"
 msgstr "至多 {max}"
 
-#: src/gui/mod.rs:1597
+#: src/gui/mod.rs:1625
 #, rust-format
 msgid "at least {min}"
 msgstr "至少 {min}"
 
-#: src/gui/mod.rs:1598
+#: src/gui/mod.rs:1626
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "在 {min} 到 {max} 之间"
 
-#: src/gui/mod.rs:1599
+#: src/gui/mod.rs:1627
 msgid "unlimited"
 msgstr "无限制"
 
-#: src/gui/mod.rs:1605
+#: src/gui/mod.rs:1633
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
 msgstr[0] "{n} 类位置"
 
-#: src/gui/mod.rs:1612
+#: src/gui/mod.rs:1640
 msgid "It can be played with other people."
 msgstr "可以和其他人一起玩。"
 
-#: src/gui/mod.rs:1615
+#: src/gui/mod.rs:1643
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "它自带 {anticheat},目前没有运行。"
 
-#: src/gui/mod.rs:1619
+#: src/gui/mod.rs:1647
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
@@ -2777,11 +2782,11 @@ msgstr ""
 "发行商会标记存档被修改过的账号：被标记的账号可能会被排除在排行榜、活动或合作"
 "模式之外。"
 
-#: src/gui/mod.rs:1624
+#: src/gui/mod.rs:1652
 msgid "Its scores go on online leaderboards that other players see."
 msgstr "它的分数会上传到其他玩家能看到的在线排行榜。"
 
-#: src/gui/mod.rs:1628
+#: src/gui/mod.rs:1656
 #, rust-format
 msgid ""
 "{anticheat} runs on your computer all the time, for other games. It may take "

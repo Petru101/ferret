@@ -3,7 +3,7 @@ members = ["helper"]
 
 [package]
 name = "ferret"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
@@ -25,6 +25,8 @@ libc = "0.2"
 zbus = "5"
 
 [target.'cfg(windows)'.dependencies]
+# Updates of the Windows build (Velopack: its installer, update feed and apply on restart).
+velopack = "1.2.161"
 # COM objects of Ferret's own (#[implement]: the notification activator in gui/notify.rs).
 windows-core = "0.62"
 # Windows.Graphics.Capture and Direct3D 11 (capture_windows.rs), hotkeys and notifications
