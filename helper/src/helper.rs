@@ -82,6 +82,12 @@ pub fn game_name(pid: u32) -> String {
     run_game(&lower, &args, || os::cwd(pid)).unwrap_or(exe)
 }
 
+/// The program Unreal Engine 4 and 5 games without code of their own run (UE4Game.exe,
+/// UE4Game-Win64-Shipping.exe, UnrealGame-...): every one of them shared one name and profile.
+fn unreal_runner(program: &str) -> bool {
+    program.starts_with("ue4game") || program.starts_with("unrealgame")
+}
+
 /// The game a player program was started with (`game_name`): the game file it was given, a
 /// LÖVE game's folder, a Python game's script (its folder when the script has a name every game
 /// uses, like main.py). LÖVE, Java and Python run many games each with the same code: values
@@ -95,6 +101,9 @@ fn run_game(program: &str, args: &[String], cwd: impl Fn() -> String) -> Option<
         "java" | "javaw" => return java_game(args),
         "mono" | "mono-sgen" => &[".exe"],
         p if is_python(p) => &[".py", ".pyc", ".pyw", ".pyz"],
+        // Content-only Unreal games run the engine's own program, started by the game's launcher
+        // with its project: `..\..\..\Zombielicious\Zombielicious.uproject`.
+        p if unreal_runner(p) => &[".uproject"],
         _ => return None,
     };
     // A path or a URL; a URL's query left out.
@@ -102,6 +111,9 @@ fn run_game(program: &str, args: &[String], cwd: impl Fn() -> String) -> Option<
     let full = |a: &str| if a.starts_with('/') { a.to_owned() } else { format!("{}/{a}", cwd()) };
     if let Some(a) = args.iter().find(|a| endings.iter().any(|e| file(a).to_ascii_lowercase().ends_with(e))) {
         let name = file(a);
+        if unreal_runner(program) {
+            return Some(format!("{} (Unreal)", name.trim_end_matches(".uproject")));
+        }
         let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s).to_ascii_lowercase();
         if !is_python(program) || !["main", "__main__", "game", "run", "run_game", "start", "play", "launcher"].contains(&stem.as_str()) {
             return Some(name);
@@ -4319,6 +4331,9 @@ mod tests {
         assert_eq!(game("python3", &["main.py"]), Some("Hyperplasm (Python)".into()));
         assert_eq!(game("python3", &["-m", "gunship"]), Some("gunship".into()));
         assert_eq!(game("python3", &["/usr/bin/some-tool"]), None);
+        assert_eq!(game("ue4game-win32-shipping.exe", &["..\\..\\..\\Zombielicious\\Zombielicious.uproject"]), Some("Zombielicious (Unreal)".into()));
+        assert_eq!(game("ue4game.exe", &["../../../Boxing1/Boxing1.uproject", "-windowed"]), Some("Boxing1 (Unreal)".into()));
+        assert_eq!(game("ue4game-win64-shipping.exe", &[]), None);
         let launcher = |args: &[&str]| wine_launcher(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
         assert!(launcher(&["/home/p/.local/share/Steam/steamapps/common/Proton - Experimental/proton", "waitforexitandrun", "/g/Game.exe"]));
         assert!(launcher(&["/home/p/.steam/root/compatibilitytools.d/GE-Proton10-1/proton", "run", "/g/Game.exe"]));
