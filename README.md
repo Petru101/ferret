@@ -23,7 +23,9 @@ flatpak install --user https://petru101.github.io/ferret-updates/ferret.flatpakr
 
 New versions then come with your other Flatpak updates. The `.flatpak` file on the
 [latest release](https://github.com/Petru101/ferret/releases/latest) installs the same way
-(`flatpak install --user ferret-<version>-x86_64.flatpak`) and gets updates too.
+(`flatpak install --user ferret-<version>-x86_64.flatpak`) and gets updates too. On Bazzite
+(Bazaar) and other stores that don't open the `.flatpakref`, use the command above or the
+`.flatpak` file.
 
 **Windows:** download `Ferret-<version>-setup.exe` from the
 [latest release](https://github.com/Petru101/ferret/releases/latest) and run it (installs for
