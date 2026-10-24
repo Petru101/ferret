@@ -33,7 +33,11 @@ const hex = (s) => /^-?[0-9a-fA-F]{1,16}$/.test(s);
 // Value names: short, so they leave little room for messages in the list.
 const goodName = (s) => /^[\p{L}\p{N}_-]{1,32}$/u.test(s);
 const goodBuild = (s) => /^[\p{L}\p{N}_-]{1,64}$/u.test(s);
-const KINDS = ["i32", "f32", "f64", "xor", "u16"];
+// Ferret's value types: the searched ones, the engines' own (GameMaker, Lua, Python, RPG Maker's
+// small integers and true/false) and on/off flags (a bit of a byte).
+const KINDS = ["i32", "f32", "f64", "xor", "u16", "gm", "lua", "py", "smi", "jsbool", "bit0", "bit1", "bit2", "bit3", "bit4", "bit5", "bit6", "bit7"];
+// Named paths by engine (core.rs `engine_path`) and Unity-style string paths.
+const NAMED = ["gd:", "mono:", "il2cpp:", "ue:", "js:", "gml:", "lua:", "java:", "py:", "air:", "{", '"'];
 
 function goodSite(s) {
   const f = s.split(/\s+/);
@@ -58,7 +62,7 @@ function goodPath(s) {
 }
 
 function goodNamed(s) {
-  return s.length <= 512 && ["gd:", "mono:", "il2cpp:", "ue:", "{", '"'].some((p) => s.startsWith(p)) && !/[\s\p{Cc}]/u.test(s);
+  return s.length <= 512 && NAMED.some((p) => s.startsWith(p)) && !/[\s\p{Cc}]/u.test(s);
 }
 
 function goodLimit(s) {
