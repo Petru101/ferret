@@ -642,6 +642,11 @@ pub enum Kind {
     JsBool,
     /// A 1-byte whole number (an Unreal enum: the movement mode the Fly tweak sets).
     U8,
+    /// A 1-byte whole number, signed (a Java `byte`). Listed by the Browse tab; never searched for.
+    I8,
+    /// An 8-byte whole number (a Java `long`): listed by the Browse tab; a search for a whole
+    /// number finds its start, and saving by name takes this type.
+    I64,
 }
 
 /// The names of `Kind::Bit`, as the helper takes them.
@@ -665,6 +670,8 @@ impl Kind {
             Kind::Bit(n) => BITS[n as usize & 7],
             Kind::JsBool => "jsbool",
             Kind::U8 => "u8",
+            Kind::I8 => "i8",
+            Kind::I64 => "i64",
         }
     }
 
@@ -672,7 +679,7 @@ impl Kind {
         if let Some(n) = BITS.iter().position(|b| *b == s) {
             return Some(Kind::Bit(n as u8));
         }
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8, Kind::I8, Kind::I64]).find(|k| k.name() == s)
     }
 
     /// On or off (1 or 0), not a number: the window shows a switch.
@@ -687,7 +694,7 @@ impl Kind {
 
     /// Whole numbers in memory (a game may still show them with decimals: 12 as "1.2").
     pub fn whole(self) -> bool {
-        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8)
+        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 | Kind::I8 | Kind::I64)
     }
 
     pub fn describe(self) -> &'static str {
@@ -703,7 +710,8 @@ impl Kind {
             Kind::Smi => "JavaScript whole number",
             Kind::Bit(_) => "on/off flag",
             Kind::JsBool => "JavaScript on/off flag",
-            Kind::U8 => "1-byte whole number",
+            Kind::U8 | Kind::I8 => "1-byte whole number",
+            Kind::I64 => "8-byte whole number",
         }
     }
 }
@@ -859,8 +867,10 @@ fn first_error(reply: &[String]) -> Option<String> {
 
 // --- Profiles: named values that survive game restarts, one file per game.
 
+/// A game's profile, named after its program; separators made `_` (a Java game started as
+/// `java ../game/Main.java` once wrote its profile three folders up, outside the profiles).
 fn profile_path(exe: &str) -> PathBuf {
-    data_dir().join("profiles").join(format!("{}.profile", exe.to_lowercase()))
+    data_dir().join("profiles").join(format!("{}.profile", exe.to_lowercase().replace(['/', '\\'], "_")))
 }
 
 /// The game's saved values as the profile holds them (feedback.rs sends them with a report).
@@ -2120,13 +2130,14 @@ impl Core {
         // helper's GameMaker value, read as whichever it holds. A Lua value is written only
         // while it holds a number (a table that grew left the old place freed).
         let loc = match &named {
-            Some((text, _, _)) if text.starts_with("gml:") => Loc { kind: Kind::Gm, ..loc },
-            Some((text, _, _)) if text.starts_with("lua:") => Loc { kind: Kind::Lua, ..loc },
-            Some((text, _, _)) if text.starts_with("py:") => Loc { kind: Kind::Py, ..loc },
+            Some((text, _, _, _)) if text.starts_with("gml:") => Loc { kind: Kind::Gm, ..loc },
+            Some((text, _, _, _)) if text.starts_with("lua:") => Loc { kind: Kind::Lua, ..loc },
+            Some((text, _, _, _)) if text.starts_with("py:") => Loc { kind: Kind::Py, ..loc },
+            Some((_, _, _, kind)) => Loc { kind: *kind, ..loc },
             _ => loc,
         };
         let reply = match &named {
-            Some((text, _, _)) if by_name || !backed_by_code(text) => Vec::new(),
+            Some((text, _, _, _)) if by_name || !backed_by_code(text) => Vec::new(),
             _ => self.helper.call(&format!("sites {loc}")),
         };
         for l in reply.iter().filter(|l| !l.starts_with("site ")) {
@@ -2164,11 +2175,11 @@ impl Core {
                 candidates = self.pointer_paths(loc).map_err(|e| tr!("Ferret can't find it again by code or by name, and {why}", why = e))?;
             }
         }
-        let how = if let (false, Some((_, places, about))) = (sites.is_empty(), &named) {
+        let how = if let (false, Some((_, places, about, _))) = (sites.is_empty(), &named) {
             format!("by name: {about}, {places} now, and {} code patterns, tried first", sites.len())
         } else if !sites.is_empty() {
             format!("{} code patterns", sites.len())
-        } else if let Some((_, places, about)) = &named {
+        } else if let Some((_, places, about, _)) = &named {
             format!("by name: {about}, {places} now")
         } else if !paths.is_empty() {
             format!("{} pointer paths that held up since the last run", paths.len())
@@ -2187,7 +2198,7 @@ impl Core {
         let limit = entries.iter().find(|e| e.name == name).and_then(|e| e.limit.clone());
         let key = entries.iter().find(|e| e.name == name && e.sites.iter().any(|s| sites.contains(s))).and_then(|e| e.key);
         entries.retain(|e| e.name != name);
-        let named_text: Vec<String> = named.iter().map(|(t, _, _)| t.clone()).collect();
+        let named_text: Vec<String> = named.iter().map(|(t, _, _, _)| t.clone()).collect();
         let mut entry = Entry {
             name: name.to_owned(),
             kind: loc.kind,
@@ -2351,21 +2362,24 @@ impl Core {
     /// The best named path to the value (see helper/src/names.rs): its text, how many places it
     /// leads to now and what it means. Checked the way a restart finds it: by name. `unreal`:
     /// only through an Unreal game's objects or a Mono class's live object (fast; nothing for other games).
-    fn named_path(&mut self, loc: Loc, unreal: bool) -> Option<(String, usize, String)> {
+    /// Last, the type the place holds: a Java field's own (a search for a whole number finds a
+    /// `long`'s first 4 bytes), else `loc`'s.
+    fn named_path(&mut self, loc: Loc, unreal: bool) -> Option<(String, usize, String, Kind)> {
         let reply = self.helper.call(&format!("names {loc}{}", if unreal { " unreal" } else { "" }));
-        for l in reply.iter().filter(|l| !l.starts_with("named ") && !(unreal && l.starts_with("0 named paths"))) {
+        for l in reply.iter().filter(|l| !l.starts_with("named ") && !l.starts_with("type ") && !(unreal && l.starts_with("0 named paths"))) {
             self.say(l);
         }
+        let kind = reply.iter().find_map(|l| l.strip_prefix("type ")).and_then(Kind::parse).unwrap_or(loc.kind);
         for line in reply.iter().filter_map(|l| l.strip_prefix("named ")) {
             let mut f = line.splitn(3, ' ');
             let (Some(text), Some(_)) = (f.next(), f.next()) else { continue };
-            let (places, doubt) = self.follow_named(loc.kind, text);
+            let (places, doubt) = self.follow_named(kind, text);
             if let Some(why) = doubt {
                 self.say(&format!("named path {text} left out: {why}"));
                 continue;
             }
             if places.iter().any(|(p, _)| p.addr == loc.addr) {
-                return Some((text.to_owned(), places.len(), f.next().unwrap_or_default().to_owned()));
+                return Some((text.to_owned(), places.len(), f.next().unwrap_or_default().to_owned(), kind));
             }
         }
         None
@@ -5685,6 +5699,13 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profiles_stay_in_their_folder() {
+        for exe in ["../../../test-game/java/Stand.java", "game/net.x.Main", "..\\x.exe"] {
+            assert_eq!(profile_path(exe).parent(), Some(data_dir().join("profiles").as_path()), "{exe}");
+        }
+    }
 
     #[cfg(windows)]
     #[test]

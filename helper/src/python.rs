@@ -768,7 +768,8 @@ pub struct PyPath {
     steps: Vec<Step>,
 }
 
-fn encode(name: &str) -> String {
+/// A name as a path writes it: letters, digits and `_` as they are, every other byte as `%XX`.
+pub(crate) fn encode(name: &str) -> String {
     name.chars()
         .map(|c| match c {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => c.to_string(),
@@ -777,7 +778,7 @@ fn encode(name: &str) -> String {
         .collect()
 }
 
-fn decode(text: &str) -> Option<String> {
+pub(crate) fn decode(text: &str) -> Option<String> {
     let mut bytes = Vec::new();
     let mut it = text.bytes();
     while let Some(b) = it.next() {

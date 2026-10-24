@@ -160,6 +160,8 @@ fn java_game(args: &[String]) -> Option<String> {
             | "--add-reads" | "--patch-module" | "--limit-modules" | "--upgrade-module-path" => {
                 args.next();
             }
+            // A source file run as it is (`java Game.java`): its name, like a jar's.
+            a if a.ends_with(".java") => return a.rsplit(['/', '\\']).next().map(str::to_owned),
             a if !a.starts_with('-') => return Some(a.to_owned()),
             _ => {}
         }
@@ -595,6 +597,12 @@ pub(crate) enum Kind {
     /// A 1-byte whole number, unsigned (an Unreal enum: the character's movement mode).
     /// Never searched for: tweaks write it.
     U8,
+    /// A 1-byte whole number, signed (a Java `byte`). Never searched for: the Browse tab lists them.
+    I8,
+    /// An 8-byte whole number, signed (a Java `long`). Never searched for: one holding a small
+    /// number starts with the same 4 bytes as an i32 of it, so a search finds its start and
+    /// saving by name takes the field's own type.
+    I64,
 }
 
 /// The names of `Kind::Bit`.
@@ -618,6 +626,8 @@ impl Kind {
             Kind::Bit(n) => BITS[n as usize & 7],
             Kind::JsBool => "jsbool",
             Kind::U8 => "u8",
+            Kind::I8 => "i8",
+            Kind::I64 => "i64",
         }
     }
 
@@ -637,15 +647,15 @@ impl Kind {
         if let Some(n) = BITS.iter().position(|b| *b == s) {
             return Some(Kind::Bit(n as u8));
         }
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8, Kind::I8, Kind::I64]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
         match self {
-            Kind::Bit(_) | Kind::U8 => 1,
+            Kind::Bit(_) | Kind::U8 | Kind::I8 => 1,
             Kind::U16 => 2,
             Kind::I32 | Kind::F32 | Kind::Smi => 4,
-            Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py => 8,
+            Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py | Kind::I64 => 8,
             Kind::JsBool => js::bool_width(),
             Kind::Gm => 16,
         }
@@ -670,6 +680,8 @@ impl Kind {
             },
             Kind::Bit(n) => f64::from((b[0] >> (n & 7)) & 1),
             Kind::U8 => f64::from(b[0]),
+            Kind::I8 => f64::from(b[0] as i8),
+            Kind::I64 => i64::from_le_bytes(b[..8].try_into().unwrap()) as f64,
             Kind::JsBool => js::bool_value(b).map_or(f64::NAN, f64::from),
         }
     }
@@ -681,7 +693,7 @@ impl Kind {
     fn fits(self, lo: f64, hi: f64, n: Shown) -> bool {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
-            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 => lo <= n.scaled && n.scaled <= hi,
+            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 | Kind::I8 | Kind::I64 => lo <= n.scaled && n.scaled <= hi,
             Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
@@ -777,6 +789,8 @@ fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
         }
         Kind::JsBool => js::write_bool(mem, addr, v != 0.0),
         Kind::U8 => mem.write_all_at(&[v.round().clamp(0.0, 255.0) as u8], addr),
+        Kind::I8 => mem.write_all_at(&[v.round().clamp(-128.0, 127.0) as i8 as u8], addr),
+        Kind::I64 => mem.write_all_at(&(v.round() as i64).to_le_bytes(), addr),
     }
 }
 
@@ -1006,7 +1020,9 @@ fn named_doubt(heap: &Heap, leads: &[u64], roots: &[u64], kind: Kind, path: &Nam
             return Some(format!("this game keeps whole numbers as {}, not {}", ints.unwrap_or_default(), kind.name()));
         }
     }
-    let plausible = |v: f64| v.is_finite() && v.abs() < 1e9 && (v == 0.0 || v.abs() >= 1e-6);
+    // A long may hold more (a Java game's gold in the billions), up to what a double holds exactly.
+    let most = if kind == Kind::I64 { 9.007e15 } else { 1e9 };
+    let plausible = |v: f64| v.is_finite() && v.abs() < most && (v == 0.0 || v.abs() >= 1e-6);
     if !leads.iter().all(|&a| read_value(mem, a, kind).is_some_and(plausible)) {
         return Some("some of its places don't hold a number".into());
     }
@@ -2173,7 +2189,7 @@ impl MemScan<'_> {
                 // The scan runs after the screen was read: allow for a fraction
                 // that has moved on by up to 1 since.
                 let hit = match kind {
-                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 => value == n.scaled,
+                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 | Kind::I8 | Kind::I64 => value == n.scaled,
                     Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
@@ -2475,10 +2491,10 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                     }
                     for &kind in &snap.kinds {
                         let step = match kind {
-                            Kind::Bit(_) | Kind::U8 => 1,
+                            Kind::Bit(_) | Kind::U8 | Kind::I8 => 1,
                             Kind::U16 => 2,
                             Kind::I32 | Kind::F32 | Kind::Xor | Kind::Smi => 4,
-                            Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsBool => 8,
+                            Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsBool | Kind::I64 => 8,
                         };
                         for o in (w..w + 8).step_by(step) {
                             let size = kind.size();
@@ -3851,7 +3867,8 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 
 /// names <hex addr[:type]> [unreal]: named paths that lead to the value now, best first ("unreal": only
 /// the engine's own: Unreal objects and Unity classes, no tracing or pointer map needed): "named <path>
-/// <places it leads to> <what it means>" (see names.rs), then a summary line.
+/// <places it leads to> <what it means>" (see names.rs), then a summary line. A Java field of
+/// another type than asked for says so first: "type <type>".
 fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let (addr, only_unreal) = match arg.trim().strip_suffix(" unreal") {
         Some(a) => (a, true),
@@ -3917,7 +3934,11 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     }
     // A field of a Java game's objects, by its path from a class's static field.
     if s.java {
-        if let Some((p, leads)) = java::discover(&heap, target) {
+        if let Some((p, leads, field)) = java::discover(&heap, target) {
+            // The field's own type, when the search's isn't it.
+            if field != kind.name() {
+                writeln!(out, "type {field}")?;
+            }
             writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
             return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
         }
@@ -4438,6 +4459,9 @@ mod tests {
         }
         assert_eq!(Kind::parse("jsbool"), Some(Kind::JsBool));
         assert_eq!(Kind::parse("bit8"), None);
+        assert_eq!(Kind::I8.decode(&[0xff]), -1.0);
+        assert_eq!(Kind::I64.decode(&(-5_000_000_000i64).to_le_bytes()), -5e9);
+        assert_eq!(Kind::parse("i64"), Some(Kind::I64));
     }
 
     #[test]
@@ -4496,6 +4520,7 @@ mod tests {
         assert_eq!(game("java", &aoc), Some("com.ageofconquest.app.user.aoc.Main".into()));
         assert_eq!(game("java", &["-p", "mods", "-m", "game/net.x.Main"]), Some("game/net.x.Main".into()));
         assert_eq!(game("java", &["-version"]), None);
+        assert_eq!(game("java", &["../../game/Stand.java", "cmd"]), Some("Stand.java".into()));
         assert_eq!(game("mono", &["--debug", "Game.exe"]), Some("Game.exe".into()));
         assert_eq!(game("python3", &["-u", "frozen_escape.py"]), Some("frozen_escape.py".into()));
         assert_eq!(game("python3.11", &["/home/p/Games/ppu/src/main.py"]), Some("ppu (Python)".into()));

@@ -35,7 +35,7 @@ const goodName = (s) => /^[\p{L}\p{N}_-]{1,32}$/u.test(s);
 const goodBuild = (s) => /^[\p{L}\p{N}_-]{1,64}$/u.test(s);
 // Ferret's value types: the searched ones, the engines' own (GameMaker, Lua, Python, RPG Maker's
 // small integers and true/false) and on/off flags (a bit of a byte).
-const KINDS = ["i32", "f32", "f64", "xor", "u16", "gm", "lua", "py", "smi", "jsbool", "bit0", "bit1", "bit2", "bit3", "bit4", "bit5", "bit6", "bit7"];
+const KINDS = ["i32", "f32", "f64", "xor", "u16", "gm", "lua", "py", "smi", "jsbool", "u8", "i8", "i64", "bit0", "bit1", "bit2", "bit3", "bit4", "bit5", "bit6", "bit7"];
 // Named paths by engine (core.rs `engine_path`) and Unity-style string paths.
 const NAMED = ["gd:", "mono:", "il2cpp:", "ue:", "js:", "gml:", "lua:", "java:", "py:", "air:", "{", '"'];
 

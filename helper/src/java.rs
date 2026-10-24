@@ -6,7 +6,9 @@
 //! Symbol), its fields (name, type, offset: InstanceKlass's field info, names in its constant
 //! pool) and its statics (in the class's mirror, a java.lang.Class object). A value is named by
 //! a class's static field and the fields from there: `java:com.example.Game#player.hp`,
-//! `java:...Dungeon#gold`, `[i]` for an array's element (an ArrayList's `elementData[2]`).
+//! `java:...Dungeon#gold`, `[i]` for an array's element (an ArrayList's `elementData[2]`),
+//! `["key"]` for a map's entry by its key (a string's text, a boxed number's digits, an enum
+//! constant's name; written `%XX`-encoded like Python's names).
 //!
 //! Java's collector moves objects: a found address goes stale at the next collection, and the
 //! old copy's memory is reused. So a path is walked again right before every write (limits do
@@ -15,6 +17,7 @@
 
 use crate::mono::player_like;
 use crate::names::Heap;
+use crate::python::{decode, encode};
 use crate::ue::{Listed, ListedObject, MAX_LISTED};
 use std::collections::{HashMap, HashSet, VecDeque};
 use crate::mem::Mem;
@@ -28,6 +31,15 @@ const MAX_VISITED: usize = 20000;
 const MAX_DEPTH: usize = 12;
 /// Elements read from one array at most.
 const MAX_ELEMENTS: u32 = 256;
+/// Slots of a map's table read at most (its entries: `MAX_ELEMENTS`; a table has room to spare).
+const MAX_SLOTS: u32 = 4096;
+/// Maps looked through by key: Java's hash maps (a table of node chains: the key, value and
+/// next fields), TreeMap, EnumMap, and libGDX's (keys and values in two arrays).
+const MAPS: &[&str] = &[
+    "java/util/HashMap", "java/util/LinkedHashMap", "java/util/Hashtable", "java/util/concurrent/ConcurrentHashMap", "java/util/TreeMap", "java/util/EnumMap",
+    "com/badlogic/gdx/utils/ObjectMap", "com/badlogic/gdx/utils/OrderedMap", "com/badlogic/gdx/utils/ObjectIntMap", "com/badlogic/gdx/utils/ObjectFloatMap",
+    "com/badlogic/gdx/utils/IntMap", "com/badlogic/gdx/utils/IntIntMap", "com/badlogic/gdx/utils/IntFloatMap",
+];
 /// Classes read from the class list at most (a runaway list is garbage).
 const MAX_CLASSES: usize = 200_000;
 /// Packages that aren't the game's: Java's own, and common libraries (their statics and
@@ -37,6 +49,7 @@ const LIBRARIES: &[&str] = &[
     "org/json/", "com/google/", "org/apache/", "org/slf4j/", "ch/qos/", "io/netty/", "it/unimi/", "org/objectweb/", "net/java/", "paulscode/",
     "de/jcm/", "org/jetbrains/", "org/intellij/", "com/fasterxml/", "org/yaml/", "javafx/", "com/jogamp/", "jogamp/", "org/joml/",
     "club/minnced/", "net/arikia/", "com/codedisaster/", "org/luaj/", "processing/core/", "processing/opengl/", "processing/awt/",
+    "com/jcraft/",
 ];
 
 /// A field of a class, as its metadata describes it.
@@ -46,6 +59,9 @@ pub struct Field {
     sig: String,
     offset: u32,
     is_static: bool,
+    /// `final`: a static final number is a constant javac copies into the code using it
+    /// (`serialVersionUID`, `MAX_HP = 100`): writing it changes nothing.
+    is_final: bool,
 }
 
 /// What a field or element holds, for listing and walking.
@@ -89,8 +105,21 @@ pub struct Jvm {
     klass_shift: u32,
     klass_in_mark: u32,
     pub major: u32,
+    threads: Option<Threads>,
     classes: Mutex<Classes>,
     fields: Mutex<HashMap<u64, Arc<Vec<Field>>>>,
+}
+
+/// Where the JVM keeps its Java threads: JDK 10+ a ThreadsList
+/// (`ThreadsSMRSupport::_java_thread_list`: a length and an array of JavaThread*), JDK 8-9 a
+/// chain from `Threads::_thread_list` through `JavaThread::_next`. A thread's java.lang.Thread
+/// object: `JavaThread::_threadObj` (an OopHandle since JDK 16, else the oop itself).
+#[derive(Clone, Copy)]
+struct Threads {
+    list: Option<(u64, u64, u64)>,
+    chain: Option<(u64, u64)>,
+    obj: u64,
+    handle: bool,
 }
 
 /// Where a field's optional items' flag bits are (JDK 21-26; later JDKs added value-class
@@ -331,6 +360,12 @@ impl Jvm {
             return None;
         }
         let major = addr("Abstract_VM_Version", "_vm_major_version").and_then(|a| half(mem, a)).unwrap_or(0);
+        let threads = structs.get(&("JavaThread".into(), "_threadObj".into())).filter(|v| !v.1).map(|v| Threads {
+            list: addr("ThreadsSMRSupport", "_java_thread_list").zip(off("ThreadsList", "_length")).zip(off("ThreadsList", "_threads")).map(|((a, l), t)| (a, l, t)),
+            chain: addr("Threads", "_thread_list").zip(off("JavaThread", "_next")),
+            obj: v.2,
+            handle: v.0.as_deref().is_some_and(|t| t.contains("OopHandle")),
+        });
         let mut jvm = Jvm {
             cld_head: addr("ClassLoaderDataGraph", "_head")?,
             cld_klasses: off("ClassLoaderData", "_klasses")?,
@@ -356,6 +391,7 @@ impl Jvm {
             klass_shift,
             klass_in_mark: ints.get("markWord::klass_shift").copied().unwrap_or(42) as u32,
             major,
+            threads: threads.filter(|t| t.list.is_some() || t.chain.is_some()),
             classes: Mutex::new(Classes::default()),
             fields: Mutex::new(HashMap::new()),
         };
@@ -461,7 +497,7 @@ impl Jvm {
                     unsigned5(&b, &mut i)?;
                 }
             }
-            out.push(Field { name: self.cp_symbol(mem, cp, name)?, sig: self.cp_symbol(mem, cp, sig)?, offset, is_static: access & 8 != 0 });
+            out.push(Field { name: self.cp_symbol(mem, cp, name)?, sig: self.cp_symbol(mem, cp, sig)?, offset, is_static: access & 8 != 0, is_final: access & 0x10 != 0 });
         }
         // The rest: injected fields, then a zero byte (and, in later JDKs, nothing else).
         let clean = b.get(i..).is_some_and(|rest| rest.len() <= 1 + 8 * 4) && out.iter().all(|f| f.sig.len() >= 1 && "BCDFIJSZL[".contains(&f.sig[..1]));
@@ -484,6 +520,7 @@ impl Jvm {
                 sig: self.cp_symbol(mem, cp, slot(o.sig)?)?,
                 offset: packed >> o.tag,
                 is_static: access & 8 != 0,
+                is_final: access & 0x10 != 0,
             });
         }
         Some(out)
@@ -515,6 +552,22 @@ impl Jvm {
                 break;
             }
             out.extend(self.own_fields(mem, k).iter().filter(|f| !f.is_static).cloned());
+            k = word(mem, k + self.klass_super).unwrap_or(0);
+        }
+        out
+    }
+
+    /// The instance fields an object's game classes declare (not those it inherits from a
+    /// library's class: a libGDX Stage's `debugAll`, a Swing panel's sizes).
+    fn game_fields(&self, mem: &Mem, mut k: u64) -> Vec<Field> {
+        let mut out = Vec::new();
+        for _ in 0..32 {
+            if k == 0 {
+                break;
+            }
+            if self.klass_name(mem, k).is_some_and(|n| !is_library(&n)) {
+                out.extend(self.own_fields(mem, k).iter().filter(|f| !f.is_static).cloned());
+            }
             k = word(mem, k + self.klass_super).unwrap_or(0);
         }
         out
@@ -585,6 +638,10 @@ impl Jvm {
             Some(b'F') => Val::Num(at, "f32"),
             Some(b'D') => Val::Num(at, "f64"),
             Some(b'S' | b'C') => Val::Num(at, "u16"),
+            Some(b'J') => Val::Num(at, "i64"),
+            Some(b'B') => Val::Num(at, "i8"),
+            // A boolean is a byte holding 0 or 1.
+            Some(b'Z') => Val::Num(at, "bit0"),
             Some(b'L' | b'[') => self.reference(mem, at).map_or(Val::Other, Val::Obj),
             _ => Val::Other,
         }
@@ -592,6 +649,10 @@ impl Jvm {
 
     /// An array's elements (up to `MAX_ELEMENTS`): index and what it holds.
     fn elements(&self, heap: &Heap, a: u64, name: &str) -> Vec<(u32, Val)> {
+        self.elements_up_to(heap, a, name, MAX_ELEMENTS)
+    }
+
+    fn elements_up_to(&self, heap: &Heap, a: u64, name: &str, most: u32) -> Vec<(u32, Val)> {
         let mem = heap.mem();
         let elem_sig = &name[1..];
         let size = match elem_sig.as_bytes().first() {
@@ -603,7 +664,220 @@ impl Jvm {
         };
         let (len_at, base) = self.array_layout(size);
         let Some(len) = half(mem, a + len_at) else { return Vec::new() };
-        (0..len.min(MAX_ELEMENTS)).map(|i| (i, self.val(mem, a + base + size * u64::from(i), elem_sig))).collect()
+        (0..len.min(most)).map(|i| (i, self.val(mem, a + base + size * u64::from(i), elem_sig))).collect()
+    }
+
+    /// What an object's field holds (`k`: the object's class).
+    fn field(&self, mem: &Mem, o: u64, k: u64, name: &str) -> Option<Val> {
+        let f = self.instance_fields(mem, k).into_iter().find(|f| f.name == name)?;
+        Some(self.val(mem, o + u64::from(f.offset), &f.sig))
+    }
+
+    /// The object a field points to, checked, with its class.
+    fn field_object(&self, heap: &Heap, o: u64, k: u64, name: &str) -> Option<(u64, u64)> {
+        match self.field(heap.mem(), o, k, name)? {
+            Val::Obj(x) if x != 0 => Some((x, self.klass_of(heap, x)?)),
+            _ => None,
+        }
+    }
+
+    /// A java.lang.String's text (JDK 9+: bytes, Latin-1 or UTF-16 by `coder`; JDK 8: chars).
+    fn string(&self, heap: &Heap, o: u64, k: u64) -> Option<String> {
+        let mem = heap.mem();
+        let (a, ak) = self.field_object(heap, o, k, "value")?;
+        let wide = match self.klass_name(mem, ak)?.as_str() {
+            "[C" => true,
+            "[B" => matches!(self.field(mem, o, k, "coder"), Some(Val::Num(at, _)) if byte(mem, at) == Some(1)),
+            _ => return None,
+        };
+        let (len_at, base) = self.array_layout(if wide { 2 } else { 1 });
+        let len = half(mem, a + len_at)? as usize;
+        let bytes = if self.klass_name(mem, ak)? == "[C" { len * 2 } else { len };
+        if bytes > 1024 {
+            return None;
+        }
+        let mut b = vec![0u8; bytes];
+        mem.read_exact_at(&mut b, a + base).ok()?;
+        match wide {
+            true => String::from_utf16(&b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()).ok(),
+            false => Some(b.iter().map(|&c| char::from(c)).collect()),
+        }
+    }
+
+    /// A map's key as a path names it: a string's text, a boxed whole number's digits, an enum
+    /// constant's name; None for other keys (their entries aren't listed).
+    fn key_text(&self, heap: &Heap, v: Val) -> Option<String> {
+        let mem = heap.mem();
+        let o = match v {
+            Val::Num(at, kind) => return whole(mem, at, kind).map(|n| n.to_string()),
+            Val::Obj(o) if o != 0 => o,
+            _ => return None,
+        };
+        let k = self.klass_of(heap, o)?;
+        match self.klass_name(mem, k)?.as_str() {
+            "java/lang/String" => self.string(heap, o, k),
+            "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" => self.key_text(heap, self.field(mem, o, k, "value")?),
+            _ if self.is_enum(mem, k) => {
+                let (n, nk) = self.field_object(heap, o, k, "name")?;
+                self.string(heap, n, nk)
+            }
+            _ => None,
+        }
+    }
+
+    /// Which of `MAPS` a class is or extends.
+    fn map_kind(&self, mem: &Mem, mut k: u64) -> Option<&'static str> {
+        for _ in 0..32 {
+            if k == 0 {
+                return None;
+            }
+            let name = self.klass_name(mem, k)?;
+            if let Some(m) = MAPS.iter().find(|m| **m == name) {
+                return Some(m);
+            }
+            k = word(mem, k + self.klass_super)?;
+        }
+        None
+    }
+
+    /// A map's entries (up to `most`: the list shows `MAX_ELEMENTS`, a saved path looks among
+    /// `MAX_SLOTS`): each key's text and what its value holds. None for anything but `MAPS`.
+    fn entries(&self, heap: &Heap, o: u64, k: u64, most: u32) -> Option<Vec<(String, Val)>> {
+        let mem = heap.mem();
+        let most = most as usize;
+        let mut out: Vec<(Val, Val)> = Vec::new();
+        let array = |name: &str| -> Vec<Val> {
+            let Some((a, ak)) = self.field_object(heap, o, k, name) else { return Vec::new() };
+            let Some(an) = self.klass_name(mem, ak).filter(|n| n.starts_with('[')) else { return Vec::new() };
+            self.elements_up_to(heap, a, &an, MAX_SLOTS).into_iter().map(|(_, v)| v).collect()
+        };
+        match self.map_kind(mem, k)? {
+            "java/util/TreeMap" => {
+                let mut stack: Vec<(u64, u64)> = self.field_object(heap, o, k, "root").into_iter().collect();
+                while let Some((n, nk)) = stack.pop() {
+                    if out.len() >= most || stack.len() > most {
+                        break;
+                    }
+                    if let (Some(key), Some(v)) = (self.field(mem, n, nk, "key"), self.field(mem, n, nk, "value")) {
+                        out.push((key, v));
+                    }
+                    stack.extend(["left", "right"].iter().filter_map(|s| self.field_object(heap, n, nk, s)));
+                }
+            }
+            "java/util/EnumMap" => {
+                let keys = array("keyUniverse");
+                out.extend(keys.into_iter().zip(array("vals")).filter(|(_, v)| *v != Val::Obj(0)).take(most));
+            }
+            m if m.starts_with("com/badlogic/") => {
+                // A key of 0 (IntMap's) or null is an empty slot.
+                let keys = array("keyTable");
+                out.extend(keys.into_iter().zip(array("valueTable")).filter(|(key, _)| *key != Val::Obj(0) && !matches!(key, Val::Num(at, kind) if whole(mem, *at, kind) == Some(0))).take(most));
+            }
+            m => {
+                let value = if m.ends_with("ConcurrentHashMap") { "val" } else { "value" };
+                for slot in array("table") {
+                    let Val::Obj(mut n) = slot else { continue };
+                    // A bucket's chain (a tree's nodes are chained too).
+                    for _ in 0..64 {
+                        let Some(nk) = self.klass_of(heap, n) else { break };
+                        match self.klass_name(mem, nk).as_deref() {
+                            // ConcurrentHashMap: a tree's bin holds its first node; a resize's
+                            // placeholders hold nothing.
+                            Some("java/util/concurrent/ConcurrentHashMap$TreeBin") => match self.field_object(heap, n, nk, "first") {
+                                Some((f, _)) => n = f,
+                                None => break,
+                            },
+                            Some(c) if c.starts_with("java/util/concurrent/ConcurrentHashMap$") && !c.ends_with("$Node") && !c.ends_with("$TreeNode") => break,
+                            _ => {
+                                if let (Some(key), Some(v)) = (self.field(mem, n, nk, "key"), self.field(mem, n, nk, value)) {
+                                    out.push((key, v));
+                                }
+                                match self.field_object(heap, n, nk, "next") {
+                                    Some((x, _)) => n = x,
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
+                    if out.len() >= most {
+                        break;
+                    }
+                }
+            }
+        }
+        Some(out.into_iter().take(most).filter_map(|(key, v)| Some((self.key_text(heap, key)?, v))).collect())
+    }
+
+    /// The java.lang.Thread objects of the JVM's Java threads.
+    fn thread_objects(&self, mem: &Mem) -> Vec<u64> {
+        let Some(t) = self.threads else { return Vec::new() };
+        let mut threads = Vec::new();
+        if let Some((list, len, array)) = t.list {
+            if let Some(l) = word(mem, list).filter(|&l| l != 0) {
+                let n = half(mem, l + len).unwrap_or(0).min(4096);
+                let a = word(mem, l + array).unwrap_or(0);
+                threads.extend((0..u64::from(n)).filter_map(|i| word(mem, a + 8 * i)));
+            }
+        } else if let Some((head, next)) = t.chain {
+            let mut jt = word(mem, head).unwrap_or(0);
+            while jt != 0 && threads.len() < 4096 {
+                threads.push(jt);
+                jt = word(mem, jt + next).unwrap_or(0);
+            }
+        }
+        threads
+            .into_iter()
+            .filter_map(|jt| {
+                let o = word(mem, jt + t.obj)?;
+                if t.handle { word(mem, o) } else { Some(o) }
+            })
+            .filter(|&o| o != 0)
+            .collect()
+    }
+
+    /// The game's objects its threads run, with their classes: a Runnable given to `new Thread`
+    /// (JDK 19+ keeps it in the thread's `holder.task`, before in `target`), a lambda's captured
+    /// objects, a game class extending Thread. Roots for games no static field leads into
+    /// (Blue Boy Adventure: `GamePanel implements Runnable`, holding the player).
+    fn thread_roots(&self, heap: &Heap) -> Vec<(u64, u64)> {
+        let mem = heap.mem();
+        let mut out: Vec<(u64, u64)> = Vec::new();
+        for t in self.thread_objects(mem) {
+            let Some(tk) = self.klass_of(heap, t) else { continue };
+            let mut objects = vec![(t, tk)];
+            let task = match self.field_object(heap, t, tk, "holder") {
+                Some((h, hk)) => self.field_object(heap, h, hk, "task"),
+                None => self.field_object(heap, t, tk, "target"),
+            };
+            match task {
+                Some((o, ok)) if self.klass_name(mem, ok).is_some_and(|n| n.contains("$$Lambda")) => {
+                    for f in self.instance_fields(mem, ok) {
+                        if let Val::Obj(x) = self.val(mem, o + u64::from(f.offset), &f.sig) {
+                            objects.extend(self.klass_of(heap, x).map(|xk| (x, xk)));
+                        }
+                    }
+                }
+                Some(task) => objects.push(task),
+                None => {}
+            }
+            for (o, k) in objects {
+                if self.klass_name(mem, k).is_some_and(|n| !is_library(&n) && !n.starts_with('[') && !n.contains("$$Lambda")) && !out.iter().any(|r| r.0 == o) {
+                    out.push((o, k));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A whole number of one of the list's types, as a key (IntMap's, a boxed number's).
+fn whole(mem: &Mem, at: u64, kind: &str) -> Option<i64> {
+    match kind {
+        "i32" => half(mem, at).map(|v| i64::from(v as i32)),
+        "i64" => word(mem, at).map(|v| v as i64),
+        "u16" => short(mem, at).map(i64::from),
+        "i8" => byte(mem, at).map(|v| i64::from(v as i8)),
+        _ => None,
     }
 }
 
@@ -632,11 +906,13 @@ fn short_name(class: &str) -> &str {
     class.rsplit('/').next().unwrap_or(class)
 }
 
-/// One step of a path: a field by name, or an array's element.
+/// One step of a path: a field by name, an array's element, or a map's entry.
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
     Field(String),
     Index(u32),
+    /// A map's entry by its key's text.
+    Key(String),
 }
 
 /// A saved path from a class's static field to a number.
@@ -644,43 +920,63 @@ enum Step {
 pub struct JavaPath {
     /// The class, with '/' (as the JVM names it).
     class: String,
+    /// From the object of that class one of the game's threads runs (`java:thread:<class>#`,
+    /// the steps then start with its field), else from the class's static field.
+    thread: bool,
     steps: Vec<Step>,
 }
 
 impl JavaPath {
-    /// "java:<class with dots>#<static>[.<field>|[i]]...".
+    /// "java:[thread:]<class with dots>#<static or field>[.<field>|[i]|["<key>"]]...".
     pub fn parse(text: &str) -> Option<JavaPath> {
-        let (class, rest) = text.strip_prefix("java:")?.split_once('#')?;
-        if class.is_empty() || class.contains(['/', ' ']) {
+        let text = text.strip_prefix("java:")?;
+        let (text, thread) = text.strip_prefix("thread:").map_or((text, false), |t| (t, true));
+        let (class, mut rest) = text.split_once('#')?;
+        if class.is_empty() || class.contains(['/', ' ', ':']) || rest.is_empty() {
             return None;
         }
         let mut steps = Vec::new();
-        for part in rest.split('.') {
-            let (name, idx) = part.split_once('[').map_or((part, None), |(n, i)| (n, Some(i)));
-            if name.is_empty() {
+        while !rest.is_empty() {
+            let (sep, body) = match rest.as_bytes()[0] {
+                b'.' | b'[' if !steps.is_empty() => (rest.as_bytes()[0], &rest[1..]),
+                _ if steps.is_empty() => (b'.', rest),
+                _ => return None,
+            };
+            if sep == b'[' {
+                if let Some(key) = body.strip_prefix('"') {
+                    let (k, after) = key.split_once("\"]")?;
+                    steps.push(Step::Key(decode(k)?));
+                    rest = after;
+                } else {
+                    let (n, after) = body.split_once(']')?;
+                    steps.push(Step::Index(n.parse().ok()?));
+                    rest = after;
+                }
+                continue;
+            }
+            let end = body.find(['.', '[']).unwrap_or(body.len());
+            if end == 0 {
                 return None;
             }
-            steps.push(Step::Field(name.to_owned()));
-            if let Some(idx) = idx {
-                for i in idx.split('[') {
-                    steps.push(Step::Index(i.strip_suffix(']')?.parse().ok()?));
-                }
-            }
+            steps.push(Step::Field(body[..end].to_owned()));
+            rest = &body[end..];
         }
-        Some(JavaPath { class: class.replace('.', "/"), steps })
+        Some(JavaPath { class: class.replace('.', "/"), thread, steps })
     }
 
     pub fn text(&self) -> String {
-        format!("java:{}#{}", self.class.replace('/', "."), self.fields_text())
+        format!("java:{}{}#{}", if self.thread { "thread:" } else { "" }, self.class.replace('/', "."), self.fields_text(true))
     }
 
-    fn fields_text(&self) -> String {
+    /// The steps; `encoded`: keys as a saved path writes them (`%20`), else as the list shows them.
+    fn fields_text(&self, encoded: bool) -> String {
         let mut t = String::new();
         for s in &self.steps {
             match s {
                 Step::Field(n) if t.is_empty() => t += n,
                 Step::Field(n) => t += &format!(".{n}"),
                 Step::Index(i) => t += &format!("[{i}]"),
+                Step::Key(k) => t += &format!("[\"{}\"]", if encoded { encode(k) } else { k.clone() }),
             }
         }
         t
@@ -690,7 +986,7 @@ impl JavaPath {
     fn shown(&self) -> String {
         match self.steps.is_empty() {
             true => short_name(&self.class).to_owned(),
-            false => format!("{}.{}", short_name(&self.class), self.fields_text()),
+            false => format!("{}.{}", short_name(&self.class), self.fields_text(false)),
         }
     }
 
@@ -708,7 +1004,7 @@ impl JavaPath {
     /// `Dungeon.hero.belongings.backpack`), if it goes through one.
     fn player_part(&self) -> Option<JavaPath> {
         let i = self.steps.iter().position(|s| matches!(s, Step::Field(n) if the_player(n)))?;
-        Some(JavaPath { class: self.class.clone(), steps: self.steps[..=i].to_vec() })
+        Some(JavaPath { class: self.class.clone(), thread: self.thread, steps: self.steps[..=i].to_vec() })
     }
 
     /// Whether the path goes through how something looks or sounds (`hero.sprite.scale`):
@@ -744,11 +1040,16 @@ fn follow(jvm: &Jvm, heap: &Heap, k: u64, path: &JavaPath) -> Option<u64> {
     if jvm.klass_name(mem, k)? != path.class {
         return None;
     }
-    let mirror = jvm.mirror(mem, k)?;
-    let Some(Step::Field(first)) = path.steps.first() else { return None };
-    let f = jvm.own_fields(mem, k).iter().find(|f| f.is_static && f.name == *first)?.clone();
-    let mut cur = jvm.val(mem, mirror + u64::from(f.offset), &f.sig);
-    for s in &path.steps[1..] {
+    // A thread's object is looked up again each time (the collector moves it).
+    let (mut cur, steps) = if path.thread {
+        (Val::Obj(jvm.thread_roots(heap).into_iter().find(|r| r.1 == k)?.0), &path.steps[..])
+    } else {
+        let mirror = jvm.mirror(mem, k)?;
+        let Some(Step::Field(first)) = path.steps.first() else { return None };
+        let f = jvm.own_fields(mem, k).iter().find(|f| f.is_static && f.name == *first)?.clone();
+        (jvm.val(mem, mirror + u64::from(f.offset), &f.sig), &path.steps[1..])
+    };
+    for s in steps {
         let Val::Obj(o) = cur else { return None };
         let ok = jvm.klass_of(heap, o)?;
         cur = match s {
@@ -763,6 +1064,7 @@ fn follow(jvm: &Jvm, heap: &Heap, k: u64, path: &JavaPath) -> Option<u64> {
                 }
                 jvm.elements(heap, o, &name).into_iter().find(|(x, _)| x == i)?.1
             }
+            Step::Key(key) => jvm.entries(heap, o, ok, MAX_SLOTS)?.into_iter().find(|(x, _)| x == key)?.1,
         };
     }
     match cur {
@@ -810,19 +1112,25 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
             continue;
         }
         let Some(mirror) = jvm.mirror(mem, k) else { continue };
-        let root = JavaPath { class: name.clone(), steps: Vec::new() };
+        let root = JavaPath { class: name.clone(), thread: false, steps: Vec::new() };
         let mut g = Group { path: root.clone(), class: name.clone(), statics: true, numbers: Vec::new() };
         // `$SwitchMap$...` and other fields the compiler made.
         for f in statics.into_iter().filter(|f| !f.name.starts_with('$')) {
             let p = root.then(Step::Field(f.name.clone()));
             match jvm.val(mem, mirror + u64::from(f.offset), &f.sig) {
-                Val::Num(at, kind) => g.numbers.push((f.name.clone(), at, kind, p)),
+                Val::Num(at, kind) if !f.is_final => g.numbers.push((f.name.clone(), at, kind, p)),
                 Val::Obj(o) if o != 0 => queues[queue_of(&p)].push_back((o, p, 1)),
                 _ => {}
             }
         }
         if !g.numbers.is_empty() {
             out.push(g);
+        }
+    }
+    for (o, k) in jvm.thread_roots(heap) {
+        if let Some(class) = jvm.klass_name(mem, k) {
+            let p = JavaPath { class, thread: true, steps: Vec::new() };
+            queues[queue_of(&p)].push_back((o, p, 1));
         }
     }
     let mut visited = 0;
@@ -844,11 +1152,23 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         }
         let mut g = Group { path: path.clone(), class: class.clone(), statics: false, numbers: Vec::new() };
         let mut refs: Vec<(Step, u64)> = Vec::new();
-        if class.starts_with('[') {
+        // Byte and boolean arrays are buffers and grids (a save's bytes, a map's tiles), not the
+        // player's numbers.
+        if class == "[B" || class == "[Z" {
+        } else if class.starts_with('[') {
             for (i, v) in jvm.elements(heap, o, &class) {
                 match v {
                     Val::Num(at, kind) => g.numbers.push((format!("[{i}]"), at, kind, path.then(Step::Index(i)))),
                     Val::Obj(x) if x != 0 => refs.push((Step::Index(i), x)),
+                    _ => {}
+                }
+            }
+        } else if let Some(entries) = jvm.entries(heap, o, k, MAX_ELEMENTS) {
+            for (key, v) in entries {
+                let p = path.then(Step::Key(key.clone()));
+                match v {
+                    Val::Num(at, kind) => g.numbers.push((format!("[\"{key}\"]"), at, kind, p)),
+                    Val::Obj(x) if x != 0 => refs.push((Step::Key(key), x)),
                     _ => {}
                 }
             }
@@ -858,9 +1178,14 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
                 refs.push((Step::Field(items.to_owned()), x));
             }
         } else if !is_library(&class) {
+            // A library superclass's numbers aren't listed (UI state); its references are
+            // followed (libGDX's `Game.screen` leads to the game's screen).
+            let own = jvm.game_fields(mem, k);
             for f in jvm.instance_fields(mem, k) {
                 match jvm.val(mem, o + u64::from(f.offset), &f.sig) {
-                    Val::Num(at, kind) => g.numbers.push((f.name.clone(), at, kind, path.then(Step::Field(f.name.clone())))),
+                    Val::Num(at, kind) if own.iter().any(|g| g.name == f.name && g.offset == f.offset) => {
+                        g.numbers.push((f.name.clone(), at, kind, path.then(Step::Field(f.name.clone()))))
+                    }
                     Val::Obj(x) if x != 0 => refs.push((Step::Field(f.name.clone()), x)),
                     _ => {}
                 }
@@ -922,11 +1247,13 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     Some(out)
 }
 
-/// The path to a number the list has, checked by following it the way a restart does.
-pub fn discover(heap: &Heap, target: u64) -> Option<(JavaPath, Vec<u64>)> {
-    let path = groups(heap)?.into_iter().flat_map(|g| g.numbers).find(|n| n.1 == target)?.3;
+/// The path to a number the list has, checked by following it the way a restart does, and
+/// the field's type (a search for a whole number lands on a `long`'s first 4 bytes, or a
+/// `byte`'s: written as 4 bytes, either would go wrong).
+pub fn discover(heap: &Heap, target: u64) -> Option<(JavaPath, Vec<u64>, &'static str)> {
+    let (_, _, kind, path) = groups(heap)?.into_iter().flat_map(|g| g.numbers).find(|n| n.1 == target)?;
     let leads = walk(heap, &find_roots(heap, &path), &path);
-    leads.contains(&target).then_some((path, leads))
+    leads.contains(&target).then_some((path, leads, kind))
 }
 
 /// jvm [class]: what was found (the JVM, how it packs references, the field format), or a
@@ -963,6 +1290,8 @@ pub fn diagnose(heap: &Heap, class: &str) -> Vec<String> {
             (true, Val::Num(a, "i32")) => half(mem, a).map(|v| (v as i32).to_string()).unwrap_or_default(),
             (true, Val::Num(a, "f32")) => half(mem, a).map(|v| f32::from_bits(v).to_string()).unwrap_or_default(),
             (true, Val::Num(a, "f64")) => word(mem, a).map(|v| f64::from_bits(v).to_string()).unwrap_or_default(),
+            (true, Val::Num(a, "bit0")) => byte(mem, a).map(|v| (v != 0).to_string()).unwrap_or_default(),
+            (true, Val::Num(a, k @ ("i64" | "i8"))) => whole(mem, a, k).map(|v| v.to_string()).unwrap_or_default(),
             (true, Val::Num(a, _)) => short(mem, a).map(|v| v.to_string()).unwrap_or_default(),
             (true, Val::Obj(o)) => format!("{o:#x}"),
             _ => String::new(),
@@ -978,7 +1307,7 @@ mod tests {
 
     #[test]
     fn paths_read_back() {
-        for text in ["java:com.shatteredpixel.shatteredpixeldungeon.Dungeon#gold", "java:a.b.Game#hero.HP", "java:Game$Inner#items.elementData[2].quantity", "java:G#grid[1][2]"] {
+        for text in ["java:com.shatteredpixel.shatteredpixeldungeon.Dungeon#gold", "java:a.b.Game#hero.HP", "java:Game$Inner#items.elementData[2].quantity", "java:G#grid[1][2]", "java:G#m[\"k\"][3]", "java:thread:main.GamePanel#player.life"] {
             assert_eq!(JavaPath::parse(text).unwrap().text(), text, "{text}");
         }
         let p = JavaPath::parse("java:a.b.Game#hero.items[3].hp").unwrap();
@@ -989,6 +1318,11 @@ mod tests {
         assert!(JavaPath::parse("java:#x").is_none());
         assert!(JavaPath::parse("java:G#a..b").is_none());
         assert!(JavaPath::parse("java:G#a[x]").is_none());
+        let p = JavaPath::parse("java:G#stats[\"Iron%20Sword\"].count").unwrap();
+        assert_eq!(p.steps, vec![Step::Field("stats".into()), Step::Key("Iron Sword".into()), Step::Field("count".into())]);
+        assert_eq!(p.text(), "java:G#stats[\"Iron%20Sword\"].count");
+        assert_eq!(p.shown(), "G.stats[\"Iron Sword\"].count");
+        assert!(JavaPath::parse("java:G#m[\"a\"]x").is_none());
     }
 
     #[test]
