@@ -24,6 +24,7 @@ mod os;
 mod pointers;
 mod steam;
 mod trace;
+mod tweaks;
 mod ue;
 #[cfg(windows)]
 mod win32;

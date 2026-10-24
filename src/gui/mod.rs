@@ -90,6 +90,8 @@ pub enum Event {
     Browse(Result<(String, Option<String>, Option<String>), String>),
     /// The player's numbers by name (the Browse tab), or why there are none.
     Player(Result<Vec<crate::core::PlayerObject>, String>),
+    /// The Browse tab's tweaks (`Core::tweaks`).
+    Tweaks(Result<Vec<crate::core::TweakRow>, String>),
     /// The saved values and the Browse tab's numbers now, in its order.
     Peeked(Result<Vec<ValueRow>, String>, Vec<Option<f64>>),
     /// Games running with anti-cheat that may look at the whole computer (`Core::risky_games`).
@@ -930,6 +932,7 @@ impl Ui {
                 self.browse.update(&now);
             }
             Event::Player(list) => self.browse.show(list),
+            Event::Tweaks(list) => self.browse.show_tweaks(list),
             Event::Browsable(pid, can) => self.browsable(pid, can),
             Event::Risky(games) => self.warn_risky(&games),
             Event::BrowseSaved(Ok((name, msg, flag))) => {
@@ -1620,6 +1623,7 @@ fn kind_text(kind: crate::core::Kind) -> String {
         Kind::Smi => tr!("JavaScript whole number"),
         Kind::Bit(_) => tr!("on/off flag"),
         Kind::JsBool => tr!("JavaScript on/off flag"),
+        Kind::U8 => tr!("1-byte whole number"),
     }
 }
 

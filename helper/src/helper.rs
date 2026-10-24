@@ -18,6 +18,7 @@ use crate::godot::{self, DictPath};
 use crate::names::{self, Heap, NamedPath};
 use crate::pointers::{self, Module, Pointers, PtrPath};
 use crate::launchers;
+use crate::tweaks;
 use crate::mono::{self, MonoPath};
 use crate::js::{self, JsPath};
 use crate::gml::{self, GmlPath};
@@ -591,6 +592,9 @@ pub(crate) enum Kind {
     /// V8's two objects for them, written by pointing it to the other; never written while it
     /// holds something else.
     JsBool,
+    /// A 1-byte whole number, unsigned (an Unreal enum: the character's movement mode).
+    /// Never searched for: tweaks write it.
+    U8,
 }
 
 /// The names of `Kind::Bit`.
@@ -613,6 +617,7 @@ impl Kind {
             Kind::Smi => "smi",
             Kind::Bit(n) => BITS[n as usize & 7],
             Kind::JsBool => "jsbool",
+            Kind::U8 => "u8",
         }
     }
 
@@ -632,12 +637,12 @@ impl Kind {
         if let Some(n) = BITS.iter().position(|b| *b == s) {
             return Some(Kind::Bit(n as u8));
         }
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
         match self {
-            Kind::Bit(_) => 1,
+            Kind::Bit(_) | Kind::U8 => 1,
             Kind::U16 => 2,
             Kind::I32 | Kind::F32 | Kind::Smi => 4,
             Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py => 8,
@@ -664,6 +669,7 @@ impl Kind {
                 _ => f64::NAN,
             },
             Kind::Bit(n) => f64::from((b[0] >> (n & 7)) & 1),
+            Kind::U8 => f64::from(b[0]),
             Kind::JsBool => js::bool_value(b).map_or(f64::NAN, f64::from),
         }
     }
@@ -675,7 +681,7 @@ impl Kind {
     fn fits(self, lo: f64, hi: f64, n: Shown) -> bool {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
-            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool => lo <= n.scaled && n.scaled <= hi,
+            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 => lo <= n.scaled && n.scaled <= hi,
             Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
@@ -770,6 +776,7 @@ fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
             mem.write_all_at(&[new], addr)
         }
         Kind::JsBool => js::write_bool(mem, addr, v != 0.0),
+        Kind::U8 => mem.write_all_at(&[v.round().clamp(0.0, 255.0) as u8], addr),
     }
 }
 
@@ -829,6 +836,10 @@ struct Limit {
     paused: Option<&'static str>,
     /// Turned off by the player (`switch`, a hotkey): still followed, never written.
     off: bool,
+    /// Kept at least the most it has held (`limit ... rising`: a tweak's HP): the minimum rises
+    /// with the value, from a place its named path was just followed to (never from a stale
+    /// one: V8 moves objects, and junk read there would become the minimum).
+    rising: bool,
     retry_at: Instant,
     /// When its code patterns last found it (the object may be replaced while the old one stays
     /// readable, which the guard can't see).
@@ -1007,6 +1018,8 @@ struct NamedLimit {
     roots: Vec<u64>,
     found_at: Option<Instant>,
     addrs: Vec<u64>,
+    /// When `addrs` were last followed to.
+    walked_at: Option<Instant>,
     /// A search for its objects is running (in a thread of its own: it takes seconds, and the
     /// value may be limited meanwhile at the address its code patterns found).
     searching: bool,
@@ -1125,7 +1138,8 @@ fn limiter_loop(shared: SharedLimiter) {
                 let addrs = if n.addrs.is_empty() { &interim[..] } else { &n.addrs[..] };
                 !l.off
                     && addrs.iter().any(|&a| match read_value(mem, a, l.kind) {
-                        Some(v) => l.min.is_some_and(|min| v < min) || l.max.is_some_and(|max| v > max),
+                        // A rising one above its minimum: followed again before it rises.
+                        Some(v) => l.min.is_some_and(|min| v < min || l.rising && v > min) || l.max.is_some_and(|max| v > max),
                         None => true,
                     })
             };
@@ -1157,6 +1171,7 @@ fn limiter_loop(shared: SharedLimiter) {
                     l.paused = l.paused.filter(|&p| p == PY_SHARED);
                 }
                 n.addrs = leads;
+                n.walked_at = Some(Instant::now());
             }
             named_due = limits
                 .iter_mut()
@@ -1172,8 +1187,14 @@ fn limiter_loop(shared: SharedLimiter) {
                 if let Some(n) = &l.named {
                     let interim = [l.addr];
                     let addrs = if n.addrs.is_empty() { &interim[..] } else { &n.addrs[..] };
+                    let walked = n.walked_at.is_some_and(|t| t.elapsed() < LIMIT_WRITE_EVERY);
                     for &addr in addrs {
                         let Some(v) = read_value(mem, addr, l.kind).filter(|_| !l.off) else { continue };
+                        if let (true, Some(min)) = (l.rising, l.min) {
+                            if v > min && walked && !n.addrs.is_empty() {
+                                l.min = Some(v);
+                            }
+                        }
                         let target = match (l.min, l.max) {
                             (_, Some(max)) if v > max => max,
                             (Some(min), _) if v < min => min,
@@ -1348,7 +1369,8 @@ fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
 /// goes with the sites (see `Site.key`), `left=<addr>,...` with the paths (see `Limit.left`). No
 /// bounds: only keeps the address current (see `limiter_loop`).
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
-    let (f, left): (Vec<&str>, Vec<&str>) = arg.split_whitespace().partition(|s| !s.starts_with("left="));
+    let rising = arg.split_whitespace().any(|s| s == "rising");
+    let (f, left): (Vec<&str>, Vec<&str>) = arg.split_whitespace().filter(|&s| s != "rising").partition(|s| !s.starts_with("left="));
     let mut left: Vec<u64> = left.iter().flat_map(|s| s["left=".len()..].split(',')).filter_map(parse_addr).collect();
     let (key, rest) = take_key(f.get(4..).unwrap_or_default());
     let is_named = |s: &&&str| Named::is_named(s);
@@ -1405,7 +1427,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         paths,
         left,
         came: Vec::new(),
-        named: named.pop().map(|path| NamedLimit { path, roots: Vec::new(), found_at: None, addrs: Vec::new(), searching: false }),
+        named: named.pop().map(|path| NamedLimit { path, roots: Vec::new(), found_at: None, addrs: Vec::new(), walked_at: None, searching: false }),
         guard_addr,
         guard,
         fixes: 0,
@@ -1414,6 +1436,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         unchanged: None,
         paused: waiting.then_some("not found yet (the game hasn't run the code that uses it), waiting"),
         off,
+        rising,
         retry_at: Instant::now(),
         checked_at: Instant::now(),
         searched_code: false,
@@ -2150,7 +2173,7 @@ impl MemScan<'_> {
                 // The scan runs after the screen was read: allow for a fraction
                 // that has moved on by up to 1 since.
                 let hit = match kind {
-                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool => value == n.scaled,
+                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 => value == n.scaled,
                     Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
@@ -2452,7 +2475,7 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                     }
                     for &kind in &snap.kinds {
                         let step = match kind {
-                            Kind::Bit(_) => 1,
+                            Kind::Bit(_) | Kind::U8 => 1,
                             Kind::U16 => 2,
                             Kind::I32 | Kind::F32 | Kind::Xor | Kind::Smi => 4,
                             Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsBool => 8,
@@ -4036,6 +4059,22 @@ fn cmd_ue(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 /// lines, for each object; "none character" while the player has no character (a menu; an RPG
 /// Maker game that hasn't made its objects yet), "none engine <why>" for games whose objects
 /// Ferret can't read so (not Unreal, Unity, Godot or RPG Maker MV/MZ).
+/// tweaks: the one-click tweaks the game's engine allows now (tweaks.rs): Unreal's and RPG
+/// Maker's; nothing for other games.
+fn cmd_tweaks(out: &mut impl Write, s: &Session) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    if let Ok(ue) = unreal(s.pid, mem) {
+        return tweaks::print(out, &ue.tweaks(mem));
+    }
+    if is_rpgmaker(s.pid) {
+        let heap = Heap::new(s.pid, mem, s.width)?;
+        return tweaks::print(out, &js::tweaks(&heap).unwrap_or_default());
+    }
+    Ok(())
+}
+
 fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let t = Instant::now();
     let Some(mem) = s.mem.as_ref() else {
@@ -4339,6 +4378,7 @@ pub fn run(as_user: Option<&str>) {
             "named" => cmd_named(&mut out, &mut session, arg),
             "ue" => cmd_ue(&mut out, &session, arg),
             "player" => cmd_player(&mut out, &session),
+            "tweaks" => cmd_tweaks(&mut out, &session),
             "browsable" => cmd_browsable(&mut out, &session),
             "gdtree" => cmd_gdtree(&mut out, &session),
             "gml" => cmd_gml(&mut out, &session),

@@ -64,7 +64,9 @@ Feedback in its menu, or an issue here).
    In Unreal Engine, Unity and RPG Maker games it lists their on/off flags too, with a switch to
    flip them: the character's "can be damaged" (off: no damage, in games that take damage the
    engine's way), the game's own flags, and an RPG Maker game's switches by the names its maker
-   gave them.
+   gave them. Above the list, one-click tweaks: god mode and fly in Unreal Engine games (they
+   work where the game leaves damage and movement to the engine); in RPG Maker games god mode
+   (your heroes' HP and MP don't go down), walk through walls, no random battles and walk faster.
    Turn on Only What Changes, change one in the game, and save the one that moved.
 
 Notifications tell you what Ferret needs while the game is in front, even in fullscreen.

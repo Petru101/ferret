@@ -563,6 +563,47 @@ pub struct PlayerObject {
     pub fields: Vec<PlayerField>,
 }
 
+/// A one-click tweak the Browse tab offers (`Core::tweaks`): helper/src/tweaks.rs.
+#[derive(Clone, Debug)]
+pub struct TweakRow {
+    /// Unreal: godmode, fly; RPG Maker: heroes, walls, battles, speed.
+    pub id: String,
+    pub on: bool,
+    /// On, but some of what it keeps isn't kept right now (not in the game, waiting).
+    pub waiting: bool,
+}
+
+/// What a tweak does to one of its places (the helper's `part` lines).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TweakHow {
+    /// Kept at least the most it has had since.
+    Rise,
+    /// Kept at `on`; turned off, `off` is written (None: what it held before).
+    Set { on: f64, off: Option<f64> },
+}
+
+/// The helper's `tweaks` reply: each tweak's id and parts.
+fn parse_tweaks(reply: &[String]) -> Vec<(String, Vec<(Loc, TweakHow)>)> {
+    let mut out: Vec<(String, Vec<(Loc, TweakHow)>)> = Vec::new();
+    for l in reply {
+        if let Some(id) = l.strip_prefix("tweak ") {
+            out.push((id.trim().to_owned(), Vec::new()));
+        } else if let (Some(p), Some(t)) = (l.strip_prefix("part "), out.last_mut()) {
+            let f: Vec<&str> = p.split_whitespace().collect();
+            let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
+            let how = match f.get(1) {
+                Some(&"rise") => Some(TweakHow::Rise),
+                Some(&"set") => num(2).map(|on| TweakHow::Set { on, off: num(3) }),
+                _ => None,
+            };
+            if let (Some(loc), Some(how)) = (f.first().and_then(|a| parse_loc(a)), how) {
+                t.1.push((loc, how));
+            }
+        }
+    }
+    out
+}
+
 /// A number the Browse tab lists: what the game calls it ("Health", "Slots[Item=Arrow].Count")
 /// and where it is.
 #[derive(Clone, Debug)]
@@ -599,6 +640,8 @@ pub enum Kind {
     Bit(u8),
     /// A JavaScript true or false (RPG Maker's switches and flags).
     JsBool,
+    /// A 1-byte whole number (an Unreal enum: the movement mode the Fly tweak sets).
+    U8,
 }
 
 /// The names of `Kind::Bit`, as the helper takes them.
@@ -621,6 +664,7 @@ impl Kind {
             Kind::Smi => "smi",
             Kind::Bit(n) => BITS[n as usize & 7],
             Kind::JsBool => "jsbool",
+            Kind::U8 => "u8",
         }
     }
 
@@ -628,7 +672,7 @@ impl Kind {
         if let Some(n) = BITS.iter().position(|b| *b == s) {
             return Some(Kind::Bit(n as u8));
         }
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8]).find(|k| k.name() == s)
     }
 
     /// On or off (1 or 0), not a number: the window shows a switch.
@@ -643,7 +687,7 @@ impl Kind {
 
     /// Whole numbers in memory (a game may still show them with decimals: 12 as "1.2").
     pub fn whole(self) -> bool {
-        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool)
+        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8)
     }
 
     pub fn describe(self) -> &'static str {
@@ -659,6 +703,7 @@ impl Kind {
             Kind::Smi => "JavaScript whole number",
             Kind::Bit(_) => "on/off flag",
             Kind::JsBool => "JavaScript on/off flag",
+            Kind::U8 => "1-byte whole number",
         }
     }
 }
@@ -884,6 +929,12 @@ struct Entry {
     /// The shared library's upload it was imported from (library.rs): told whether it worked
     /// when the player confirms it or removes it unconfirmed.
     from: Option<String>,
+    /// Part of a tweak (`Core::set_tweak`): "tweak <id>". Not listed as a value of its own.
+    tweak: Option<String>,
+    /// A tweak's part: what to write when the tweak is turned off ("putback <v>").
+    put_back: Option<f64>,
+    /// Kept at least the most it has had: the helper raises the minimum ("rising"; a tweak's HP).
+    rising: bool,
     /// Lines this build doesn't understand (from a newer one), saved back unchanged.
     other: Vec<String>,
 }
@@ -901,8 +952,8 @@ pub fn one_word(name: &str) -> String {
 /// missing), its "site ...", "key <offset> <number>", "path ...", "named ..." and "candidate ..." lines, "run <pid>" (where the
 /// candidates came from), an optional "limit <min|-> <max|->" line and "decimals <n>" for a
 /// whole number shown with decimals, "last <value>" while its pointer paths are unconfirmed,
-/// "build <stamp>" with code patterns, "untraced <stamp>", "imported", "suggest <min|-> <max|->"
-/// and "from <upload id>" (see Entry).
+/// "build <stamp>" with code patterns, "untraced <stamp>", "imported", "suggest <min|-> <max|->",
+/// "from <upload id>", and a tweak's "tweak <id>", "putback <v>" and "rising" (see Entry).
 /// Other lines are kept
 /// with their entry, so a build older than the profile doesn't drop what it doesn't know.
 fn read_profile(exe: &str) -> Vec<Entry> {
@@ -929,7 +980,10 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 imported: false,
                 suggested: None,
                 from: None,
-                other: Vec::new(),
+                tweak: None,
+            put_back: None,
+            rising: false,
+            other: Vec::new(),
             });
         } else if let (Some(kind), Some(e)) = (line.strip_prefix("type ").and_then(|k| Kind::parse(k.trim())), entries.last_mut()) {
             e.kind = kind;
@@ -961,6 +1015,12 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.suggested = Some(l.trim().to_owned());
         } else if let (Some(id), Some(e)) = (line.strip_prefix("from "), entries.last_mut()) {
             e.from = Some(id.trim().to_owned());
+        } else if let (Some(id), Some(e)) = (line.strip_prefix("tweak "), entries.last_mut()) {
+            e.tweak = Some(id.trim().to_owned());
+        } else if let (Some(v), Some(e)) = (line.strip_prefix("putback ").and_then(|v| v.trim().parse().ok()), entries.last_mut()) {
+            e.put_back = Some(v);
+        } else if let ("rising", Some(e)) = (line.trim(), entries.last_mut()) {
+            e.rising = true;
         } else if let (false, Some(e)) = (line.trim().is_empty(), entries.last_mut()) {
             e.other.push(line.to_owned());
         }
@@ -1025,6 +1085,15 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         if let Some(id) = &e.from {
             text.push_str(&format!("from {id}\n"));
+        }
+        if let Some(id) = &e.tweak {
+            text.push_str(&format!("tweak {id}\n"));
+        }
+        if let Some(v) = e.put_back {
+            text.push_str(&format!("putback {v}\n"));
+        }
+        if e.rising {
+            text.push_str("rising\n");
         }
         for l in &e.other {
             text.push_str(&format!("{l}\n"));
@@ -2136,6 +2205,9 @@ impl Core {
             imported: false,
             suggested: None,
             from: None,
+            tweak: None,
+            put_back: None,
+            rising: false,
             other: Vec::new(),
         };
         let known = entry.known(&entries);
@@ -2214,6 +2286,9 @@ impl Core {
             imported: false,
             suggested: None,
             from: None,
+            tweak: None,
+            put_back: None,
+            rising: false,
             other: Vec::new(),
         });
         let path = write_profile(&game.exe, &entries)?;
@@ -2642,7 +2717,8 @@ impl Core {
             Some((_, l)) => format!(" left={}", l.iter().map(|a| format!("0x{a:x}")).collect::<Vec<_>>().join(",")),
             None => String::new(),
         };
-        let reply = self.helper.call(&format!("limit {} {loc} {limit} {}{left}", entry.name, sites.join(" ")));
+        let rising = if entry.rising { " rising" } else { "" };
+        let reply = self.helper.call(&format!("limit {} {loc} {limit} {}{left}{rising}", entry.name, sites.join(" ")));
         self.limits();
         first_error(&reply).map_or(Ok(()), Err)
     }
@@ -2897,7 +2973,10 @@ impl Core {
                 imported: false,
                 suggested: None,
                 from: None,
-                other: Vec::new(),
+                tweak: None,
+            put_back: None,
+            rising: false,
+            other: Vec::new(),
                 ..entry.clone()
             });
             added.push((new, other));
@@ -2944,6 +3023,10 @@ impl Core {
         let (exe, build, steam) = (game.exe.clone(), game.build.clone(), game.steam.clone());
         let (mut values, mut left_out) = (Vec::new(), Vec::new());
         for e in read_profile(&exe) {
+            // A tweak is the game engine's, not the player's find: every player has it.
+            if e.tweak.is_some() {
+                continue;
+            }
             if e.imported {
                 // Says what to do: the player re-imported their own export and couldn't tell
                 // why it stayed out (Particle Fleet's omni).
@@ -3063,7 +3146,10 @@ impl Core {
                 imported: true,
                 suggested: v.limit,
                 from: from.map(str::to_owned),
-                other: Vec::new(),
+                tweak: None,
+            put_back: None,
+            rising: false,
+            other: Vec::new(),
             });
         }
         for s in &skipped {
@@ -3607,6 +3693,8 @@ impl Core {
         Ok(entries
             .into_iter()
             .zip(values)
+            // A tweak's parts show as the tweak, in the Browse tab.
+            .filter(|((name, _), _)| !saved.iter().any(|e| e.name == *name && e.tweak.is_some()))
             .map(|((name, loc), value)| {
                 let entry = saved.iter().find(|e| e.name == name);
                 let (min, max) = entry.map_or((None, None), Entry::shown_range);
@@ -4124,6 +4212,91 @@ impl Core {
             }
         }
         Ok(list)
+    }
+
+    /// The tweaks the game's engine allows (Unreal's, RPG Maker's), on or off; also ones turned
+    /// on before that can't be found now (the character gone), still on.
+    pub fn tweaks(&mut self) -> Result<Vec<TweakRow>, String> {
+        let exe = self.game()?.exe.clone();
+        let reply = self.helper.call("tweaks");
+        let saved = read_profile(&exe);
+        let limits = self.limits();
+        let mut ids: Vec<String> = parse_tweaks(&reply).into_iter().map(|(id, _)| id).collect();
+        for id in saved.iter().filter_map(|e| e.tweak.clone()) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        Ok(ids
+            .into_iter()
+            .map(|id| {
+                let parts: Vec<&Entry> = saved.iter().filter(|e| e.tweak.as_deref() == Some(id.as_str())).collect();
+                let kept = |e: &&Entry| limits.iter().any(|(n, addr, state)| *n == e.name && *addr != 0 && state.ends_with("active"));
+                TweakRow { waiting: !parts.iter().all(kept), on: !parts.is_empty(), id }
+            })
+            .map(|t| TweakRow { waiting: t.on && t.waiting, ..t })
+            .collect())
+    }
+
+    /// Turns a tweak on (each of its places saved by name, as a hidden value with its limit:
+    /// "tweak_<id>_<n>") or off (each put back as the tweak found it, or as `off` says, and
+    /// forgotten). On stays on across restarts, like any kept value.
+    pub fn set_tweak(&mut self, id: &str, on: bool) -> Result<(), String> {
+        let exe = self.game()?.exe.clone();
+        let mine: Vec<Entry> = read_profile(&exe).into_iter().filter(|e| e.tweak.as_deref() == Some(id)).collect();
+        if !on {
+            for e in &mine {
+                self.helper.call(&format!("unlimit {}", e.name));
+                if let Some(v) = e.put_back {
+                    if let Err(err) = self.set(&e.name, v) {
+                        self.say(&format!("{}: not put back: {err}", e.name));
+                    }
+                }
+                self.remove(&e.name)?;
+            }
+            self.say(&format!("tweak {id} off"));
+            return Ok(());
+        }
+        if !mine.is_empty() {
+            return Ok(());
+        }
+        let reply = self.helper.call("tweaks");
+        let Some((_, parts)) = parse_tweaks(&reply).into_iter().find(|(t, _)| t == id) else {
+            return Err(tr!("This tweak can't be used right now. Is your character in the game?"));
+        };
+        let mut done = 0;
+        for (i, (loc, how)) in parts.into_iter().enumerate() {
+            let name = format!("tweak_{id}_{}", i + 1);
+            let Some(now) = self.peek_exact(&[loc]).pop().flatten() else { continue };
+            if let Err(e) = self.save_at(&name, loc, 0, true) {
+                self.say(&format!("{name}: {e}"));
+                continue;
+            }
+            let mut entries = read_profile(&exe);
+            let Some(e) = entries.iter_mut().find(|e| e.name == name) else { continue };
+            e.tweak = Some(id.to_owned());
+            match how {
+                TweakHow::Rise => {
+                    e.limit = Some(range_text(Some(now), None));
+                    e.rising = true;
+                }
+                TweakHow::Set { on, off } => {
+                    e.limit = Some(range_text(Some(on), Some(on)));
+                    e.put_back = Some(off.unwrap_or(now));
+                }
+            }
+            let entry = e.clone();
+            write_profile(&exe, &entries)?;
+            match self.apply_limit(&entry) {
+                Ok(()) => done += 1,
+                Err(err) => self.say(&format!("{name}: not kept: {err}")),
+            }
+        }
+        if done == 0 {
+            return Err(tr!("Ferret couldn't find what this tweak changes by its name, so it's off."));
+        }
+        self.say(&format!("tweak {id} on ({done} places)"));
+        Ok(())
     }
 
     /// The numbers at these places now (the Browse tab's list, once a second).
@@ -5560,6 +5733,9 @@ mod tests {
             imported: false,
             suggested: None,
             from: None,
+            tweak: None,
+            put_back: None,
+            rising: false,
             other: Vec::new(),
         }
     }
@@ -5593,6 +5769,16 @@ mod tests {
     #[test]
     fn shown_numbers() {
         assert_eq!(number_text(96.5, None), "96.5");
+        let reply: Vec<String> = ["tweak walls", "part 0x2619:jsbool set 1 0", "tweak heroes", "part 0x10:smi rise", "part 0x14:smi rise", "tweak speed", "part 0x20:f64 set 5", "part junk"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let t = parse_tweaks(&reply);
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[0].1, vec![(Loc { addr: 0x2619, kind: Kind::JsBool }, TweakHow::Set { on: 1.0, off: Some(0.0) })]);
+        assert_eq!(t[1].1.len(), 2);
+        assert_eq!(t[1].1[0].1, TweakHow::Rise);
+        assert_eq!(t[2].1, vec![(Loc { addr: 0x20, kind: Kind::F64 }, TweakHow::Set { on: 5.0, off: None })]);
         assert_eq!(number_text(100.0, None), "100");
         assert_eq!(number_text(0.1f32 as f64, None), "0.1");
         assert_eq!(number_text(-0.0001, None), "0");

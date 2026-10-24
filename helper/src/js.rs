@@ -1303,6 +1303,53 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     )
 }
 
+/// RPG Maker's tweaks (`tweaks.rs`), the same in every MV and MZ game: walk through walls
+/// (`$gamePlayer._through`, which the engine's passability check honours first), no random
+/// battles (`$gameSystem._encounterEnabled`), a faster walk (`_moveSpeed`, 4 is normal, each
+/// step doubles it) and god mode (every hero's HP and MP kept at the most they've had since:
+/// what the game stores is the HP left, its maximum is worked out from the class, equipment and
+/// states). None before the game has made its objects.
+pub fn tweaks(heap: &Heap) -> Option<Vec<crate::tweaks::Tweak>> {
+    use crate::tweaks::{How, Part, Tweak};
+    let js = shared(heap)?;
+    let mem = heap.mem();
+    let player = js.global(mem, "$gamePlayer")?;
+    let int_kind = js.int_kind();
+    // A number's place and type, and what it holds now.
+    let number = |v: Option<Val>| match v? {
+        Val::Int(a) => Some((a, int_kind, f64::from(js.int(mem, a)? as i32))),
+        Val::Real(a) => Some((a, "f64", f64::from_bits(word(mem, a)?))),
+        _ => None,
+    };
+    let flag = |v: Option<Val>, on: bool| match v? {
+        Val::Bool(a) => Some(Part { addr: a, kind: "jsbool", how: How::Set { on: f64::from(on), off: Some(f64::from(!on)) } }),
+        _ => None,
+    };
+    let mut out = vec![
+        Tweak { id: "walls", parts: flag(js.field(mem, player, "_through"), true).into_iter().collect() },
+        Tweak {
+            id: "battles",
+            parts: js.global(mem, "$gameSystem").and_then(|sys| flag(js.field(mem, sys, "_encounterEnabled"), false)).into_iter().collect(),
+        },
+    ];
+    if let Some((addr, kind, now)) = number(js.field(mem, player, "_moveSpeed")) {
+        let fast = if now < 5.0 { 5.0 } else { (now + 1.0).min(6.0) };
+        out.push(Tweak { id: "speed", parts: vec![Part { addr, kind, how: How::Set { on: fast, off: None } }] });
+    }
+    let mut god = Vec::new();
+    let actors = js.global(mem, "$gameActors").and_then(|a| js.field_obj(mem, a, "_data"));
+    for (_, actor) in actors.map(|a| js.elements(mem, a)).unwrap_or_default() {
+        let Val::Obj(actor) = actor else { continue };
+        for field in ["_hp", "_mp"] {
+            if let Some((addr, kind, _)) = number(js.field(mem, actor, field)) {
+                god.push(Part { addr, kind, how: How::Rise });
+            }
+        }
+    }
+    out.push(Tweak { id: "heroes", parts: god });
+    Some(out)
+}
+
 /// The path to a number the list has (the curated entries before the raw ones), checked by
 /// following it the way a restart does.
 pub fn discover(heap: &Heap, target: u64) -> Option<(JsPath, Vec<u64>)> {

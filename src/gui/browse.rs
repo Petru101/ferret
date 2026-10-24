@@ -2,7 +2,8 @@
 // through the engine's own objects instead of a search (`Core::player_values`). Each shows its
 // number live (the 1 s refresh); Only What Changes keeps the ones that move after it's turned
 // on, so the player changes something in the game and sees which it was; Save keeps one like
-// a found value (by name only, `Core::save_listed`).
+// a found value (by name only, `Core::save_listed`). Above the list, the engine's tweaks
+// (Unreal's and RPG Maker's: god mode, fly...), each a switch (`Core::set_tweak`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -31,6 +32,8 @@ pub struct BrowseView {
     pub root: gtk::Box,
     stack: gtk::Stack,
     list: gtk::Box,
+    tweaks: adw::PreferencesGroup,
+    tweak_rows: RefCell<Vec<adw::SwitchRow>>,
     none: adw::StatusPage,
     search: gtk::SearchEntry,
     changed: gtk::ToggleButton,
@@ -113,6 +116,12 @@ impl BrowseView {
             .margin_start(12)
             .margin_end(12)
             .build();
+        let tweaks = adw::PreferencesGroup::builder()
+            .title(tr!("Tweaks"))
+            .description(tr!("Changes the game's engine understands, one switch each. Save your game before you try one."))
+            .visible(false)
+            .build();
+        list.append(&tweaks);
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
@@ -138,6 +147,8 @@ impl BrowseView {
             root,
             stack,
             list,
+            tweaks,
+            tweak_rows: RefCell::default(),
             none,
             search,
             changed,
@@ -187,12 +198,53 @@ impl BrowseView {
         self.asked.set(true);
         self.stack.set_visible_child_name("loading");
         self.worker.run(|core| Event::Player(core.player_values()));
+        self.worker.run(|core| Event::Tweaks(core.tweaks()));
+    }
+
+    /// The tweaks the game's engine allows, each a switch.
+    pub fn show_tweaks(self: &Rc<Self>, list: Result<Vec<core::TweakRow>, String>) {
+        for r in self.tweak_rows.borrow_mut().drain(..) {
+            self.tweaks.remove(&r);
+        }
+        let list = list.unwrap_or_default();
+        let mut rows = self.tweak_rows.borrow_mut();
+        for t in list {
+            let Some((title, about)) = tweak_text(&t.id) else { continue };
+            let subtitle = match t.waiting {
+                true => tr!("{about} On, but not all of it is in the game right now: Ferret keeps it once it is.", about),
+                false => about,
+            };
+            let row = adw::SwitchRow::builder().title(title).subtitle(subtitle).subtitle_lines(4).active(t.on).build();
+            {
+                let (worker, id) = (self.worker.clone(), t.id.clone());
+                row.connect_active_notify(move |r| {
+                    let (id, on) = (id.clone(), r.is_active());
+                    worker.run_now(move |core| {
+                        Event::Done(core.set_tweak(&id, on).map(|_| match on {
+                            true => tr!("Tweak on: Ferret keeps it while you play"),
+                            false => tr!("Tweak off: the game has its own values back"),
+                        }))
+                    });
+                    worker.run(|core| Event::Tweaks(core.tweaks()));
+                    // Its places are found by name in the background: "waiting" a moment.
+                    let worker = worker.clone();
+                    gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || worker.run(|core| Event::Tweaks(core.tweaks())));
+                });
+            }
+            self.tweaks.add(&row);
+            rows.push(row);
+        }
+        self.tweaks.set_visible(!rows.is_empty());
     }
 
     /// Another game: its list is made when the tab is shown.
     pub fn new_game(&self) {
         self.asked.set(false);
         self.clear();
+        for r in self.tweak_rows.borrow_mut().drain(..) {
+            self.tweaks.remove(&r);
+        }
+        self.tweaks.set_visible(false);
         self.stack.set_visible_child_name("loading");
     }
 
@@ -347,6 +399,32 @@ impl BrowseView {
             (n, _) => ntr!("{n} number", "{n} numbers", n, n = super::find::grouped(n)),
         });
     }
+}
+
+/// A tweak's title and what it does (helper/src/tweaks.rs ids); None for one this build doesn't
+/// know.
+fn tweak_text(id: &str) -> Option<(String, String)> {
+    Some(match id {
+        "godmode" => (
+            tr!("God Mode"),
+            tr!("Your character can't be damaged the engine's way, and its health stays at the most it has had since you turned this on. Games with damage rules of their own may ignore the first part."),
+        ),
+        "fly" => (
+            tr!("Fly"),
+            tr!("Your character flies instead of walking or falling. Going up and down depends on the game's controls; turned off, the character falls back down."),
+        ),
+        "heroes" => (
+            tr!("God Mode"),
+            tr!("Your heroes' HP and MP don't go down: they stay at the most they've had since you turned this on, so heal once to keep them full. One hit bigger than a hero's HP can still knock them out."),
+        ),
+        "walls" => (
+            tr!("Walk Through Walls"),
+            tr!("You walk through walls, people and water (not off the map). Places the story hasn't opened yet open too."),
+        ),
+        "battles" => (tr!("No Random Battles"), tr!("Walking around starts no random battles. Battles the story starts still happen.")),
+        "speed" => (tr!("Walk Faster"), tr!("You walk twice as fast.")),
+        _ => return None,
+    })
 }
 
 /// libadwaita's group titles and descriptions are markup: the game's names are text.

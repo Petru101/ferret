@@ -181,6 +181,16 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
                 }
             }
         }
+        // One-click tweaks (Unreal's, RPG Maker's): "tweaks" lists them, "tweak <id> on|off".
+        "tweaks" => {
+            for t in core.tweaks()? {
+                println!("{} {}{}", t.id, if t.on { "on" } else { "off" }, if t.waiting { ", waiting" } else { "" });
+            }
+        }
+        "tweak" => {
+            let (id, state) = arg.split_once(' ').ok_or("usage: tweak <id> on|off")?;
+            core.set_tweak(id, state.trim() == "on")?;
+        }
         "save-listed" => {
             let (loc, name) = arg.split_once(' ').ok_or("usage: save-listed <hex addr:type> <name>")?;
             core.save_listed(name, core::parse_loc(loc).ok_or("usage: save-listed <hex addr:type> <name>")?)?;

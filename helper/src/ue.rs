@@ -1997,9 +1997,9 @@ impl Ue {
 
     /// The player's numbers, by object: their character first, then the actors it owns, the
     /// player state, the controller, the game, and the objects their fields point to.
-    pub fn player(&self, mem: &Mem) -> Result<Vec<ListedObject>, NoPlayer> {
-        // Every live object's class and outer, read once.
-        let mut heads: Vec<(u64, u64, u64)> = Vec::new();
+    /// Every live object's (address, class, outer), read once.
+    fn heads(&self, mem: &Mem) -> Vec<(u64, u64, u64)> {
+        let mut heads = Vec::new();
         for obj in self.objects(mem) {
             let mut head = [0u8; 0x80];
             if mem.read_exact_at(&mut head[..(self.h.outer.max(self.h.class) + self.h.w) as usize], obj).is_err() {
@@ -2011,8 +2011,12 @@ impl Ue {
                 heads.push((obj, class, raw.p(self.h.outer as usize)));
             }
         }
-        let mut lineages: HashMap<u64, Vec<String>> = HashMap::new();
-        let mut is_a = |class: u64, names: &[&str]| lineages.entry(class).or_insert_with(|| self.lineage(mem, class)).iter().any(|n| names.contains(&n.as_str()));
+        heads
+    }
+
+    /// The local player's game instance, controller, the pawn it controls, and the Character
+    /// that pawn steers when it's only a rig (see `player`).
+    fn local_player(&self, mem: &Mem, heads: &[(u64, u64, u64)], is_a: &mut dyn FnMut(u64, &[&str]) -> bool) -> Option<(Option<u64>, u64, u64, Option<u64>)> {
         let instance = heads.iter().find(|h| is_a(h.1, &["GameEngine"])).and_then(|h| self.object_in(mem, h.0, "GameInstance"));
         let from_instance = instance.and_then(|gi| {
             let class = self.class_of(mem, gi)?;
@@ -2023,19 +2027,7 @@ impl Ue {
         // UE3: the LocalPlayer's PlayerController is its "Actor", the state "PlayerReplicationInfo".
         let controller = local.and_then(|l| self.object_in(mem, l, "PlayerController").or_else(|| self.object_in(mem, l, "Actor")));
         let pawn = controller.and_then(|c| self.object_in(mem, c, "AcknowledgedPawn").or_else(|| self.object_in(mem, c, "Pawn")));
-        let (Some(controller), Some(pawn)) = (controller, pawn) else { return Err(NoPlayer::NoCharacter) };
-        let state = ["PlayerState", "PlayerReplicationInfo"]
-            .iter()
-            .find_map(|n| self.object_in(mem, controller, n).or_else(|| self.object_in(mem, pawn, n)));
-        let mut world = self.outer(mem, pawn);
-        for _ in 0..4 {
-            match world {
-                Some(w) if !self.class_of(mem, w).is_some_and(|c| is_a(c, &["World"])) => world = self.outer(mem, w),
-                _ => break,
-            }
-        }
-        let game_state = world.and_then(|w| self.object_in(mem, w, "GameState"));
-
+        let (controller, pawn) = (controller?, pawn?);
         // A pawn that only steers another (Hell Pie possesses a camera rig, a plain Pawn, whose
         // ControlledPawn is the demon the player moves): that Character is theirs too, first.
         // Only through a field made to hold a pawn (the rig's AdditionalInputActor, an Actor
@@ -2056,6 +2048,26 @@ impl Ue {
             }
             (found.len() == 1).then(|| found[0])
         };
+        Some((instance, controller, pawn, driven))
+    }
+
+    pub fn player(&self, mem: &Mem) -> Result<Vec<ListedObject>, NoPlayer> {
+        let heads = self.heads(mem);
+        let mut lineages: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut is_a = |class: u64, names: &[&str]| lineages.entry(class).or_insert_with(|| self.lineage(mem, class)).iter().any(|n| names.contains(&n.as_str()));
+        let Some((instance, controller, pawn, driven)) = self.local_player(mem, &heads, &mut is_a) else { return Err(NoPlayer::NoCharacter) };
+        let state = ["PlayerState", "PlayerReplicationInfo"]
+            .iter()
+            .find_map(|n| self.object_in(mem, controller, n).or_else(|| self.object_in(mem, pawn, n)));
+        let mut world = self.outer(mem, pawn);
+        for _ in 0..4 {
+            match world {
+                Some(w) if !self.class_of(mem, w).is_some_and(|c| is_a(c, &["World"])) => world = self.outer(mem, w),
+                _ => break,
+            }
+        }
+        let game_state = world.and_then(|w| self.object_in(mem, w, "GameState"));
+
         // (object, role, the group it belongs to)
         let mut groups: Vec<(u64, &'static str, Option<usize>)> = driven.into_iter().map(|d| (d, "character", None)).collect();
         groups.push((pawn, "character", None));
@@ -2174,6 +2186,53 @@ impl Ue {
                 }
             })
             .collect())
+    }
+}
+
+/// What a character's health is called: a field, or a Gameplay Ability System attribute
+/// (lowercased; "MaxHealth" isn't it).
+const HEALTH_NAMES: &[&str] = &["health", "hp", "currenthealth", "currenthp", "life", "currentlife"];
+/// EMovementMode: falling (gravity on; the engine lands it and switches to walking) and flying.
+const MOVE_FALLING: f64 = 3.0;
+const MOVE_FLYING: f64 = 5.0;
+
+impl Ue {
+    /// Unreal's tweaks (`tweaks.rs`), through the engine's own classes: god mode (the
+    /// character's `bCanBeDamaged` off, which the engine's damage checks first, and its health,
+    /// when Ferret can tell which number it is, kept at the most it has had: games with their own
+    /// damage code ignore the flag) and fly (the movement component's mode set to flying, with
+    /// `bCheatFlying` so landing doesn't end it; up and down follow the game's own controls).
+    pub fn tweaks(&self, mem: &Mem) -> Vec<crate::tweaks::Tweak> {
+        use crate::tweaks::{How, Part, Tweak};
+        let heads = self.heads(mem);
+        let mut lineages: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut is_a = |class: u64, names: &[&str]| lineages.entry(class).or_insert_with(|| self.lineage(mem, class)).iter().any(|n| names.contains(&n.as_str()));
+        let Some((_, _, pawn, driven)) = self.local_player(mem, &heads, &mut is_a) else { return Vec::new() };
+        let character = driven.unwrap_or(pawn);
+        let class = self.class_of(mem, character).unwrap_or(0);
+        let flag = |obj: u64, p: &Prop, on: bool| {
+            let (byte, bit) = p.bit?;
+            Some(Part { addr: obj + p.offset + byte, kind: crate::helper::Kind::Bit(bit).name(), how: How::Set { on: f64::from(on), off: Some(f64::from(!on)) } })
+        };
+        let mut god: Vec<Part> = self.find_prop(mem, class, "bCanBeDamaged").and_then(|p| flag(character, &p, false)).into_iter().collect();
+        if let Ok(list) = self.player(mem) {
+            let health = list
+                .iter()
+                .filter(|o| !o.more && matches!(o.role, "character" | "part" | "state"))
+                .flat_map(|o| &o.fields)
+                .find(|f| !f.kind.starts_with("bit") && HEALTH_NAMES.contains(&f.label.rsplit('.').next().unwrap_or(&f.label).to_lowercase().as_str()));
+            god.extend(health.map(|f| Part { addr: f.addr, kind: f.kind, how: How::Rise }));
+        }
+        let mut fly = Vec::new();
+        if let (true, Some(comp)) = (is_a(class, &["Character"]), self.object_in(mem, character, "CharacterMovement")) {
+            let cc = self.class_of(mem, comp).unwrap_or(0);
+            let mode = self.find_prop(mem, cc, "MovementMode").filter(|p| p.size == 1 && matches!(p.kind.as_str(), "ByteProperty" | "EnumProperty"));
+            if let Some(m) = mode {
+                fly.push(Part { addr: comp + m.offset, kind: "u8", how: How::Set { on: MOVE_FLYING, off: Some(MOVE_FALLING) } });
+                fly.extend(self.find_prop(mem, cc, "bCheatFlying").and_then(|p| flag(comp, &p, true)));
+            }
+        }
+        vec![Tweak { id: "godmode", parts: god }, Tweak { id: "fly", parts: fly }]
     }
 }
 
