@@ -103,6 +103,13 @@ pub struct Js {
     /// property array's) header included (bits 19-29), and whether it's in the object (bit 30),
     /// not an index (Electron 45; web.rs).
     offsets: bool,
+    /// V8's sandbox (Electron): where its external pointer table starts. An external string
+    /// keeps 4-byte handles to its resource and characters, not pointers (web.rs finds it).
+    pub(crate) ept: Option<u64>,
+    /// A web game's HeapNumber map (web.rs): a field V8 keeps as any value (representation
+    /// Tagged) holding a small integer or a HeapNumber is then a `Val::Var` (its slot; the box
+    /// may be shared, so it's never written into). None: RPG Maker's reading.
+    pub(crate) number_map: Option<u64>,
     /// V8's false and true (tagged), once seen (`boolean`); 0 until then.
     bools: Mutex<[u64; 2]>,
 }
@@ -355,7 +362,7 @@ impl Js {
             }
         }
         let field_shift = if cells == Cells::Named { 20 } else { 19 };
-        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0, cell_name: 1, modern: false, offsets: false, bools: Mutex::default() };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0, cell_name: 1, modern: false, offsets: false, ept: None, number_map: None, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -489,7 +496,7 @@ impl Js {
                 globals[g].1.push(cell);
             }
         }
-        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext, cell_name, modern: false, offsets: false, bools: Mutex::default() };
+        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext, cell_name, modern: false, offsets: false, ept: None, number_map: None, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -520,7 +527,36 @@ impl Js {
     /// newer; `offsets`: V8 15.x's field offsets in property details.
     pub(crate) fn web(base: u64, meta: u64, cell_map: u64, offsets: bool) -> Js {
         let l = Layout { w: 4, base };
-        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, bools: Mutex::default() }
+        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, ept: None, number_map: None, bools: Mutex::default() }
+    }
+
+    /// A web game's V8 version, from objects of the game (web.rs): V8 15.x when their
+    /// descriptors' keys read as strings with its layout (`offsets`), else V8 14.x, its field
+    /// index's place the one where each object's indices come out as 0, 1, 2... (in-object and
+    /// out, no gaps).
+    pub(crate) fn calibrate_web(&mut self, mem: &Mem, objects: &[u64]) {
+        let maps: Vec<u64> = objects.iter().filter_map(|&o| self.map_of(mem, o)).collect();
+        let keys_read = |js: &Js| maps.iter().filter(|&&m| js.descriptors(mem, m).first().is_some_and(|&(k, _)| js.text(mem, k).is_some())).count();
+        self.offsets = true;
+        let v15 = keys_read(self);
+        self.offsets = false;
+        let v14 = keys_read(self);
+        if v15 >= v14 && v15 > 0 {
+            self.offsets = true;
+            return;
+        }
+        let fits = |s: u32| {
+            maps.iter()
+                .filter(|&&m| {
+                    let mut idx: Vec<u32> = self.descriptors(mem, m).into_iter().filter(|(_, d)| d & 1 == 0 && d >> 5 & 1 == 0).map(|(_, d)| (d >> s) & 0x3ff).collect();
+                    idx.sort_unstable();
+                    !idx.is_empty() && idx.iter().enumerate().all(|(i, &x)| x == i as u32)
+                })
+                .count()
+        };
+        if let Some(s) = (16..24).max_by_key(|&s| fits(s)).filter(|&s| fits(s) > 0) {
+            self.field_shift = s;
+        }
     }
 
     pub(crate) fn word(&self, mem: &Mem, at: u64) -> Option<u64> {
@@ -684,6 +720,14 @@ impl Js {
             0 => chars(o + body),
             // External (V8 8.x: Blink's names): {.., resource}; the resource holds Blink's
             // string {refs, length, hash, characters}.
+            // V8's sandbox: {.., resource handle, characters handle}, each an index (handle
+            // >> 6) into the external pointer table, whose 8-byte entries keep the pointer in
+            // their low 48 bits (a tag above).
+            2 if self.ept.is_some() => {
+                let handle = half(mem, o + body + 4)?;
+                let entry = word(mem, self.ept? + u64::from(handle >> 6) * 8)?;
+                chars(entry & 0xffff_ffff_ffff)
+            }
             2 if self.cells == Cells::Compressed => {
                 let resource = word(mem, o + body)?;
                 chars(word(mem, resource.checked_add_signed(self.ext)?)? + 12)
@@ -813,7 +857,8 @@ impl Js {
                 // included; representation Double = 2 in bits 6-8.
                 let off = u64::from((det >> 19) & 0x7ff);
                 let base = if det >> 30 & 1 == 1 { o } else if tagged(props) { props } else { continue };
-                let val = self.slot(mem, base - 1 + off * l.w, (det >> 6) & 0x7 == 2);
+                let at = base - 1 + off * l.w;
+                let val = self.tagged_number(mem, at, (det >> 6) & 0x7, self.slot(mem, at, (det >> 6) & 0x7 == 2));
                 if let Some(name) = self.text(mem, k) {
                     out.push((name, val));
                 }
@@ -836,19 +881,31 @@ impl Js {
                 match (double, raw) {
                     (true, true) if l.is_smi(layout) => Val::Real(at),
                     (true, true) => Val::Other,
-                    _ => self.slot(mem, at, double),
+                    _ => self.tagged_number(mem, at, (det >> (self.field_shift - 13)) & 0x7, self.slot(mem, at, double)),
                 }
             } else {
                 if !tagged(props) {
                     continue;
                 }
-                self.slot(mem, props - 1 + l.array_data() + (index - inside) * l.w, double)
+                let at = props - 1 + l.array_data() + (index - inside) * l.w;
+                self.tagged_number(mem, at, (det >> (self.field_shift - 13)) & 0x7, self.slot(mem, at, double))
             };
             if let Some(name) = self.text(mem, k) {
                 out.push((name, val));
             }
         }
         out
+    }
+
+    /// A web game's field kept as any value (representation 4, Tagged: compressed V8) holding
+    /// a number: its slot (`Val::Var`). See `number_map`.
+    fn tagged_number(&self, mem: &Mem, at: u64, representation: u32, v: Val) -> Val {
+        let Some(number) = self.number_map.filter(|_| representation == 4 && self.l.compressed()) else { return v };
+        match v {
+            Val::Int(_) => Val::Var(at),
+            Val::Obj(o) if self.map_of(mem, o) == Some(number) => Val::Var(at),
+            v => v,
+        }
     }
 
     pub fn field(&self, mem: &Mem, o: u64, name: &str) -> Option<Val> {
@@ -896,7 +953,12 @@ impl Js {
         let Some(m) = self.map_of(mem, o) else { return Vec::new() };
         let Some(kind) = self.elements_kind(mem, m) else { return Vec::new() };
         let Some(e) = self.word(mem, o - 1 + l.obj_elements()).filter(|&e| tagged(e)) else { return Vec::new() };
-        let Some(n) = self.word(mem, e - 1 + l.w).and_then(|x| l.smi(x)) else { return Vec::new() };
+        // V8 15.x: the array's length is a plain number, not a Smi.
+        let n = match self.offsets {
+            true => half(mem, e - 1 + l.w).map(|n| n as i32),
+            false => self.word(mem, e - 1 + l.w).and_then(|x| l.smi(x)),
+        };
+        let Some(n) = n else { return Vec::new() };
         let n = (n.max(0) as usize).min(MAX_ELEMENTS);
         let data = e - 1 + l.array_data();
         // Kinds: Smis or anything, packed or with holes (0-3), doubles (4-5), then a

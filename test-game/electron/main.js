@@ -19,9 +19,10 @@ app.whenReady().then(() => {
   win.webContents.on("console-message", (e) => {
     const text = e.message ?? "";
     if (text.startsWith("state ")) fs.appendFileSync(log, text.slice(6) + "\n");
+    else console.error("page: " + text);
   });
   setInterval(() => {
-    if (!fs.existsSync(cmd)) return;
+    if (win.isDestroyed() || !fs.existsSync(cmd)) return;
     const lines = fs.readFileSync(cmd, "utf8").split("\n").filter((l) => l.trim());
     fs.unlinkSync(cmd);
     for (const l of lines) {

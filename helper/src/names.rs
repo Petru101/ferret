@@ -166,6 +166,11 @@ impl<'a> Heap<'a> {
     /// Whether `v` is in the game's program or a library (code, constant data or the file's
     /// own data section) or other memory the game can't write: where C++ vtables are, not the
     /// heap.
+    /// Where each mapping starts (writable or not).
+    pub fn starts(&self) -> Vec<u64> {
+        self.rw.iter().chain(&self.ro).map(|r| r.0).collect()
+    }
+
     pub fn read_only(&self, v: u64) -> bool {
         let i = self.ro.partition_point(|r| r.0 <= v);
         i > 0 && v < self.ro[i - 1].1

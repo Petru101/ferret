@@ -75,6 +75,7 @@ const PHASER: &[&str] = &[
 const BUILTINS: &[&str] = &[
     "Math", "JSON", "Reflect", "Intl", "Atomics", "WebAssembly", "console", "CSS", "globalThis", "window", "self", "frames", "parent", "top", "chrome",
     "Iterator", "Temporal", "process", "require", "module", "exports", "global", "Buffer", "navigation", "crossOriginIsolated", "isSecureContext",
+    "NaN", "Infinity", "undefined",
 ];
 
 fn half(mem: &Mem, at: u64) -> Option<u32> {
@@ -92,15 +93,17 @@ fn smi(x: u32) -> Option<i32> {
     (x & 1 == 0).then_some(x as i32 >> 1)
 }
 
-/// The attached game's ContextCell and HeapNumber maps (their 4-byte references), for reading
-/// and writing `Kind::JsVar` places without the layout. Set when the game's V8 is located.
-static VARS: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+/// The attached game's ContextCell and HeapNumber maps (their 4-byte references, either may
+/// be missing: a V8 without ContextCells), for reading and writing `Kind::JsVar` places
+/// without the layout. Set when the game's V8 is located.
+static VARS: Mutex<(Option<u32>, Option<u32>)> = Mutex::new((None, None));
 
 /// A scope variable's number (`Val::Var`): its slot holds a small integer, a HeapNumber
 /// ({map, double}) or a ContextCell (by its state: a constant or small integer in `value`,
 /// an int32 or a double in the last field). None when it holds anything else now.
 pub fn read_var(mem: &Mem, slot: u64) -> Option<f64> {
-    let (cell, number) = (*VARS.lock().unwrap())?;
+    let (cell, number) = *VARS.lock().unwrap();
+    let number = number?;
     let base = slot & !0xffff_ffff;
     let x = half(mem, slot)?;
     if let Some(v) = smi(x) {
@@ -111,7 +114,7 @@ pub fn read_var(mem: &Mem, slot: u64) -> Option<f64> {
     if map == number {
         return f64_at(mem, o + 4);
     }
-    if map != cell {
+    if Some(map) != cell {
         return None;
     }
     match half(mem, o + 12)? {
@@ -137,7 +140,7 @@ pub fn read_var(mem: &Mem, slot: u64) -> Option<f64> {
 /// numbers there).
 pub fn write_var(mem: &Mem, slot: u64, v: f64) -> std::io::Result<()> {
     let refused = |why: &str| Err(std::io::Error::other(why.to_owned()));
-    let Some((cell, number)) = *VARS.lock().unwrap() else { return refused("this game's numbers aren't known yet") };
+    let (cell, Some(number)) = *VARS.lock().unwrap() else { return refused("this game's numbers aren't known yet") };
     let whole = v.fract() == 0.0 && v.abs() < f64::from(1 << 30);
     let small = (v as i32).wrapping_shl(1) as u32;
     let base = slot & !0xffff_ffff;
@@ -149,7 +152,7 @@ pub fn write_var(mem: &Mem, slot: u64, v: f64) -> std::io::Result<()> {
             true => mem.write_all_at(&small.to_le_bytes(), slot),
             false => refused("this variable takes whole numbers only"),
         },
-        Some(m) if m == cell => match half(mem, o + 12) {
+        Some(m) if Some(m) == cell => match half(mem, o + 12) {
             Some(CELL_SMI) if whole => mem.write_all_at(&small.to_le_bytes(), o + 4),
             Some(CELL_SMI) => refused("this variable takes whole numbers only"),
             Some(CELL_INT32) if whole => mem.write_all_at(&(v as i32).to_le_bytes(), o + 16),
@@ -258,7 +261,28 @@ impl Web {
             }
         }
         let mut web = best?;
+        // Names V8's sandbox keeps outside the heap: read through its external pointer table,
+        // then the scopes again.
+        web.js.ept = web.external_table(heap);
+        if web.js.ept.is_some() {
+            let infos: Vec<u64> = web.scopes.iter().map(|s| s.info).collect();
+            web.scopes = infos.into_iter().filter_map(|i| web.scope(mem, i)).collect();
+        }
         web.find_contexts(heap);
+        // V8 14.x or 15.x: from the objects the scopes' variables hold.
+        let mut objects: Vec<u64> = Vec::new();
+        for c in &web.contexts {
+            let s = &web.scopes[c.scope];
+            for i in 0..s.names.len() {
+                if let Val::Obj(o) = web.js.slot(mem, c.at - 1 + 8 + 4 * u64::from(s.first + i as u32), false) {
+                    objects.push(o);
+                }
+            }
+            if objects.len() > 400 {
+                break;
+            }
+        }
+        web.js.calibrate_web(mem, &objects);
         web.learn_cells(mem);
         Some(web)
     }
@@ -287,6 +311,50 @@ impl Web {
         };
         let modes = (0..u64::from(n)).map(|i| half(mem, infos + 4 * i).and_then(smi).map_or(0, |v| v as u32 & 0xf)).collect();
         Some(Scope { info, kind, names, modes, first: 0 })
+    }
+
+    /// Where V8's sandbox keeps its external pointer table: the start of the mapping that
+    /// decodes the most of the scopes' unread names (external one-byte strings: {map, hash,
+    /// length, resource handle, characters handle}) into identifiers of their length. The
+    /// table is reserved outside the cage, its first segment read-only.
+    fn external_table(&self, heap: &Heap) -> Option<u64> {
+        let mem = heap.mem();
+        let mut samples: Vec<(u32, u32)> = Vec::new();
+        for s in &self.scopes {
+            let first = s.info - 1 + 24 + 4 * u64::from(s.kind == MODULE_SCOPE);
+            for (i, n) in s.names.iter().enumerate().take(MAX_INLINED as usize) {
+                if !n.starts_with('#') {
+                    continue;
+                }
+                let Some(w) = self.js.word(mem, first + 4 * i as u64) else { continue };
+                let (Some(len), Some(handle)) = (half(mem, w - 1 + 8), half(mem, w - 1 + 16)) else { continue };
+                if (1..=64).contains(&len) {
+                    samples.push((handle, len));
+                }
+            }
+            if samples.len() >= 24 {
+                break;
+            }
+        }
+        if samples.is_empty() {
+            return None;
+        }
+        let identifier = |p: u64, len: u32| {
+            let mut b = vec![0u8; len as usize];
+            mem.read_exact_at(&mut b, p).is_ok() && b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$') && !b[0].is_ascii_digit()
+        };
+        let decodes = |t: u64| {
+            samples
+                .iter()
+                .filter(|&&(h, len)| {
+                    let mut e = [0u8; 8];
+                    mem.read_exact_at(&mut e, t + u64::from(h >> 6) * 8).is_ok() && identifier(u64::from_le_bytes(e) & 0xffff_ffff_ffff, len)
+                })
+                .count()
+        };
+        let base = self.js.base();
+        let (t, n) = heap.starts().into_iter().filter(|&t| t & 0xfff == 0 && !(base..base + (1 << 32)).contains(&t)).map(|t| (t, decodes(t))).max_by_key(|x| x.1)?;
+        (n * 2 >= samples.len() && n > 0).then_some(t)
     }
 
     fn is_string(&self, mem: &Mem, w: u64) -> bool {
@@ -351,6 +419,22 @@ impl Web {
                 self.native = self.js.word(mem, c - 1 + 12).filter(|&p| self.js.map_of(mem, p).is_some());
             }
             self.contexts.push(Context { at: c, scope: s });
+        }
+        // No script or module scope (a game wholly inside function wrappers: Construct 2): the
+        // native context ends every context's chain of previous ones (theirs hold a ScopeInfo).
+        if self.native.is_none() {
+            self.native = self.contexts.iter().take(64).find_map(|c| {
+                let mut at = c.at;
+                for _ in 0..256 {
+                    let p = self.js.word(mem, at - 1 + 12).filter(|&p| self.js.map_of(mem, p).is_some());
+                    let info = p.and_then(|p| self.js.word(mem, p - 1 + 8));
+                    match (p, info) {
+                        (Some(p), Some(i)) if self.js.map_of(mem, i) == Some(self.scope_map) => at = p,
+                        _ => return Some(at).filter(|&a| a != c.at),
+                    }
+                }
+                None
+            });
         }
     }
 
@@ -440,9 +524,16 @@ impl Web {
                 break;
             }
         }
-        self.number_map = majority(maps);
+        self.number_map = majority(maps).or_else(|| {
+            // Else the global NaN's: a HeapNumber on every page.
+            self.dictionary(mem).into_iter().find_map(|cell| {
+                let name = self.js.word(mem, cell - 1 + 4).and_then(|n| self.js.text(mem, n))?;
+                (name == "NaN").then(|| self.js.word(mem, cell - 1 + 12).and_then(|v| self.js.map_of(mem, v)))?
+            })
+        });
         let base = self.js.base();
-        *VARS.lock().unwrap() = self.cell_map.zip(self.number_map).map(|(c, n)| ((c - base) as u32, (n - base) as u32));
+        *VARS.lock().unwrap() = (self.cell_map.map(|c| (c - base) as u32), self.number_map.map(|n| (n - base) as u32));
+        self.js.number_map = self.number_map;
     }
 
     /// The global object's property dictionary's entries (objects): the global object is the
@@ -468,7 +559,14 @@ impl Web {
             if BUILTINS.contains(&name.as_str()) || name.starts_with("on") && name.len() > 2 && name[2..].chars().all(|c| c.is_ascii_lowercase()) {
                 continue;
             }
-            out.push((name, cell, self.js.slot(mem, cell - 1 + 12, false)));
+            // Functions (the browser's, JavaScript's constructors, the game's own) hold no state.
+            let v = self.js.slot(mem, cell - 1 + 12, false);
+            if let Val::Obj(o) = v {
+                if self.callable(mem, o) || self.is_number(mem, v) {
+                    continue;
+                }
+            }
+            out.push((name, cell, v));
         }
         out
     }
@@ -554,10 +652,7 @@ impl Web {
         if of.is_empty() {
             return Vec::new();
         }
-        // An object (not a stale copy's leftover word): its properties and elements are V8's
-        // arrays, the read-only empty ones, or a PropertyArray or FixedArray (read-only maps).
-        let read_only = |p: u64| p.wrapping_sub(base) < READ_ONLY || self.js.word(mem, p - 1).is_some_and(|m| m.wrapping_sub(base) < READ_ONLY);
-        let object = |o: u64| [4, 8].iter().all(|f| self.js.word(mem, o - 1 + f).is_some_and(|p| p & 1 == 1 && read_only(p)));
+        let object = |o: u64| self.is_object(mem, o);
         let mut out: Vec<(String, u64)> = Vec::new();
         let mut count: HashMap<String, usize> = HashMap::new();
         heap.each_chunk(0, |addr, b, fresh| {
@@ -580,6 +675,117 @@ impl Web {
             }
         });
         out
+    }
+
+    /// GDevelop's games (`gdjs.RuntimeGame`): objects whose map has `_sceneStack`, `_variables`
+    /// and `_data` (the game's runtime keeps its scenes, global variables and project data so).
+    pub fn gd_games(&self, heap: &Heap) -> Vec<u64> {
+        let mem = heap.mem();
+        self.objects_where(heap, |m| {
+            let names: Vec<String> = self.js.descriptors(mem, m).into_iter().take(80).filter_map(|(k, _)| self.js.text(mem, k)).collect();
+            ["_sceneStack", "_variables", "_data"].iter().all(|n| names.iter().any(|x| x == n)).then(String::new)
+        })
+        .into_iter()
+        .map(|(_, o)| o)
+        .collect()
+    }
+
+    /// Construct 2's runtimes: the canvas element's `c2runtime` (cr_createRuntime sets it; the
+    /// runtime's own properties are minified, `name` and `data` of its variables aren't).
+    pub fn c2_runtimes(&self, heap: &Heap) -> Vec<u64> {
+        let mem = heap.mem();
+        self.objects_where(heap, |m| self.js.descriptors(mem, m).into_iter().take(80).any(|(k, _)| self.js.text(mem, k).as_deref() == Some("c2runtime")).then(String::new))
+            .into_iter()
+            .filter_map(|(_, canvas)| match self.js.field(mem, canvas, "c2runtime")? {
+                Val::Obj(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Construct 2's global variables: the runtime's array whose elements are its variables
+    /// (objects with `name` and `data`): the array's field, and each variable's index, name and
+    /// value.
+    fn c2_globals(&self, mem: &Mem, runtime: u64) -> Option<(String, Vec<(u32, String, Val)>)> {
+        let mut best: Option<(String, Vec<(u32, String, Val)>)> = None;
+        for (field, v) in self.js.fields(mem, runtime) {
+            let Val::Obj(list) = v else { continue };
+            let mut vars = Vec::new();
+            for (i, e) in self.js.elements(mem, list).into_iter().take(1000) {
+                let Val::Obj(var) = e else { continue };
+                let fields = self.js.fields(mem, var);
+                let name = fields.iter().find(|f| f.0 == "name").and_then(|f| match f.1 {
+                    Val::Obj(t) => self.js.text(mem, t),
+                    _ => None,
+                });
+                let data = fields.iter().find(|f| f.0 == "data").map(|f| f.1).filter(|v| kind_of(*v).is_some());
+                if let (Some(name), Some(data)) = (name, data) {
+                    vars.push((i, name, data));
+                }
+            }
+            if vars.len() > best.as_ref().map_or(0, |b| b.1.len()) {
+                best = Some((field, vars));
+            }
+        }
+        best
+    }
+
+    /// A GDevelop game's running scenes (`_sceneStack._stack`), by `_name`.
+    fn gd_scenes(&self, mem: &Mem, game: u64) -> Vec<(String, u64)> {
+        let Some(Val::Obj(stack)) = self.js.field(mem, game, "_sceneStack") else { return Vec::new() };
+        let Some(Val::Obj(list)) = self.js.field(mem, stack, "_stack") else { return Vec::new() };
+        self.js
+            .elements(mem, list)
+            .into_iter()
+            .filter_map(|(_, v)| {
+                let Val::Obj(scene) = v else { return None };
+                let Val::Obj(n) = self.js.field(mem, scene, "_name")? else { return None };
+                Some((self.js.text(mem, n)?, scene))
+            })
+            .collect()
+    }
+
+    /// A GDevelop VariablesContainer's variables (`_variables.items`: name -> Variable): each
+    /// name, the Variable and its number or flag (`_value`, `_bool`).
+    fn gd_variables(&self, mem: &Mem, container: u64) -> Vec<(String, u64, Val, &'static str)> {
+        let Some(Val::Obj(table)) = self.js.field(mem, container, "_variables") else { return Vec::new() };
+        let Some(Val::Obj(items)) = self.js.field(mem, table, "items") else { return Vec::new() };
+        let mut out = Vec::new();
+        for (name, v) in self.js.fields(mem, items) {
+            // Extensions' own variables ("__CameraShake_Duration") aren't the game's.
+            let Val::Obj(var) = v else { continue };
+            if name.starts_with("__") {
+                continue;
+            }
+            let fields = self.js.fields(mem, var);
+            let ty = fields.iter().find(|f| f.0 == "_type").and_then(|f| match f.1 {
+                Val::Obj(t) => self.js.text(mem, t),
+                _ => None,
+            });
+            let (field, val) = match ty.as_deref() {
+                Some("boolean") => ("_bool", fields.iter().find(|f| f.0 == "_bool").map(|f| f.1)),
+                Some("string") | Some("structure") | Some("array") => continue,
+                _ => ("_value", fields.iter().find(|f| f.0 == "_value").map(|f| f.1)),
+            };
+            if let Some(val) = val.filter(|v| kind_of(*v).is_some()) {
+                out.push((name, var, val, field));
+            }
+        }
+        out
+    }
+
+    /// Whether an object is a JavaScript object (not a stale copy's leftover word, a string or a
+    /// number): its properties and elements are V8's arrays, the read-only empty ones, or a
+    /// PropertyArray or FixedArray (read-only maps).
+    fn is_object(&self, mem: &Mem, o: u64) -> bool {
+        let base = self.js.base();
+        let read_only = |p: u64| p.wrapping_sub(base) < READ_ONLY || self.js.word(mem, p - 1).is_some_and(|m| m.wrapping_sub(base) < READ_ONLY);
+        [4, 8].iter().all(|f| self.js.word(mem, o - 1 + f).is_some_and(|p| p & 1 == 1 && read_only(p)))
+    }
+
+    /// Whether an object is a function (its map's bit_field, map +10: callable bit 1).
+    fn callable(&self, mem: &Mem, o: u64) -> bool {
+        self.js.map_of(mem, o).and_then(|m| half(mem, m - 1 + 8)).is_some_and(|w| (w >> 16) & 0x2 != 0)
     }
 
     /// The game's classes: the constructors its scopes' variables hold (a map's bit_field,
@@ -627,6 +833,12 @@ pub enum Root {
     New(String),
     /// A Phaser scene, by its key: `scene:main`.
     Scene(String),
+    /// GDevelop's game (`gdjs.RuntimeGame`): `gdgame`.
+    GdGame,
+    /// A GDevelop scene in the game's scene stack, by its name: `gdscene:Level1`.
+    GdScene(String),
+    /// Construct 2's runtime (the canvas's `c2runtime`): `c2`.
+    C2,
 }
 
 /// One step of a path: a property by name, or an element by index.
@@ -647,10 +859,18 @@ impl WebPath {
     /// "web:@<variable>|new:<class variable>|scene:<key>|<global>[.<property>|[i]]...".
     pub fn parse(text: &str) -> Option<WebPath> {
         let rest = text.strip_prefix("web:")?;
+        for (prefix, root) in [("gdgame", Root::GdGame), ("c2", Root::C2)] {
+            if let Some(r) = rest.strip_prefix(prefix).filter(|r| r.is_empty() || r.starts_with(['.', '['])) {
+                let mut p = WebPath::parse(&format!("web:@x{r}"))?;
+                p.root = root;
+                return Some(p);
+            }
+        }
         let (make, rest): (fn(String) -> Root, &str) = match () {
             _ if rest.starts_with('@') => (Root::Var, &rest[1..]),
             _ if rest.starts_with("new:") => (Root::New, &rest[4..]),
             _ if rest.starts_with("scene:") => (Root::Scene, &rest[6..]),
+            _ if rest.starts_with("gdscene:") => (Root::GdScene, &rest[8..]),
             _ => (Root::Global, rest),
         };
         let end = rest.find(['.', '[']).unwrap_or(rest.len());
@@ -685,6 +905,9 @@ impl WebPath {
             Root::Global(n) => encode(n),
             Root::New(n) => format!("new:{}", encode(n)),
             Root::Scene(n) => format!("scene:{}", encode(n)),
+            Root::GdGame => "gdgame".into(),
+            Root::GdScene(n) => format!("gdscene:{}", encode(n)),
+            Root::C2 => "c2".into(),
         };
         format!("web:{root}{}", self.steps_text(true))
     }
@@ -706,6 +929,9 @@ impl WebPath {
             Root::Var(n) | Root::Global(n) => n.clone(),
             Root::New(n) => format!("new {n}"),
             Root::Scene(n) => format!("scene {n}"),
+            Root::GdGame => "game".into(),
+            Root::GdScene(n) => n.clone(),
+            Root::C2 => "runtime".into(),
         };
         root + &self.steps_text(false)
     }
@@ -729,7 +955,9 @@ impl WebPath {
                 _ => None,
             })
             .unwrap_or(match &self.root {
-                Root::Var(n) | Root::Global(n) | Root::New(n) | Root::Scene(n) => n,
+                Root::Var(n) | Root::Global(n) | Root::New(n) | Root::Scene(n) | Root::GdScene(n) => n,
+                Root::GdGame => "game",
+                Root::C2 => "runtime",
             })
     }
 }
@@ -747,6 +975,9 @@ pub fn find_roots(heap: &Heap, path: &WebPath) -> Vec<u64> {
             web.instances(heap, &classes).into_iter().map(|(_, o)| o).collect()
         }
         Root::Scene(key) => web.scenes(heap).into_iter().filter(|(k, _)| k == key).map(|(_, o)| o).collect(),
+        Root::GdGame => web.gd_games(heap),
+        Root::GdScene(name) => web.gd_games(heap).into_iter().flat_map(|g| web.gd_scenes(mem, g)).filter(|(n, _)| n == name).map(|(_, o)| o).collect(),
+        Root::C2 => web.c2_runtimes(heap),
     }
 }
 
@@ -776,7 +1007,7 @@ fn root_value(web: &Web, mem: &Mem, r: u64, root: &Root) -> Option<Val> {
             let n = web.js.word(mem, r - 1 + 4)?;
             (web.js.map_of(mem, r) == web.property_map && web.js.text(mem, n).as_deref() == Some(name)).then(|| web.js.slot(mem, r - 1 + 12, false))
         }
-        Root::New(_) | Root::Scene(_) => web.js.map_of(mem, r).map(|_| Val::Obj(r)),
+        Root::New(_) | Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2 => web.js.map_of(mem, r).map(|_| Val::Obj(r)),
     }
 }
 
@@ -836,6 +1067,45 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     let mem = heap.mem();
     let mut out: Vec<Group> = Vec::new();
     let mut queue: VecDeque<(u64, WebPath, usize)> = VecDeque::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    // GDevelop: the game's, each running scene's and each object's variables, by the names the
+    // game's maker gave them.
+    for game in web.gd_games(heap).into_iter().take(1) {
+        let vars = |container: u64, root: &WebPath, seen: &mut HashSet<u64>| -> Vec<(String, Val, WebPath)> {
+            web.gd_variables(mem, container)
+                .into_iter()
+                .map(|(name, var, val, field)| {
+                    seen.insert(var);
+                    (name.clone(), val, root.then(Step::Prop("_variables".into())).then(Step::Prop("items".into())).then(Step::Prop(name)).then(Step::Prop(field.into())))
+                })
+                .collect()
+        };
+        let root = WebPath { root: Root::GdGame, steps: vec![Step::Prop("_variables".into())] };
+        if let Some(Val::Obj(c)) = web.js.field(mem, game, "_variables") {
+            out.push(Group { path: WebPath { root: Root::GdGame, steps: Vec::new() }, class: "Global variables".into(), numbers: vars(c, &root, &mut seen) });
+        }
+        for (scene_name, scene) in web.gd_scenes(mem, game) {
+            let sroot = WebPath { root: Root::GdScene(scene_name.clone()), steps: vec![Step::Prop("_variables".into())] };
+            if let Some(Val::Obj(c)) = web.js.field(mem, scene, "_variables") {
+                out.push(Group { path: WebPath { root: Root::GdScene(scene_name.clone()), steps: Vec::new() }, class: "Scene variables".into(), numbers: vars(c, &sroot, &mut seen) });
+            }
+            let Some(Val::Obj(instances)) = web.js.field(mem, scene, "_instances") else { continue };
+            let Some(Val::Obj(items)) = web.js.field(mem, instances, "items") else { continue };
+            for (object, list) in web.js.fields(mem, items) {
+                let Val::Obj(list) = list else { continue };
+                for (i, v) in web.js.elements(mem, list).into_iter().take(8) {
+                    let Val::Obj(o) = v else { continue };
+                    let Some(Val::Obj(c)) = web.js.field(mem, o, "_variables") else { continue };
+                    let path = WebPath { root: Root::GdScene(scene_name.clone()), steps: vec![Step::Prop("_instances".into()), Step::Prop("items".into()), Step::Prop(object.clone()), Step::Index(i)] };
+                    let numbers = vars(c, &path.then(Step::Prop("_variables".into())), &mut seen);
+                    seen.insert(o);
+                    if !numbers.is_empty() {
+                        out.push(Group { path, class: object.clone(), numbers });
+                    }
+                }
+            }
+        }
+    }
     let mut vars = Group { path: WebPath { root: Root::Var(String::new()), steps: Vec::new() }, class: "Script".into(), numbers: Vec::new() };
     for (name, c, i) in web.variables(mem) {
         let Some(ctx) = web.contexts.iter().find(|x| x.at == c) else { continue };
@@ -863,11 +1133,19 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     for (class, o) in web.instances(heap, &web.classes(mem)) {
         queue.push_back((o, WebPath { root: Root::New(class), steps: Vec::new() }, 1));
     }
+    // Construct 2: the event sheets' global variables, by name.
+    for runtime in web.c2_runtimes(heap).into_iter().take(1) {
+        if let Some((field, list)) = web.c2_globals(mem, runtime) {
+            let path = WebPath { root: Root::C2, steps: vec![Step::Prop(field)] };
+            let numbers = list.into_iter().map(|(i, name, v)| (name, v, path.then(Step::Index(i)).then(Step::Prop("data".into())))).collect();
+            out.push(Group { path: WebPath { root: Root::C2, steps: Vec::new() }, class: "Global variables".into(), numbers });
+        }
+        seen.insert(runtime);
+    }
     out.extend([vars, globals].into_iter().filter(|g| !g.numbers.is_empty()));
-    let mut seen: HashSet<u64> = HashSet::new();
     let (mut visited, mut listed) = (0, 0);
     while let Some((o, path, depth)) = queue.pop_front() {
-        if !seen.insert(o) {
+        if !seen.insert(o) || !web.is_object(mem, o) {
             continue;
         }
         visited += 1;
@@ -906,6 +1184,10 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
                 }
             }
         }
+        // V8's read-only objects (the empty arrays' elements, read-only strings) are never the
+        // game's.
+        let base = web.js.base();
+        g.numbers.retain(|n| place(n.1).is_some_and(|a| a.wrapping_sub(base) >= READ_ONLY));
         if !g.numbers.is_empty() {
             listed += g.numbers.len();
             out.push(g);
@@ -924,14 +1206,26 @@ fn players(name: &str) -> bool {
 /// The Browse tab's list for a web game: the objects with the player's sort of numbers first
 /// (hp, energy, gold, lives...), then the rest under Show Everything.
 pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
-    let groups = groups(heap)?;
+    let mut groups = groups(heap)?;
+    groups.retain(|g| !g.numbers.is_empty());
+    // An engine's own state found (GDevelop's variables, a Phaser scene): the scripts' top-level
+    // variables are then mostly its libraries' (PixiJS's).
+    let engine = groups.iter().any(|g| matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2));
     let mut out: Vec<ListedObject> = groups
         .into_iter()
         .map(|g| {
-            let main = g.numbers.iter().any(|n| players(&n.0));
+            // The game's own variables and its scene are its state, whatever their names.
+            // GDevelop's objects' variables are the game's too (the maker named them).
+            let own = !engine && g.path.steps.is_empty() && matches!(&g.path.root, Root::Var(n) | Root::Global(n) if n.is_empty())
+                || matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2) && (g.path.steps.is_empty() || g.class != "Object");
+            let main = own || g.numbers.iter().any(|n| players(&n.0));
             let character = players(g.path.last_name()) || ["player", "hero", "ship"].contains(&g.path.last_name().to_ascii_lowercase().as_str());
             let name = match g.path.root {
                 Root::Var(ref n) | Root::Global(ref n) if n.is_empty() => g.class.clone(),
+                Root::GdGame | Root::C2 if g.path.steps.is_empty() => g.class.clone(),
+                Root::GdScene(ref n) if g.path.steps.is_empty() => format!("{n} ({})", g.class),
+                // A GDevelop object's instance: "Player[0]".
+                Root::GdScene(_) if g.path.steps.len() == 4 => format!("{}{}", g.class, g.path.steps_text(false).rsplit('.').next().unwrap_or_default().trim_start_matches(&*g.class)),
                 _ => g.path.shown(),
             };
             ListedObject {
@@ -1174,6 +1468,12 @@ pub fn diagnose(heap: &Heap) -> Vec<String> {
     for (key, o) in web.scenes(heap) {
         out.push(format!("Phaser scene {key} at {o:#x}"));
     }
+    for g in web.gd_games(heap) {
+        out.push(format!("GDevelop game at {g:#x}, scenes {:?}", web.gd_scenes(mem, g).iter().map(|s| s.0.clone()).collect::<Vec<_>>()));
+    }
+    for r in web.c2_runtimes(heap) {
+        out.push(format!("Construct 2 runtime at {r:#x}, global variables {:?}", web.c2_globals(mem, r).map(|(f, v)| (f, v.len()))));
+    }
     for (class, o) in web.instances(heap, &web.classes(mem)) {
         out.push(format!("object of {class} at {o:#x}"));
     }
@@ -1186,7 +1486,7 @@ mod tests {
 
     #[test]
     fn paths_read_back() {
-        for text in ["web:@ship.hp", "web:@omnis[0].hp", "web:score", "web:new:Bt.health", "web:scene:main.health", "web:@a%20b.c[2][3].d", "web:@%24game.x"] {
+        for text in ["web:@ship.hp", "web:@omnis[0].hp", "web:score", "web:new:Bt.health", "web:scene:main.health", "web:gdgame._variables._variables.items.Score._value", "web:gdscene:Level%201._variables.x", "web:c2.Vf[3].data", "web:@a%20b.c[2][3].d", "web:@%24game.x"] {
             assert_eq!(WebPath::parse(text).unwrap().text(), text, "{text}");
         }
         let p = WebPath::parse("web:@game.ship.cargo[1]").unwrap();
