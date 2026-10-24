@@ -21,6 +21,7 @@ use crate::launchers;
 use crate::tweaks;
 use crate::mono::{self, MonoPath};
 use crate::js::{self, JsPath};
+use crate::web::{self, WebPath};
 use crate::gml::{self, GmlPath};
 use crate::lua::{self, LuaPath};
 use crate::air::{self, AirPath};
@@ -72,6 +73,9 @@ pub fn exe_name(pid: u32) -> String {
 pub fn game_name(pid: u32) -> String {
     if let Some(name) = nwjs_app(pid).map(|dir| nwjs_name(pid, &dir)) {
         return name;
+    }
+    if let Some(app) = electron(pid) {
+        return app.name;
     }
     let exe = exe_name(pid);
     let lower = exe.to_ascii_lowercase();
@@ -222,6 +226,12 @@ fn dosbox_game(argv0: &str, cwd: &str, home: &str) -> Option<String> {
 /// The folder of the NW.js app a process belongs to (RPG Maker MV and MZ, Construct and other
 /// HTML5 games): its program sits next to package.json or package.nw and NW.js's own files.
 /// Under Wine the program is the .exe it maps (RPG Maker MZ games ship for Windows only).
+/// The Electron app a process belongs to (`web::electron_app`).
+fn electron(pid: u32) -> Option<web::App> {
+    let program = os::exe(pid)?;
+    web::electron_app(&program, &cmdline(pid), |p| os::inside(pid, p))
+}
+
 fn nwjs_app(pid: u32) -> Option<PathBuf> {
     let windows = exe_name(pid).to_ascii_lowercase().ends_with(".exe");
     let program = if windows { program_of(pid)? } else { os::exe(pid)? };
@@ -323,6 +333,12 @@ fn is_lua(pid: u32) -> bool {
 fn is_rpgmaker(pid: u32) -> bool {
     let program = maps(pid).ok().and_then(|m| program_path(pid, &m));
     js::is_rpgmaker(pid, program.as_deref())
+}
+
+/// Web games (web.rs): the renderer of an Electron app or of an NW.js game that isn't RPG
+/// Maker's.
+fn is_web(pid: u32) -> bool {
+    nwjs_renderer(pid) && (electron(pid).is_some() || nwjs_app(pid).is_some() && !is_rpgmaker(pid))
 }
 
 /// Godot games load <program>.pck from next to the program, or carry it at the end of the
@@ -603,6 +619,10 @@ pub(crate) enum Kind {
     /// number starts with the same 4 bytes as an i32 of it, so a search finds its start and
     /// saving by name takes the field's own type.
     I64,
+    /// A web game's scope variable (web.rs): its context's 4-byte slot, holding a small integer,
+    /// a double's box or a ContextCell, read and written by what it holds then
+    /// (`web::read_var`). Never searched for: the Browse tab lists them.
+    JsVar,
 }
 
 /// The names of `Kind::Bit`.
@@ -628,6 +648,7 @@ impl Kind {
             Kind::U8 => "u8",
             Kind::I8 => "i8",
             Kind::I64 => "i64",
+            Kind::JsVar => "jsvar",
         }
     }
 
@@ -647,14 +668,14 @@ impl Kind {
         if let Some(n) = BITS.iter().position(|b| *b == s) {
             return Some(Kind::Bit(n as u8));
         }
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8, Kind::I8, Kind::I64]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8, Kind::I8, Kind::I64, Kind::JsVar]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
         match self {
             Kind::Bit(_) | Kind::U8 | Kind::I8 => 1,
             Kind::U16 => 2,
-            Kind::I32 | Kind::F32 | Kind::Smi => 4,
+            Kind::I32 | Kind::F32 | Kind::Smi | Kind::JsVar => 4,
             Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py | Kind::I64 => 8,
             Kind::JsBool => js::bool_width(),
             Kind::Gm => 16,
@@ -673,7 +694,7 @@ impl Kind {
             Kind::Gm => gml::rvalue_number(b).unwrap_or(f64::NAN),
             Kind::Lua => lua::number(b).unwrap_or(f64::NAN),
             // Read through the slot (`read_value`).
-            Kind::Py => f64::NAN,
+            Kind::Py | Kind::JsVar => f64::NAN,
             Kind::Smi => match i32::from_le_bytes(b[..4].try_into().unwrap()) {
                 w if w & 1 == 0 => (w >> 1) as f64,
                 _ => f64::NAN,
@@ -694,7 +715,7 @@ impl Kind {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
             Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 | Kind::I8 | Kind::I64 => lo <= n.scaled && n.scaled <= hi,
-            Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => lo < n.value + n.step && hi > n.value - n.step,
+            Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsVar => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
 
@@ -732,6 +753,9 @@ fn read_value(mem: &Mem, addr: u64, kind: Kind) -> Option<f64> {
     if kind == Kind::Py {
         return python::read_slot(mem, addr);
     }
+    if kind == Kind::JsVar {
+        return web::read_var(mem, addr);
+    }
     let mut b = [0u8; 16];
     mem.read_exact_at(&mut b[..kind.size()], addr).ok()?;
     Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua | Kind::Smi | Kind::JsBool) || !v.is_nan())
@@ -767,6 +791,7 @@ fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
             mem.write_all_at(&v.to_le_bytes(), addr)
         }
         Kind::Py => python::write_slot(mem, addr, v),
+        Kind::JsVar => web::write_var(mem, addr, v),
         Kind::Smi => {
             let mut b = [0u8; 4];
             mem.read_exact_at(&mut b, addr)?;
@@ -886,6 +911,7 @@ enum Named {
     Java(JavaPath),
     Py(PyPath),
     Air(AirPath),
+    Web(WebPath),
 }
 
 impl Named {
@@ -917,6 +943,9 @@ impl Named {
         if text.starts_with("air:") {
             return AirPath::parse(text).map(Named::Air);
         }
+        if text.starts_with("web:") {
+            return WebPath::parse(text).map(Named::Web);
+        }
         match text.starts_with('{') {
             true => DictPath::parse(text).map(Named::Dict),
             false => NamedPath::parse(text).map(Named::Objects),
@@ -924,7 +953,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:") || text.starts_with("py:") || text.starts_with("air:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:") || text.starts_with("py:") || text.starts_with("air:") || text.starts_with("web:")
     }
 
     /// Walked again right before every write (not only every `LIMIT_FIND_EVERY`): Java and
@@ -932,7 +961,7 @@ impl Named {
     /// reused; Python makes a new number object at every change (`hp -= 1`) and frees the old
     /// one.
     fn fresh(&self) -> bool {
-        matches!(self, Named::Java(_) | Named::Py(_) | Named::Js(_))
+        matches!(self, Named::Java(_) | Named::Py(_) | Named::Js(_) | Named::Web(_))
     }
 
     /// Walked again before a write only when one is due (the number at its last place is out
@@ -940,7 +969,7 @@ impl Named {
     /// the game's memory map each time). A number that moved and stayed in range waits for
     /// the next `LIMIT_FIND_EVERY` walk; a write always follows a walk.
     fn walk_when_due(&self) -> bool {
-        matches!(self, Named::Js(_))
+        matches!(self, Named::Js(_) | Named::Web(_))
     }
 
     /// Where it leads from the roots found before (no search).
@@ -956,6 +985,7 @@ impl Named {
             Named::Java(p) => java::walk(heap, roots, p),
             Named::Py(p) => python::walk(heap, roots, p),
             Named::Air(p) => air::walk(heap, roots, p),
+            Named::Web(p) => web::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.mem()).map(|ue| ue.walk(heap.mem(), roots, p)).unwrap_or_default(),
         }
     }
@@ -973,6 +1003,7 @@ impl Named {
             Named::Java(p) => java::find_roots(heap, p),
             Named::Py(p) => python::find_roots(heap, p),
             Named::Air(p) => air::find_roots(heap, p),
+            Named::Web(p) => web::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.mem()).map(|ue| ue.roots(heap.mem(), p)).unwrap_or_default(),
         }
     }
@@ -1008,7 +1039,16 @@ fn named_doubt(heap: &Heap, leads: &[u64], roots: &[u64], kind: Kind, path: &Nam
     }
     // An Unreal path's places are the properties the game itself describes (a stack and a
     // tally of it may sit at different alignments).
-    if !matches!(path, Named::Unreal(_)) && leads.iter().any(|a| a % 8 != leads[0] % 8) {
+    // A web game's number kept as another type now (a field that held small integers holds a
+    // double's box once the game stores a fraction): written as the old one it would go wrong.
+    if let Named::Web(p) = path {
+        if let Some(now) = web::kind_now(heap, roots, p).filter(|k| *k != kind.name()) {
+            return Some(format!("the game keeps it as {now} now, not {}", kind.name()));
+        }
+    }
+    // A web game's V8 compresses references: fields are 4 bytes apart.
+    let align = if matches!(path, Named::Web(_)) { 4 } else { 8 };
+    if !matches!(path, Named::Unreal(_)) && leads.iter().any(|a| a % align != leads[0] % align) {
         return Some("its places don't line up like the same field of objects".into());
     }
     // An RPG Maker whole number is a plain i32 in 64-bit V8 and doubled ("smi") in 32-bit V8
@@ -1721,7 +1761,7 @@ const NOT_GAMES: &[&str] = &[
     "steamwebhelper.exe", "mscorsvw.exe", "ngen.exe", "reaper", "pressure-vessel-wrap", "pv-adverb",
     "srt-bwrap", "bwrap", "wineserver", "sh",
     "bash", "steam", "gameoverlayui", "fossilize_replay", "timeout", "sleep", "umu.exe", "xalia.exe",
-    "xwayland", "gamescope", "gamescope-wl", "gamescopereaper", "gpu-screen-recorder", "mpv", "ffplay",
+    "xwayland", "xvfb", "gamescope", "gamescope-wl", "gamescopereaper", "gpu-screen-recorder", "mpv", "ffplay", "ffmpeg",
     // Windows itself: launchers, browsers, consoles and Ferret (most of Windows' own programs
     // run from C:\Windows, `windows_non_game`).
     "epicgameslauncher.exe", "epicwebhelper.exe", "galaxyclient.exe", "galaxyclient helper.exe", "eadesktop.exe",
@@ -1856,8 +1896,11 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         if not_game || anti_cheat || lower.contains("crashhandler") || lower.contains("crashreport") {
             continue;
         }
-        // An NW.js game: only its renderer, where its values are.
-        let nwjs = nwjs_app(pid).is_some();
+        // An NW.js game: only its renderer, where its values are; an Electron game's likewise
+        // (an Electron app counts when its files show a game: `web::electron_app`, or a
+        // launcher started it).
+        let electron = electron(pid).filter(|a| a.game || app_id.is_some());
+        let nwjs = nwjs_app(pid).is_some() || electron.is_some();
         if nwjs && !nwjs_renderer(pid) {
             continue;
         }
@@ -1891,7 +1934,7 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let row = format!("{pid}\t{name_now}\t{id}\t{refused}\t{name}\t{}\t{ships}\t{extras}\t{resident}", dash(play));
         // An NW.js game's renderers (NW.js 0.12 forks a second one from its zygote): the one
         // holding the most memory, as for a launch.
-        let launch = match nwjs.then(|| nwjs_app(pid)).flatten() {
+        let launch = match nwjs.then(|| nwjs_app(pid).or_else(|| electron.as_ref().map(|a| a.dir.clone()))).flatten() {
             Some(dir) => format!("nwjs {}", dir.display()),
             None => launch_of(pid, &env),
         };
@@ -2190,7 +2233,7 @@ impl MemScan<'_> {
                 // that has moved on by up to 1 since.
                 let hit = match kind {
                     Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 | Kind::I8 | Kind::I64 => value == n.scaled,
-                    Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => kind.fits(value - n.step, value + n.step, n),
+                    Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsVar => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
                     self.hit(r, buf, len, addr, off, kind, value);
@@ -2493,7 +2536,7 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                         let step = match kind {
                             Kind::Bit(_) | Kind::U8 | Kind::I8 => 1,
                             Kind::U16 => 2,
-                            Kind::I32 | Kind::F32 | Kind::Xor | Kind::Smi => 4,
+                            Kind::I32 | Kind::F32 | Kind::Xor | Kind::Smi | Kind::JsVar => 4,
                             Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsBool | Kind::I64 => 8,
                         };
                         for o in (w..w + 8).step_by(step) {
@@ -3925,6 +3968,18 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
             return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
         }
     }
+    // A web game's number, by its variable, global or class and the fields from there; its
+    // value type first when the search's isn't it (a small integer is kept doubled).
+    if is_web(s.pid) {
+        if let Some((p, leads, field)) = web::discover(&heap, target) {
+            if field != kind.name() {
+                writeln!(out, "type {field}")?;
+            }
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        }
+        return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
+    }
     // A number of an RPG Maker MV or MZ game, by its path from the game's globals.
     if is_rpgmaker(s.pid) {
         if let Some((p, leads)) = js::discover(&heap, target) {
@@ -4122,6 +4177,12 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
                     None => writeln!(out, "none character"),
                 };
             }
+            if is_web(s.pid) {
+                return match web::player(&heap) {
+                    Some(list) => print_player(out, s, &list, t),
+                    None => writeln!(out, "none engine JavaScript scopes not found (only V8 with compressed pointers: Electron 21 and newer)"),
+                };
+            }
             if s.java {
                 return match java::player(&heap) {
                     Some(list) => print_player(out, s, &list, t),
@@ -4172,7 +4233,7 @@ fn print_player(out: &mut impl Write, s: &Session, list: &[ue::ListedObject], t:
     writeln!(out, "{} objects, {n} numbers in {} ms", list.len(), t.elapsed().as_millis())
 }
 
-/// browsable: "browsable unreal|unity|godot|rpgmaker|gamemaker|lua|java|python|air" when `player` can list the game's numbers, else "browsable no".
+/// browsable: "browsable unreal|unity|godot|rpgmaker|web|gamemaker|lua|java|python|air" when `player` can list the game's numbers, else "browsable no".
 fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -4181,6 +4242,7 @@ fn cmd_browsable(out: &mut impl Write, s: &Session) -> io::Result<()> {
         Ok(_) => "unreal",
         Err(_) if is_godot(s.pid) => "godot",
         Err(_) if is_rpgmaker(s.pid) => "rpgmaker",
+        Err(_) if is_web(s.pid) => "web",
         Err(_) if s.doubles_only && gml::is_runner(s.pid, program_of(s.pid).as_deref()) => "gamemaker",
         Err(_) if mono::runs_csharp(s.pid) => "unity",
         Err(_) if is_air(s.pid) && s.width == 4 => "air",
@@ -4241,6 +4303,19 @@ fn cmd_jsdump(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let t = Instant::now();
     let heap = Heap::new(s.pid, mem, s.width)?;
     for l in js::diagnose(&heap, arg.trim()) {
+        writeln!(out, "{l}")?;
+    }
+    writeln!(out, "in {} ms", t.elapsed().as_millis())
+}
+
+/// webscan: a web game's V8 scopes and their variables (`web::diagnose`).
+fn cmd_webscan(out: &mut impl Write, s: &Session) -> io::Result<()> {
+    let Some(mem) = s.mem.as_ref() else {
+        return writeln!(out, "error: not attached");
+    };
+    let t = Instant::now();
+    let heap = Heap::new(s.pid, mem, s.width)?;
+    for l in crate::web::diagnose(&heap) {
         writeln!(out, "{l}")?;
     }
     writeln!(out, "in {} ms", t.elapsed().as_millis())
@@ -4356,7 +4431,10 @@ pub fn run(as_user: Option<&str>) {
         if arg.contains("jsbool") && !js::bools_known() {
             if let Some(mem) = session.mem.as_ref() {
                 if let Ok(heap) = Heap::new(session.pid, mem, session.width) {
-                    js::learn_bools(&heap);
+                    match is_web(session.pid) {
+                        true => web::learn_bools(&heap),
+                        false => js::learn_bools(&heap),
+                    }
                 }
             }
         }
@@ -4407,6 +4485,7 @@ pub fn run(as_user: Option<&str>) {
             "jvm" => cmd_jvm(&mut out, &session, arg),
             "pydump" => cmd_pydump(&mut out, &session, arg),
             "jsdump" => cmd_jsdump(&mut out, &session, arg),
+            "webscan" => cmd_webscan(&mut out, &session),
             "airdump" => cmd_airdump(&mut out, &session, arg),
             "follow" => cmd_follow(&mut out, &session, arg),
             "limit" => cmd_limit(&mut out, &limiter, arg),

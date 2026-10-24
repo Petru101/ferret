@@ -356,7 +356,7 @@ impl Helper {
 /// dictionaries, RPG Maker's globals, GameMaker's variables, Lua tables, Java's, Python's and
 /// ActionScript's objects): nothing better to upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "java:", "py:", "air:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "java:", "py:", "air:", "web:", "{"].iter().any(|p| text.starts_with(p))
 }
 
 /// A name the helper lists in Ferret's words rather than the game's ("@gold": RPG Maker's
@@ -647,6 +647,9 @@ pub enum Kind {
     /// An 8-byte whole number (a Java `long`): listed by the Browse tab; a search for a whole
     /// number finds its start, and saving by name takes this type.
     I64,
+    /// A web game's scope variable (the helper's web.rs): read and written by what its slot
+    /// holds then (a small integer, a double's box, a ContextCell). Listed by the Browse tab.
+    JsVar,
 }
 
 /// The names of `Kind::Bit`, as the helper takes them.
@@ -672,6 +675,7 @@ impl Kind {
             Kind::U8 => "u8",
             Kind::I8 => "i8",
             Kind::I64 => "i64",
+            Kind::JsVar => "jsvar",
         }
     }
 
@@ -679,7 +683,7 @@ impl Kind {
         if let Some(n) = BITS.iter().position(|b| *b == s) {
             return Some(Kind::Bit(n as u8));
         }
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8, Kind::I8, Kind::I64]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8, Kind::I8, Kind::I64, Kind::JsVar]).find(|k| k.name() == s)
     }
 
     /// On or off (1 or 0), not a number: the window shows a switch.
@@ -712,6 +716,7 @@ impl Kind {
             Kind::JsBool => "JavaScript on/off flag",
             Kind::U8 | Kind::I8 => "1-byte whole number",
             Kind::I64 => "8-byte whole number",
+            Kind::JsVar => "JavaScript number",
         }
     }
 }

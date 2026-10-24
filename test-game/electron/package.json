@@ -1,0 +1,15 @@
+{
+  "name": "ferret-electron-standin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Electron stand-ins for web games (see main.js)",
+  "main": "main.js",
+  "scripts": {
+    "build": "esbuild module/main.js --bundle --minify --format=esm --outfile=bundle/game.js && cp module/bundle.html bundle/index.html && esbuild phaser/main.js --bundle --minify --format=esm --outfile=phaser/dist/game.js"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "esbuild": "0.28.2",
+    "phaser": "3.90.0"
+  }
+}

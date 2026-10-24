@@ -61,6 +61,9 @@ enum Cells {
 pub enum Val {
     /// A small integer: the address of its i32 (the upper half of the slot).
     Int(u64),
+    /// A web game's scope variable holding a number: its context's slot, read and written by
+    /// what the slot holds then (`web::read_var`, value type `jsvar`).
+    Var(u64),
     /// A double kept in the object or in a box of the field's own: the address of the f64.
     Real(u64),
     /// true or false: the address of the slot pointing to it (`Kind::JsBool`).
@@ -96,6 +99,10 @@ pub struct Js {
     /// property's details {kind, constness, attributes (3), location, ...} (location bit 5;
     /// bit 1 in 8.x). Each native context has its own meta map then (`is_map`).
     modern: bool,
+    /// V8 15.x: a property's details hold its field's offset in words, the object's (or its
+    /// property array's) header included (bits 19-29), and whether it's in the object (bit 30),
+    /// not an index (Electron 45; web.rs).
+    offsets: bool,
     /// V8's false and true (tagged), once seen (`boolean`); 0 until then.
     bools: Mutex<[u64; 2]>,
 }
@@ -348,7 +355,7 @@ impl Js {
             }
         }
         let field_shift = if cells == Cells::Named { 20 } else { 19 };
-        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0, cell_name: 1, modern: false, bools: Mutex::default() };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0, cell_name: 1, modern: false, offsets: false, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -482,7 +489,7 @@ impl Js {
                 globals[g].1.push(cell);
             }
         }
-        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext, cell_name, modern: false, bools: Mutex::default() };
+        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext, cell_name, modern: false, offsets: false, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -509,8 +516,20 @@ impl Js {
         }
     }
 
-    fn word(&self, mem: &Mem, at: u64) -> Option<u64> {
+    /// A web game's V8 (web.rs): compressed references into the cage at `base`, V8 14.x or
+    /// newer; `offsets`: V8 15.x's field offsets in property details.
+    pub(crate) fn web(base: u64, meta: u64, cell_map: u64, offsets: bool) -> Js {
+        let l = Layout { w: 4, base };
+        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, bools: Mutex::default() }
+    }
+
+    pub(crate) fn word(&self, mem: &Mem, at: u64) -> Option<u64> {
         self.l.word(mem, at)
+    }
+
+    /// The cage's start (compressed references), else 0.
+    pub(crate) fn base(&self) -> u64 {
+        self.l.base
     }
 
     /// A small integer's value, from its place (`Val::Int`).
@@ -527,7 +546,7 @@ impl Js {
     }
 
     /// A map: its map is the meta map (V8 14.x: or its native context's own, a map of itself).
-    fn is_map(&self, mem: &Mem, m: u64) -> bool {
+    pub(crate) fn is_map(&self, mem: &Mem, m: u64) -> bool {
         if !tagged(m) {
             return false;
         }
@@ -543,14 +562,14 @@ impl Js {
         byte(mem, m - 1 + self.l.map_bit_field2()).map(|b| if self.modern { b >> 2 & 0x3f } else { b >> 3 })
     }
 
-    fn map_of(&self, mem: &Mem, o: u64) -> Option<u64> {
+    pub(crate) fn map_of(&self, mem: &Mem, o: u64) -> Option<u64> {
         if !tagged(o) {
             return None;
         }
         self.word(mem, o - 1).filter(|&m| self.is_map(mem, m))
     }
 
-    fn instance_type(&self, mem: &Mem, m: u64) -> Option<u16> {
+    pub(crate) fn instance_type(&self, mem: &Mem, m: u64) -> Option<u16> {
         let at = m - 1 + self.l.map_type();
         match self.cells {
             Cells::Named | Cells::Compressed => half(mem, at).map(|t| t as u16),
@@ -593,15 +612,16 @@ impl Js {
 
     /// A map's own properties: each name (a string, tagged) and its details. The descriptor
     /// array: {map, length, count, enum cache, (name, details, value)...}.
-    fn descriptors(&self, mem: &Mem, m: u64) -> Vec<(u64, u32)> {
+    pub(crate) fn descriptors(&self, mem: &Mem, m: u64) -> Vec<(u64, u32)> {
         let l = self.l;
         let Some(bits) = half(mem, m - 1 + l.map_bit_field3()) else { return Vec::new() };
         let own = (bits >> 10) & 0x3ff;
         let Some(d) = self.word(mem, m - 1 + l.map_descriptors()).filter(|&d| tagged(d)) else { return Vec::new() };
         let ws = l.w as usize;
         let mut b = vec![0u8; 3 * ws * own as usize];
-        // Entries after {map, counts, marked count, enum cache} (V8 14.x: a word more).
-        let first = if self.modern { 20 } else { 4 * l.w };
+        // Entries after {map, counts, marked count, enum cache} (V8 14.x: a word more; 15.x:
+        // the two counts in one word, as before).
+        let first = if self.offsets { 16 } else if self.modern { 20 } else { 4 * l.w };
         if mem.read_exact_at(&mut b, d - 1 + first).is_err() {
             return Vec::new();
         }
@@ -622,7 +642,7 @@ impl Js {
 
     /// A string's text: sequential (one or two bytes a character), a concatenation, a slice of
     /// another, or a thin string pointing to its internalized copy.
-    fn text(&self, mem: &Mem, s: u64) -> Option<String> {
+    pub(crate) fn text(&self, mem: &Mem, s: u64) -> Option<String> {
         self.text_in(mem, s, 0)
     }
 
@@ -683,7 +703,7 @@ impl Js {
     }
 
     /// What a slot holds; `double`: the field is kept as a double in a box of its own.
-    fn slot(&self, mem: &Mem, at: u64, double: bool) -> Val {
+    pub(crate) fn slot(&self, mem: &Mem, at: u64, double: bool) -> Val {
         let l = self.l;
         let Some(w) = self.word(mem, at) else { return Val::Other };
         if l.is_smi(w) {
@@ -762,7 +782,9 @@ impl Js {
         let props = self.word(mem, o - 1 + l.obj_props()).unwrap_or(0);
         // A dictionary-mode object: bit 20 of bit_field3 (21 in V8 8.x and later).
         if bits >> if self.cells == Cells::Compressed { 21 } else { 20 } & 1 == 1 {
-            return self.dictionary(mem, props, 5).into_iter().filter_map(|(k, v)| Some((self.text(mem, k)?, v))).collect();
+            // Entries after the prefix (next enumeration index, hash; V8 15.x: flags too).
+            let first = if self.offsets { 6 } else { 5 };
+            return self.dictionary(mem, props, first).into_iter().filter_map(|(k, v)| Some((self.text(mem, k)?, v))).collect();
         }
         let (Some(words), Some(b9)) = (byte(mem, m - 1 + l.map_words()), byte(mem, m - 1 + l.map_words() + 1)) else { return Vec::new() };
         let (words, b9) = (u64::from(words), u64::from(b9));
@@ -784,6 +806,17 @@ impl Js {
                 false => det & 3 != 0,
             };
             if not_field {
+                continue;
+            }
+            if self.offsets {
+                // V8 15.x: the offset in words from the object (or its property array), headers
+                // included; representation Double = 2 in bits 6-8.
+                let off = u64::from((det >> 19) & 0x7ff);
+                let base = if det >> 30 & 1 == 1 { o } else if tagged(props) { props } else { continue };
+                let val = self.slot(mem, base - 1 + off * l.w, (det >> 6) & 0x7 == 2);
+                if let Some(name) = self.text(mem, k) {
+                    out.push((name, val));
+                }
                 continue;
             }
             let index = u64::from((det >> self.field_shift) & 0x3ff);
@@ -836,8 +869,18 @@ impl Js {
         if !tagged(table) {
             return Vec::new();
         }
-        let Some(len) = self.word(mem, table - 1 + l.w).and_then(|x| l.smi(x)) else { return Vec::new() };
-        let entries = ((len.max(0) as u64).saturating_sub(first) / 3).min(4 * MAX_ELEMENTS as u64);
+        let entries = match self.offsets {
+            // V8 15.x: the capacity (slot 2, a Smi; the length isn't one).
+            true => {
+                let Some(capacity) = self.word(mem, table - 1 + l.array_data() + 2 * l.w).and_then(|x| l.smi(x)) else { return Vec::new() };
+                capacity.max(0) as u64
+            }
+            false => {
+                let Some(len) = self.word(mem, table - 1 + l.w).and_then(|x| l.smi(x)) else { return Vec::new() };
+                (len.max(0) as u64).saturating_sub(first) / 3
+            }
+        }
+        .min(4 * MAX_ELEMENTS as u64);
         (0..entries)
             .filter_map(|i| {
                 let at = table - 1 + l.array_data() + (first + 3 * i) * l.w;
@@ -1295,6 +1338,7 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
                         Val::Real(addr) => Listed { label: e.label, addr, kind: "f64" },
                         Val::Bool(addr) => Listed { label: e.label, addr, kind: "jsbool" },
                         Val::Int(addr) | Val::Obj(addr) => Listed { label: e.label, addr, kind: int_kind },
+                        Val::Var(addr) => Listed { label: e.label, addr, kind: "jsvar" },
                         Val::Other => Listed { label: e.label, addr: 0, kind: int_kind },
                     })
                     .collect(),

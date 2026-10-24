@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Dungeon Dash</title></head>
+<body style="margin:0;background:#111">
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+// One inline script, the way a single-file web game is often written: top-level let/const
+// live in the script scope (not on window), var and functions on window.
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let player = { name: "Hero", hp: 100, maxHp: 100, gold: 250, speed: 3.5, alive: true, x: 400, y: 300 };
+let inventory = [{ id: "potion", count: 3 }, { id: "bomb", count: 1 }];
+const world = { level: 1, wave: 1, enemies: [{ kind: "slime", hp: 30 }, { kind: "bat", hp: 12 }], paused: false };
+var score = 0;
+var highScore = 1200;
+
+function draw() {
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, 800, 600);
+  ctx.fillStyle = player.alive ? "#4af" : "#666";
+  ctx.fillRect(player.x - 10, player.y - 10, 20, 20);
+  ctx.fillStyle = "#fff";
+  ctx.font = "20px monospace";
+  ctx.fillText(`HP ${player.hp}/${player.maxHp}  Gold ${player.gold}  Wave ${world.wave}  Score ${score}`, 20, 30);
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+function report() {
+  console.log("state " + JSON.stringify({ hp: player.hp, gold: player.gold, alive: player.alive, wave: world.wave, score, potions: inventory[0].count }));
+}
+
+window.addEventListener("message", (e) => {
+  const [c, n] = String(e.data).split(" ");
+  const v = Number(n) || 0;
+  if (c === "hurt" && player.alive) player.hp = Math.max(0, player.hp - v);
+  if (c === "gold") player.gold += v;
+  if (c === "kill") player.alive = false;
+  if (c === "revive") player.alive = true;
+  if (c === "wave") { world.wave++; score += 100; }
+  if (c === "churn") { for (let i = 0; i < 200000; i++) new Array(16).fill(i); if (window.gc) gc(); }
+  report();
+});
+report();
+</script>
+</body>
+</html>

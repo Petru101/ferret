@@ -1625,6 +1625,7 @@ fn kind_text(kind: crate::core::Kind) -> String {
         Kind::JsBool => tr!("JavaScript on/off flag"),
         Kind::U8 | Kind::I8 => tr!("1-byte whole number"),
         Kind::I64 => tr!("8-byte whole number"),
+        Kind::JsVar => tr!("JavaScript number"),
     }
 }
 
