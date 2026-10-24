@@ -97,7 +97,8 @@ pub enum Event {
     /// Whether the game (its pid) has numbers the Browse tab can list.
     Browsable(u32, bool),
     /// A number from the Browse tab was saved: its name and what to tell the player.
-    BrowseSaved(Result<(String, String), String>),
+    /// A listed value saved: its name, the message, whether it's a flag.
+    BrowseSaved(Result<(String, String, bool), String>),
     /// The places still matching, with their values (the player tries them out).
     Matches(Result<Vec<crate::core::Match>, String>),
     /// The player picked one of them as the value.
@@ -931,8 +932,11 @@ impl Ui {
             Event::Player(list) => self.browse.show(list),
             Event::Browsable(pid, can) => self.browsable(pid, can),
             Event::Risky(games) => self.warn_risky(&games),
-            Event::BrowseSaved(Ok((name, msg))) => {
+            Event::BrowseSaved(Ok((name, msg, flag))) => {
                 self.toast(&msg);
+                if flag {
+                    self.tips.show(tips::Tip::Flags);
+                }
                 self.values.show_when_listed(&name);
                 self.stack.set_visible_child_name("values");
                 self.worker.run(|core| Event::Values(core.values()));
@@ -1614,6 +1618,17 @@ fn kind_text(kind: crate::core::Kind) -> String {
         Kind::Lua => tr!("Lua number"),
         Kind::Py => tr!("Python number"),
         Kind::Smi => tr!("JavaScript whole number"),
+        Kind::Bit(_) => tr!("on/off flag"),
+        Kind::JsBool => tr!("JavaScript on/off flag"),
+    }
+}
+
+/// A value as the window shows it: a number, or a flag's On/Off.
+fn value_text(kind: crate::core::Kind, v: f64, decimals: Option<u32>) -> String {
+    match kind.flag() {
+        true if v != 0.0 => tr!("On"),
+        true => tr!("Off"),
+        false => crate::core::number_text(v, decimals),
     }
 }
 

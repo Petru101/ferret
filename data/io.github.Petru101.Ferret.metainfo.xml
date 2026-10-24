@@ -23,6 +23,7 @@
       <li>Save it with a name: Ferret finds it again after the game restarts</li>
       <li>Set it, or keep it in a range while you play, with a hotkey to turn that off and on</li>
       <li>Browse by name in Unreal Engine, Unity, Godot, GameMaker, RPG Maker, Java, Python, Adobe AIR and Lua games: the character’s numbers listed by the names the game gives them, no search needed</li>
+      <li>Flip on/off flags in Unreal Engine, Unity and RPG Maker games: the character’s “can be damaged”, the game’s own flags, an RPG Maker game’s switches</li>
       <li>Export your values to a file, or share them with other players and use theirs</li>
     </ul>
     <p>

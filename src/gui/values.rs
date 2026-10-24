@@ -16,14 +16,18 @@ use crate::i18n::{gettext, n_, ntr, tr};
 struct ValueWidgets {
     group: adw::PreferencesGroup,
     value: gtk::Label,
-    limit: adw::ExpanderRow,
+    /// Keep in Range (a flag's Keep It This Way), and what shows its state.
+    limit: gtk::Widget,
+    limit_subtitle: Box<dyn Fn(&str)>,
     /// "Does the game show 31?" on a value whose pointer paths a restart hasn't confirmed.
     confirm: adw::ActionRow,
     confirm_button: gtk::Button,
-    /// The Set field and button: off for values Ferret only shows.
-    set: gtk::Box,
-    /// "Keep It": never below the number now.
-    keep: gtk::Button,
+    /// The Set field and button (a flag's switch): off for values Ferret only shows.
+    set: gtk::Widget,
+    /// "Keep It": never below the number now (none on a flag).
+    keep: Option<gtk::Button>,
+    /// A flag's switch, and whether the window is setting it (not the player).
+    flag: Option<(gtk::Switch, Rc<Cell<bool>>)>,
     /// "More Like This": only for values found through the game's code.
     others: adw::ActionRow,
     /// The number now, as the game shows it.
@@ -89,6 +93,22 @@ fn state_text(state: &str) -> String {
     }
     parts.push(LIMIT_STATES.iter().find(|s| **s == what).map_or(what.to_owned(), |s| gettext(s)));
     parts.join(" · ")
+}
+
+/// A flag's Keep It This Way, like `limit_subtitle`.
+fn flag_subtitle(v: &ValueRow) -> String {
+    let on = v.min.is_some_and(|m| m != 0.0);
+    match &v.limit_state {
+        Some(state) if state.ends_with("turned off") => match on {
+            true => tr!("Turned off with the hotkey · keeps it on when on"),
+            false => tr!("Turned off with the hotkey · keeps it off when on"),
+        },
+        Some(state) => match on {
+            true => tr!("Kept on · {state}", state = state_text(state)),
+            false => tr!("Kept off · {state}", state = state_text(state)),
+        },
+        None => tr!("Off"),
+    }
 }
 
 fn limit_subtitle(v: &ValueRow) -> String {
@@ -266,19 +286,26 @@ impl ValuesView {
                 about.push(tr!("Java game: only shown. Java moves its objects, so a write could land in another one and crash the game."));
             }
             let about = about.join(" ");
-            w.set.set_sensitive(!v.read_only);
+            w.set.set_sensitive(!v.read_only && (w.flag.is_none() || v.value.is_some()));
             w.limit.set_sensitive(!v.read_only);
             w.current.set(v.value);
             if w.shown_limit.replace((v.min, v.max)) != (v.min, v.max) {
                 (w.fill_limit)(v.min, v.max);
             }
-            w.keep.set_sensitive(v.value.is_some_and(|n| n >= 0.0));
+            if let Some(keep) = &w.keep {
+                keep.set_sensitive(v.value.is_some_and(|n| n >= 0.0));
+            }
+            if let (Some((switch, setting)), Some(n)) = (&w.flag, v.value) {
+                setting.set(true);
+                switch.set_active(n != 0.0);
+                setting.set(false);
+            }
             w.others.set_visible(v.by_code);
             w.group.set_description(Some(&about));
-            let shown = v.value.map_or("?".into(), |n| core::number_text(n, v.decimals));
+            let shown = v.value.map_or("?".into(), |n| super::value_text(v.kind, n, v.decimals));
             w.value.set_tooltip_text(Some(&shown));
             w.value.set_label(&shown);
-            w.limit.set_subtitle(&limit_subtitle(v));
+            (w.limit_subtitle)(&if w.flag.is_some() { flag_subtitle(v) } else { limit_subtitle(v) });
             w.confirm.set_visible(v.confirmable);
             if let (true, Some(n)) = (v.confirmable, v.value) {
                 let n = core::number_text(n, v.decimals);
@@ -305,7 +332,8 @@ impl ValuesView {
         });
     }
 
-    fn create(&self, v: &ValueRow) -> ValueWidgets {
+    /// A value's card with its rename and remove buttons.
+    fn card(&self, v: &ValueRow) -> adw::PreferencesGroup {
         let name = v.name.clone();
         let group = adw::PreferencesGroup::builder().title(&v.name).build();
         let remove = gtk::Button::builder()
@@ -332,6 +360,112 @@ impl ValuesView {
         header.append(&rename);
         header.append(&remove);
         group.set_header_suffix(Some(&header));
+        group
+    }
+
+    /// A flag's card (`Kind::flag`): a switch that turns it on or off in the game, and Keep It
+    /// This Way, which keeps it as it is now.
+    fn create_flag(&self, v: &ValueRow) -> ValueWidgets {
+        let name = v.name.clone();
+        let group = self.card(v);
+        let value = gtk::Label::builder().css_classes(["title-3"]).build();
+        let switch = gtk::Switch::builder().valign(gtk::Align::Center).active(v.value.is_some_and(|n| n != 0.0)).build();
+        let row = adw::ActionRow::builder().title(tr!("Value")).activatable_widget(&switch).build();
+        row.add_suffix(&value);
+        row.add_suffix(&switch);
+        group.add(&row);
+        let setting = Rc::new(Cell::new(false));
+        let (confirm, confirm_button) = (adw::ActionRow::builder().visible(false).build(), gtk::Button::new());
+        let keep = adw::SwitchRow::builder().title(tr!("Keep It This Way")).subtitle_lines(2).active(v.min.is_some()).build();
+        group.add(&keep);
+        {
+            let (worker, name, setting, keep) = (self.worker.clone(), name.clone(), setting.clone(), keep.clone());
+            switch.connect_active_notify(move |s| {
+                if setting.get() {
+                    return;
+                }
+                let (name, on, kept) = (name.clone(), s.is_active(), keep.is_active());
+                let n = if on { 1.0 } else { 0.0 };
+                worker.run_now(move |core| {
+                    // A kept flag is kept the new way from now on.
+                    let kept = if kept { core.limit(&name, Some(n), Some(n)) } else { Ok(()) };
+                    Event::Done(kept.and_then(|_| core.set(&name, n)).map(|_| match on {
+                        true => tr!("{name} turned on", name),
+                        false => tr!("{name} turned off", name),
+                    }))
+                });
+            });
+        }
+        let current: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(v.value));
+        let filling = Rc::new(Cell::new(false));
+        {
+            let (worker, name, current, filling) = (self.worker.clone(), name.clone(), current.clone(), filling.clone());
+            keep.connect_active_notify(move |k| {
+                if filling.get() {
+                    return;
+                }
+                let name = name.clone();
+                let state = match (k.is_active(), current.get()) {
+                    (false, _) => None,
+                    (true, Some(n)) => Some(if n != 0.0 { 1.0 } else { 0.0 }),
+                    // Not found now: nothing to keep it as.
+                    (true, None) => {
+                        filling.set(true);
+                        k.set_active(false);
+                        filling.set(false);
+                        return;
+                    }
+                };
+                worker.run_now(move |core| {
+                    Event::Done(core.limit(&name, state, state).map(|_| match state {
+                        None => tr!("{name} is no longer kept", name),
+                        Some(n) if n != 0.0 => tr!("{name} is kept on", name),
+                        Some(_) => tr!("{name} is kept off", name),
+                    }))
+                });
+            });
+        }
+        let keep_it: Rc<dyn Fn()> = {
+            let keep = keep.clone();
+            Rc::new(move || keep.set_active(true))
+        };
+        let fill_limit: Rc<dyn Fn(Option<f64>, Option<f64>)> = {
+            let (keep, filling) = (keep.clone(), filling.clone());
+            Rc::new(move |lo, _| {
+                filling.set(true);
+                keep.set_active(lo.is_some());
+                filling.set(false);
+            })
+        };
+        let others = adw::ActionRow::builder().visible(false).build();
+        let limit_subtitle: Box<dyn Fn(&str)> = {
+            let keep = keep.clone();
+            Box::new(move |s| keep.set_subtitle(s))
+        };
+        ValueWidgets {
+            group,
+            value,
+            limit: keep.upcast(),
+            limit_subtitle,
+            confirm,
+            confirm_button,
+            set: switch.clone().upcast(),
+            keep: None,
+            flag: Some((switch, setting)),
+            others,
+            current,
+            keep_it,
+            shown_limit: Cell::new((v.min, v.max)),
+            fill_limit,
+        }
+    }
+
+    fn create(&self, v: &ValueRow) -> ValueWidgets {
+        if v.kind.flag() {
+            return self.create_flag(v);
+        }
+        let name = v.name.clone();
+        let group = self.card(v);
 
         // A huge number (Age of War's coins at 5555554545654 and up) cut short, whole in the
         // tooltip: it stretched the window before.
@@ -564,7 +698,26 @@ impl ValuesView {
             find_them.connect_clicked(move |_| find_others(&worker, &name));
         }
         let shown_limit = Cell::new((v.min, v.max));
-        ValueWidgets { group, value, limit, confirm, confirm_button, set: set_box, keep, others, current, keep_it, shown_limit, fill_limit }
+        let limit_subtitle: Box<dyn Fn(&str)> = {
+            let limit = limit.clone();
+            Box::new(move |s| limit.set_subtitle(s))
+        };
+        ValueWidgets {
+            group,
+            value,
+            limit: limit.upcast(),
+            limit_subtitle,
+            confirm,
+            confirm_button,
+            set: set_box.upcast(),
+            keep: Some(keep),
+            flag: None,
+            others,
+            current,
+            keep_it,
+            shown_limit,
+            fill_limit,
+        }
     }
 }
 

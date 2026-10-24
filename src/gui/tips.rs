@@ -15,6 +15,8 @@ pub enum Tip {
     SaveFirst,
     /// After saving a value.
     Slots,
+    /// After saving an on/off flag (Browse), before the player first switches it.
+    Flags,
 }
 
 impl Tip {
@@ -22,6 +24,7 @@ impl Tip {
         match self {
             Tip::SaveFirst => "save-first",
             Tip::Slots => "slots",
+            Tip::Flags => "flags",
         }
     }
 
@@ -35,6 +38,11 @@ impl Tip {
                 "Tip: In many games, inventory values are stored per slot, not per item. If you rearrange, sort, \
                  use up, or pick up items, the address you found may now point to a different item. Re-scan if \
                  values start changing unexpectedly."
+            ),
+            Tip::Flags => tr!(
+                "Tip: Some flags are the game's story: switching one the game hasn't reached yet can stop your \
+                 progress, and the game saves it with everything else. Save your game before you switch one, and \
+                 switch it back if something goes wrong."
             ),
         }
     }

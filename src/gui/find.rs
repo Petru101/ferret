@@ -2361,9 +2361,10 @@ impl FindView {
         let rows: Vec<(String, String, String)> = values
             .iter()
             .map(|v| {
-                let text = |n: f64| core::number_text(n, v.decimals);
+                let text = |n: f64| super::value_text(v.kind, n, v.decimals);
                 let value = v.value.map_or(tr!("not found now"), text);
                 let limit = match (v.min, v.max) {
+                    (Some(a), Some(b)) if a == b && v.kind.flag() => if a != 0.0 { tr!("kept on") } else { tr!("kept off") },
                     (Some(a), Some(b)) if a == b => tr!("kept at {n}", n = text(a)),
                     (Some(a), Some(b)) => tr!("kept between {min} and {max}", min = text(a), max = text(b)),
                     (Some(a), None) => tr!("kept at least {n}", n = text(a)),

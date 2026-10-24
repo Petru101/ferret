@@ -25,6 +25,7 @@ const GLOBALS: &[&str] = &[
     "$gameParty",
     "$gameActors",
     "$gameVariables",
+    "$gameSwitches",
     "$gamePlayer",
     "$gameSystem",
     "$gameTimer",
@@ -62,8 +63,10 @@ pub enum Val {
     Int(u64),
     /// A double kept in the object or in a box of the field's own: the address of the f64.
     Real(u64),
-    /// Any other object (tagged): a JavaScript object, a string, true/false, null, a hole, or
-    /// a number in a box other fields may share (not written).
+    /// true or false: the address of the slot pointing to it (`Kind::JsBool`).
+    Bool(u64),
+    /// Any other object (tagged): a JavaScript object, a string, null, a hole, or a number in a
+    /// box other fields may share (not written).
     Obj(u64),
     /// Not a value (unreadable, or not what V8 keeps there).
     Other,
@@ -93,6 +96,61 @@ pub struct Js {
     /// property's details {kind, constness, attributes (3), location, ...} (location bit 5;
     /// bit 1 in 8.x). Each native context has its own meta map then (`is_map`).
     modern: bool,
+    /// V8's false and true (tagged), once seen (`boolean`); 0 until then.
+    bools: Mutex<[u64; 2]>,
+}
+
+/// The attached game's false and true as its slots hold them (4 bytes in 32-bit V8 and with
+/// pointer compression, else 8), for reading and writing `Kind::JsBool` places without the
+/// layout: (slot width, false, true). Set once `Js::boolean` has seen both.
+static BOOLS: Mutex<Option<(usize, u64, u64)>> = Mutex::new(None);
+
+/// Whether the attached game's true and false are known (`learn_bools`).
+pub fn bools_known() -> bool {
+    BOOLS.lock().unwrap().is_some()
+}
+
+/// Learns the game's true and false from the fields of its globals (Game_Party's first field,
+/// `_inBattle`, is one of them).
+pub fn learn_bools(heap: &Heap) {
+    let Some(js) = shared(heap) else { return };
+    for g in GLOBALS {
+        if let Some(o) = js.global(heap.mem(), g) {
+            js.fields(heap.mem(), o);
+        }
+        if bools_known() {
+            return;
+        }
+    }
+}
+
+/// How wide a slot holding true or false is in the attached game.
+pub fn bool_width() -> usize {
+    BOOLS.lock().unwrap().map_or(8, |b| b.0)
+}
+
+/// The true or false a slot's bytes hold (None: something else, or not seen yet).
+pub fn bool_value(b: &[u8]) -> Option<bool> {
+    let (w, f, t) = (*BOOLS.lock().unwrap())?;
+    let mut x = [0u8; 8];
+    x[..w].copy_from_slice(b.get(..w)?);
+    match u64::from_le_bytes(x) {
+        v if v == t => Some(true),
+        v if v == f => Some(false),
+        _ => None,
+    }
+}
+
+/// Points the slot at `addr` to true or false; only while it holds one of them (a field the
+/// game turned into something else is left alone).
+pub fn write_bool(mem: &Mem, addr: u64, on: bool) -> std::io::Result<()> {
+    let Some((w, f, t)) = *BOOLS.lock().unwrap() else { return Err(std::io::Error::other("this game's true and false aren't known yet")) };
+    let mut b = [0u8; 8];
+    mem.read_exact_at(&mut b[..w], addr)?;
+    if bool_value(&b[..w]).is_none() {
+        return Err(std::io::Error::other("not true or false now"));
+    }
+    mem.write_all_at(&(if on { t } else { f }).to_le_bytes()[..w], addr)
 }
 
 fn word(mem: &Mem, at: u64) -> Option<u64> {
@@ -290,7 +348,7 @@ impl Js {
             }
         }
         let field_shift = if cells == Cells::Named { 20 } else { 19 };
-        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0, cell_name: 1, modern: false };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0, cell_name: 1, modern: false, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -424,7 +482,7 @@ impl Js {
                 globals[g].1.push(cell);
             }
         }
-        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext, cell_name, modern: false };
+        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext, cell_name, modern: false, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -638,8 +696,60 @@ impl Js {
             return Val::Real(w - 1 + l.number_value());
         }
         match self.map_of(mem, w) {
+            Some(_) if self.boolean(mem, w).is_some() => Val::Bool(at),
             Some(_) => Val::Obj(w),
             None => Val::Other,
+        }
+    }
+
+    /// Whether the object `o` (tagged) is V8's true or false: an oddball whose own fields hold
+    /// the strings "true" or "false" and "boolean" (its to_string and type_of: {map, number,
+    /// to_string, to_number, type_of, kind} in every version read). Once one is seen, only
+    /// objects of its map are looked at, and the other is looked for next to it (V8 makes the
+    /// two one after the other).
+    fn boolean(&self, mem: &Mem, o: u64) -> Option<bool> {
+        let known = *self.bools.lock().unwrap();
+        if o == known[0] || o == known[1] {
+            return Some(o == known[1]);
+        }
+        if known[0] != 0 && known[1] != 0 {
+            return None;
+        }
+        let seen = known.iter().copied().find(|&k| k != 0);
+        let m = self.map_of(mem, o)?;
+        if seen.is_some_and(|k| self.word(mem, k - 1) != Some(m)) {
+            return None;
+        }
+        let on = self.oddball_bool(mem, o)?;
+        let mut bools = self.bools.lock().unwrap();
+        bools[on as usize] = o;
+        if bools[!on as usize] == 0 {
+            let w = self.l.w;
+            let other = (1..=64u64).flat_map(|i| [o.wrapping_sub(i * w), o + i * w]).find(|&p| {
+                self.word(mem, p - 1) == Some(m) && self.oddball_bool(mem, p) == Some(!on)
+            });
+            bools[!on as usize] = other.unwrap_or(0);
+        }
+        if bools[0] != 0 && bools[1] != 0 {
+            let mask = if self.l.w == 8 { u64::MAX } else { 0xffff_ffff };
+            *BOOLS.lock().unwrap() = Some((self.l.w as usize, bools[0] & mask, bools[1] & mask));
+        }
+        Some(on)
+    }
+
+    /// true or false by an oddball's strings (`boolean`); None for other objects.
+    fn oddball_bool(&self, mem: &Mem, o: u64) -> Option<bool> {
+        let texts: Vec<String> = (1..7u64)
+            .filter_map(|i| self.word(mem, o - 1 + i * self.l.w).filter(|&x| tagged(x)))
+            .filter_map(|x| self.text(mem, x))
+            .collect();
+        if !texts.iter().any(|t| t == "boolean") {
+            return None;
+        }
+        match () {
+            _ if texts.iter().any(|t| t == "true") => Some(true),
+            _ if texts.iter().any(|t| t == "false") => Some(false),
+            _ => None,
         }
     }
 
@@ -848,6 +958,10 @@ pub fn shared(heap: &Heap) -> Option<Arc<Js>> {
         }
     }
     let js = Js::locate(heap).or_else(|| Js::locate_compressed(heap)).map(Arc::new);
+    // Another game's true and false.
+    if found.as_ref().is_none_or(|f| f.0 != heap.pid) {
+        *BOOLS.lock().unwrap() = None;
+    }
     *found = Some((heap.pid, js.clone(), Instant::now()));
     js
 }
@@ -988,7 +1102,7 @@ fn follow(js: &Js, mem: &Mem, mut o: u64, steps: &[Step]) -> Option<u64> {
         let last = i + 1 == steps.len();
         match v {
             Val::Obj(p) if !last => o = p,
-            Val::Int(a) | Val::Real(a) if last => return Some(a),
+            Val::Int(a) | Val::Real(a) | Val::Bool(a) if last => return Some(a),
             _ => return None,
         }
     }
@@ -1017,12 +1131,12 @@ impl Group {
     }
 
     fn add(&mut self, label: impl Into<String>, val: Option<Val>, path: JsPath) {
-        if let Some(val @ (Val::Int(_) | Val::Real(_))) = val {
+        if let Some(val @ (Val::Int(_) | Val::Real(_) | Val::Bool(_))) = val {
             self.entries.push(Entry { label: label.into(), val, path });
         }
     }
 
-    /// Every number among an object's own fields, by the field's name.
+    /// Every number and true/false among an object's own fields, by the field's name.
     fn add_all(&mut self, js: &Js, mem: &Mem, o: u64, path: &JsPath) {
         for (name, val) in js.fields(mem, o) {
             self.add(name.clone(), Some(val), path.clone().prop(&name));
@@ -1124,6 +1238,20 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         }
         out.push(g);
     }
+    // The maker's switches, on or off (story steps, doors, quests), by the names they gave
+    // them; ones the game never set (holes) aren't listed: writing there could break the array.
+    if let Some(data) = js.global(mem, "$gameSwitches").and_then(|v| js.field_obj(mem, v, "_data")) {
+        let names = js.texts(mem, system.and_then(|s| js.field_obj(mem, s, "switches")));
+        let mut g = Group::new("@switches", "Game_Switches", "game", false);
+        for (i, val) in js.elements(mem, data) {
+            if !matches!(val, Val::Bool(_)) {
+                continue;
+            }
+            let label = names.get(i as usize).filter(|n| !n.trim().is_empty()).cloned().unwrap_or_else(|| format!("#{i}"));
+            g.add(label, Some(val), root("$gameSwitches").prop("_data").index(i));
+        }
+        out.push(g);
+    }
     if let Some(player) = js.global(mem, "$gamePlayer") {
         let mut g = Group::new("@player", "Game_Player", "character", false);
         g.add("@speed", js.field(mem, player, "_moveSpeed"), root("$gamePlayer").prop("_moveSpeed"));
@@ -1165,6 +1293,7 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
                     .into_iter()
                     .map(|e| match e.val {
                         Val::Real(addr) => Listed { label: e.label, addr, kind: "f64" },
+                        Val::Bool(addr) => Listed { label: e.label, addr, kind: "jsbool" },
                         Val::Int(addr) | Val::Obj(addr) => Listed { label: e.label, addr, kind: int_kind },
                         Val::Other => Listed { label: e.label, addr: 0, kind: int_kind },
                     })
@@ -1178,7 +1307,7 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
 /// following it the way a restart does.
 pub fn discover(heap: &Heap, target: u64) -> Option<(JsPath, Vec<u64>)> {
     let groups = groups(heap)?;
-    let entry = groups.into_iter().flat_map(|g| g.entries).find(|e| matches!(e.val, Val::Int(a) | Val::Real(a) if a == target))?;
+    let entry = groups.into_iter().flat_map(|g| g.entries).find(|e| matches!(e.val, Val::Int(a) | Val::Real(a) | Val::Bool(a) if a == target))?;
     let leads = walk(heap, &find_roots(heap, &entry.path), &entry.path);
     leads.contains(&target).then_some((entry.path, leads))
 }

@@ -282,6 +282,8 @@ pub struct Prop {
     pub inner: Option<Arc<Prop>>,
     /// MapProperty: the values' property.
     pub value: Option<Arc<Prop>>,
+    /// BoolProperty: the byte its flag is in (from the field) and its bit there.
+    pub bit: Option<(u64, u8)>,
 }
 
 /// Where the game keeps its names.
@@ -749,18 +751,25 @@ impl Ue {
         let l = self.layout;
         let kind = self.fname(mem, self.ptr(mem, field + l.class)? + l.class_name)?;
         let extra = if matches!(kind.as_str(), "ArrayProperty" | "SetProperty") { l.inner } else { l.extra };
+        let size = i32_at(mem, field + l.size)?.max(0) as u64;
+        let bit = match kind.as_str() {
+            "BoolProperty" => u32_at(mem, field + l.extra).and_then(|raw| bool_bit(raw, size, self.h.template == 0)),
+            _ => None,
+        };
         Some(Prop {
             name: self.fname(mem, field + l.name)?,
             offset: i32_at(mem, field + l.offset)?.max(0) as u64,
-            size: i32_at(mem, field + l.size)?.max(0) as u64,
+            size,
             dim: i32_at(mem, field + l.dim)?.max(1) as u64,
             extra: self.word(mem, field + extra).unwrap_or(0),
             extra2: self.word(mem, field + l.value).unwrap_or(0),
             kind,
             inner: None,
             value: None,
+            bit,
         })
     }
+
 
     /// The object's full name: outers first ("Level.BP_Player_C_0.Inventory").
     pub fn full_name(&self, mem: &Mem, obj: u64) -> String {
@@ -773,6 +782,21 @@ impl Ue {
         parts.reverse();
         parts.join(".")
     }
+}
+
+/// Where a BoolProperty's flag is (byte, bit), from the word after the property's common part
+/// (where a StructProperty keeps its struct) and its size: UE4 and 5 keep { FieldSize,
+/// ByteOffset, ByteMask, FieldMask } bytes (a plain bool: mask 1, field mask 255; a bit of a
+/// bitfield: the same single bit in both, Epic's FBoolProperty::SetBoolSize), UE3 a 4-byte
+/// BitMask of a 4-byte field. Anything else is left out.
+fn bool_bit(raw: u32, size: u64, ue3: bool) -> Option<(u64, u8)> {
+    if ue3 {
+        let at = raw.trailing_zeros();
+        return (raw.count_ones() == 1 && size == 4).then(|| (u64::from(at / 8), (at % 8) as u8));
+    }
+    let [field, byte, mask, field_mask] = raw.to_le_bytes();
+    let fits = u64::from(field) == size && byte < field && mask.count_ones() == 1 && (field_mask == mask || field_mask == 0xff);
+    fits.then(|| (u64::from(byte), mask.trailing_zeros() as u8))
 }
 
 /// The first `n` objects of a list in order: their indices (InternalIndex) are 0, 1, ...
@@ -1347,6 +1371,7 @@ impl Ue {
                 Some((o, self.class_of(mem, o)?))
             }
             k if numeric(k) => Some((at, 0)),
+            "BoolProperty" => p.bit.map(|(byte, _)| (at + byte, 0)),
             _ => None,
         }
     }
@@ -1370,29 +1395,37 @@ impl Ue {
 
     /// Where a path leads from these objects (each still checked: the game may have freed it).
     pub fn walk(&self, mem: &Mem, roots: &[u64], path: &UePath) -> Vec<u64> {
-        let start: Vec<(u64, u64)> = roots
+        let mut leads: Vec<u64> = self.walk_bits(mem, roots, path).into_iter().map(|(a, _)| a).collect();
+        leads.dedup();
+        leads
+    }
+
+    /// `walk`, with the bit of the flag each place holds (a BoolProperty's).
+    pub fn walk_bits(&self, mem: &Mem, roots: &[u64], path: &UePath) -> Vec<(u64, Option<u8>)> {
+        let start: Vec<(u64, u64, Option<u8>)> = roots
             .iter()
             .filter(|&&r| self.class_name(mem, r).as_deref() == Some(path.class.as_str()) && !self.is_template(mem, r))
-            .filter_map(|&r| Some((r, self.class_of(mem, r)?)))
+            .filter_map(|&r| Some((r, self.class_of(mem, r)?, None)))
             .collect();
-        let mut leads: Vec<u64> = std::iter::once(&path.steps).chain(&path.also).flat_map(|s| self.walk_steps(mem, start.clone(), s)).collect();
+        let mut leads: Vec<(u64, Option<u8>)> = std::iter::once(&path.steps).chain(&path.also).flat_map(|s| self.walk_steps(mem, start.clone(), s)).collect();
         leads.sort();
         leads.dedup();
         leads
     }
 
-    fn walk_steps(&self, mem: &Mem, mut cur: Vec<(u64, u64)>, steps: &[Step]) -> Vec<u64> {
+    fn walk_steps(&self, mem: &Mem, mut cur: Vec<(u64, u64, Option<u8>)>, steps: &[Step]) -> Vec<(u64, Option<u8>)> {
+        let bit = |p: &Prop| p.bit.map(|(_, b)| b);
         for (i, step) in steps.iter().enumerate() {
             let last = i + 1 == steps.len();
             let mut next = Vec::new();
-            for &(at, st) in &cur {
+            for &(at, st, _) in &cur {
                 if st == 0 {
                     continue;
                 }
                 match step {
                     Step::Field(name) => {
                         let Some(p) = self.find_prop(mem, st, name) else { continue };
-                        next.extend(self.enter(mem, at + p.offset, &p));
+                        next.extend(self.enter(mem, at + p.offset, &p).map(|(a, s)| (a, s, bit(&p))));
                     }
                     Step::Elem(name, key) => {
                         let Some(p) = self.find_prop(mem, st, name).filter(|p| p.kind == "ArrayProperty") else { continue };
@@ -1404,7 +1437,7 @@ impl Ue {
                                     && self.find_prop(mem, est, k).and_then(|kp| self.key_text(mem, e + kp.offset, &kp)).as_ref() == Some(v),
                             };
                             if keep {
-                                next.push((e, est));
+                                next.push((e, est, None));
                             }
                         }
                     }
@@ -1413,18 +1446,18 @@ impl Ue {
                         let (Some(kp), Some(vp)) = (p.inner.as_deref(), p.value.as_deref()) else { continue };
                         for (k, v) in self.map_entries(mem, at + p.offset, kp, vp) {
                             if self.key_text(mem, k, kp).as_ref() == Some(key) {
-                                next.extend(self.enter(mem, v, vp));
+                                next.extend(self.enter(mem, v, vp).map(|(a, s)| (a, s, bit(vp))));
                             }
                         }
                     }
                 }
             }
             // Only the last step may end at a number.
-            next.retain(|&(_, st)| (st == 0) == last);
+            next.retain(|&(_, st, _)| (st == 0) == last);
             next.truncate(MAX_LEADS);
             cur = next;
         }
-        cur.into_iter().map(|(a, _)| a).collect()
+        cur.into_iter().map(|(a, _, b)| (a, b)).collect()
     }
 
     /// Other places in the root object keeping the same count as the path's place: a map
@@ -1564,8 +1597,9 @@ impl Ue {
         has
     }
 
-    /// The steps from the struct or object at `at` to `target`.
-    fn find_in(&self, mem: &Mem, snap: &Snap, at: u64, st: u64, target: u64, depth: usize) -> Option<Vec<Step>> {
+    /// The steps from the struct or object at `at` to `target`: a number there, or with `bit`,
+    /// the flag at that bit of the byte.
+    fn find_in(&self, mem: &Mem, snap: &Snap, at: u64, st: u64, (target, bit): (u64, Option<u8>), depth: usize) -> Option<Vec<Step>> {
         if depth > MAX_DEPTH {
             return None;
         }
@@ -1576,11 +1610,14 @@ impl Ue {
             let inside = target >= start && target < start + p.size * p.dim;
             match p.kind.as_str() {
                 "StructProperty" if inside || self.has_containers(mem, p.extra, 0) => {
-                    if let Some(rest) = self.find_in(mem, snap, start, p.extra, target, depth + 1) {
+                    if let Some(rest) = self.find_in(mem, snap, start, p.extra, (target, bit), depth + 1) {
                         return with(Step::Field(p.name.clone()), rest);
                     }
                 }
-                k if numeric(k) && target == start => return Some(vec![Step::Field(p.name.clone())]),
+                k if numeric(k) && target == start && bit.is_none() => return Some(vec![Step::Field(p.name.clone())]),
+                "BoolProperty" if bit.is_some() && p.bit.is_some_and(|(byte, b)| start + byte == target && Some(b) == bit) => {
+                    return Some(vec![Step::Field(p.name.clone())]);
+                }
                 "ArrayProperty" => {
                     let Some(inner) = p.inner.as_deref() else { continue };
                     // Most arrays can't hold it: read their elements only when it's among them or
@@ -1593,11 +1630,11 @@ impl Ue {
                     let elems = self.elements(mem, start, p);
                     for (i, &(e, est)) in elems.iter().enumerate() {
                         let here = inner.kind != "ObjectProperty" && target >= e && target < e + inner.size;
-                        if est == 0 && target == e {
+                        if est == 0 && target == e && bit.is_none() {
                             return Some(vec![Step::Elem(p.name.clone(), Key::Index(i))]);
                         }
                         if here || (inner.kind == "StructProperty" && self.has_containers(mem, est, 0)) {
-                            if let Some(rest) = self.find_in(mem, &Snap::default(), e, est, target, depth + 1) {
+                            if let Some(rest) = self.find_in(mem, &Snap::default(), e, est, (target, bit), depth + 1) {
                                 return with(Step::Elem(p.name.clone(), self.elem_key(mem, &elems, i)), rest);
                             }
                         }
@@ -1616,9 +1653,9 @@ impl Ue {
                         }
                         let Some(key) = self.key_text(mem, k, kp) else { continue };
                         match self.enter(mem, v, vp) {
-                            Some((_, 0)) if target == v => return Some(vec![Step::Map(p.name.clone(), key)]),
+                            Some((a, 0)) if target == a && vp.bit.map(|(_, b)| b) == bit => return Some(vec![Step::Map(p.name.clone(), key)]),
                             Some((sa, sst)) if vp.kind == "StructProperty" => {
-                                if let Some(rest) = self.find_in(mem, &Snap::default(), sa, sst, target, depth + 1) {
+                                if let Some(rest) = self.find_in(mem, &Snap::default(), sa, sst, (target, bit), depth + 1) {
                                     return with(Step::Map(p.name.clone(), key), rest);
                                 }
                             }
@@ -1634,12 +1671,13 @@ impl Ue {
 
     /// Paths from the game's objects to `target`, each with every place it leads to now, best
     /// (fewest places, then fewest steps) first.
-    pub fn discover(&self, mem: &Mem, target: u64) -> Vec<(UePath, Vec<u64>)> {
-        self.discover_all(mem, &[target]).pop().unwrap_or_default()
+    /// `bit`: a flag, the bit of the byte at `target` (`Kind::Bit`).
+    pub fn discover(&self, mem: &Mem, target: u64, bit: Option<u8>) -> Vec<(UePath, Vec<u64>)> {
+        self.discover_all(mem, &[(target, bit)]).pop().unwrap_or_default()
     }
 
     /// `discover` for several places in one pass over the objects.
-    pub fn discover_all(&self, mem: &Mem, targets: &[u64]) -> Vec<Vec<(UePath, Vec<u64>)>> {
+    pub fn discover_all(&self, mem: &Mem, targets: &[(u64, Option<u8>)]) -> Vec<Vec<(UePath, Vec<u64>)>> {
         let mut found: Vec<Vec<(UePath, Vec<u64>)>> = vec![Vec::new(); targets.len()];
         let mut sizes: HashMap<u64, u64> = HashMap::new();
         for obj in self.objects(mem) {
@@ -1653,13 +1691,13 @@ impl Ue {
                 continue;
             }
             let size = *sizes.entry(class).or_insert_with(|| self.struct_size(mem, class));
-            let inside = targets.iter().any(|&t| t >= obj && t < obj + size);
+            let inside = targets.iter().any(|&(t, _)| t >= obj && t < obj + size);
             if !inside && !self.has_containers(mem, class, 0) {
                 continue;
             }
             let snap = Snap::read(mem, obj, size);
-            for (i, &target) in targets.iter().enumerate() {
-                let Some(steps) = self.find_in(mem, &snap, obj, class, target, 0) else { continue };
+            for (i, &(target, bit)) in targets.iter().enumerate() {
+                let Some(steps) = self.find_in(mem, &snap, obj, class, (target, bit), 0) else { continue };
                 let Some(class_name) = self.object_name(mem, class) else { continue };
                 let name = self.object_name(mem, obj).filter(|n| !run_name(n));
                 let outer = self.outer(mem, obj).and_then(|o| self.class_name(mem, o)).filter(|n| n != "Package");
@@ -1733,7 +1771,7 @@ const LIST_ELEMENTS: usize = 64;
 pub struct Listed {
     pub label: String,
     pub addr: u64,
-    /// The helper's value type: i32, f32, f64 or u16.
+    /// The helper's value type: i32, f32, f64, u16, or bit0-bit7 for a flag.
     pub kind: &'static str,
 }
 
@@ -1769,6 +1807,19 @@ fn listed_kind(kind: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// Where a listed property's value is from the property's place, and its value type: a number,
+/// or a flag (a BoolProperty: its byte and bit).
+fn listed(p: &Prop) -> Option<(u64, &'static str)> {
+    match p.bit {
+        Some((byte, b)) => Some((byte, crate::helper::Kind::Bit(b).name())),
+        None => listed_kind(&p.kind).map(|k| (0, k)),
+    }
+}
+
+/// The engine's flags worth changing, listed on the character only: AActor's (UE3 too).
+/// `bCanBeDamaged` off is god mode where the game takes damage the engine's way.
+const ENGINE_FLAGS: &[&str] = &["bCanBeDamaged"];
 
 /// Walks objects' fields for `Ue::player`.
 struct Lister<'a> {
@@ -1826,10 +1877,12 @@ impl Lister<'_> {
         let start = at + p.offset;
         let mem = self.mem;
         if engine {
-            match listed_kind(&p.kind) {
-                Some(kind) if p.dim == 1 && (ENGINE_FIELDS.contains(&p.name.as_str()) || self.character && p.name == TIME_DILATION) => {
-                    self.push(label, start, kind)
-                }
+            let wanted = match p.bit {
+                Some(_) => self.character && ENGINE_FLAGS.contains(&p.name.as_str()),
+                None => ENGINE_FIELDS.contains(&p.name.as_str()) || self.character && p.name == TIME_DILATION,
+            };
+            match listed(p) {
+                Some((byte, kind)) if p.dim == 1 && wanted => self.push(label, start + byte, kind),
                 // The ability system's attribute sets, when they aren't inside the actor (they
                 // usually are).
                 _ if links && p.name == "SpawnedAttributes" => {
@@ -1843,8 +1896,8 @@ impl Lister<'_> {
         if p.dim != 1 {
             return;
         }
-        if let Some(kind) = listed_kind(&p.kind) {
-            return self.push(label, start, kind);
+        if let Some((byte, kind)) = listed(p) {
+            return self.push(label, start + byte, kind);
         }
         match p.kind.as_str() {
             "StructProperty" => self.in_struct(start, p.extra, &label, depth),
@@ -1874,8 +1927,8 @@ impl Lister<'_> {
                 for (k, v) in self.ue.map_entries(mem, start, kp, vp).into_iter().take(LIST_ELEMENTS) {
                     let Some(key) = self.ue.key_text(mem, k, kp) else { continue };
                     let l = format!("{label}{{{key}}}");
-                    match listed_kind(&vp.kind) {
-                        Some(kind) => self.push(l, v, kind),
+                    match listed(vp) {
+                        Some((byte, kind)) => self.push(l, v + byte, kind),
                         None if vp.kind == "StructProperty" => self.in_struct(v, vp.extra, &l, depth),
                         None => {}
                     }
@@ -2160,6 +2213,23 @@ mod tests {
         );
         assert!(UePath::parse("ue:A").is_none());
         assert!(UePath::parse("ue:A.B C").is_none());
+    }
+
+    #[test]
+    fn bool_bits() {
+        // A plain bool: size 1, byte 0, mask 1, field mask 255.
+        assert_eq!(bool_bit(u32::from_le_bytes([1, 0, 1, 0xff]), 1, false), Some((0, 0)));
+        // `uint8 bCanBeDamaged:1` at bit 3, and a bit of the second byte of a 4-byte bitfield.
+        assert_eq!(bool_bit(u32::from_le_bytes([1, 0, 8, 8]), 1, false), Some((0, 3)));
+        assert_eq!(bool_bit(u32::from_le_bytes([4, 1, 0x40, 0x40]), 4, false), Some((1, 6)));
+        // Junk: two bits, the byte past the field, a size that isn't the property's.
+        assert_eq!(bool_bit(u32::from_le_bytes([1, 0, 3, 3]), 1, false), None);
+        assert_eq!(bool_bit(u32::from_le_bytes([1, 1, 1, 1]), 1, false), None);
+        assert_eq!(bool_bit(u32::from_le_bytes([1, 0, 1, 0xff]), 4, false), None);
+        // UE3: a BitMask of a 4-byte field.
+        assert_eq!(bool_bit(0x1, 4, true), Some((0, 0)));
+        assert_eq!(bool_bit(0x200, 4, true), Some((1, 1)));
+        assert_eq!(bool_bit(0x201, 4, true), None);
     }
 
     #[test]

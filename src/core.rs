@@ -372,6 +372,7 @@ fn engine_word(name: &str) -> String {
         "@weapons" => tr!("Weapons"),
         "@armors" => tr!("Armor"),
         "@variables" => tr!("Variables"),
+        "@switches" => tr!("Switches"),
         "@player" => tr!("Player"),
         "@speed" => tr!("Move speed"),
         "@timer" => tr!("Timer"),
@@ -593,7 +594,15 @@ pub enum Kind {
     /// A small integer of 32-bit V8 or V8 8.x (the helper's js.rs: RPG Maker MV on 32-bit
     /// NW.js, MZ), kept as the number times two. Values saved by a JavaScript path on such a game.
     Smi,
+    /// An on/off flag: bit n of the byte (Unreal's bools, a C# bool's bit 0). Listed by the
+    /// Browse tab; never searched for.
+    Bit(u8),
+    /// A JavaScript true or false (RPG Maker's switches and flags).
+    JsBool,
 }
+
+/// The names of `Kind::Bit`, as the helper takes them.
+const BITS: [&str; 8] = ["bit0", "bit1", "bit2", "bit3", "bit4", "bit5", "bit6", "bit7"];
 
 impl Kind {
     /// The kinds searches look for.
@@ -610,11 +619,21 @@ impl Kind {
             Kind::Lua => "lua",
             Kind::Py => "py",
             Kind::Smi => "smi",
+            Kind::Bit(n) => BITS[n as usize & 7],
+            Kind::JsBool => "jsbool",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi]).find(|k| k.name() == s)
+        if let Some(n) = BITS.iter().position(|b| *b == s) {
+            return Some(Kind::Bit(n as u8));
+        }
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool]).find(|k| k.name() == s)
+    }
+
+    /// On or off (1 or 0), not a number: the window shows a switch.
+    pub fn flag(self) -> bool {
+        matches!(self, Kind::Bit(_) | Kind::JsBool)
     }
 
     fn with_article(self) -> String {
@@ -624,7 +643,7 @@ impl Kind {
 
     /// Whole numbers in memory (a game may still show them with decimals: 12 as "1.2").
     pub fn whole(self) -> bool {
-        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi)
+        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool)
     }
 
     pub fn describe(self) -> &'static str {
@@ -638,6 +657,8 @@ impl Kind {
             Kind::Lua => "Lua number",
             Kind::Py => "Python number",
             Kind::Smi => "JavaScript whole number",
+            Kind::Bit(_) => "on/off flag",
+            Kind::JsBool => "JavaScript on/off flag",
         }
     }
 }

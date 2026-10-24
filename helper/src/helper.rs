@@ -583,13 +583,24 @@ pub(crate) enum Kind {
     /// bytes holding the number times two (bit 0 clear; set, it's a pointer: not a number now).
     /// Values saved by a JavaScript path on such a game.
     Smi,
+    /// An on/off flag: bit n of the byte (1 or 0). Unreal packs up to 8 flags into one byte
+    /// (`bCanBeDamaged:1`); a plain bool (C#, Unreal's native ones) is bit 0 of its byte.
+    /// Written by changing only that bit. Never searched for: the Browse tab lists them.
+    Bit(u8),
+    /// A JavaScript true or false (js.rs, RPG Maker's switches): the slot points to one of
+    /// V8's two objects for them, written by pointing it to the other; never written while it
+    /// holds something else.
+    JsBool,
 }
+
+/// The names of `Kind::Bit`.
+const BITS: [&str; 8] = ["bit0", "bit1", "bit2", "bit3", "bit4", "bit5", "bit6", "bit7"];
 
 impl Kind {
     /// The kinds searches look for (all but `Gm` and `Lua`).
     const ALL: [Kind; 5] = [Kind::I32, Kind::F32, Kind::F64, Kind::Xor, Kind::U16];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Kind::I32 => "i32",
             Kind::F32 => "f32",
@@ -600,18 +611,37 @@ impl Kind {
             Kind::Lua => "lua",
             Kind::Py => "py",
             Kind::Smi => "smi",
+            Kind::Bit(n) => BITS[n as usize & 7],
+            Kind::JsBool => "jsbool",
+        }
+    }
+
+    /// Its place in `ALL` (a scan's candidates keep it in 3 bits; only those kinds are searched).
+    fn searched(self) -> u64 {
+        match self {
+            Kind::I32 => 0,
+            Kind::F32 => 1,
+            Kind::F64 => 2,
+            Kind::Xor => 3,
+            Kind::U16 => 4,
+            _ => unreachable!("{} isn't searched for", self.name()),
         }
     }
 
     fn parse(s: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi]).find(|k| k.name() == s)
+        if let Some(n) = BITS.iter().position(|b| *b == s) {
+            return Some(Kind::Bit(n as u8));
+        }
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
         match self {
+            Kind::Bit(_) => 1,
             Kind::U16 => 2,
             Kind::I32 | Kind::F32 | Kind::Smi => 4,
             Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py => 8,
+            Kind::JsBool => js::bool_width(),
             Kind::Gm => 16,
         }
     }
@@ -633,6 +663,8 @@ impl Kind {
                 w if w & 1 == 0 => (w >> 1) as f64,
                 _ => f64::NAN,
             },
+            Kind::Bit(n) => f64::from((b[0] >> (n & 7)) & 1),
+            Kind::JsBool => js::bool_value(b).map_or(f64::NAN, f64::from),
         }
     }
 
@@ -643,7 +675,7 @@ impl Kind {
     fn fits(self, lo: f64, hi: f64, n: Shown) -> bool {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
-            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi => lo <= n.scaled && n.scaled <= hi,
+            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool => lo <= n.scaled && n.scaled <= hi,
             Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
@@ -684,7 +716,7 @@ fn read_value(mem: &Mem, addr: u64, kind: Kind) -> Option<f64> {
     }
     let mut b = [0u8; 16];
     mem.read_exact_at(&mut b[..kind.size()], addr).ok()?;
-    Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua | Kind::Smi) || !v.is_nan())
+    Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua | Kind::Smi | Kind::JsBool) || !v.is_nan())
 }
 
 fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
@@ -726,6 +758,18 @@ fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
             let n = v.round().clamp(-(1 << 30) as f64, ((1 << 30) - 1) as f64) as i32;
             mem.write_all_at(&(n << 1).to_le_bytes(), addr)
         }
+        // Only the flag's own bit: the byte's other bits are other flags.
+        Kind::Bit(n) => {
+            let mut b = [0u8; 1];
+            mem.read_exact_at(&mut b, addr)?;
+            let bit = 1u8 << (n & 7);
+            let new = if v != 0.0 { b[0] | bit } else { b[0] & !bit };
+            if new == b[0] {
+                return Ok(());
+            }
+            mem.write_all_at(&[new], addr)
+        }
+        Kind::JsBool => js::write_bool(mem, addr, v != 0.0),
     }
 }
 
@@ -923,8 +967,17 @@ const MAX_NAMED_PLACES: usize = 32;
 /// no named objects; a path through two random characters led to 95 places, and a write went
 /// to all of them). Places of one value are the same field of objects of one kind: few, lined
 /// up alike, holding plausible numbers.
-fn named_doubt(heap: &Heap, leads: &[u64], kind: Kind, path: &Named) -> Option<String> {
+fn named_doubt(heap: &Heap, leads: &[u64], roots: &[u64], kind: Kind, path: &Named) -> Option<String> {
     let mem = heap.mem();
+    // An Unreal flag is saved with its bit; a game update may move it to another bit of the
+    // byte (or make it a number), and a write of the old bit would change another flag.
+    if let (Named::Unreal(p), Kind::Bit(b)) = (path, kind) {
+        if let Ok(ue) = unreal(heap.pid, mem) {
+            if ue.walk_bits(mem, roots, p).iter().any(|&(a, x)| leads.contains(&a) && x != Some(b)) {
+                return Some("the game keeps this flag in another place now (an update?)".into());
+            }
+        }
+    }
     if leads.len() > MAX_NAMED_PLACES {
         return Some(format!("it leads to {} places, more than one value is kept in", leads.len()));
     }
@@ -1094,7 +1147,7 @@ fn limiter_loop(shared: SharedLimiter) {
                         None => "looking for it by name",
                         Some(_) => "it isn't anywhere right now (none in the game?), waiting",
                     });
-                } else if named_doubt(heap, &leads, l.kind, &n.path).is_some() {
+                } else if named_doubt(heap, &leads, &n.roots, l.kind, &n.path).is_some() {
                     l.paused = Some("its name leads to places that aren't one value, not written");
                 } else {
                     if leads != n.addrs || l.paused.is_some_and(|p| p != PY_SHARED) {
@@ -1446,7 +1499,7 @@ const MOVES: u64 = 3 << 56;
 
 impl Candidate {
     fn new(addr: u64, kind: Kind, value: f64) -> Self {
-        Candidate { tagged: addr | (kind as u64) << 61, value }
+        Candidate { tagged: addr | kind.searched() << 61, value }
     }
 
     fn addr(&self) -> u64 {
@@ -2097,7 +2150,7 @@ impl MemScan<'_> {
                 // The scan runs after the screen was read: allow for a fraction
                 // that has moved on by up to 1 since.
                 let hit = match kind {
-                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi => value == n.scaled,
+                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool => value == n.scaled,
                     Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
@@ -2399,9 +2452,10 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                     }
                     for &kind in &snap.kinds {
                         let step = match kind {
+                            Kind::Bit(_) => 1,
                             Kind::U16 => 2,
                             Kind::I32 | Kind::F32 | Kind::Xor | Kind::Smi => 4,
-                            Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py => 8,
+                            Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsBool => 8,
                         };
                         for o in (w..w + 8).step_by(step) {
                             let size = kind.size();
@@ -2425,7 +2479,7 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                 }
             }
             count.fetch_add(found.len(), Ordering::Relaxed);
-            found.sort_by_key(|c| (c.addr(), c.kind() as u8, c.mirror()));
+            found.sort_by_key(|c| (c.addr(), c.kind().searched(), c.mirror()));
             found
         },
     );
@@ -2916,7 +2970,7 @@ fn cmd_about(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     // Unreal places in one pass over the objects (a fraction of a second).
     let unnamed: Vec<u64> = new.iter().zip(&texts).filter(|(_, t)| t.is_none()).map(|(a, _)| *a).collect();
     if let (Ok(ue), false) = (unreal(s.pid, mem), unnamed.is_empty()) {
-        let found = ue.discover_all(mem, &unnamed);
+        let found = ue.discover_all(mem, &unnamed.iter().map(|&a| (a, None)).collect::<Vec<_>>());
         for (a, f) in unnamed.iter().zip(found) {
             if let Some(i) = new.iter().position(|n| n == a) {
                 texts[i] = f.first().map(|(p, _)| p.describe());
@@ -3780,14 +3834,19 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         Some(a) => (a, true),
         None => (arg.trim(), false),
     };
-    let (Some((target, _)), Some(mem)) = (parse_loc(addr), s.mem.as_ref()) else {
+    let (Some((target, kind)), Some(mem)) = (parse_loc(addr), s.mem.as_ref()) else {
         return writeln!(out, "error: usage: names <hex addr[:type]> [unreal] (after attach)");
+    };
+    // A flag is one bit of its byte; the byte may hold others.
+    let bit = match kind {
+        Kind::Bit(b) => Some(b),
+        _ => None,
     };
     let t = Instant::now();
     let heap = Heap::new(s.pid, mem, s.width)?;
     // A property of an Unreal object is named by the objects and properties leading to it.
     if let Ok(ue) = unreal(s.pid, mem) {
-        let found = ue.discover(mem, target);
+        let found = ue.discover(mem, target, bit);
         for (p, leads) in found.iter().take(5) {
             writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
         }
@@ -3948,8 +4007,9 @@ fn cmd_named(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     let heap = Heap::new(s.pid, mem, s.width)?;
     let (mut roots, mut found_at) = s.named_roots.remove(text).unwrap_or_default();
     let leads = named_walk(&heap, &path, &mut roots, &mut found_at);
+    let doubt = named_doubt(&heap, &leads, &roots, kind, &path);
     s.named_roots.insert(text.to_owned(), (roots, found_at));
-    if let Some(why) = named_doubt(&heap, &leads, kind, &path) {
+    if let Some(why) = doubt {
         writeln!(out, "doubtful {why}")?;
     }
     for a in &leads {
@@ -4231,6 +4291,15 @@ pub fn run(as_user: Option<&str>) {
         if cmd == "attach" {
             caught = None;
         }
+        // A JavaScript true or false is read and written through the game's two objects for
+        // them, learned from its objects (a fresh helper hasn't walked any yet).
+        if arg.contains("jsbool") && !js::bools_known() {
+            if let Some(mem) = session.mem.as_ref() {
+                if let Ok(heap) = Heap::new(session.pid, mem, session.width) {
+                    js::learn_bools(&heap);
+                }
+            }
+        }
         let res = match cmd {
             "info" => os::info(&mut out),
             "ps" => cmd_ps(&mut out, arg),
@@ -4316,7 +4385,20 @@ fn exit_untraced() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{dosbox_game, heap_block, parse_pattern, run_game, udk_game, wine_launcher, Patterns};
+    use super::{dosbox_game, heap_block, parse_pattern, run_game, udk_game, wine_launcher, Kind, Patterns};
+
+    #[test]
+    fn flags() {
+        for n in 0..8 {
+            let k = Kind::Bit(n);
+            assert_eq!(Kind::parse(k.name()), Some(k));
+            // Bit n of a byte holding only bit n, and of one holding every other bit.
+            assert_eq!(k.decode(&[1 << n]), 1.0);
+            assert_eq!(k.decode(&[!(1 << n)]), 0.0);
+        }
+        assert_eq!(Kind::parse("jsbool"), Some(Kind::JsBool));
+        assert_eq!(Kind::parse("bit8"), None);
+    }
 
     #[test]
     fn finds_the_heap_block_around_a_value() {

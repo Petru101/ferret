@@ -235,7 +235,7 @@ impl BrowseView {
                     let (worker, label, loc) = (self.worker.clone(), f.label.clone(), f.loc);
                     save.connect_clicked(move |b| ask_save(&worker, &label, loc, b));
                 }
-                value.set_label(&f.value.map_or("?".into(), |v| core::number_text(v, None)));
+                value.set_label(&f.value.map_or("?".into(), |v| super::value_text(f.loc.kind, v, None)));
                 rows.push(Row {
                     widget,
                     value,
@@ -274,7 +274,7 @@ impl BrowseView {
             if r.now.replace(v) == v {
                 continue;
             }
-            r.value.set_label(&v.map_or("?".into(), |v| core::number_text(v, None)));
+            r.value.set_label(&v.map_or("?".into(), |v| super::value_text(r.loc.kind, v, None)));
             let changed = v != r.since.get();
             if changed != r.value.has_css_class("accent") {
                 moved = true;
@@ -380,7 +380,9 @@ fn ask_save(worker: &Worker, label: &str, loc: Loc, parent: &impl IsA<gtk::Widge
 pub fn save(worker: &Worker, name: &str, loc: Loc) {
     let name = name.to_owned();
     worker.run(move |core| {
-        Event::BrowseSaved(core.save_listed(&name, loc).map(|_| (name.clone(), tr!("Saved {name}. Ferret finds it again every time you attach.", name))))
+        Event::BrowseSaved(
+            core.save_listed(&name, loc).map(|_| (name.clone(), tr!("Saved {name}. Ferret finds it again every time you attach.", name), loc.kind.flag())),
+        )
     });
 }
 

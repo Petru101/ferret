@@ -1008,7 +1008,9 @@ const ENGINE_NAMESPACES: &[&str] = &[
 ];
 /// Levels of subclasses below MonoBehaviour looked for.
 const MAX_DEPTH: usize = 10;
-/// MonoTypeEnum: 2-byte, 4-byte ints, floats, doubles.
+/// MonoTypeEnum (IL2CPP's is the same): a bool (one byte, 0 or 1), 2-byte, 4-byte ints,
+/// floats, doubles.
+const TYPE_BOOLEAN: u8 = 0x02;
 const TYPE_I2: u8 = 0x06;
 const TYPE_U2: u8 = 0x07;
 const TYPE_U4: u8 = 0x09;
@@ -1075,8 +1077,8 @@ impl Mono<'_> {
         field.strip_prefix('<').and_then(|f| f.split_once(">k__BackingField")).map_or(field.to_owned(), |(n, _)| n.to_owned())
     }
 
-    /// The numbers an object of class `k` holds in fields of the game's own classes (not
-    /// MonoBehaviour's and the engine's): label, offset, helper type.
+    /// The numbers and flags (bools) an object of class `k` holds in fields of the game's own
+    /// classes (not MonoBehaviour's and the engine's): label, offset, helper type.
     fn numbers(&self, k: u64, stop: &[u64]) -> Vec<(String, u64, &'static str)> {
         let mut chain: Vec<u64> = self.chain(k).into_iter().take_while(|c| !stop.contains(c)).collect();
         chain.retain(|&c| self.name(c).is_some_and(|(ns, _)| !engine_namespace(&ns)));
@@ -1092,6 +1094,7 @@ impl Mono<'_> {
                     Some(TYPE_R4) => "f32",
                     Some(TYPE_R8) => "f64",
                     Some(TYPE_I2 | TYPE_U2) => "u16",
+                    Some(TYPE_BOOLEAN) => "bit0",
                     _ => continue,
                 };
                 out.push((Self::shown_name(&name), off, kind));
