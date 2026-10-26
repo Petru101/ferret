@@ -1614,11 +1614,13 @@ pub fn run() -> glib::ExitCode {
 fn kind_text(kind: crate::core::Kind) -> String {
     use crate::core::Kind;
     match kind {
-        Kind::I32 => tr!("whole number"),
-        Kind::F32 => tr!("float"),
-        Kind::F64 => tr!("double"),
-        Kind::Xor => tr!("encoded whole number"),
-        Kind::U16 => tr!("2-byte whole number"),
+        // The searched types by the Find tab's names for them (`TYPE_CHOICES`), so a saved
+        // value's type is one the player can pick there.
+        Kind::I32 => tr!("4 Bytes"),
+        Kind::F32 => tr!("Float"),
+        Kind::F64 => tr!("Double"),
+        Kind::Xor => tr!("Encoded 4 Bytes"),
+        Kind::U16 => tr!("2 Bytes"),
         Kind::Gm => tr!("GameMaker number"),
         Kind::Lua => tr!("Lua number"),
         Kind::Py => tr!("Python number"),
