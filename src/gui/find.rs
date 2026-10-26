@@ -1519,6 +1519,9 @@ impl FindView {
         self.result.set_visible(false);
         self.typed_searching(true);
         self.searching(true);
+        // A first number scans all of the game's memory: half a minute in a big game.
+        self.stop.set_label(&tr!("Stop"));
+        self.stop.set_visible(true);
         self.unconfirmed.replace(None);
         self.guide.wait(
             guide::HANDS_OFF,
@@ -1561,6 +1564,8 @@ impl FindView {
         self.again.set_sensitive(false);
         self.typed_searching(true);
         self.searching(true);
+        self.stop.set_label(&tr!("Stop"));
+        self.stop.set_visible(true);
         self.guide.wait(
             guide::HANDS_OFF,
             &tr!("Scanning again…"),
@@ -1845,7 +1850,19 @@ impl FindView {
     }
 
     /// Forgets the matches so far; the picked number and the captured frame stay.
+    /// Says what to do after Start Over; again once it's done, over what a search it stopped
+    /// said.
+    pub fn started_over(&self) {
+        match self.selection.borrow().is_some() {
+            true => self.guide.pick(&tr!("Starting over"), &tr!("Click Start, or type the number the game shows.")),
+            false => self.guide.pick(&tr!("Starting over"), &tr!("Click a number in the picture, or type the number the game shows.")),
+        }
+    }
+
     pub fn start_over(&self) {
+        // A typed number's scan still running stops first (the worker does one thing at a
+        // time: Start Over used to wait behind it).
+        interrupt(&self.cancel, &self.stop);
         self.one_by_one.replace(None);
         self.moving.set(false);
         self.last_count.set(None);
@@ -1854,10 +1871,7 @@ impl FindView {
         self.matches.set_visible(false);
         self.result.set_visible(false);
         self.typed.set_text("");
-        match self.selection.borrow().is_some() {
-            true => self.guide.pick(&tr!("Starting over"), &tr!("Click Start, or type the number the game shows.")),
-            false => self.guide.pick(&tr!("Starting over"), &tr!("Click a number in the picture, or type the number the game shows.")),
-        }
+        self.started_over();
         self.worker.run(|core| {
             core.reset();
             Event::Reset

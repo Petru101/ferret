@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2047,14 +2047,16 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     let n = words.next().and_then(Shown::parse);
     let mut picked = Some(Vec::new());
     let mut use_shapes = !s.shapes.is_empty();
+    let mut stoppable = false;
     for w in words {
         match w {
             "all" => use_shapes = false,
+            "stoppable" => stoppable = true,
             w => picked = w.split(',').map(Kind::parse).collect(),
         }
     }
     let (Some(n), Some(picked)) = (n, picked) else {
-        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5> [i32,f32,f64,xor,u16] [all]");
+        return writeln!(out, "error: usage: scan <number, e.g. 1250 or 1.5> [i32,f32,f64,xor,u16] [all] [stoppable]");
     };
     let Some(mem) = s.mem.as_ref() else {
         return writeln!(out, "error: not attached");
@@ -2068,7 +2070,8 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     let regions = maps(s.pid)?;
     let mapped = Mapped::new(&regions);
     let shapes: &[Shape] = if use_shapes { &s.shapes } else { &[] };
-    let into = MemScan { mem, regions: &regions, mapped: &mapped, width: s.width, n, shapes };
+    let stop = stoppable.then(AtomicBool::default);
+    let into = MemScan { mem, regions: &regions, mapped: &mapped, width: s.width, n, shapes, stop: stop.as_ref() };
     // Places shaped like an earlier find, looking only at the types those had (with one type, a
     // third of the work of all four); everything when none of them holds the number. The
     // caller searches everywhere ("all") when the value isn't among them after all.
@@ -2084,6 +2087,9 @@ fn cmd_scan(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> 
     if r.over {
         // The search so far is kept: nothing replaced it.
         return writeln!(out, "error: too many matches (over {MAX_MATCHES})");
+    }
+    if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+        return writeln!(out, "error: stopped (the search so far is kept)");
     }
     let all = r.found.len();
     let step = format!("scan {arg}");
@@ -2113,6 +2119,9 @@ struct MemScan<'a> {
     width: usize,
     n: Shown,
     shapes: &'a [Shape],
+    /// With "stoppable": set once the frontend sends a line (`cancel`) while the scan runs (a
+    /// full scan of a big game takes half a minute); the chunks left are skipped.
+    stop: Option<&'a AtomicBool>,
 }
 
 struct MemScanned {
@@ -2146,6 +2155,12 @@ impl MemScan<'_> {
             let (addr, len) = chunks[i];
             if seen.load(Ordering::Relaxed) > MAX_MATCHES {
                 return MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0, over: true };
+            }
+            if let Some(stop) = self.stop {
+                if stop.load(Ordering::Relaxed) || frontend_spoke() {
+                    stop.store(true, Ordering::Relaxed);
+                    return MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0, over: false };
+                }
             }
             let r = self.chunk(kinds, &mut buf[..len], addr);
             seen.fetch_add(r.found.len(), Ordering::Relaxed);
@@ -4494,7 +4509,7 @@ pub fn run(as_user: Option<&str>) {
             "limits" => cmd_limits(&mut out, &limiter),
             _ => writeln!(
                 out,
-                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all], mark, snap <file> [types], next <n>|+|-|=|!|bar <full before> <full now> <error>, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], others <seconds> <addr> <sites>, ptrscan <addr> [depth] [max offset] [max paths] [loose], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
+                "commands: sandbox, info, ps [filter], games, attach <pid>, scan <n> [i32,f32,f64,xor,u16] [all] [stoppable], mark, snap <file> [types], next <n>|+|-|=|!|bar <full before> <full now> <error>, undo, redo, list [n], peek <addr>..., keep <addr>, drop <addr>, about <addr>..., alive, shape <addr>, shapes <shape>; ..., track <addr>..., sites <addr> [seconds] [wait], cancel, resolve <site> [type], others <seconds> <addr> <sites>, ptrscan <addr> [depth] [max offset] [max paths] [loose], names <addr> [unreal], named <type> <named path>, ue [objects <text>|class <name>|dump <addr>], gdtree, follow <type> <path>..., limit <name> <addr> <min> <max> <sites>, unlimit <name>, switch <name|*> <on|off|toggle>, limits, write <addr> <n> [test], set <n>, quit (addresses: <hex>[:i32|f32|f64|xor|u16])"
             ),
         };
         // A command that failed (the game quit: its /proc files are gone) says so; only losing

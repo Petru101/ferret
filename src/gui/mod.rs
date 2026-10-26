@@ -1000,7 +1000,9 @@ impl Ui {
                 self.toast(&e);
                 self.notify.send(&tr!("Limits"), &e, None, Some(4));
             }
-            Event::Reset | Event::Idle => {}
+            // A typed search Start Over stopped said so meanwhile.
+            Event::Reset => self.find.started_over(),
+            Event::Idle => {}
             Event::Digits(shapes) => self.find.show_digits(shapes),
             Event::Shapes(n) => self.find.show_shapes(n),
             Event::Done(Ok(msg)) => self.toast(&msg),

@@ -287,6 +287,17 @@ impl Helper {
     /// `call_cancellable`, telling `note` each "note ..." line as it comes (what a long wait
     /// found so far), without the "note ".
     fn call_noting(&mut self, line: &str, cancel: &Arc<AtomicBool>, note: &mut dyn FnMut(&str)) -> Vec<String> {
+        self.call_watched(line, cancel, &mut |_| {}, note)
+    }
+
+    /// `call_noting` with `call_with`'s progress (a stoppable `scan`).
+    fn call_watched(
+        &mut self,
+        line: &str,
+        cancel: &Arc<AtomicBool>,
+        progress: &mut dyn FnMut(f64),
+        note: &mut dyn FnMut(&str),
+    ) -> Vec<String> {
         #[cfg(unix)]
         use std::os::fd::AsFd as AsDup;
         #[cfg(windows)]
@@ -312,7 +323,7 @@ impl Helper {
                 }
             })
         });
-        let reply = self.reply_noting(&mut |_| {}, note);
+        let reply = self.reply_noting(progress, note);
         done.store(true, Ordering::Relaxed);
         if let Some(w) = watcher {
             w.join().ok();
@@ -4442,6 +4453,8 @@ impl Core {
         if self.unshaped {
             cmd += " all";
         }
+        // Stop (Start Over too) ends it: a big game's memory takes half a minute.
+        cmd += " stoppable";
         self.bar_last = None;
         self.phase_copy = false;
         let shown = n.to_string();
@@ -4452,7 +4465,11 @@ impl Core {
             }
         };
         tell(0.0);
-        let reply = self.helper.call_with(&cmd, &mut tell);
+        let reply = self.helper.call_watched(&cmd, &self.cancel, &mut tell, &mut |_| {});
+        if first_error(&reply).is_some_and(|e| e.starts_with("stopped")) {
+            self.say(&format!("scan for {shown} stopped"));
+            return vec![format!("error: {}", tr!("Stopped before the scan was done. Type the number again, or press Start, to search for it."))];
+        }
         self.shaped = reply.first().is_some_and(|l| l.contains("shaped like"));
         if let Some(e) = first_error(&reply).filter(|e| e.starts_with("too many matches")) {
             self.say(&e);
@@ -5102,6 +5119,9 @@ impl Core {
                 now = self.past_zero(now, start, limit)?;
                 let reply = self.scan(&now);
                 self.say(&format!("{now} again: lost it, rescanning: {}", reply.join(" ")));
+                if cancelled(&self.cancel) && match_count(&reply).is_none() {
+                    return Err(first_error(&reply).unwrap_or_default());
+                }
                 count = match_count(&reply).unwrap_or(0);
                 confirm = false;
                 unchanged_rounds = 0;
