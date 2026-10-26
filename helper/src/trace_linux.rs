@@ -26,6 +26,17 @@ fn wait(tid: i32, flags: libc::c_int) -> Option<(i32, libc::c_int)> {
     (r > 0).then_some((r, status))
 }
 
+/// The longest `Tracer::stop` waits for a thread to stop (a live one stops at once).
+const STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// The thread has exited (a zombie, or already gone).
+fn dead(tid: i32) -> bool {
+    match fs::read_to_string(format!("/proc/{tid}/stat")) {
+        Ok(stat) => stat.rsplit_once(") ").is_none_or(|(_, rest)| matches!(rest.as_bytes().first(), Some(b'Z' | b'X'))),
+        Err(_) => true,
+    }
+}
+
 fn is_event_stop(status: libc::c_int) -> bool {
     libc::WIFSTOPPED(status) && (status >> 16) == libc::PTRACE_EVENT_STOP
 }
@@ -51,13 +62,29 @@ impl Tracer {
         Ok(Self { tids, parked: HashSet::new() })
     }
 
-    /// Stops one thread. Signals that arrive meanwhile are passed on to it.
+    /// Stops one thread. Signals that arrive meanwhile are passed on to it. Never waits on a
+    /// thread that has died, nor longer than `STOP_WAIT`: the game's main thread, dead while
+    /// others aren't collected yet, is never reported, and those others can only be collected by
+    /// this same tracer. Borderlands 4 quit during a limiter re-check, and the helper waited on
+    /// its main thread for hours, holding the game's process (and Ferret) open.
     fn stop(&self, tid: i32) -> bool {
-        if ptrace(libc::PTRACE_INTERRUPT, tid, 0, 0) != 0 {
+        if dead(tid) || ptrace(libc::PTRACE_INTERRUPT, tid, 0, 0) != 0 {
+            // A dead thread other than the main one is collected here (it stays otherwise).
+            wait(tid, libc::WNOHANG);
             return false;
         }
+        let start = Instant::now();
         loop {
-            match wait(tid, 0) {
+            let mut status = 0;
+            let r = unsafe { libc::waitpid(tid, &mut status, libc::WNOHANG | libc::__WALL) };
+            if r == 0 {
+                if dead(tid) || start.elapsed() >= STOP_WAIT {
+                    return false;
+                }
+                child_stopped(Duration::from_millis(5));
+                continue;
+            }
+            match (r > 0).then_some((r, status)) {
                 Some((_, st)) if is_event_stop(st) => return true,
                 Some((_, st)) if libc::WIFSTOPPED(st) => {
                     let sig = libc::WSTOPSIG(st);
