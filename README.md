@@ -58,7 +58,7 @@ Feedback in its menu, or an issue here).
 6. **More like this**: found one power's timer or one unit's health? Find Them on its card
    watches the game's code that changes it while you use the others, and saves each one with
    the same range.
-7. **Browse by name** (Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV and MZ, Java, Python (Ren'Py, pygame), Adobe AIR, Lua games such as LÖVE's, and web games in Electron: plain JavaScript or Phaser): the Browse tab lists your character's numbers by
+7. **Browse by name** (Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV and MZ, Java, Python (Ren'Py, pygame), Adobe AIR, Lua games such as LÖVE's, and web games in recent Electron versions: plain JavaScript, Phaser, GDevelop or Construct 2): the Browse tab lists your character's numbers by
    the names the game gives them (health, ammo, run speed, jump height; in RPG Maker games the
    party's gold and items, each hero's HP, MP and level, the game's variables), no search needed.
    In Unreal Engine, Unity and RPG Maker games it lists their on/off flags too, with a switch to
@@ -67,7 +67,8 @@ Feedback in its menu, or an issue here).
    gave them. Above the list, one-click tweaks: god mode and fly in Unreal Engine games (they
    work where the game leaves damage and movement to the engine); in RPG Maker games god mode
    (your heroes' HP and MP don't go down), walk through walls, no random battles and walk faster.
-   Turn on Only What Changes, change one in the game, and save the one that moved.
+   Turn on Only What Changes, change one in the game, and save the one that moved, or type the
+   number the game shows into the search box to see which names hold it.
 
 Notifications tell you what Ferret needs while the game is in front, even in fullscreen.
 
