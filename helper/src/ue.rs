@@ -1082,6 +1082,10 @@ pub struct UePath {
     pub class: String,
     pub name: Option<String>,
     pub outer: Option<String>,
+    /// Only the local player's (`@`): their character, what's inside it or what it owns.
+    /// Borderlands 4's player and its enemies are all OakCharacters of the Level: god mode's
+    /// flag, saved by class alone, made the enemies unkillable too.
+    pub player: bool,
     pub steps: Vec<Step>,
     /// Other places in the same object that keep the same count (a tally by item next to the
     /// stacks): written together, so the game never sees them disagree.
@@ -1121,6 +1125,10 @@ fn decode(text: &str) -> Option<String> {
 impl UePath {
     pub fn parse(text: &str) -> Option<Self> {
         let (root, rest) = text.strip_prefix("ue:")?.split_once('.')?;
+        let (root, player) = match root.strip_prefix('@') {
+            Some(r) => (r, true),
+            None => (root, false),
+        };
         let (root, outer) = match root.split_once('^') {
             Some((r, o)) => (r, Some(decode(o)?)),
             None => (root, None),
@@ -1132,11 +1140,11 @@ impl UePath {
         let mut lists = rest.split('+').map(parse_steps);
         let steps = lists.next()??;
         let also = lists.collect::<Option<Vec<_>>>()?;
-        Some(UePath { class, name, outer, steps, also })
+        Some(UePath { class, name, outer, player, steps, also })
     }
 
     pub fn text(&self) -> String {
-        let mut t = format!("ue:{}", encode(&self.class));
+        let mut t = format!("ue:{}{}", if self.player { "@" } else { "" }, encode(&self.class));
         if let Some(n) = &self.name {
             t += &format!("/{}", encode(n));
         }
@@ -1154,7 +1162,7 @@ impl UePath {
         for a in &self.also {
             t += &format!(" (and {})", steps_words(a));
         }
-        t += &format!(", in {}", self.name.as_deref().unwrap_or(&self.class));
+        t += &format!(", in {}{}", if self.player { "your " } else { "" }, self.name.as_deref().unwrap_or(&self.class));
         if let Some(o) = &self.outer {
             t += &format!(" (of a {o})");
         }
@@ -1378,6 +1386,10 @@ impl Ue {
 
     /// The objects a path starts from now.
     pub fn roots(&self, mem: &Mem, path: &UePath) -> Vec<u64> {
+        let players = if path.player { self.players(mem) } else { Vec::new() };
+        if path.player && players.is_empty() {
+            return Vec::new();
+        }
         let mut class_names: HashMap<u64, Option<String>> = HashMap::new();
         let mut class_name = |c: u64| class_names.entry(c).or_insert_with(|| self.object_name(mem, c)).clone();
         self.objects(mem)
@@ -1389,8 +1401,33 @@ impl Ue {
                     && path.outer.as_ref().is_none_or(|n| {
                         self.outer(mem, o).and_then(|out| self.class_of(mem, out)).is_some_and(|c| class_name(c).as_ref() == Some(n))
                     })
+                    && (!path.player || self.is_players(mem, o, &players))
             })
             .collect()
+    }
+
+    /// The local player's characters: the pawn its controller possesses and the Character that
+    /// pawn drives (`local_player`); none at a menu.
+    fn players(&self, mem: &Mem) -> Vec<u64> {
+        let heads = self.heads(mem);
+        let mut lineages: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut is_a = |class: u64, names: &[&str]| lineages.entry(class).or_insert_with(|| self.lineage(mem, class)).iter().any(|n| names.contains(&n.as_str()));
+        self.local_player(mem, &heads, &mut is_a).map_or(Vec::new(), |(_, _, pawn, driven)| driven.into_iter().chain([pawn]).collect())
+    }
+
+    /// One of the player's characters, inside one (its outer chain, 3 steps: components,
+    /// attribute sets) or owned by one (AActor's `Owner`: a weapon).
+    fn is_players(&self, mem: &Mem, obj: u64, players: &[u64]) -> bool {
+        let mut cur = Some(obj);
+        for _ in 0..4 {
+            match cur {
+                Some(o) if players.contains(&o) => return true,
+                Some(o) => cur = self.outer(mem, o),
+                None => break,
+            }
+        }
+        let owner = self.class_of(mem, obj).and_then(|c| self.find_prop(mem, c, "Owner")).filter(|p| p.kind == "ObjectProperty");
+        owner.and_then(|p| self.ptr(mem, obj + p.offset)).is_some_and(|o| players.contains(&o))
     }
 
     /// Where a path leads from these objects (each still checked: the game may have freed it).
@@ -1680,6 +1717,7 @@ impl Ue {
     pub fn discover_all(&self, mem: &Mem, targets: &[(u64, Option<u8>)]) -> Vec<Vec<(UePath, Vec<u64>)>> {
         let mut found: Vec<Vec<(UePath, Vec<u64>)>> = vec![Vec::new(); targets.len()];
         let mut sizes: HashMap<u64, u64> = HashMap::new();
+        let mut players: Option<Vec<u64>> = None;
         for obj in self.objects(mem) {
             let mut head = [0u8; 0x80];
             if mem.read_exact_at(&mut head[..(self.h.class + self.h.w) as usize], obj).is_err() {
@@ -1702,8 +1740,20 @@ impl Ue {
                 let name = self.object_name(mem, obj).filter(|n| !run_name(n));
                 let outer = self.outer(mem, obj).and_then(|o| self.class_name(mem, o)).filter(|n| n != "Package");
                 let also = self.twins(mem, obj, &steps, target);
-                let path = UePath { class: class_name, name, outer, steps, also };
+                let path = UePath { class: class_name, name, outer, player: false, steps, also };
                 let leads = self.walk(mem, &self.roots(mem, &path), &path);
+                // Other objects like it lead elsewhere (enemies of the player's class): the
+                // player's own too, which sorts first (it leads to fewer places).
+                if leads.len() > 1 && leads.contains(&target) {
+                    let players = players.get_or_insert_with(|| self.players(mem));
+                    if self.is_players(mem, obj, players) {
+                        let mine = UePath { player: true, ..path.clone() };
+                        let leads = self.walk(mem, &self.roots(mem, &mine), &mine);
+                        if leads.contains(&target) && !found[i].iter().any(|(p, _)| *p == mine) {
+                            found[i].push((mine, leads));
+                        }
+                    }
+                }
                 if leads.contains(&target) && !found[i].iter().any(|(p, _)| *p == path) {
                     found[i].push((path, leads));
                 }

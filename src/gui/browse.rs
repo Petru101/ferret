@@ -2,7 +2,8 @@
 // through the engine's own objects instead of a search (`Core::player_values`). Each shows its
 // number live (the 1 s refresh); Only What Changes keeps the ones that move after it's turned
 // on, so the player changes something in the game and sees which it was; Save keeps one like
-// a found value (by name only, `Core::save_listed`). Above the list, the engine's tweaks
+// a found value (by name only, `Core::save_listed`). The search box takes names and numbers (the
+// places holding a number now). Above the list, the engine's tweaks
 // (Unreal's and RPG Maker's: god mode, fly...), each a switch (`Core::set_tweak`).
 
 use std::cell::{Cell, RefCell};
@@ -13,6 +14,7 @@ use adw::prelude::*;
 use super::{Event, Worker};
 use crate::core::{self, Belongs, Loc, PlayerObject};
 use crate::i18n::{ntr, tr};
+use crate::ocr::Shown;
 
 struct Row {
     widget: adw::ActionRow,
@@ -70,7 +72,7 @@ fn suggested_name(label: &str) -> String {
 impl BrowseView {
     pub fn new(worker: Worker) -> Rc<Self> {
         let search = gtk::SearchEntry::builder()
-            .placeholder_text(tr!("Look for a name: health, ammo, gold…"))
+            .placeholder_text(tr!("Look for a name or a number: health, ammo, 250…"))
             .hexpand(true)
             .build();
         let changed = gtk::ToggleButton::builder()
@@ -321,11 +323,12 @@ impl BrowseView {
         if values.len() != rows.len() {
             return;
         }
-        let mut moved = false;
+        let (mut moved, mut any) = (false, false);
         for (r, &v) in rows.iter().zip(values) {
             if r.now.replace(v) == v {
                 continue;
             }
+            any = true;
             r.value.set_label(&v.map_or("?".into(), |v| super::value_text(r.loc.kind, v, None)));
             let changed = v != r.since.get();
             if changed != r.value.has_css_class("accent") {
@@ -338,7 +341,8 @@ impl BrowseView {
             }
         }
         drop(rows);
-        if moved && self.changed.is_active() {
+        // A number searched for: the places holding it now.
+        if moved && self.changed.is_active() || any && !self.query().1.is_empty() {
             self.filter();
         }
     }
@@ -362,8 +366,21 @@ impl BrowseView {
         }
     }
 
+    /// The search box's words: parts of names, and numbers to find among the values (the name
+    /// may mean nothing, while the game shows the number).
+    fn query(&self) -> (Vec<String>, Vec<Shown>) {
+        let (mut words, mut numbers) = (Vec::new(), Vec::new());
+        for w in self.search.text().to_lowercase().split_whitespace() {
+            match Shown::parse(w) {
+                Some(n) => numbers.push(n),
+                None => words.push(w.to_owned()),
+            }
+        }
+        (words, numbers)
+    }
+
     fn filter(&self) {
-        let words: Vec<String> = self.search.text().to_lowercase().split_whitespace().map(str::to_owned).collect();
+        let (words, numbers) = self.query();
         let only_changed = self.changed.is_active();
         let everything = self.everything.is_active();
         let rows = self.rows.borrow();
@@ -371,8 +388,11 @@ impl BrowseView {
         let mut shown_in = vec![false; groups.len()];
         let (mut shown, mut held_back) = (0, 0);
         for r in rows.iter() {
-            let show = words.iter().all(|w| r.hay.contains(w.as_str())) && (!only_changed || r.now.get() != r.since.get());
-            if show && r.more && !everything {
+            let show = words.iter().all(|w| r.hay.contains(w.as_str()))
+                && numbers.iter().all(|n| holds(r.loc.kind, r.now.get(), n))
+                && (!only_changed || r.now.get() != r.since.get());
+            // A number looks everywhere: the place holding it may be among the inner workings.
+            if show && r.more && !everything && numbers.is_empty() {
                 held_back += 1;
                 r.widget.set_visible(false);
                 continue;
@@ -388,6 +408,7 @@ impl BrowseView {
         }
         self.count.set_label(&match (shown, only_changed) {
             (0, true) if held_back == 0 => tr!("Nothing changed yet: change the number in the game."),
+            (0, false) if held_back == 0 && !numbers.is_empty() => tr!("Nothing listed holds that number now."),
             (0, false) if held_back == 0 => tr!("No names match."),
             (n, _) if held_back > 0 => ntr!(
                 "{n} number shown, {more} more with Show Everything",
@@ -399,6 +420,14 @@ impl BrowseView {
             (n, _) => ntr!("{n} number", "{n} numbers", n, n = super::find::grouped(n)),
         });
     }
+}
+
+/// A listed number the game would show as `n`: whole numbers equal, decimals within one step
+/// of its last digit (87 for a health of 87.4 or 86.6), as searches take them. Flags aren't
+/// numbers.
+fn holds(kind: core::Kind, v: Option<f64>, n: &Shown) -> bool {
+    let step = 10f64.powi(-(n.decimals() as i32));
+    !matches!(kind, core::Kind::Bit(_) | core::Kind::JsBool) && v.is_some_and(|v| (v - n.value()).abs() < step)
 }
 
 /// A tweak's title and what it does (helper/src/tweaks.rs ids); None for one this build doesn't
@@ -474,5 +503,20 @@ mod tests {
         assert_eq!(suggested_name("Slots[Item=Bow Arrow].Count"), "count");
         assert_eq!(suggested_name("Ammo #2"), "ammo");
         assert_eq!(suggested_name("Currencies{Gold}"), "currencies");
+    }
+
+    #[test]
+    fn numbers_found_as_the_game_shows_them() {
+        let n = |t: &str| Shown::parse(t).unwrap();
+        assert!(holds(core::Kind::I32, Some(250.0), &n("250")));
+        assert!(!holds(core::Kind::I32, Some(251.0), &n("250")));
+        assert!(holds(core::Kind::F32, Some(87.4), &n("87")));
+        assert!(holds(core::Kind::F32, Some(86.6), &n("87")));
+        assert!(!holds(core::Kind::F32, Some(88.0), &n("87")));
+        assert!(holds(core::Kind::F32, Some(1.25), &n("1.2")));
+        assert!(!holds(core::Kind::F32, Some(1.35), &n("1.2")));
+        assert!(holds(core::Kind::I32, Some(197.0), &n("3:17")));
+        assert!(!holds(core::Kind::Bit(1), Some(1.0), &n("1")));
+        assert!(!holds(core::Kind::I32, None, &n("0")));
     }
 }

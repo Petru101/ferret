@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-26 03:24+0000\n"
+"POT-Creation-Date: 2026-10-26 03:52+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -790,75 +790,75 @@ msgid ""
 "A report with this id was sent already: close this window and write it again."
 msgstr "已经发送过这个编号的报告了:请关闭此窗口重新写一份。"
 
-#: src/gui/browse.rs:51
+#: src/gui/browse.rs:53
 #, rust-format
 msgid "Your character ({class})"
 msgstr "你的角色（{class}）"
 
-#: src/gui/browse.rs:52
+#: src/gui/browse.rs:54
 #, rust-format
 msgid "Your player's state ({class})"
 msgstr "你的玩家状态（{class}）"
 
-#: src/gui/browse.rs:53
+#: src/gui/browse.rs:55
 #, rust-format
 msgid "Your controller ({class})"
 msgstr "你的控制器（{class}）"
 
-#: src/gui/browse.rs:54
+#: src/gui/browse.rs:56
 #, rust-format
 msgid "The game ({class})"
 msgstr "游戏（{class}）"
 
-#: src/gui/browse.rs:55
+#: src/gui/browse.rs:57
 #, rust-format
 msgid "Your party ({class})"
 msgstr "你的队伍（{class}）"
 
-#: src/gui/browse.rs:56
+#: src/gui/browse.rs:58
 #, rust-format
 msgid "Belongs to {owner} ({class})"
 msgstr "属于 {owner}（{class}）"
 
-#: src/gui/browse.rs:57
+#: src/gui/browse.rs:59
 #, rust-format
 msgid "Part of {owner} ({class})"
 msgstr "{owner} 的一部分（{class}）"
 
-#: src/gui/browse.rs:58
+#: src/gui/browse.rs:60
 #, rust-format
 msgid "Used by {owner} ({class})"
 msgstr "由 {owner} 使用（{class}）"
 
-#: src/gui/browse.rs:73
-msgid "Look for a name: health, ammo, gold…"
-msgstr "查找名称：health、ammo、gold…"
+#: src/gui/browse.rs:75
+msgid "Look for a name or a number: health, ammo, 250…"
+msgstr "查找名称或数字：health、ammo、250…"
 
-#: src/gui/browse.rs:77
+#: src/gui/browse.rs:79
 msgid "Only What Changes"
 msgstr "只看变化的"
 
-#: src/gui/browse.rs:78
+#: src/gui/browse.rs:80
 msgid ""
 "Turn this on, then change the number in the game: only the numbers that "
 "moved stay in the list."
 msgstr "打开它，然后在游戏中改变这个数字：列表中只保留变化过的数字。"
 
-#: src/gui/browse.rs:82
+#: src/gui/browse.rs:84
 msgid "Show Everything"
 msgstr "显示全部"
 
-#: src/gui/browse.rs:83
+#: src/gui/browse.rs:85
 msgid ""
 "Also the game's inner workings: each ability's settings, the game's own "
 "systems, the controller and the settings."
 msgstr "还包括游戏的内部机制：每个技能的设置、游戏自身的系统、控制器和设置。"
 
-#: src/gui/browse.rs:85
+#: src/gui/browse.rs:87
 msgid "List Again"
 msgstr "重新列出"
 
-#: src/gui/browse.rs:93
+#: src/gui/browse.rs:95
 msgid ""
 "Your character's numbers, by the names the game gives them. Can't tell which "
 "one it is? Turn on Only What Changes and change it in the game."
@@ -866,29 +866,29 @@ msgstr ""
 "你的角色的数字，使用游戏给它们起的名称。不知道是哪一个？打开“只看变化的”，然"
 "后在游戏中改变它。"
 
-#: src/gui/browse.rs:120
+#: src/gui/browse.rs:122
 msgid "Tweaks"
 msgstr "调整"
 
-#: src/gui/browse.rs:121
+#: src/gui/browse.rs:123
 msgid ""
 "Changes the game's engine understands, one switch each. Save your game "
 "before you try one."
 msgstr "游戏引擎能理解的改动，每项一个开关。试之前先保存游戏。"
 
-#: src/gui/browse.rs:130
+#: src/gui/browse.rs:132
 msgid "Reading the game's objects…"
 msgstr "正在读取游戏的对象…"
 
-#: src/gui/browse.rs:133
+#: src/gui/browse.rs:135
 msgid "Try Again"
 msgstr "重试"
 
-#: src/gui/browse.rs:137
+#: src/gui/browse.rs:139
 msgid "Nothing to List Yet"
 msgstr "暂时没有可列出的内容"
 
-#: src/gui/browse.rs:214
+#: src/gui/browse.rs:216
 #, rust-format
 msgid ""
 "{about} On, but not all of it is in the game right now: Ferret keeps it once "
@@ -896,48 +896,52 @@ msgid ""
 msgstr ""
 "{about} 已开启，但现在游戏里还没有全部内容：一旦出现，Ferret 就会保持它。"
 
-#: src/gui/browse.rs:224
+#: src/gui/browse.rs:226
 msgid "Tweak on: Ferret keeps it while you play"
 msgstr "调整已开启：你玩游戏时 Ferret 会保持它"
 
-#: src/gui/browse.rs:225
+#: src/gui/browse.rs:227
 msgid "Tweak off: the game has its own values back"
 msgstr "调整已关闭：游戏恢复了自己的值"
 
-#: src/gui/browse.rs:264
+#: src/gui/browse.rs:266
 msgid "Ferret found no numbers in your character's objects."
 msgstr "Ferret 在你的角色的对象中没有找到数字。"
 
-#: src/gui/browse.rs:280 src/gui/browse.rs:441 src/gui/find.rs:369
+#: src/gui/browse.rs:282 src/gui/browse.rs:470 src/gui/find.rs:369
 #: src/gui/guide.rs:77
 msgid "Save"
 msgstr "保存"
 
-#: src/gui/browse.rs:390
+#: src/gui/browse.rs:410
 msgid "Nothing changed yet: change the number in the game."
 msgstr "还没有变化：请在游戏中改变这个数字。"
 
-#: src/gui/browse.rs:391
+#: src/gui/browse.rs:411
+msgid "Nothing listed holds that number now."
+msgstr "列表中目前没有这个数字。"
+
+#: src/gui/browse.rs:412
 msgid "No names match."
 msgstr "没有匹配的名称。"
 
-#: src/gui/browse.rs:393
+#: src/gui/browse.rs:414
 #, rust-format
 msgid "{n} number shown, {more} more with Show Everything"
 msgid_plural "{n} numbers shown, {more} more with Show Everything"
 msgstr[0] "显示了 {n} 个数字，打开“显示全部”还有 {more} 个"
 
-#: src/gui/browse.rs:399
+#: src/gui/browse.rs:420
 #, rust-format
 msgid "{n} number"
 msgid_plural "{n} numbers"
 msgstr[0] "{n} 个数字"
 
-#: src/gui/browse.rs:409 src/gui/browse.rs:417
+#: src/gui/browse.rs:438 src/gui/browse.rs:446
 msgid "God Mode"
 msgstr "无敌模式"
 
-#: src/gui/browse.rs:410
+#: src/gui/browse.rs:439
 msgid ""
 "Your character can't be damaged the engine's way, and its health stays at "
 "the most it has had since you turned this on. Games with damage rules of "
@@ -946,11 +950,11 @@ msgstr ""
 "你的角色不会以引擎的方式受到伤害，生命值保持在开启后达到过的最高值。有自己伤"
 "害规则的游戏可能会忽略第一部分。"
 
-#: src/gui/browse.rs:413
+#: src/gui/browse.rs:442
 msgid "Fly"
 msgstr "飞行"
 
-#: src/gui/browse.rs:414
+#: src/gui/browse.rs:443
 msgid ""
 "Your character flies instead of walking or falling. Going up and down "
 "depends on the game's controls; turned off, the character falls back down."
@@ -958,7 +962,7 @@ msgstr ""
 "你的角色会飞，而不是行走或下落。能否上升和下降取决于游戏的操作；关闭后角色会"
 "落回地面。"
 
-#: src/gui/browse.rs:418
+#: src/gui/browse.rs:447
 msgid ""
 "Your heroes' HP and MP don't go down: they stay at the most they've had "
 "since you turned this on, so heal once to keep them full. One hit bigger "
@@ -967,51 +971,51 @@ msgstr ""
 "你的英雄的 HP 和 MP 不会下降：它们保持在开启后达到过的最高值，所以治疗一次就"
 "能让它们保持满值。比英雄 HP 更高的一击仍然可能把他击倒。"
 
-#: src/gui/browse.rs:421
+#: src/gui/browse.rs:450
 msgid "Walk Through Walls"
 msgstr "穿墙"
 
-#: src/gui/browse.rs:422
+#: src/gui/browse.rs:451
 msgid ""
 "You walk through walls, people and water (not off the map). Places the story "
 "hasn't opened yet open too."
 msgstr "你可以穿过墙壁、人物和水（不会走出地图）。剧情还没开放的地方也会开放。"
 
-#: src/gui/browse.rs:424
+#: src/gui/browse.rs:453
 msgid "No Random Battles"
 msgstr "无随机战斗"
 
-#: src/gui/browse.rs:424
+#: src/gui/browse.rs:453
 msgid ""
 "Walking around starts no random battles. Battles the story starts still "
 "happen."
 msgstr "四处走动不会触发随机战斗。剧情触发的战斗仍会发生。"
 
-#: src/gui/browse.rs:425
+#: src/gui/browse.rs:454
 msgid "Walk Faster"
 msgstr "走得更快"
 
-#: src/gui/browse.rs:425
+#: src/gui/browse.rs:454
 msgid "You walk twice as fast."
 msgstr "你走路的速度变为两倍。"
 
-#: src/gui/browse.rs:438
+#: src/gui/browse.rs:467
 #, rust-format
 msgid "Save {name}"
 msgstr "保存 {name}"
 
-#: src/gui/browse.rs:438
+#: src/gui/browse.rs:467
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr "每次你打开游戏时，Ferret 都会按这个名称再次找到它。"
 
-#: src/gui/browse.rs:441 src/gui/feedback.rs:69 src/gui/find.rs:239
+#: src/gui/browse.rs:470 src/gui/feedback.rs:69 src/gui/find.rs:239
 #: src/gui/find.rs:2359 src/gui/guide.rs:162 src/gui/guide.rs:610
 #: src/gui/guide.rs:616 src/gui/share.rs:256 src/gui/share.rs:447
 #: src/gui/share.rs:475 src/gui/values.rs:144 src/gui/values.rs:175
 msgid "Cancel"
 msgstr "取消"
 
-#: src/gui/browse.rs:462 src/gui/find.rs:2325
+#: src/gui/browse.rs:491 src/gui/find.rs:2325
 #, rust-format
 msgid "Saved {name}. Ferret finds it again every time you attach."
 msgstr "已保存 {name}。每次连接时 Ferret 都会再找到它。"
@@ -1075,23 +1079,23 @@ msgstr "要发送的内容"
 msgid "All Types"
 msgstr "所有类型"
 
-#: src/gui/find.rs:208
+#: src/gui/find.rs:208 src/gui/mod.rs:1623
 msgid "2 Bytes"
 msgstr "2 字节"
 
-#: src/gui/find.rs:209
+#: src/gui/find.rs:209 src/gui/mod.rs:1619
 msgid "4 Bytes"
 msgstr "4 字节"
 
-#: src/gui/find.rs:210
+#: src/gui/find.rs:210 src/gui/mod.rs:1620
 msgid "Float"
 msgstr "单浮点"
 
-#: src/gui/find.rs:211
+#: src/gui/find.rs:211 src/gui/mod.rs:1621
 msgid "Double"
 msgstr "双浮点"
 
-#: src/gui/find.rs:212
+#: src/gui/find.rs:212 src/gui/mod.rs:1622
 msgid "Encoded 4 Bytes"
 msgstr "编码的 4 字节"
 
@@ -2819,105 +2823,85 @@ msgstr "Ferret {version} 已可安装"
 msgid "{names} and {last}"
 msgstr "{names}和{last}"
 
-#: src/gui/mod.rs:1617
-msgid "whole number"
-msgstr "整数"
-
-#: src/gui/mod.rs:1618
-msgid "float"
-msgstr "单浮点"
-
-#: src/gui/mod.rs:1619
-msgid "double"
-msgstr "双浮点"
-
-#: src/gui/mod.rs:1620
-msgid "encoded whole number"
-msgstr "编码整数"
-
-#: src/gui/mod.rs:1621
-msgid "2-byte whole number"
-msgstr "2 字节整数"
-
-#: src/gui/mod.rs:1622
+#: src/gui/mod.rs:1624
 msgid "GameMaker number"
 msgstr "GameMaker 数字"
 
-#: src/gui/mod.rs:1623
+#: src/gui/mod.rs:1625
 msgid "Lua number"
 msgstr "Lua 数字"
 
-#: src/gui/mod.rs:1624
+#: src/gui/mod.rs:1626
 msgid "Python number"
 msgstr "Python 数字"
 
-#: src/gui/mod.rs:1625
+#: src/gui/mod.rs:1627
 msgid "JavaScript whole number"
 msgstr "JavaScript 整数"
 
-#: src/gui/mod.rs:1626
+#: src/gui/mod.rs:1628
 msgid "on/off flag"
 msgstr "开关值"
 
-#: src/gui/mod.rs:1627
+#: src/gui/mod.rs:1629
 msgid "JavaScript on/off flag"
 msgstr "JavaScript 开关值"
 
-#: src/gui/mod.rs:1628
+#: src/gui/mod.rs:1630
 msgid "1-byte whole number"
 msgstr "1 字节整数"
 
-#: src/gui/mod.rs:1629
+#: src/gui/mod.rs:1631
 msgid "8-byte whole number"
 msgstr "8 字节整数"
 
-#: src/gui/mod.rs:1630
+#: src/gui/mod.rs:1632
 msgid "JavaScript number"
 msgstr "JavaScript 数字"
 
-#: src/gui/mod.rs:1637
+#: src/gui/mod.rs:1639
 msgid "On"
 msgstr "开启"
 
-#: src/gui/mod.rs:1638 src/gui/values.rs:110 src/gui/values.rs:121
+#: src/gui/mod.rs:1640 src/gui/values.rs:110 src/gui/values.rs:121
 msgid "Off"
 msgstr "关闭"
 
-#: src/gui/mod.rs:1647
+#: src/gui/mod.rs:1649
 #, rust-format
 msgid "at most {max}"
 msgstr "至多 {max}"
 
-#: src/gui/mod.rs:1648
+#: src/gui/mod.rs:1650
 #, rust-format
 msgid "at least {min}"
 msgstr "至少 {min}"
 
-#: src/gui/mod.rs:1649
+#: src/gui/mod.rs:1651
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "在 {min} 到 {max} 之间"
 
-#: src/gui/mod.rs:1650
+#: src/gui/mod.rs:1652
 msgid "unlimited"
 msgstr "无限制"
 
-#: src/gui/mod.rs:1656
+#: src/gui/mod.rs:1658
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
 msgstr[0] "{n} 类位置"
 
-#: src/gui/mod.rs:1663
+#: src/gui/mod.rs:1665
 msgid "It can be played with other people."
 msgstr "可以和其他人一起玩。"
 
-#: src/gui/mod.rs:1666
+#: src/gui/mod.rs:1668
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "它自带 {anticheat},目前没有运行。"
 
-#: src/gui/mod.rs:1670
+#: src/gui/mod.rs:1672
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
@@ -2925,11 +2909,11 @@ msgstr ""
 "发行商会标记存档被修改过的账号：被标记的账号可能会被排除在排行榜、活动或合作"
 "模式之外。"
 
-#: src/gui/mod.rs:1675
+#: src/gui/mod.rs:1677
 msgid "Its scores go on online leaderboards that other players see."
 msgstr "它的分数会上传到其他玩家能看到的在线排行榜。"
 
-#: src/gui/mod.rs:1679
+#: src/gui/mod.rs:1681
 #, rust-format
 msgid ""
 "{anticheat} runs on your computer all the time, for other games. It may take "
@@ -3663,6 +3647,21 @@ msgstr "这个 Ferret 文件没有说明是哪个游戏的。"
 #: src/share.rs:262
 msgid "This Ferret file has no values in it."
 msgstr "这个 Ferret 文件里没有数值。"
+
+#~ msgid "whole number"
+#~ msgstr "整数"
+
+#~ msgid "float"
+#~ msgstr "单浮点"
+
+#~ msgid "double"
+#~ msgstr "双浮点"
+
+#~ msgid "encoded whole number"
+#~ msgstr "编码整数"
+
+#~ msgid "2-byte whole number"
+#~ msgstr "2 字节整数"
 
 #, fuzzy, rust-format
 #~ msgid "Ferret Let Go of {name}"

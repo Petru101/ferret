@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-26 03:24+0000\n"
+"POT-Creation-Date: 2026-10-26 03:52+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -704,7 +704,9 @@ msgstr ""
 msgid ""
 "Stopped before the scan was done. Type the number again, or press Start, to "
 "search for it."
-msgstr "Arrêté avant la fin de l'analyse. Tapez à nouveau le nombre, ou appuyez sur Démarrer, pour le chercher."
+msgstr ""
+"Arrêté avant la fin de l'analyse. Tapez à nouveau le nombre, ou appuyez sur "
+"Démarrer, pour le chercher."
 
 #: src/core.rs:4476
 #, rust-format
@@ -899,55 +901,55 @@ msgstr ""
 "Un rapport avec cet identifiant a déjà été envoyé : fermez cette fenêtre et "
 "écrivez-le à nouveau."
 
-#: src/gui/browse.rs:51
+#: src/gui/browse.rs:53
 #, rust-format
 msgid "Your character ({class})"
 msgstr "Votre personnage ({class})"
 
-#: src/gui/browse.rs:52
+#: src/gui/browse.rs:54
 #, rust-format
 msgid "Your player's state ({class})"
 msgstr "L'état de votre joueur ({class})"
 
-#: src/gui/browse.rs:53
+#: src/gui/browse.rs:55
 #, rust-format
 msgid "Your controller ({class})"
 msgstr "Votre contrôleur ({class})"
 
-#: src/gui/browse.rs:54
+#: src/gui/browse.rs:56
 #, rust-format
 msgid "The game ({class})"
 msgstr "Le jeu ({class})"
 
-#: src/gui/browse.rs:55
+#: src/gui/browse.rs:57
 #, rust-format
 msgid "Your party ({class})"
 msgstr "Votre équipe ({class})"
 
-#: src/gui/browse.rs:56
+#: src/gui/browse.rs:58
 #, rust-format
 msgid "Belongs to {owner} ({class})"
 msgstr "Appartient à {owner} ({class})"
 
-#: src/gui/browse.rs:57
+#: src/gui/browse.rs:59
 #, rust-format
 msgid "Part of {owner} ({class})"
 msgstr "Fait partie de {owner} ({class})"
 
-#: src/gui/browse.rs:58
+#: src/gui/browse.rs:60
 #, rust-format
 msgid "Used by {owner} ({class})"
 msgstr "Utilisé par {owner} ({class})"
 
-#: src/gui/browse.rs:73
-msgid "Look for a name: health, ammo, gold…"
-msgstr "Chercher un nom : health, ammo, gold…"
+#: src/gui/browse.rs:75
+msgid "Look for a name or a number: health, ammo, 250…"
+msgstr "Chercher un nom ou un nombre : health, ammo, 250…"
 
-#: src/gui/browse.rs:77
+#: src/gui/browse.rs:79
 msgid "Only What Changes"
 msgstr "Seulement ce qui change"
 
-#: src/gui/browse.rs:78
+#: src/gui/browse.rs:80
 msgid ""
 "Turn this on, then change the number in the game: only the numbers that "
 "moved stay in the list."
@@ -955,11 +957,11 @@ msgstr ""
 "Activez ceci, puis changez le nombre dans le jeu : seuls les nombres qui ont "
 "bougé restent dans la liste."
 
-#: src/gui/browse.rs:82
+#: src/gui/browse.rs:84
 msgid "Show Everything"
 msgstr "Tout afficher"
 
-#: src/gui/browse.rs:83
+#: src/gui/browse.rs:85
 msgid ""
 "Also the game's inner workings: each ability's settings, the game's own "
 "systems, the controller and the settings."
@@ -967,11 +969,11 @@ msgstr ""
 "Aussi les rouages du jeu : les réglages de chaque capacité, les systèmes "
 "propres au jeu, le contrôleur et les paramètres."
 
-#: src/gui/browse.rs:85
+#: src/gui/browse.rs:87
 msgid "List Again"
 msgstr "Lister à nouveau"
 
-#: src/gui/browse.rs:93
+#: src/gui/browse.rs:95
 msgid ""
 "Your character's numbers, by the names the game gives them. Can't tell which "
 "one it is? Turn on Only What Changes and change it in the game."
@@ -980,11 +982,11 @@ msgstr ""
 "ne savez pas lequel c'est ? Activez « Seulement ce qui change » et changez-"
 "le dans le jeu."
 
-#: src/gui/browse.rs:120
+#: src/gui/browse.rs:122
 msgid "Tweaks"
 msgstr "Ajustements"
 
-#: src/gui/browse.rs:121
+#: src/gui/browse.rs:123
 msgid ""
 "Changes the game's engine understands, one switch each. Save your game "
 "before you try one."
@@ -992,19 +994,19 @@ msgstr ""
 "Des changements que le moteur du jeu comprend, un interrupteur chacun. "
 "Sauvegardez votre partie avant d'en essayer un."
 
-#: src/gui/browse.rs:130
+#: src/gui/browse.rs:132
 msgid "Reading the game's objects…"
 msgstr "Lecture des objets du jeu…"
 
-#: src/gui/browse.rs:133
+#: src/gui/browse.rs:135
 msgid "Try Again"
 msgstr "Réessayer"
 
-#: src/gui/browse.rs:137
+#: src/gui/browse.rs:139
 msgid "Nothing to List Yet"
 msgstr "Rien à lister pour l'instant"
 
-#: src/gui/browse.rs:214
+#: src/gui/browse.rs:216
 #, rust-format
 msgid ""
 "{about} On, but not all of it is in the game right now: Ferret keeps it once "
@@ -1013,50 +1015,54 @@ msgstr ""
 "{about} Activé, mais tout n'est pas dans le jeu pour le moment : Ferret le "
 "garde dès que c'est le cas."
 
-#: src/gui/browse.rs:224
+#: src/gui/browse.rs:226
 msgid "Tweak on: Ferret keeps it while you play"
 msgstr "Ajustement activé : Ferret le garde pendant que vous jouez"
 
-#: src/gui/browse.rs:225
+#: src/gui/browse.rs:227
 msgid "Tweak off: the game has its own values back"
 msgstr "Ajustement désactivé : le jeu retrouve ses propres valeurs"
 
-#: src/gui/browse.rs:264
+#: src/gui/browse.rs:266
 msgid "Ferret found no numbers in your character's objects."
 msgstr "Ferret n'a trouvé aucun nombre dans les objets de votre personnage."
 
-#: src/gui/browse.rs:280 src/gui/browse.rs:441 src/gui/find.rs:369
+#: src/gui/browse.rs:282 src/gui/browse.rs:470 src/gui/find.rs:369
 #: src/gui/guide.rs:77
 msgid "Save"
 msgstr "Enregistrer"
 
-#: src/gui/browse.rs:390
+#: src/gui/browse.rs:410
 msgid "Nothing changed yet: change the number in the game."
 msgstr "Rien n'a encore changé : changez le nombre dans le jeu."
 
-#: src/gui/browse.rs:391
+#: src/gui/browse.rs:411
+msgid "Nothing listed holds that number now."
+msgstr "Rien dans la liste n'a ce nombre en ce moment."
+
+#: src/gui/browse.rs:412
 msgid "No names match."
 msgstr "Aucun nom ne correspond."
 
-#: src/gui/browse.rs:393
+#: src/gui/browse.rs:414
 #, rust-format
 msgid "{n} number shown, {more} more with Show Everything"
 msgid_plural "{n} numbers shown, {more} more with Show Everything"
 msgstr[0] "{n} nombre affiché, {more} de plus avec « Tout afficher »"
 msgstr[1] "{n} nombres affichés, {more} de plus avec « Tout afficher »"
 
-#: src/gui/browse.rs:399
+#: src/gui/browse.rs:420
 #, rust-format
 msgid "{n} number"
 msgid_plural "{n} numbers"
 msgstr[0] "{n} nombre"
 msgstr[1] "{n} nombres"
 
-#: src/gui/browse.rs:409 src/gui/browse.rs:417
+#: src/gui/browse.rs:438 src/gui/browse.rs:446
 msgid "God Mode"
 msgstr "Mode dieu"
 
-#: src/gui/browse.rs:410
+#: src/gui/browse.rs:439
 msgid ""
 "Your character can't be damaged the engine's way, and its health stays at "
 "the most it has had since you turned this on. Games with damage rules of "
@@ -1066,11 +1072,11 @@ msgstr ""
 "reste au plus haut qu'elle a atteint depuis l'activation. Les jeux qui ont "
 "leurs propres règles de dégâts peuvent ignorer la première partie."
 
-#: src/gui/browse.rs:413
+#: src/gui/browse.rs:442
 msgid "Fly"
 msgstr "Voler"
 
-#: src/gui/browse.rs:414
+#: src/gui/browse.rs:443
 msgid ""
 "Your character flies instead of walking or falling. Going up and down "
 "depends on the game's controls; turned off, the character falls back down."
@@ -1078,7 +1084,7 @@ msgstr ""
 "Votre personnage vole au lieu de marcher ou de tomber. Monter et descendre "
 "dépend des commandes du jeu ; une fois désactivé, le personnage retombe."
 
-#: src/gui/browse.rs:418
+#: src/gui/browse.rs:447
 msgid ""
 "Your heroes' HP and MP don't go down: they stay at the most they've had "
 "since you turned this on, so heal once to keep them full. One hit bigger "
@@ -1089,11 +1095,11 @@ msgstr ""
 "pleins. Un coup plus fort que les PV d'un héros peut quand même le mettre "
 "K.O."
 
-#: src/gui/browse.rs:421
+#: src/gui/browse.rs:450
 msgid "Walk Through Walls"
 msgstr "Traverser les murs"
 
-#: src/gui/browse.rs:422
+#: src/gui/browse.rs:451
 msgid ""
 "You walk through walls, people and water (not off the map). Places the story "
 "hasn't opened yet open too."
@@ -1101,11 +1107,11 @@ msgstr ""
 "Vous traversez les murs, les personnages et l'eau (sans sortir de la carte). "
 "Les lieux que l'histoire n'a pas encore ouverts s'ouvrent aussi."
 
-#: src/gui/browse.rs:424
+#: src/gui/browse.rs:453
 msgid "No Random Battles"
 msgstr "Pas de combats aléatoires"
 
-#: src/gui/browse.rs:424
+#: src/gui/browse.rs:453
 msgid ""
 "Walking around starts no random battles. Battles the story starts still "
 "happen."
@@ -1113,31 +1119,31 @@ msgstr ""
 "Se déplacer ne déclenche plus de combats aléatoires. Les combats lancés par "
 "l'histoire ont toujours lieu."
 
-#: src/gui/browse.rs:425
+#: src/gui/browse.rs:454
 msgid "Walk Faster"
 msgstr "Marcher plus vite"
 
-#: src/gui/browse.rs:425
+#: src/gui/browse.rs:454
 msgid "You walk twice as fast."
 msgstr "Vous marchez deux fois plus vite."
 
-#: src/gui/browse.rs:438
+#: src/gui/browse.rs:467
 #, rust-format
 msgid "Save {name}"
 msgstr "Enregistrer {name}"
 
-#: src/gui/browse.rs:438
+#: src/gui/browse.rs:467
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr "Ferret le retrouve sous ce nom chaque fois que vous ouvrez le jeu."
 
-#: src/gui/browse.rs:441 src/gui/feedback.rs:69 src/gui/find.rs:239
+#: src/gui/browse.rs:470 src/gui/feedback.rs:69 src/gui/find.rs:239
 #: src/gui/find.rs:2359 src/gui/guide.rs:162 src/gui/guide.rs:610
 #: src/gui/guide.rs:616 src/gui/share.rs:256 src/gui/share.rs:447
 #: src/gui/share.rs:475 src/gui/values.rs:144 src/gui/values.rs:175
 msgid "Cancel"
 msgstr "Annuler"
 
-#: src/gui/browse.rs:462 src/gui/find.rs:2325
+#: src/gui/browse.rs:491 src/gui/find.rs:2325
 #, rust-format
 msgid "Saved {name}. Ferret finds it again every time you attach."
 msgstr ""
@@ -1205,23 +1211,23 @@ msgstr "Ce qui est envoyé"
 msgid "All Types"
 msgstr "Tous les types"
 
-#: src/gui/find.rs:208
+#: src/gui/find.rs:208 src/gui/mod.rs:1623
 msgid "2 Bytes"
 msgstr "2 octets"
 
-#: src/gui/find.rs:209
+#: src/gui/find.rs:209 src/gui/mod.rs:1619
 msgid "4 Bytes"
 msgstr "4 octets"
 
-#: src/gui/find.rs:210
+#: src/gui/find.rs:210 src/gui/mod.rs:1620
 msgid "Float"
 msgstr "Float"
 
-#: src/gui/find.rs:211
+#: src/gui/find.rs:211 src/gui/mod.rs:1621
 msgid "Double"
 msgstr "Double"
 
-#: src/gui/find.rs:212
+#: src/gui/find.rs:212 src/gui/mod.rs:1622
 msgid "Encoded 4 Bytes"
 msgstr "4 octets encodés"
 
@@ -3137,106 +3143,86 @@ msgstr "Ferret {version} est prêt à être installé"
 msgid "{names} and {last}"
 msgstr "{names} et {last}"
 
-#: src/gui/mod.rs:1617
-msgid "whole number"
-msgstr "nombre entier"
-
-#: src/gui/mod.rs:1618
-msgid "float"
-msgstr "float"
-
-#: src/gui/mod.rs:1619
-msgid "double"
-msgstr "double"
-
-#: src/gui/mod.rs:1620
-msgid "encoded whole number"
-msgstr "nombre entier encodé"
-
-#: src/gui/mod.rs:1621
-msgid "2-byte whole number"
-msgstr "nombre entier sur 2 octets"
-
-#: src/gui/mod.rs:1622
+#: src/gui/mod.rs:1624
 msgid "GameMaker number"
 msgstr "Nombre GameMaker"
 
-#: src/gui/mod.rs:1623
+#: src/gui/mod.rs:1625
 msgid "Lua number"
 msgstr "Nombre Lua"
 
-#: src/gui/mod.rs:1624
+#: src/gui/mod.rs:1626
 msgid "Python number"
 msgstr "Nombre Python"
 
-#: src/gui/mod.rs:1625
+#: src/gui/mod.rs:1627
 msgid "JavaScript whole number"
 msgstr "Nombre entier JavaScript"
 
-#: src/gui/mod.rs:1626
+#: src/gui/mod.rs:1628
 msgid "on/off flag"
 msgstr "valeur activée/désactivée"
 
-#: src/gui/mod.rs:1627
+#: src/gui/mod.rs:1629
 msgid "JavaScript on/off flag"
 msgstr "valeur activée/désactivée JavaScript"
 
-#: src/gui/mod.rs:1628
+#: src/gui/mod.rs:1630
 msgid "1-byte whole number"
 msgstr "nombre entier sur 1 octet"
 
-#: src/gui/mod.rs:1629
+#: src/gui/mod.rs:1631
 msgid "8-byte whole number"
 msgstr "nombre entier sur 8 octets"
 
-#: src/gui/mod.rs:1630
+#: src/gui/mod.rs:1632
 msgid "JavaScript number"
 msgstr "nombre JavaScript"
 
-#: src/gui/mod.rs:1637
+#: src/gui/mod.rs:1639
 msgid "On"
 msgstr "Activée"
 
-#: src/gui/mod.rs:1638 src/gui/values.rs:110 src/gui/values.rs:121
+#: src/gui/mod.rs:1640 src/gui/values.rs:110 src/gui/values.rs:121
 msgid "Off"
 msgstr "Désactivée"
 
-#: src/gui/mod.rs:1647
+#: src/gui/mod.rs:1649
 #, rust-format
 msgid "at most {max}"
 msgstr "au plus {max}"
 
-#: src/gui/mod.rs:1648
+#: src/gui/mod.rs:1650
 #, rust-format
 msgid "at least {min}"
 msgstr "au moins {min}"
 
-#: src/gui/mod.rs:1649
+#: src/gui/mod.rs:1651
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "entre {min} et {max}"
 
-#: src/gui/mod.rs:1650
+#: src/gui/mod.rs:1652
 msgid "unlimited"
 msgstr "illimitée"
 
-#: src/gui/mod.rs:1656
+#: src/gui/mod.rs:1658
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
 msgstr[0] "{n} genre d'emplacement"
 msgstr[1] "{n} genres d'emplacements"
 
-#: src/gui/mod.rs:1663
+#: src/gui/mod.rs:1665
 msgid "It can be played with other people."
 msgstr "On peut y jouer avec d'autres personnes."
 
-#: src/gui/mod.rs:1666
+#: src/gui/mod.rs:1668
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "Il est fourni avec {anticheat}, qui ne tourne pas pour l'instant."
 
-#: src/gui/mod.rs:1670
+#: src/gui/mod.rs:1672
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
@@ -3245,12 +3231,12 @@ msgstr ""
 "compte signalé peut être exclu des classements, des événements ou de la "
 "coopération."
 
-#: src/gui/mod.rs:1675
+#: src/gui/mod.rs:1677
 msgid "Its scores go on online leaderboards that other players see."
 msgstr ""
 "Ses scores vont dans des classements en ligne que d'autres joueurs voient."
 
-#: src/gui/mod.rs:1679
+#: src/gui/mod.rs:1681
 #, rust-format
 msgid ""
 "{anticheat} runs on your computer all the time, for other games. It may take "
@@ -4043,6 +4029,21 @@ msgstr "Ce fichier Ferret ne dit pas pour quel jeu il est."
 #: src/share.rs:262
 msgid "This Ferret file has no values in it."
 msgstr "Ce fichier Ferret ne contient aucune valeur."
+
+#~ msgid "whole number"
+#~ msgstr "nombre entier"
+
+#~ msgid "float"
+#~ msgstr "float"
+
+#~ msgid "double"
+#~ msgstr "double"
+
+#~ msgid "encoded whole number"
+#~ msgstr "nombre entier encodé"
+
+#~ msgid "2-byte whole number"
+#~ msgstr "nombre entier sur 2 octets"
 
 #, fuzzy, rust-format
 #~ msgid "Ferret Let Go of {name}"

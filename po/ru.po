@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-26 03:24+0000\n"
+"POT-Creation-Date: 2026-10-26 03:52+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Russian\n"
 "Language: ru\n"
@@ -687,7 +687,9 @@ msgstr ""
 msgid ""
 "Stopped before the scan was done. Type the number again, or press Start, to "
 "search for it."
-msgstr "Остановлено до конца сканирования. Введите число ещё раз или нажмите «Старт», чтобы найти его."
+msgstr ""
+"Остановлено до конца сканирования. Введите число ещё раз или нажмите "
+"«Старт», чтобы найти его."
 
 #: src/core.rs:4476
 #, rust-format
@@ -879,55 +881,55 @@ msgstr ""
 "Отчёт с этим идентификатором уже отправлен: закройте это окно и напишите его "
 "заново."
 
-#: src/gui/browse.rs:51
+#: src/gui/browse.rs:53
 #, rust-format
 msgid "Your character ({class})"
 msgstr "Ваш персонаж ({class})"
 
-#: src/gui/browse.rs:52
+#: src/gui/browse.rs:54
 #, rust-format
 msgid "Your player's state ({class})"
 msgstr "Состояние вашего игрока ({class})"
 
-#: src/gui/browse.rs:53
+#: src/gui/browse.rs:55
 #, rust-format
 msgid "Your controller ({class})"
 msgstr "Ваш контроллер ({class})"
 
-#: src/gui/browse.rs:54
+#: src/gui/browse.rs:56
 #, rust-format
 msgid "The game ({class})"
 msgstr "Игра ({class})"
 
-#: src/gui/browse.rs:55
+#: src/gui/browse.rs:57
 #, rust-format
 msgid "Your party ({class})"
 msgstr "Ваша группа ({class})"
 
-#: src/gui/browse.rs:56
+#: src/gui/browse.rs:58
 #, rust-format
 msgid "Belongs to {owner} ({class})"
 msgstr "Принадлежит {owner} ({class})"
 
-#: src/gui/browse.rs:57
+#: src/gui/browse.rs:59
 #, rust-format
 msgid "Part of {owner} ({class})"
 msgstr "Часть {owner} ({class})"
 
-#: src/gui/browse.rs:58
+#: src/gui/browse.rs:60
 #, rust-format
 msgid "Used by {owner} ({class})"
 msgstr "Используется {owner} ({class})"
 
-#: src/gui/browse.rs:73
-msgid "Look for a name: health, ammo, gold…"
-msgstr "Найти имя: health, ammo, gold…"
+#: src/gui/browse.rs:75
+msgid "Look for a name or a number: health, ammo, 250…"
+msgstr "Найти имя или число: health, ammo, 250…"
 
-#: src/gui/browse.rs:77
+#: src/gui/browse.rs:79
 msgid "Only What Changes"
 msgstr "Только то, что меняется"
 
-#: src/gui/browse.rs:78
+#: src/gui/browse.rs:80
 msgid ""
 "Turn this on, then change the number in the game: only the numbers that "
 "moved stay in the list."
@@ -935,11 +937,11 @@ msgstr ""
 "Включите это, затем измените число в игре: в списке останутся только числа, "
 "которые изменились."
 
-#: src/gui/browse.rs:82
+#: src/gui/browse.rs:84
 msgid "Show Everything"
 msgstr "Показать всё"
 
-#: src/gui/browse.rs:83
+#: src/gui/browse.rs:85
 msgid ""
 "Also the game's inner workings: each ability's settings, the game's own "
 "systems, the controller and the settings."
@@ -947,11 +949,11 @@ msgstr ""
 "А также внутреннее устройство игры: настройки каждой способности, "
 "собственные системы игры, контроллер и настройки."
 
-#: src/gui/browse.rs:85
+#: src/gui/browse.rs:87
 msgid "List Again"
 msgstr "Показать заново"
 
-#: src/gui/browse.rs:93
+#: src/gui/browse.rs:95
 msgid ""
 "Your character's numbers, by the names the game gives them. Can't tell which "
 "one it is? Turn on Only What Changes and change it in the game."
@@ -959,11 +961,11 @@ msgstr ""
 "Числа вашего персонажа под именами, которые им даёт игра. Не знаете, какое "
 "нужное? Включите «Только то, что меняется» и измените его в игре."
 
-#: src/gui/browse.rs:120
+#: src/gui/browse.rs:122
 msgid "Tweaks"
 msgstr "Настройки"
 
-#: src/gui/browse.rs:121
+#: src/gui/browse.rs:123
 msgid ""
 "Changes the game's engine understands, one switch each. Save your game "
 "before you try one."
@@ -971,19 +973,19 @@ msgstr ""
 "Изменения, которые понимает движок игры, по одному переключателю. Сохраните "
 "игру, прежде чем пробовать."
 
-#: src/gui/browse.rs:130
+#: src/gui/browse.rs:132
 msgid "Reading the game's objects…"
 msgstr "Чтение объектов игры…"
 
-#: src/gui/browse.rs:133
+#: src/gui/browse.rs:135
 msgid "Try Again"
 msgstr "Попробовать снова"
 
-#: src/gui/browse.rs:137
+#: src/gui/browse.rs:139
 msgid "Nothing to List Yet"
 msgstr "Пока нечего показать"
 
-#: src/gui/browse.rs:214
+#: src/gui/browse.rs:216
 #, rust-format
 msgid ""
 "{about} On, but not all of it is in the game right now: Ferret keeps it once "
@@ -992,32 +994,36 @@ msgstr ""
 "{about} Включено, но сейчас в игре есть не всё: Ferret удержит это, как "
 "только оно появится."
 
-#: src/gui/browse.rs:224
+#: src/gui/browse.rs:226
 msgid "Tweak on: Ferret keeps it while you play"
 msgstr "Настройка включена: Ferret удерживает её, пока вы играете"
 
-#: src/gui/browse.rs:225
+#: src/gui/browse.rs:227
 msgid "Tweak off: the game has its own values back"
 msgstr "Настройка выключена: у игры снова свои значения"
 
-#: src/gui/browse.rs:264
+#: src/gui/browse.rs:266
 msgid "Ferret found no numbers in your character's objects."
 msgstr "Ferret не нашёл чисел в объектах вашего персонажа."
 
-#: src/gui/browse.rs:280 src/gui/browse.rs:441 src/gui/find.rs:369
+#: src/gui/browse.rs:282 src/gui/browse.rs:470 src/gui/find.rs:369
 #: src/gui/guide.rs:77
 msgid "Save"
 msgstr "Сохранить"
 
-#: src/gui/browse.rs:390
+#: src/gui/browse.rs:410
 msgid "Nothing changed yet: change the number in the game."
 msgstr "Пока ничего не изменилось: измените число в игре."
 
-#: src/gui/browse.rs:391
+#: src/gui/browse.rs:411
+msgid "Nothing listed holds that number now."
+msgstr "Сейчас ни у чего в списке нет этого числа."
+
+#: src/gui/browse.rs:412
 msgid "No names match."
 msgstr "Нет подходящих имён."
 
-#: src/gui/browse.rs:393
+#: src/gui/browse.rs:414
 #, rust-format
 msgid "{n} number shown, {more} more with Show Everything"
 msgid_plural "{n} numbers shown, {more} more with Show Everything"
@@ -1025,7 +1031,7 @@ msgstr[0] "Показано {n} число, ещё {more} с «Показать 
 msgstr[1] "Показано {n} числа, ещё {more} с «Показать всё»"
 msgstr[2] "Показано {n} чисел, ещё {more} с «Показать всё»"
 
-#: src/gui/browse.rs:399
+#: src/gui/browse.rs:420
 #, rust-format
 msgid "{n} number"
 msgid_plural "{n} numbers"
@@ -1033,11 +1039,11 @@ msgstr[0] "{n} число"
 msgstr[1] "{n} числа"
 msgstr[2] "{n} чисел"
 
-#: src/gui/browse.rs:409 src/gui/browse.rs:417
+#: src/gui/browse.rs:438 src/gui/browse.rs:446
 msgid "God Mode"
 msgstr "Режим бога"
 
-#: src/gui/browse.rs:410
+#: src/gui/browse.rs:439
 msgid ""
 "Your character can't be damaged the engine's way, and its health stays at "
 "the most it has had since you turned this on. Games with damage rules of "
@@ -1047,11 +1053,11 @@ msgstr ""
 "максимуме, который было с момента включения. Игры со своими правилами урона "
 "могут игнорировать первую часть."
 
-#: src/gui/browse.rs:413
+#: src/gui/browse.rs:442
 msgid "Fly"
 msgstr "Полёт"
 
-#: src/gui/browse.rs:414
+#: src/gui/browse.rs:443
 msgid ""
 "Your character flies instead of walking or falling. Going up and down "
 "depends on the game's controls; turned off, the character falls back down."
@@ -1059,7 +1065,7 @@ msgstr ""
 "Ваш персонаж летает вместо ходьбы и падения. Подъём и спуск зависят от "
 "управления игры; после выключения персонаж падает обратно."
 
-#: src/gui/browse.rs:418
+#: src/gui/browse.rs:447
 msgid ""
 "Your heroes' HP and MP don't go down: they stay at the most they've had "
 "since you turned this on, so heal once to keep them full. One hit bigger "
@@ -1069,11 +1075,11 @@ msgstr ""
 "включения, так что вылечите их один раз, чтобы они были полными. Удар "
 "сильнее ОЗ героя всё равно может его вырубить."
 
-#: src/gui/browse.rs:421
+#: src/gui/browse.rs:450
 msgid "Walk Through Walls"
 msgstr "Ходить сквозь стены"
 
-#: src/gui/browse.rs:422
+#: src/gui/browse.rs:451
 msgid ""
 "You walk through walls, people and water (not off the map). Places the story "
 "hasn't opened yet open too."
@@ -1081,11 +1087,11 @@ msgstr ""
 "Вы проходите сквозь стены, людей и воду (не за пределы карты). Места, "
 "которые сюжет ещё не открыл, тоже открываются."
 
-#: src/gui/browse.rs:424
+#: src/gui/browse.rs:453
 msgid "No Random Battles"
 msgstr "Без случайных боёв"
 
-#: src/gui/browse.rs:424
+#: src/gui/browse.rs:453
 msgid ""
 "Walking around starts no random battles. Battles the story starts still "
 "happen."
@@ -1093,33 +1099,33 @@ msgstr ""
 "При ходьбе не начинаются случайные бои. Бои, которые начинает сюжет, всё "
 "равно бывают."
 
-#: src/gui/browse.rs:425
+#: src/gui/browse.rs:454
 msgid "Walk Faster"
 msgstr "Ходить быстрее"
 
-#: src/gui/browse.rs:425
+#: src/gui/browse.rs:454
 msgid "You walk twice as fast."
 msgstr "Вы ходите в два раза быстрее."
 
-#: src/gui/browse.rs:438
+#: src/gui/browse.rs:467
 #, rust-format
 msgid "Save {name}"
 msgstr "Сохранить {name}"
 
-#: src/gui/browse.rs:438
+#: src/gui/browse.rs:467
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr ""
 "Ferret будет находить его по этому имени каждый раз, когда вы открываете "
 "игру."
 
-#: src/gui/browse.rs:441 src/gui/feedback.rs:69 src/gui/find.rs:239
+#: src/gui/browse.rs:470 src/gui/feedback.rs:69 src/gui/find.rs:239
 #: src/gui/find.rs:2359 src/gui/guide.rs:162 src/gui/guide.rs:610
 #: src/gui/guide.rs:616 src/gui/share.rs:256 src/gui/share.rs:447
 #: src/gui/share.rs:475 src/gui/values.rs:144 src/gui/values.rs:175
 msgid "Cancel"
 msgstr "Отмена"
 
-#: src/gui/browse.rs:462 src/gui/find.rs:2325
+#: src/gui/browse.rs:491 src/gui/find.rs:2325
 #, rust-format
 msgid "Saved {name}. Ferret finds it again every time you attach."
 msgstr ""
@@ -1187,23 +1193,23 @@ msgstr "Что отправляется"
 msgid "All Types"
 msgstr "Все типы"
 
-#: src/gui/find.rs:208
+#: src/gui/find.rs:208 src/gui/mod.rs:1623
 msgid "2 Bytes"
 msgstr "2 байта"
 
-#: src/gui/find.rs:209
+#: src/gui/find.rs:209 src/gui/mod.rs:1619
 msgid "4 Bytes"
 msgstr "4 байта"
 
-#: src/gui/find.rs:210
+#: src/gui/find.rs:210 src/gui/mod.rs:1620
 msgid "Float"
 msgstr "Float"
 
-#: src/gui/find.rs:211
+#: src/gui/find.rs:211 src/gui/mod.rs:1621
 msgid "Double"
 msgstr "Double"
 
-#: src/gui/find.rs:212
+#: src/gui/find.rs:212 src/gui/mod.rs:1622
 msgid "Encoded 4 Bytes"
 msgstr "Закодированные 4 байта"
 
@@ -3128,90 +3134,70 @@ msgstr "Ferret {version} готов к установке"
 msgid "{names} and {last}"
 msgstr "{names} и {last}"
 
-#: src/gui/mod.rs:1617
-msgid "whole number"
-msgstr "целое число"
-
-#: src/gui/mod.rs:1618
-msgid "float"
-msgstr "float"
-
-#: src/gui/mod.rs:1619
-msgid "double"
-msgstr "double"
-
-#: src/gui/mod.rs:1620
-msgid "encoded whole number"
-msgstr "закодированное целое число"
-
-#: src/gui/mod.rs:1621
-msgid "2-byte whole number"
-msgstr "2-байтовое целое число"
-
-#: src/gui/mod.rs:1622
+#: src/gui/mod.rs:1624
 msgid "GameMaker number"
 msgstr "Число GameMaker"
 
-#: src/gui/mod.rs:1623
+#: src/gui/mod.rs:1625
 msgid "Lua number"
 msgstr "Число Lua"
 
-#: src/gui/mod.rs:1624
+#: src/gui/mod.rs:1626
 msgid "Python number"
 msgstr "Число Python"
 
-#: src/gui/mod.rs:1625
+#: src/gui/mod.rs:1627
 msgid "JavaScript whole number"
 msgstr "Целое число JavaScript"
 
-#: src/gui/mod.rs:1626
+#: src/gui/mod.rs:1628
 msgid "on/off flag"
 msgstr "флаг вкл./выкл."
 
-#: src/gui/mod.rs:1627
+#: src/gui/mod.rs:1629
 msgid "JavaScript on/off flag"
 msgstr "флаг вкл./выкл. JavaScript"
 
-#: src/gui/mod.rs:1628
+#: src/gui/mod.rs:1630
 msgid "1-byte whole number"
 msgstr "1-байтовое целое число"
 
-#: src/gui/mod.rs:1629
+#: src/gui/mod.rs:1631
 msgid "8-byte whole number"
 msgstr "8-байтовое целое число"
 
-#: src/gui/mod.rs:1630
+#: src/gui/mod.rs:1632
 msgid "JavaScript number"
 msgstr "число JavaScript"
 
-#: src/gui/mod.rs:1637
+#: src/gui/mod.rs:1639
 msgid "On"
 msgstr "Включено"
 
-#: src/gui/mod.rs:1638 src/gui/values.rs:110 src/gui/values.rs:121
+#: src/gui/mod.rs:1640 src/gui/values.rs:110 src/gui/values.rs:121
 msgid "Off"
 msgstr "Выключено"
 
-#: src/gui/mod.rs:1647
+#: src/gui/mod.rs:1649
 #, rust-format
 msgid "at most {max}"
 msgstr "не больше {max}"
 
-#: src/gui/mod.rs:1648
+#: src/gui/mod.rs:1650
 #, rust-format
 msgid "at least {min}"
 msgstr "не меньше {min}"
 
-#: src/gui/mod.rs:1649
+#: src/gui/mod.rs:1651
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "между {min} и {max}"
 
-#: src/gui/mod.rs:1650
+#: src/gui/mod.rs:1652
 msgid "unlimited"
 msgstr "без ограничений"
 
-#: src/gui/mod.rs:1656
+#: src/gui/mod.rs:1658
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
@@ -3219,16 +3205,16 @@ msgstr[0] "{n} вид мест"
 msgstr[1] "{n} вида мест"
 msgstr[2] "{n} видов мест"
 
-#: src/gui/mod.rs:1663
+#: src/gui/mod.rs:1665
 msgid "It can be played with other people."
 msgstr "В неё можно играть с другими людьми."
 
-#: src/gui/mod.rs:1666
+#: src/gui/mod.rs:1668
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "В комплекте с ней идёт {anticheat}, который сейчас не запущен."
 
-#: src/gui/mod.rs:1670
+#: src/gui/mod.rs:1672
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
@@ -3236,12 +3222,12 @@ msgstr ""
 "Издатель помечает учётные записи с изменёнными сохранениями: помеченную "
 "учётную запись могут не пускать в таблицы лидеров, события или кооператив."
 
-#: src/gui/mod.rs:1675
+#: src/gui/mod.rs:1677
 msgid "Its scores go on online leaderboards that other players see."
 msgstr ""
 "Её результаты попадают в онлайн-таблицы лидеров, которые видят другие игроки."
 
-#: src/gui/mod.rs:1679
+#: src/gui/mod.rs:1681
 #, rust-format
 msgid ""
 "{anticheat} runs on your computer all the time, for other games. It may take "
@@ -4035,6 +4021,21 @@ msgstr "В этом файле Ferret не сказано, для какой о�
 #: src/share.rs:262
 msgid "This Ferret file has no values in it."
 msgstr "В этом файле Ferret нет значений."
+
+#~ msgid "whole number"
+#~ msgstr "целое число"
+
+#~ msgid "float"
+#~ msgstr "float"
+
+#~ msgid "double"
+#~ msgstr "double"
+
+#~ msgid "encoded whole number"
+#~ msgstr "закодированное целое число"
+
+#~ msgid "2-byte whole number"
+#~ msgstr "2-байтовое целое число"
 
 #, fuzzy, rust-format
 #~ msgid "Ferret Let Go of {name}"
