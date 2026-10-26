@@ -44,7 +44,7 @@ fn confirm_paths() -> String {
 }
 
 /// The helper's states of a limit (`cmd_limits`, `paused`), shown in the player's language.
-const LIMIT_STATES: [&str; 11] = [
+const LIMIT_STATES: [&str; 12] = [
     n_!("turned off"),
     n_!("active"),
     n_!("waiting for the game to change it once before writing"),
@@ -56,6 +56,7 @@ const LIMIT_STATES: [&str; 11] = [
     n_!("the object holding it changed, finding it again"),
     n_!("unreadable, finding it again"),
     n_!("not found yet (the game hasn't run the code that uses it), waiting"),
+    n_!("a tweak keeps this place while it's on, not written"),
 ];
 
 /// Confirms a value's pointer paths: the player saw the game show the number Ferret reads.

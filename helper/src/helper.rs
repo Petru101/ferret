@@ -875,6 +875,10 @@ struct Limit {
     paused: Option<&'static str>,
     /// Turned off by the player (`switch`, a hotkey): still followed, never written.
     off: bool,
+    /// A tweak keeps its place now (`HELD`): not written, else the two would write in turn
+    /// (Borderlands 4: God Mode keeping the player's `bCanBeDamaged` off, the player's own
+    /// saved flag keeping it on).
+    held: bool,
     /// Kept at least the most it has held (`limit ... rising`: a tweak's HP): the minimum rises
     /// with the value, from a place its named path was just followed to (never from a stale
     /// one: V8 moves objects, and junk read there would become the minimum).
@@ -1239,7 +1243,24 @@ fn limiter_loop(shared: SharedLimiter) {
                     due.then(|| (l.name.clone(), n.path.clone()))
                 })
                 .collect();
-            for l in limits.iter_mut().filter(|l| l.paused.is_none() || l.paused == Some(PY_SHARED)) {
+            // The places tweaks keep (`Core::set_tweak` names their parts `tweak_<id>_<n>`).
+            let tweaked: Vec<u64> = limits
+                .iter()
+                .filter(|l| is_tweak(&l.name) && !l.off && (l.min.is_some() || l.max.is_some()))
+                .flat_map(|l| match &l.named {
+                    Some(n) if !n.addrs.is_empty() => n.addrs.clone(),
+                    _ => vec![l.addr],
+                })
+                .filter(|&a| a != 0)
+                .collect();
+            for l in limits.iter_mut() {
+                let at: Vec<u64> = match &l.named {
+                    Some(n) if !n.addrs.is_empty() => n.addrs.clone(),
+                    _ => vec![l.addr],
+                };
+                l.held = !is_tweak(&l.name) && at.iter().any(|a| tweaked.contains(a));
+            }
+            for l in limits.iter_mut().filter(|l| (l.paused.is_none() || l.paused == Some(PY_SHARED)) && !l.held) {
                 if let Some(n) = &l.named {
                     let interim = [l.addr];
                     let addrs = if n.addrs.is_empty() { &interim[..] } else { &n.addrs[..] };
@@ -1492,6 +1513,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         unchanged: None,
         paused: waiting.then_some("not found yet (the game hasn't run the code that uses it), waiting"),
         off,
+        held: false,
         rising,
         retry_at: Instant::now(),
         checked_at: Instant::now(),
@@ -1534,6 +1556,14 @@ fn cmd_switch(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::R
 }
 
 /// One line per limit: <name> <hex addr> <min|-> <max|-> fixed N times, restored M times, <state>
+/// A limit's state while a tweak keeps its place (`Limit.held`).
+const HELD: &str = "a tweak keeps this place while it's on, not written";
+
+/// A tweak's part (`Core::set_tweak`: `tweak_<id>_<n>`).
+fn is_tweak(name: &str) -> bool {
+    name.starts_with("tweak_")
+}
+
 fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
     let show = |b: Option<f64>| b.map_or("-".to_owned(), |b| b.to_string());
     for l in &limiter.lock().unwrap().limits {
@@ -1548,6 +1578,7 @@ fn cmd_limits(out: &mut impl Write, limiter: &SharedLimiter) -> io::Result<()> {
             l.restores,
             match (l.off, l.paused) {
                 (true, _) => "turned off",
+                _ if l.held => HELD,
                 (false, Some(why)) => why,
                 (false, None) if l.changed => "active",
                 (false, None) => "waiting for the game to change it once before writing",

@@ -222,9 +222,13 @@ impl BrowseView {
                 row.connect_active_notify(move |r| {
                     let (id, on) = (id.clone(), r.is_active());
                     worker.run_now(move |core| {
-                        Event::Done(core.set_tweak(&id, on).map(|_| match on {
-                            true => tr!("Tweak on: Ferret keeps it while you play"),
-                            false => tr!("Tweak off: the game has its own values back"),
+                        Event::Done(core.set_tweak(&id, on).map(|taken| match (on, taken.is_empty()) {
+                            (true, true) => tr!("Tweak on: Ferret keeps it while you play"),
+                            (true, false) => tr!(
+                                "Tweak on. It changes {names} too, which you saved: your own setting for it waits until the tweak is off.",
+                                names = taken.join(", ")
+                            ),
+                            (false, _) => tr!("Tweak off: the game has its own values back"),
                         }))
                     });
                     worker.run(|core| Event::Tweaks(core.tweaks()));

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-26 03:52+0000\n"
+"POT-Creation-Date: 2026-10-26 04:25+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Brazilian Portuguese\n"
 "Language: pt_BR\n"
@@ -222,7 +222,7 @@ msgstr ""
 "Em um Steam Deck, defina uma senha primeiro: abra o Konsole no modo desktop, "
 "execute isto e tente de novo."
 
-#: src/core.rs:2104 src/core.rs:2126 src/core.rs:2861
+#: src/core.rs:2104 src/core.rs:2126 src/core.rs:2882
 msgid "the value needs a name"
 msgstr "o valor precisa de um nome"
 
@@ -347,18 +347,18 @@ msgstr ""
 msgid "Nothing is kept in range in this game"
 msgstr "Nada é mantido no intervalo neste jogo"
 
-#: src/core.rs:2840 src/core.rs:2866 src/core.rs:2924 src/core.rs:3223
-#: src/core.rs:3829
+#: src/core.rs:2861 src/core.rs:2887 src/core.rs:2945 src/core.rs:3244
+#: src/core.rs:3854
 #, rust-format
 msgid "no saved value called {name}"
 msgstr "nenhum valor salvo chamado {name}"
 
-#: src/core.rs:2872
+#: src/core.rs:2893
 #, rust-format
 msgid "{name} is the name of another saved value already"
 msgstr "{name} já é o nome de outro valor salvo"
 
-#: src/core.rs:2928
+#: src/core.rs:2949
 #, rust-format
 msgid ""
 "Ferret finds others like {name} through the game's code that changes it, and "
@@ -369,7 +369,7 @@ msgstr ""
 "conhece esse código: encontre {name} de novo e salve-o enquanto ele muda no "
 "jogo"
 
-#: src/core.rs:2933
+#: src/core.rs:2954
 #, rust-format
 msgid ""
 "{name} isn't found in this run yet: let it change in the game once, then try "
@@ -378,7 +378,7 @@ msgstr ""
 "{name} ainda não foi encontrado nesta execução: deixe-o mudar uma vez no "
 "jogo e tente de novo"
 
-#: src/core.rs:2966
+#: src/core.rs:2987
 #, rust-format
 msgid ""
 "Nothing else ran the code that changes {name} while Ferret watched. Use the "
@@ -389,7 +389,7 @@ msgstr ""
 "Use os outros no jogo enquanto ele observa (seus outros poderes, outras "
 "unidades) e clique em Concluído."
 
-#: src/core.rs:2973
+#: src/core.rs:2994
 #, rust-format
 msgid ""
 "Ferret found {n} more like {name}, but nothing next to the two tells them "
@@ -404,12 +404,12 @@ msgstr[1] ""
 "O Ferret encontrou mais {n} como {name}, mas nada ao lado deles os "
 "distingue, então não conseguiria encontrar cada um de novo: não salvos"
 
-#: src/core.rs:3031
+#: src/core.rs:3052
 #, rust-format
 msgid "The others like {name} are saved already"
 msgstr "Os outros como {name} já estão salvos"
 
-#: src/core.rs:3033
+#: src/core.rs:3054
 #, rust-format
 msgid "Found {n} more like {name}: {names}. It's kept in range like {name}."
 msgid_plural ""
@@ -421,7 +421,7 @@ msgstr[1] ""
 "Encontrados mais {n} como {name}: {names}. Cada um é mantido no intervalo "
 "como {name}."
 
-#: src/core.rs:3040
+#: src/core.rs:3061
 #, rust-format
 msgid "Found {n} more like {name}: {names}. It's in the Values tab."
 msgid_plural "Found {n} more like {name}: {names}. They're in the Values tab."
@@ -429,7 +429,7 @@ msgstr[0] "Encontrado mais {n} como {name}: {names}. Ele está na aba Valores."
 msgstr[1] ""
 "Encontrados mais {n} como {name}: {names}. Eles estão na aba Valores."
 
-#: src/core.rs:3064
+#: src/core.rs:3085
 #, rust-format
 msgid ""
 "{name}: imported and not checked yet. On its card in the Values tab, click "
@@ -438,14 +438,14 @@ msgstr ""
 "{name}: importado e ainda não conferido. No cartão dele na aba Valores, "
 "clique em “Sim, mostra…” se o jogo mostrar esse número"
 
-#: src/core.rs:3071
+#: src/core.rs:3092
 #, rust-format
 msgid ""
 "{name}: its name is longer than 32 letters (save it again with a shorter one)"
 msgstr ""
 "{name}: o nome tem mais de 32 caracteres (salve-o de novo com um mais curto)"
 
-#: src/core.rs:3078
+#: src/core.rs:3099
 #, rust-format
 msgid ""
 "{name}: its pointer paths start in files that differ between computers "
@@ -454,7 +454,7 @@ msgstr ""
 "{name}: seus caminhos de ponteiros começam em arquivos que mudam de um "
 "computador para outro (driver de vídeo, Wine, Steam)"
 
-#: src/core.rs:3082
+#: src/core.rs:3103
 #, rust-format
 msgid ""
 "{name}: its pointer paths aren't confirmed yet (restart the game and check "
@@ -463,27 +463,27 @@ msgstr ""
 "{name}: seus caminhos de ponteiros ainda não foram confirmados (reinicie o "
 "jogo e confira)"
 
-#: src/core.rs:3084
+#: src/core.rs:3105
 #, rust-format
 msgid "{name}: Ferret has no way to find it that works on other computers"
 msgstr ""
 "{name}: o Ferret não tem um jeito de encontrá-lo que funcione em outros "
 "computadores"
 
-#: src/core.rs:3102
+#: src/core.rs:3123
 msgid "Nothing is saved for this game yet"
 msgstr "Nada salvo para este jogo ainda"
 
-#: src/core.rs:3103
+#: src/core.rs:3124
 msgid "Nothing to export."
 msgstr "Nada para exportar."
 
-#: src/core.rs:3132
+#: src/core.rs:3153
 #, rust-format
 msgid "These values are for {theirs}, not {exe}"
 msgstr "Estes valores são para {theirs}, não para {exe}"
 
-#: src/core.rs:3137
+#: src/core.rs:3158
 #, rust-format
 msgid ""
 "These values are for another game with a program called {exe} (Steam app "
@@ -492,21 +492,28 @@ msgstr ""
 "Estes valores são para outro jogo com um programa chamado {exe} (app da "
 "Steam {theirs}, este é {ours})"
 
-#: src/core.rs:3152
+#: src/core.rs:3173
 #, rust-format
 msgid "{name}: you have it already, as {mine}"
 msgstr "{name}: você já tem, como {mine}"
 
-#: src/core.rs:3192
+#: src/core.rs:3213
 msgid "Nothing imported."
 msgstr "Nada importado."
 
-#: src/core.rs:3215
+#: src/core.rs:3236
 #, rust-format
 msgid "At most ({max}) is lower than at least ({min}): nothing changed"
 msgstr "No máximo ({max}) é menor que no mínimo ({min}): nada mudou"
 
-#: src/core.rs:3788
+#: src/core.rs:3807
+#, rust-format
+msgid ""
+"{name} not written: a tweak in the Browse tab keeps this place while it's "
+"on. Turn it off there first."
+msgstr "{name} não foi escrito: um ajuste da aba Navegar mantém este lugar enquanto está ligado. Desligue-o lá primeiro."
+
+#: src/core.rs:3813
 #, rust-format
 msgid ""
 "{name} not written: it was imported and isn't checked yet. If the game shows "
@@ -515,12 +522,12 @@ msgstr ""
 "{name} não escrito: ele foi importado e ainda não foi conferido. Se o jogo "
 "mostra o número que o Ferret lê, diga isso na aba Valores"
 
-#: src/core.rs:3810
+#: src/core.rs:3835
 #, rust-format
 msgid "{name} isn't in the game right now (is a save loaded?)"
 msgstr "{name} não está no jogo agora (há um jogo salvo carregado?)"
 
-#: src/core.rs:3813
+#: src/core.rs:3838
 #, rust-format
 msgid ""
 "{name} not written: its name doesn't lead to one value ({why}). Find it "
@@ -529,12 +536,12 @@ msgstr ""
 "{name} não escrito: seu nome não leva a um único valor ({why}). Encontre-o "
 "de novo e salve-o como {name}."
 
-#: src/core.rs:3831
+#: src/core.rs:3856
 #, rust-format
 msgid "{name} can't be found right now (is a save loaded?)"
 msgstr "{name} não pode ser encontrado agora (há um jogo salvo carregado?)"
 
-#: src/core.rs:3835
+#: src/core.rs:3860
 #, rust-format
 msgid ""
 "not written: {why}, so it could land in the wrong place. Find it again and "
@@ -543,46 +550,46 @@ msgstr ""
 "não escrito: {why}, então ele poderia cair no lugar errado. Encontre-o de "
 "novo e salve-o como {name}: isso confirma o caminho certo"
 
-#: src/core.rs:3984
+#: src/core.rs:4009
 msgid "a move of the bar"
 msgstr "um movimento da barra"
 
-#: src/core.rs:3985
+#: src/core.rs:4010
 msgid "a reading while it moved"
 msgstr "uma leitura enquanto ele se mexia"
 
-#: src/core.rs:3986
+#: src/core.rs:4011
 msgid "a reading while it stayed still"
 msgstr "uma leitura enquanto ele estava parado"
 
-#: src/core.rs:3987
+#: src/core.rs:4012
 msgid "copying the game's memory"
 msgstr "a cópia da memória do jogo"
 
-#: src/core.rs:3988
+#: src/core.rs:4013
 #, rust-format
 msgid "the search for {n}"
 msgstr "a busca por {n}"
 
-#: src/core.rs:3989
+#: src/core.rs:4014
 #, rust-format
 msgid "ruling out {place}"
 msgstr "o descarte de {place}"
 
-#: src/core.rs:3990
+#: src/core.rs:4015
 #, rust-format
 msgid "picking {place}"
 msgstr "a escolha de {place}"
 
-#: src/core.rs:3991
+#: src/core.rs:4016
 msgid "starting over"
 msgstr "o recomeço"
 
-#: src/core.rs:4045
+#: src/core.rs:4070
 msgid "The number is back in the box."
 msgstr "O número voltou para a caixa."
 
-#: src/core.rs:4048
+#: src/core.rs:4073
 msgid ""
 "The box keeps changing: it may take in something that moves or blinks around "
 "the number. Pick the number again with a box around its digits only."
@@ -590,7 +597,7 @@ msgstr ""
 "A caixa não para de mudar: talvez inclua algo que se move ou pisca em volta "
 "do número. Escolha o número de novo com uma caixa só em volta dos dígitos."
 
-#: src/core.rs:4053
+#: src/core.rs:4078
 msgid ""
 "The box doesn't show the number now (it looks different from when you picked "
 "it: a menu or the inventory closed?). Ferret waits until it's back."
@@ -598,7 +605,7 @@ msgstr ""
 "A caixa não mostra o número agora (está diferente de quando você a escolheu: "
 "um menu ou o inventário fechou?). O Ferret espera ele voltar."
 
-#: src/core.rs:4079
+#: src/core.rs:4104
 msgid ""
 "The box is outside the game picture now (the window got smaller?): capture "
 "again and pick it again."
@@ -606,12 +613,12 @@ msgstr ""
 "A caixa está fora da imagem do jogo agora (a janela ficou menor?): capture "
 "de novo e escolha-a novamente."
 
-#: src/core.rs:4189
+#: src/core.rs:4214
 #, rust-format
 msgid "saved as {names}"
 msgstr "salvo como {names}"
 
-#: src/core.rs:4213
+#: src/core.rs:4238
 msgid ""
 "Your character isn't in the game right now (a menu or a loading screen?). "
 "Try again once you're playing."
@@ -619,7 +626,7 @@ msgstr ""
 "Seu personagem não está no jogo agora (um menu ou uma tela de "
 "carregamento?). Tente de novo quando estiver jogando."
 
-#: src/core.rs:4217
+#: src/core.rs:4242
 msgid ""
 "Ferret can list a game's numbers by name only in Unreal Engine, Unity, "
 "Godot, GameMaker, RPG Maker MV/MZ, Lua (LuaJIT), Java, Python and Adobe AIR "
@@ -629,22 +636,22 @@ msgstr ""
 "jogos de Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV/MZ, Lua "
 "(LuaJIT), Java, Python e Adobe AIR."
 
-#: src/core.rs:4295
+#: src/core.rs:4322
 msgid "This tweak can't be used right now. Is your character in the game?"
 msgstr "Este ajuste não pode ser usado agora. Seu personagem está no jogo?"
 
-#: src/core.rs:4326
+#: src/core.rs:4355
 msgid "Ferret couldn't find what this tweak changes by its name, so it's off."
 msgstr ""
 "O Ferret não encontrou pelo nome o que este ajuste muda, então ele está "
 "desligado."
 
-#: src/core.rs:4361
+#: src/core.rs:4403
 #, rust-format
 msgid "not a number: {value}"
 msgstr "não é um número: {value}"
 
-#: src/core.rs:4380
+#: src/core.rs:4422
 #, rust-format
 msgid ""
 "The game put {n} back at once, so that place isn't where it keeps the value: "
@@ -653,11 +660,11 @@ msgstr ""
 "O jogo devolveu {n} na hora, então não é ali que ele guarda o valor: "
 "removido."
 
-#: src/core.rs:4385
+#: src/core.rs:4427
 msgid "No places are left: press Start Over and search again."
 msgstr "Não sobrou nenhum lugar: aperte Recomeçar e busque de novo."
 
-#: src/core.rs:4392
+#: src/core.rs:4434
 #, rust-format
 msgid ""
 "It kept {n}. If the game shows it too, press Use This One (some games only "
@@ -666,7 +673,7 @@ msgstr ""
 "Ele manteve {n}. Se o jogo também mostrar isso, aperte Usar este (alguns "
 "jogos só redesenham um número quando eles mesmos o alteram)."
 
-#: src/core.rs:4434
+#: src/core.rs:4476
 msgid ""
 "The number is 0, like most of the game's memory: change it in the game and "
 "Ferret searches from there."
@@ -674,11 +681,11 @@ msgstr ""
 "O número é 0, como quase toda a memória do jogo: mude-o no jogo e o Ferret "
 "busca a partir daí."
 
-#: src/core.rs:4437
+#: src/core.rs:4479
 msgid "The number stayed at 0. Change it in the game, then search again."
 msgstr "O número ficou em 0. Mude-o no jogo e busque de novo."
 
-#: src/core.rs:4471
+#: src/core.rs:4513
 msgid ""
 "Stopped before the scan was done. Type the number again, or press Start, to "
 "search for it."
@@ -686,7 +693,7 @@ msgstr ""
 "Parou antes de a varredura terminar. Digite o número de novo, ou aperte "
 "Iniciar, para procurá-lo."
 
-#: src/core.rs:4476
+#: src/core.rs:4518
 #, rust-format
 msgid ""
 "{n} is in too many places in the game's memory to search for: search once "
@@ -695,12 +702,12 @@ msgstr ""
 "{n} está em lugares demais na memória do jogo para ser buscado: busque "
 "quando o jogo mostrar um número maior."
 
-#: src/core.rs:4564
+#: src/core.rs:4606
 #, rust-format
 msgid "{place} isn't among the matches any more"
 msgstr "{place} não está mais entre as correspondências"
 
-#: src/core.rs:4856
+#: src/core.rs:4898
 msgid ""
 "Now change the number in the game once (use some or pick some up): Ferret "
 "watches which of the game's code does it, the surest way to find it again. "
@@ -710,7 +717,7 @@ msgstr ""
 "Ferret observa qual código do jogo faz isso, o jeito mais seguro de "
 "reencontrá-lo. Cancelar o salva de outro jeito."
 
-#: src/core.rs:4888
+#: src/core.rs:4930
 #, rust-format
 msgid ""
 "Now change the number in the game once (pick some up or use some): Ferret "
@@ -729,24 +736,24 @@ msgstr[1] ""
 "Ferret espera e observa a partir de qual dos {n} lugares o jogo continua. "
 "Parar de esperar lista os lugares para você testar."
 
-#: src/core.rs:5020
+#: src/core.rs:5062
 #, rust-format
 msgid "The one place left holds {held}, not the {n} on screen."
 msgstr "O único lugar restante tem {held}, não o {n} da tela."
 
-#: src/core.rs:5044
+#: src/core.rs:5086
 msgid "could not read the number"
 msgstr "não foi possível ler o número"
 
-#: src/core.rs:5282
+#: src/core.rs:5324
 msgid "The icons are all empty, hidden or keep changing."
 msgstr "Os ícones estão todos vazios, escondidos ou não param de mudar."
 
-#: src/core.rs:5283
+#: src/core.rs:5325
 msgid "The bar is empty, hidden or keeps moving."
 msgstr "A barra está vazia, escondida ou não para de se mexer."
 
-#: src/core.rs:5379
+#: src/core.rs:5421
 msgid ""
 "Stopped before the icons changed. Press Start again and let them change in "
 "the game."
@@ -754,7 +761,7 @@ msgstr ""
 "Parado antes de os ícones mudarem. Aperte Iniciar de novo e deixe-os mudar "
 "no jogo."
 
-#: src/core.rs:5380
+#: src/core.rs:5422
 msgid ""
 "Stopped before the bar moved. Press Start again and let the bar change in "
 "the game."
@@ -762,28 +769,28 @@ msgstr ""
 "Parado antes de a barra se mexer. Aperte Iniciar de novo e deixe a barra "
 "mudar no jogo."
 
-#: src/core.rs:5413
+#: src/core.rs:5455
 msgid "The one place left kept a test value, but the icons didn't show it."
 msgstr ""
 "O único lugar restante manteve um valor de teste, mas os ícones não o "
 "mostraram."
 
-#: src/core.rs:5414
+#: src/core.rs:5456
 msgid "The one place left kept a test value, but the bar didn't show it."
 msgstr ""
 "O único lugar restante manteve um valor de teste, mas a barra não o mostrou."
 
-#: src/core.rs:5493
+#: src/core.rs:5535
 msgid ""
 "Nothing to narrow down yet: press Start or type the number the game shows."
 msgstr ""
 "Nada para reduzir ainda: aperte Iniciar ou digite o número que o jogo mostra."
 
-#: src/core.rs:5496
+#: src/core.rs:5538
 msgid "No number picked: type the number the game shows instead."
 msgstr "Nenhum número escolhido: digite o número que o jogo mostra."
 
-#: src/core.rs:5504
+#: src/core.rs:5546
 msgid ""
 "The icons are all empty, hidden or changing: try again while they show and "
 "stay still."
@@ -791,14 +798,14 @@ msgstr ""
 "Os ícones estão todos vazios, escondidos ou mudando: tente de novo enquanto "
 "aparecem e ficam parados."
 
-#: src/core.rs:5505
+#: src/core.rs:5547
 msgid ""
 "The bar is empty, hidden or moving: try again while it shows and stays still."
 msgstr ""
 "A barra está vazia, escondida ou se mexendo: tente de novo enquanto ela "
 "aparece e fica parada."
 
-#: src/core.rs:5509
+#: src/core.rs:5551
 msgid ""
 "Nothing in the game's memory changed like the icons did. Press Start Over "
 "and search again."
@@ -806,7 +813,7 @@ msgstr ""
 "Nada na memória do jogo mudou como os ícones. Aperte Recomeçar e busque de "
 "novo."
 
-#: src/core.rs:5510
+#: src/core.rs:5552
 msgid ""
 "Nothing in the game's memory moved like the bar did. Press Start Over and "
 "search again."
@@ -814,22 +821,22 @@ msgstr ""
 "Nada na memória do jogo se mexeu como a barra. Aperte Recomeçar e busque de "
 "novo."
 
-#: src/core.rs:5525
+#: src/core.rs:5567
 msgid "Can't read the number now (is it on screen?). Type it below instead."
 msgstr "Não dá para ler o número agora (ele está na tela?). Digite-o abaixo."
 
-#: src/core.rs:5568
+#: src/core.rs:5610
 msgid "Nothing to compare with yet. Click No Number? first."
 msgstr "Ainda não há com o que comparar. Clique primeiro em Sem número?."
 
-#: src/core.rs:5585
+#: src/core.rs:5627
 msgid ""
 "The copy of the game's memory is gone. Click No Number? to make a new one."
 msgstr ""
 "A cópia da memória do jogo não existe mais. Clique em Sem número? para fazer "
 "outra."
 
-#: src/core.rs:5639
+#: src/core.rs:5681
 msgid ""
 "Stopped before anything was narrowed down. Press It's Moving while it "
 "changes on its own."
@@ -837,11 +844,11 @@ msgstr ""
 "Parou antes de reduzir qualquer coisa. Aperte Está mudando enquanto ele muda "
 "sozinho."
 
-#: src/core.rs:5640
+#: src/core.rs:5682
 msgid "Ferret only knows that it moved when you said it did."
 msgstr "O Ferret só sabe que ele mudou quando você disse."
 
-#: src/core.rs:5666
+#: src/core.rs:5708
 msgid ""
 "Almost everything in the game's memory is 0: type the number once the game "
 "shows another one."
@@ -849,7 +856,7 @@ msgstr ""
 "Quase toda a memória do jogo é 0: digite o número quando o jogo mostrar "
 "outro."
 
-#: src/core.rs:5681
+#: src/core.rs:5723
 #, rust-format
 msgid "{n} is nowhere in the game's memory"
 msgstr "{n} não está em lugar nenhum da memória do jogo"
@@ -992,50 +999,57 @@ msgstr ""
 msgid "Tweak on: Ferret keeps it while you play"
 msgstr "Ajuste ligado: o Ferret o mantém enquanto você joga"
 
-#: src/gui/browse.rs:227
+#: src/gui/browse.rs:228
+#, rust-format
+msgid ""
+"Tweak on. It changes {names} too, which you saved: your own setting for it "
+"waits until the tweak is off."
+msgstr "Ajuste ligado. Ele também muda {names}, que você salvou: sua própria configuração para isso espera até o ajuste ser desligado."
+
+#: src/gui/browse.rs:231
 msgid "Tweak off: the game has its own values back"
 msgstr "Ajuste desligado: o jogo tem seus próprios valores de volta"
 
-#: src/gui/browse.rs:266
+#: src/gui/browse.rs:270
 msgid "Ferret found no numbers in your character's objects."
 msgstr "O Ferret não encontrou números nos objetos do seu personagem."
 
-#: src/gui/browse.rs:282 src/gui/browse.rs:470 src/gui/find.rs:369
+#: src/gui/browse.rs:286 src/gui/browse.rs:474 src/gui/find.rs:369
 #: src/gui/guide.rs:77
 msgid "Save"
 msgstr "Salvar"
 
-#: src/gui/browse.rs:410
+#: src/gui/browse.rs:414
 msgid "Nothing changed yet: change the number in the game."
 msgstr "Nada mudou ainda: mude o número no jogo."
 
-#: src/gui/browse.rs:411
+#: src/gui/browse.rs:415
 msgid "Nothing listed holds that number now."
 msgstr "Nada na lista tem esse número agora."
 
-#: src/gui/browse.rs:412
+#: src/gui/browse.rs:416
 msgid "No names match."
 msgstr "Nenhum nome corresponde."
 
-#: src/gui/browse.rs:414
+#: src/gui/browse.rs:418
 #, rust-format
 msgid "{n} number shown, {more} more with Show Everything"
 msgid_plural "{n} numbers shown, {more} more with Show Everything"
 msgstr[0] "{n} número mostrado, mais {more} com “Mostrar tudo”"
 msgstr[1] "{n} números mostrados, mais {more} com “Mostrar tudo”"
 
-#: src/gui/browse.rs:420
+#: src/gui/browse.rs:424
 #, rust-format
 msgid "{n} number"
 msgid_plural "{n} numbers"
 msgstr[0] "{n} número"
 msgstr[1] "{n} números"
 
-#: src/gui/browse.rs:438 src/gui/browse.rs:446
+#: src/gui/browse.rs:442 src/gui/browse.rs:450
 msgid "God Mode"
 msgstr "Modo deus"
 
-#: src/gui/browse.rs:439
+#: src/gui/browse.rs:443
 msgid ""
 "Your character can't be damaged the engine's way, and its health stays at "
 "the most it has had since you turned this on. Games with damage rules of "
@@ -1045,11 +1059,11 @@ msgstr ""
 "que já teve desde que você ligou. Jogos com regras de dano próprias podem "
 "ignorar a primeira parte."
 
-#: src/gui/browse.rs:442
+#: src/gui/browse.rs:446
 msgid "Fly"
 msgstr "Voar"
 
-#: src/gui/browse.rs:443
+#: src/gui/browse.rs:447
 msgid ""
 "Your character flies instead of walking or falling. Going up and down "
 "depends on the game's controls; turned off, the character falls back down."
@@ -1057,7 +1071,7 @@ msgstr ""
 "Seu personagem voa em vez de andar ou cair. Subir e descer depende dos "
 "controles do jogo; desligado, o personagem cai de volta."
 
-#: src/gui/browse.rs:447
+#: src/gui/browse.rs:451
 msgid ""
 "Your heroes' HP and MP don't go down: they stay at the most they've had "
 "since you turned this on, so heal once to keep them full. One hit bigger "
@@ -1067,11 +1081,11 @@ msgstr ""
 "que você ligou, então cure uma vez para mantê-los cheios. Um golpe maior que "
 "o HP de um herói ainda pode nocauteá-lo."
 
-#: src/gui/browse.rs:450
+#: src/gui/browse.rs:454
 msgid "Walk Through Walls"
 msgstr "Atravessar paredes"
 
-#: src/gui/browse.rs:451
+#: src/gui/browse.rs:455
 msgid ""
 "You walk through walls, people and water (not off the map). Places the story "
 "hasn't opened yet open too."
@@ -1079,11 +1093,11 @@ msgstr ""
 "Você atravessa paredes, pessoas e água (sem sair do mapa). Lugares que a "
 "história ainda não abriu também se abrem."
 
-#: src/gui/browse.rs:453
+#: src/gui/browse.rs:457
 msgid "No Random Battles"
 msgstr "Sem batalhas aleatórias"
 
-#: src/gui/browse.rs:453
+#: src/gui/browse.rs:457
 msgid ""
 "Walking around starts no random battles. Battles the story starts still "
 "happen."
@@ -1091,32 +1105,32 @@ msgstr ""
 "Andar por aí não inicia batalhas aleatórias. As batalhas que a história "
 "inicia continuam acontecendo."
 
-#: src/gui/browse.rs:454
+#: src/gui/browse.rs:458
 msgid "Walk Faster"
 msgstr "Andar mais rápido"
 
-#: src/gui/browse.rs:454
+#: src/gui/browse.rs:458
 msgid "You walk twice as fast."
 msgstr "Você anda duas vezes mais rápido."
 
-#: src/gui/browse.rs:467
+#: src/gui/browse.rs:471
 #, rust-format
 msgid "Save {name}"
 msgstr "Salvar {name}"
 
-#: src/gui/browse.rs:467
+#: src/gui/browse.rs:471
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr ""
 "O Ferret o encontra de novo por este nome toda vez que você abre o jogo."
 
-#: src/gui/browse.rs:470 src/gui/feedback.rs:69 src/gui/find.rs:239
+#: src/gui/browse.rs:474 src/gui/feedback.rs:69 src/gui/find.rs:239
 #: src/gui/find.rs:2359 src/gui/guide.rs:162 src/gui/guide.rs:610
 #: src/gui/guide.rs:616 src/gui/share.rs:256 src/gui/share.rs:447
-#: src/gui/share.rs:475 src/gui/values.rs:144 src/gui/values.rs:175
+#: src/gui/share.rs:475 src/gui/values.rs:145 src/gui/values.rs:176
 msgid "Cancel"
 msgstr "Cancelar"
 
-#: src/gui/browse.rs:491 src/gui/find.rs:2325
+#: src/gui/browse.rs:495 src/gui/find.rs:2325
 #, rust-format
 msgid "Saved {name}. Ferret finds it again every time you attach."
 msgstr ""
@@ -1434,7 +1448,7 @@ msgstr "Mostrar a janela do jogo"
 msgid "Type the Number Instead"
 msgstr "Digitar o número"
 
-#: src/gui/find.rs:521 src/gui/values.rs:191
+#: src/gui/find.rs:521 src/gui/values.rs:192
 msgid "Find a Value"
 msgstr "Encontrar um valor"
 
@@ -1637,7 +1651,7 @@ msgstr "O Ferret lê"
 msgid "No, I'll Type It"
 msgstr "Não, vou digitar"
 
-#: src/gui/find.rs:1201 src/gui/values.rs:313
+#: src/gui/find.rs:1201 src/gui/values.rs:314
 #, rust-format
 msgid "Yes, It Shows {n}"
 msgstr "Sim, mostra {n}"
@@ -2066,7 +2080,7 @@ msgstr "Digite abaixo o número que o jogo tem, ou clique em um na imagem."
 msgid "In the picture of your game below, or drag a box around it."
 msgstr "Na imagem do seu jogo, abaixo, ou desenhe uma caixa em volta dele."
 
-#: src/gui/find.rs:2035 src/gui/values.rs:478
+#: src/gui/find.rs:2035 src/gui/values.rs:479
 msgid "New value"
 msgstr "Novo valor"
 
@@ -3128,7 +3142,7 @@ msgstr "número JavaScript"
 msgid "On"
 msgstr "Ligado"
 
-#: src/gui/mod.rs:1640 src/gui/values.rs:110 src/gui/values.rs:121
+#: src/gui/mod.rs:1640 src/gui/values.rs:111 src/gui/values.rs:122
 msgid "Off"
 msgstr "Desligado"
 
@@ -3569,73 +3583,77 @@ msgstr "ilegível, procurando de novo"
 msgid "not found yet (the game hasn't run the code that uses it), waiting"
 msgstr "ainda não encontrado (o jogo não rodou o código que o usa), esperando"
 
-#: src/gui/values.rs:89
+#: src/gui/values.rs:59
+msgid "a tweak keeps this place while it's on, not written"
+msgstr "um ajuste mantém este lugar enquanto está ligado, não escrito"
+
+#: src/gui/values.rs:90
 #, rust-format
 msgid "fixed {n} time"
 msgid_plural "fixed {n} times"
 msgstr[0] "corrigido {n} vez"
 msgstr[1] "corrigido {n} vezes"
 
-#: src/gui/values.rs:91
+#: src/gui/values.rs:92
 #, rust-format
 msgid "restored {n} time"
 msgid_plural "restored {n} times"
 msgstr[0] "restaurado {n} vez"
 msgstr[1] "restaurado {n} vezes"
 
-#: src/gui/values.rs:103
+#: src/gui/values.rs:104
 msgid "Turned off with the hotkey · keeps it on when on"
 msgstr "Desligado pelo atalho · mantém ligado quando ligado"
 
-#: src/gui/values.rs:104
+#: src/gui/values.rs:105
 msgid "Turned off with the hotkey · keeps it off when on"
 msgstr "Desligado pelo atalho · mantém desligado quando ligado"
 
-#: src/gui/values.rs:107
+#: src/gui/values.rs:108
 #, rust-format
 msgid "Kept on · {state}"
 msgstr "Mantido ligado · {state}"
 
-#: src/gui/values.rs:108
+#: src/gui/values.rs:109
 #, rust-format
 msgid "Kept off · {state}"
 msgstr "Mantido desligado · {state}"
 
-#: src/gui/values.rs:117
+#: src/gui/values.rs:118
 #, rust-format
 msgid "Turned off with the hotkey · keeps {range} when on"
 msgstr "Desligado pelo atalho · mantém {range} quando ligado"
 
-#: src/gui/values.rs:119
+#: src/gui/values.rs:120
 #, rust-format
 msgid "Kept {range} · {state}"
 msgstr "Mantido {range} · {state}"
 
-#: src/gui/values.rs:122
+#: src/gui/values.rs:123
 #, rust-format
 msgid "Off · the import suggests keeping it {range}"
 msgstr "Desligado · a importação sugere mantê-lo {range}"
 
-#: src/gui/values.rs:138
+#: src/gui/values.rs:139
 #, rust-format
 msgid "Rename {name}"
 msgstr "Renomear {name}"
 
-#: src/gui/values.rs:144 src/gui/values.rs:351
+#: src/gui/values.rs:145 src/gui/values.rs:352
 msgid "Rename"
 msgstr "Renomear"
 
-#: src/gui/values.rs:165
+#: src/gui/values.rs:166
 #, rust-format
 msgid "Renamed {name} to {to}"
 msgstr "{name} renomeado para {to}"
 
-#: src/gui/values.rs:172
+#: src/gui/values.rs:173
 #, rust-format
 msgid "Remove {name}?"
 msgstr "Remover {name}?"
 
-#: src/gui/values.rs:173
+#: src/gui/values.rs:174
 msgid ""
 "Ferret stops finding it and keeping it in range. The number in the game "
 "stays as it is."
@@ -3643,20 +3661,20 @@ msgstr ""
 "O Ferret para de encontrá-lo e de mantê-lo no intervalo. O número no jogo "
 "fica como está."
 
-#: src/gui/values.rs:175 src/gui/values.rs:341
+#: src/gui/values.rs:176 src/gui/values.rs:342
 msgid "Remove"
 msgstr "Remover"
 
-#: src/gui/values.rs:182
+#: src/gui/values.rs:183
 #, rust-format
 msgid "Removed {name}"
 msgstr "{name} removido"
 
-#: src/gui/values.rs:198
+#: src/gui/values.rs:199
 msgid "No Saved Values Yet"
 msgstr "Nenhum valor salvo ainda"
 
-#: src/gui/values.rs:199
+#: src/gui/values.rs:200
 msgid ""
 "Find a value in the game and save it. Saved values are found again "
 "automatically every time you attach."
@@ -3664,7 +3682,7 @@ msgstr ""
 "Encontre um valor no jogo e salve-o. Os valores salvos são reencontrados "
 "automaticamente toda vez que você se conecta."
 
-#: src/gui/values.rs:255
+#: src/gui/values.rs:256
 #, rust-format
 msgid ""
 "Saved in an earlier run, {kind}. Find it again and save it with the same "
@@ -3673,33 +3691,33 @@ msgstr ""
 "Salvo numa execução anterior, {kind}. Encontre-o de novo e salve com o mesmo "
 "nome para vê-lo."
 
-#: src/gui/values.rs:256
+#: src/gui/values.rs:257
 #, rust-format
 msgid "Not in the game right now (none of it, or no save loaded), {kind}."
 msgstr ""
 "Não está no jogo agora (não há nenhum, ou nenhum jogo salvo carregado), "
 "{kind}."
 
-#: src/gui/values.rs:259
+#: src/gui/values.rs:260
 #, rust-format
 msgid "At {place}, {kind}, shown with {n} decimal."
 msgid_plural "At {place}, {kind}, shown with {n} decimals."
 msgstr[0] "Em {place}, {kind}, mostrado com {n} casa decimal."
 msgstr[1] "Em {place}, {kind}, mostrado com {n} casas decimais."
 
-#: src/gui/values.rs:265
+#: src/gui/values.rs:266
 #, rust-format
 msgid "At {place}, {kind}."
 msgstr "Em {place}, {kind}."
 
-#: src/gui/values.rs:270
+#: src/gui/values.rs:271
 #, rust-format
 msgid "Kept in {n} place (every stack): setting it sets each."
 msgid_plural "Kept in {n} places (every stack): setting it sets each."
 msgstr[0] "Mantido em {n} lugar (cada pilha): alterá-lo altera todos."
 msgstr[1] "Mantido em {n} lugares (cada pilha): alterá-lo altera todos."
 
-#: src/gui/values.rs:276
+#: src/gui/values.rs:277
 msgid ""
 "Imported, not checked yet: if the game shows this number, say so below. "
 "Ferret won't change it until then."
@@ -3707,20 +3725,20 @@ msgstr ""
 "Importado, ainda não conferido: se o jogo mostrar este número, diga isso "
 "abaixo. O Ferret não vai alterá-lo até lá."
 
-#: src/gui/values.rs:278
+#: src/gui/values.rs:279
 msgid "Not confirmed yet: if the game shows this number, say so below."
 msgstr "Ainda não confirmado: se o jogo mostrar este número, diga isso abaixo."
 
-#: src/gui/values.rs:280
+#: src/gui/values.rs:281
 msgid "Not confirmed yet: restart the game, then check the number here."
 msgstr "Ainda não confirmado: reinicie o jogo e depois confira o número aqui."
 
-#: src/gui/values.rs:283
+#: src/gui/values.rs:284
 #, rust-format
 msgid "Not written right now: {why}."
 msgstr "Não escrito agora: {why}."
 
-#: src/gui/values.rs:286
+#: src/gui/values.rs:287
 msgid ""
 "Java game: only shown. Java moves its objects, so a write could land in "
 "another one and crash the game."
@@ -3728,12 +3746,12 @@ msgstr ""
 "Jogo Java: só mostrado. O Java move seus objetos, então uma escrita poderia "
 "cair em outro e travar o jogo."
 
-#: src/gui/values.rs:312
+#: src/gui/values.rs:313
 #, rust-format
 msgid "Does the game show {n}?"
 msgstr "O jogo mostra {n}?"
 
-#: src/gui/values.rs:315
+#: src/gui/values.rs:316
 msgid ""
 "Then Ferret can change it and keep it in range. If it shows another number, "
 "remove it and find it yourself."
@@ -3741,77 +3759,77 @@ msgstr ""
 "Então o Ferret pode alterá-lo e mantê-lo no intervalo. Se mostrar outro "
 "número, remova-o e encontre-o você mesmo."
 
-#: src/gui/values.rs:373 src/gui/values.rs:484
+#: src/gui/values.rs:374 src/gui/values.rs:485
 msgid "Value"
 msgstr "Valor"
 
-#: src/gui/values.rs:379
+#: src/gui/values.rs:380
 msgid "Keep It This Way"
 msgstr "Manter assim"
 
-#: src/gui/values.rs:393
+#: src/gui/values.rs:394
 #, rust-format
 msgid "{name} turned on"
 msgstr "{name} ligado"
 
-#: src/gui/values.rs:394
+#: src/gui/values.rs:395
 #, rust-format
 msgid "{name} turned off"
 msgstr "{name} desligado"
 
-#: src/gui/values.rs:421
+#: src/gui/values.rs:422
 #, rust-format
 msgid "{name} is no longer kept"
 msgstr "{name} não é mais mantido"
 
-#: src/gui/values.rs:422
+#: src/gui/values.rs:423
 #, rust-format
 msgid "{name} is kept on"
 msgstr "{name} é mantido ligado"
 
-#: src/gui/values.rs:423
+#: src/gui/values.rs:424
 #, rust-format
 msgid "{name} is kept off"
 msgstr "{name} é mantido desligado"
 
-#: src/gui/values.rs:483
+#: src/gui/values.rs:484
 msgid "Set"
 msgstr "Definir"
 
-#: src/gui/values.rs:497
+#: src/gui/values.rs:498
 #, rust-format
 msgid "{name} set to {n}"
 msgstr "{name} definido para {n}"
 
-#: src/gui/values.rs:520
+#: src/gui/values.rs:521
 msgid "Keep in Range"
 msgstr "Manter no intervalo"
 
-#: src/gui/values.rs:534
+#: src/gui/values.rs:535
 msgid "At Most"
 msgstr "No máximo"
 
-#: src/gui/values.rs:539
+#: src/gui/values.rs:540
 msgid "No maximum: only At Least is kept"
 msgstr "Sem máximo: só No mínimo é mantido"
 
-#: src/gui/values.rs:545 src/gui/values.rs:583 src/gui/values.rs:681
+#: src/gui/values.rs:546 src/gui/values.rs:584 src/gui/values.rs:682
 msgid "No maximum"
 msgstr "Sem máximo"
 
-#: src/gui/values.rs:549
+#: src/gui/values.rs:550
 msgid "At Least"
 msgstr "No mínimo"
 
-#: src/gui/values.rs:550
+#: src/gui/values.rs:551
 msgid "0 means no minimum"
 msgstr "0 significa sem mínimo"
 
-#: src/gui/values.rs:555
+#: src/gui/values.rs:556
 msgid "Keep It"
 msgstr "Manter"
 
-#: src/gui/values.rs:556
+#: src/gui/values.rs:557
 msgid ""
 "Never let it drop below the number it is now (at 0: never let it rise above "
 "0)"
@@ -3819,29 +3837,29 @@ msgstr ""
 "Nunca deixar cair abaixo do número atual (em 0: nunca deixar subir acima de "
 "0)"
 
-#: src/gui/values.rs:582
+#: src/gui/values.rs:583
 msgid "Lower than At Least: the range isn't changed"
 msgstr "Menor que No mínimo: o intervalo não é alterado"
 
-#: src/gui/values.rs:594
+#: src/gui/values.rs:595
 #, rust-format
 msgid "{name} is no longer limited"
 msgstr "{name} não está mais limitado"
 
-#: src/gui/values.rs:595
+#: src/gui/values.rs:596
 #, rust-format
 msgid "{name} is kept {range}"
 msgstr "{name} é mantido {range}"
 
-#: src/gui/values.rs:687
+#: src/gui/values.rs:688
 msgid "Find Them"
 msgstr "Encontrar"
 
-#: src/gui/values.rs:689
+#: src/gui/values.rs:690
 msgid "More Like This"
 msgstr "Mais como este"
 
-#: src/gui/values.rs:690
+#: src/gui/values.rs:691
 msgid ""
 "The game's other values of this kind, like your other powers or other units: "
 "Ferret finds them through the code that changes this one while you use them."

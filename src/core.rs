@@ -2786,6 +2786,27 @@ impl Core {
         Ok((on, names))
     }
 
+    /// Where a saved value is now: its limit's place, else where its name leads.
+    fn places_now(&mut self, name: &str, limits: &[(String, u64, String)]) -> Vec<u64> {
+        if let Some((_, addr, _)) = limits.iter().find(|(n, a, _)| n == name && *a != 0) {
+            return vec![*addr];
+        }
+        self.refresh_named();
+        let Some(game) = self.game.as_ref() else { return Vec::new() };
+        match game.named.iter().find(|(n, _, _)| n == name) {
+            Some((_, _, places)) => places.iter().map(|p| p.addr).collect(),
+            None => game.entries.iter().filter(|(n, e)| n == name && e.addr != 0).map(|(_, e)| e.addr).collect(),
+        }
+    }
+
+    /// The tweak part keeping a saved value's place now (the helper's limit `tweak_<id>_<n>`
+    /// at the same address), if any.
+    fn tweak_holding(&mut self, name: &str) -> Option<String> {
+        let limits = self.limits();
+        let places = self.places_now(name, &limits);
+        limits.into_iter().find(|(n, a, _)| n.starts_with("tweak_") && n != name && places.contains(a)).map(|(n, _, _)| n)
+    }
+
     /// Limits the helper enforces: name, current address, and the rest of its line. Kept as
     /// `known_limits` while the helper answers.
     fn limits(&mut self) -> Vec<(String, u64, String)> {
@@ -3781,6 +3802,10 @@ impl Core {
         if !self.java_writable(name) {
             return Err(java_write());
         }
+        // A tweak's limit would put its own back at once (and the card flicker between them).
+        if !name.starts_with("tweak_") && self.tweak_holding(name).is_some() {
+            return Err(tr!("{name} not written: a tweak in the Browse tab keeps this place while it's on. Turn it off there first.", name));
+        }
         let exe = self.game()?.exe.clone();
         let saved = read_profile(&exe);
         if saved.iter().any(|e| e.name == name && e.imported) {
@@ -4271,7 +4296,9 @@ impl Core {
     /// Turns a tweak on (each of its places saved by name, as a hidden value with its limit:
     /// "tweak_<id>_<n>") or off (each put back as the tweak found it, or as `off` says, and
     /// forgotten). On stays on across restarts, like any kept value.
-    pub fn set_tweak(&mut self, id: &str, on: bool) -> Result<(), String> {
+    /// Turns a tweak on or off; on, the saved values whose places it now keeps (their own
+    /// limits wait meanwhile: the helper's `held`).
+    pub fn set_tweak(&mut self, id: &str, on: bool) -> Result<Vec<String>, String> {
         let exe = self.game()?.exe.clone();
         let mine: Vec<Entry> = read_profile(&exe).into_iter().filter(|e| e.tweak.as_deref() == Some(id)).collect();
         if !on {
@@ -4285,16 +4312,17 @@ impl Core {
                 self.remove(&e.name)?;
             }
             self.say(&format!("tweak {id} off"));
-            return Ok(());
+            return Ok(Vec::new());
         }
         if !mine.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let reply = self.helper.call("tweaks");
         let Some((_, parts)) = parse_tweaks(&reply).into_iter().find(|(t, _)| t == id) else {
             return Err(tr!("This tweak can't be used right now. Is your character in the game?"));
         };
         let mut done = 0;
+        let mut kept = Vec::new();
         for (i, (loc, how)) in parts.into_iter().enumerate() {
             let name = format!("tweak_{id}_{}", i + 1);
             let Some(now) = self.peek_exact(&[loc]).pop().flatten() else { continue };
@@ -4321,12 +4349,26 @@ impl Core {
                 Ok(()) => done += 1,
                 Err(err) => self.say(&format!("{name}: not kept: {err}")),
             }
+            kept.push(loc.addr);
         }
         if done == 0 {
             return Err(tr!("Ferret couldn't find what this tweak changes by its name, so it's off."));
         }
         self.say(&format!("tweak {id} on ({done} places)"));
-        Ok(())
+        // The player's own values on the same places (Borderlands 4: God Mode's flag was the
+        // player's saved `bcanbedamaged`, kept on while the tweak kept it off).
+        let limits = self.limits();
+        let mut taken = Vec::new();
+        let names: Vec<String> = read_profile(&exe).into_iter().filter(|e| e.tweak.is_none()).map(|e| e.name).collect();
+        for name in names {
+            if self.places_now(&name, &limits).iter().any(|a| kept.contains(a)) {
+                taken.push(name);
+            }
+        }
+        if !taken.is_empty() {
+            self.say(&format!("tweak {id} keeps the places of {} while it's on", taken.join(", ")));
+        }
+        Ok(taken)
     }
 
     /// The numbers at these places now (the Browse tab's list, once a second).
