@@ -1945,7 +1945,9 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         }
         let dash = |s: Option<&str>| s.filter(|s| !s.is_empty()).unwrap_or("-").to_owned();
         let about = about(&env);
-        let name = about.name.as_ref().map(|n| n.replace('\t', " "));
+        // A launcher's name for it, else a Flathub game's own (no launcher to ask).
+        let name = about.name.clone().or_else(|| os::flatpak_app(pid).and_then(|app| launchers::flatpak_name(&app)));
+        let name = name.map(|n| n.replace('\t', " "));
         let play = if about.online_only { Some("online") } else { about.multiplayer.then_some("multiplayer") };
         let id = dash(app_id.map(String::as_str));
         let v = verdict(pid, &running);

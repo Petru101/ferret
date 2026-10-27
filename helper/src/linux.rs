@@ -67,6 +67,27 @@ pub fn exe(pid: u32) -> Option<PathBuf> {
     fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
+/// The flatpak app whose own program a process runs (`name=` in the sandbox's
+/// `.flatpak-info`): its program, or a file it was given (a Java game's jar), is in the app's
+/// `/app`. A game a flatpak launcher started (Heroic, Steam, Bottles) runs in the launcher's
+/// sandbox from files elsewhere, and isn't named after the launcher.
+pub fn flatpak_app(pid: u32) -> Option<String> {
+    let info = fs::read_to_string(format!("/proc/{pid}/root/.flatpak-info")).ok()?;
+    let own = exe(pid).is_some_and(|e| e.starts_with("/app")) || argv(pid).iter().skip(1).any(|a| a.starts_with("/app/"));
+    if !own {
+        return None;
+    }
+    let mut app = false;
+    for line in info.lines().map(str::trim) {
+        if line.starts_with('[') {
+            app = line == "[Application]";
+        } else if let Some(name) = line.strip_prefix("name=").filter(|_| app) {
+            return Some(name.to_owned()).filter(|n| !n.is_empty());
+        }
+    }
+    None
+}
+
 /// The process that started it.
 pub fn parent(pid: u32) -> Option<u32> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;

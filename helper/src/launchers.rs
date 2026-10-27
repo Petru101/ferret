@@ -172,6 +172,30 @@ fn heroic_game(dirs: &[PathBuf], runner: &str, app: &str, a: &mut About, ids: &m
     }
 }
 
+/// The name a flatpak app goes by in the menu: its exported .desktop file's `Name=`, per user
+/// or system-wide. A game installed from Flathub has no launcher to ask, and its program
+/// name says little ("supertux2", "com.shatteredpixel.shatteredpixeldungeon.jar").
+pub fn flatpak_name(app: &str) -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    [format!("{home}/.local/share/flatpak"), "/var/lib/flatpak".into()]
+        .iter()
+        .find_map(|dir| fs::read_to_string(format!("{dir}/exports/share/applications/{app}.desktop")).ok())
+        .and_then(|text| desktop_name(&text))
+}
+
+/// `Name=` of a .desktop file's main group (not a translated `Name[..]=`, not an action's).
+fn desktop_name(text: &str) -> Option<String> {
+    let mut main = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            main = line == "[Desktop Entry]";
+        } else if let Some(name) = line.strip_prefix("Name=").filter(|_| main) {
+            return Some(name.trim().to_owned()).filter(|n| !n.is_empty());
+        }
+    }
+    None
+}
+
 /// AreWeAntiCheatYet's anti-cheat for a game named like one of `names` (its folder and
 /// program), whatever started it. Kept per names: the games list asks every second.
 pub fn listed_as(env: &HashMap<String, String>, names: &[String]) -> Option<String> {
@@ -212,4 +236,20 @@ fn listed_anti_cheat(dirs: &[PathBuf], ids: &Ids, name: Option<&str>) -> Option<
         let acs: Vec<&str> = g.get("anticheats").map(Value::arr).unwrap_or_default().iter().filter_map(Value::str).collect();
         (!acs.is_empty()).then(|| acs.join(" / "))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_entry_name() {
+        let spd = "[Desktop Entry]\nCategories=Game;StrategyGame;\nExec=/usr/bin/flatpak run com.shatteredpixel.shatteredpixeldungeon\nName=Shattered Pixel Dungeon\n";
+        assert_eq!(desktop_name(spd).as_deref(), Some("Shattered Pixel Dungeon"));
+        let st = "[Desktop Entry]\nName[de]=SuperTux Zwei\nName=SuperTux 2\n\n[Desktop Action Editor]\nName=Level Editor\n";
+        assert_eq!(desktop_name(st).as_deref(), Some("SuperTux 2"));
+        let action_first = "[Desktop Action New]\nName=New Window\n[Desktop Entry]\nName=Game\n";
+        assert_eq!(desktop_name(action_first).as_deref(), Some("Game"));
+        assert_eq!(desktop_name("[Desktop Entry]\nName=\n"), None);
+    }
 }

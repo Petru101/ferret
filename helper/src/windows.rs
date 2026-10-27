@@ -270,6 +270,11 @@ pub fn cwd(pid: u32) -> String {
     .unwrap_or_default()
 }
 
+/// Flatpak apps are Linux only.
+pub fn flatpak_app(_pid: u32) -> Option<String> {
+    None
+}
+
 /// The program's file.
 pub fn exe(pid: u32) -> Option<PathBuf> {
     let p = open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
