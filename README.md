@@ -6,10 +6,9 @@ down, and get it back automatically every time you play. For single-player games
 
 If you know Cheat Engine or GameConqueror (scanmem): Ferret is a memory editor in that family, made so you don’t need to know what a memory scan is.
 
-![Ferret finding SuperTux's coins: click the number, play while the matches drop from 2,132 to 2, Ferret checks which is real, save it, set it to 999 and keep it there](data/screenshots/ferret-supertux.gif)
+![Ferret's Browse tab in Shattered Pixel Dungeon: search gold, save it, set it to 9999, and the game shows 9999 gold](data/screenshots/ferret-demo.gif)
 
-<sub>The game is [SuperTux](https://www.supertux.org/), free and open source; its artwork is
-under its own free licenses. The GIF is sped up.</sub>
+<sub>[Shattered Pixel Dungeon](https://shatteredpixel.com/)'s gold picked from Browse and set to 9999.</sub>
 
 ## Install
 
