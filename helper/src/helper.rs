@@ -3,7 +3,7 @@
 // the OS about other programs goes through `os` (linux.rs).
 // Protocol: one command per line on stdin; each reply ends with a line "end".
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -1831,6 +1831,32 @@ fn draws_like_a_game(pid: u32) -> bool {
     (driver || game || display && !system()) && (game || !toolkit)
 }
 
+/// Programs seen not drawing: (first seen, next look). Reading every program's memory map for
+/// `draws_like_a_game` was most of what the games list cost, once a second.
+static NOT_DRAWING: Mutex<BTreeMap<u32, (Instant, Instant)>> = Mutex::new(BTreeMap::new());
+/// A new program may still be loading its libraries: looked at on every refresh this long.
+const DRAWS_NEW_FOR: Duration = Duration::from_secs(30);
+/// After that, how late a program that starts drawing shows up in the games list.
+const DRAWS_LOOK_EVERY: Duration = Duration::from_secs(5);
+
+/// `draws_like_a_game` for the games list.
+fn draws_now(pid: u32) -> bool {
+    let now = Instant::now();
+    let seen = NOT_DRAWING.lock().unwrap().get(&pid).copied();
+    if seen.is_some_and(|(_, next)| now < next) {
+        return false;
+    }
+    let draws = draws_like_a_game(pid);
+    let mut not_drawing = NOT_DRAWING.lock().unwrap();
+    if draws {
+        not_drawing.remove(&pid);
+    } else {
+        let first = seen.map_or(now, |(first, _)| first);
+        not_drawing.insert(pid, (first, if now - first < DRAWS_NEW_FOR { now } else { now + DRAWS_LOOK_EVERY }));
+    }
+    draws
+}
+
 /// A GPU driver's library: loaded once a program draws with the GPU.
 fn gpu_driver(name: &str) -> bool {
     ["libGLX_", "libEGL_", "libvulkan_", "libnvidia-glcore.", "libnvidia-eglcore.", "libgallium", "amdvlk"]
@@ -1911,10 +1937,11 @@ fn windows_non_game(pid: u32) -> bool {
 fn cmd_games(out: &mut impl Write) -> io::Result<()> {
     let running = on_computer();
     let mut rows = Vec::new();
-    for pid in os::own_pids() {
+    let pids = os::own_pids();
+    NOT_DRAWING.lock().unwrap().retain(|pid, _| pids.contains(pid));
+    for pid in pids {
         let exe = exe_name(pid);
         let lower = exe.to_ascii_lowercase();
-        let name_now = game_name(pid);
         let env = environ(pid);
         let app_id = steam_id(&env);
         let windows = lower.ends_with(".exe");
@@ -1935,7 +1962,7 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         if nwjs && !nwjs_renderer(pid) {
             continue;
         }
-        if !nwjs && (!(windows || app_id.is_some() || draws_like_a_game(pid)) || windows && windows_non_game(pid)) {
+        if !nwjs && (!(windows || app_id.is_some() || draws_now(pid)) || windows && windows_non_game(pid)) {
             continue;
         }
         // Python also runs Steam's and umu's tools (with the game's app ID): only a Python that
@@ -1943,6 +1970,7 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         if is_python(&lower) && (!draws_like_a_game(pid) || wine_launcher(&args(pid))) {
             continue;
         }
+        let name_now = game_name(pid);
         let dash = |s: Option<&str>| s.filter(|s| !s.is_empty()).unwrap_or("-").to_owned();
         let about = about(&env);
         // A launcher's name for it, else a Flathub game's own (no launcher to ask).

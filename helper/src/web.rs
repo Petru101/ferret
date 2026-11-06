@@ -1304,28 +1304,79 @@ pub fn electron_app(program: &Path, cmdline: &str, inside: impl Fn(&Path) -> Pat
     // Chromium rewrites its process title into one string: a path with spaces runs to the next
     // flag.
     let app_path = cmdline.split_once("--app-path=").map(|(_, rest)| PathBuf::from(rest.split(" --").next().unwrap_or(rest).trim()));
-    let files: Box<dyn Files> = match () {
-        _ if here.join("resources/app.asar").is_file() => Box::new(Asar::open(&here.join("resources/app.asar"))?),
-        _ if here.join("resources/app/package.json").is_file() => Box::new(Folder(here.join("resources/app"))),
-        _ => Box::new(Folder(inside(app_path.as_deref()?))),
+    let asar = here.join("resources/app.asar");
+    let source = match () {
+        _ if asar.is_file() => AppFiles::Asar(asar),
+        _ if here.join("resources/app/package.json").is_file() => AppFiles::Folder(here.join("resources/app")),
+        _ => AppFiles::Folder(inside(app_path.as_deref()?)),
     };
-    let names = files.names();
-    let engine = names.iter().any(|n| ENGINES.iter().any(|e| n.to_ascii_lowercase().contains(e)));
-    let package = files.read("package.json").and_then(|b| crate::json::parse(&String::from_utf8_lossy(&b)));
-    let depends = package.as_ref().is_some_and(|p| {
-        ["dependencies", "devDependencies"].iter().any(|d| match p.get(d) {
-            Some(crate::json::Value::Obj(deps)) => deps.iter().any(|(k, _)| ENGINE_PACKAGES.contains(&k.as_str())),
-            _ => false,
-        })
-    });
-    let canvas = names.iter().filter(|n| n.ends_with(".html") && n.matches('/').count() <= 2).take(16).any(|n| files.read(n).is_some_and(|b| b.windows(7).any(|w| w.eq_ignore_ascii_case(b"<canvas"))));
+    let about = source.about(dir, app_path.as_deref())?;
     let program_name = program.file_name()?.to_string_lossy().into_owned();
-    let product = package.as_ref().and_then(|p| p.get("productName").or_else(|| p.get("name"))).and_then(|v| v.str()).map(str::to_owned);
     let name = match program_name.as_str() {
-        "electron" | "electron.exe" => product.or_else(|| app_path.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()))?,
+        "electron" | "electron.exe" => about.product.or_else(|| app_path.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()))?,
         _ => program_name.trim_end_matches(".exe").to_owned(),
     };
-    Some(App { dir: app_path.unwrap_or_else(|| dir.to_path_buf()), name, game: engine || depends || canvas })
+    Some(App { dir: app_path.unwrap_or_else(|| dir.to_path_buf()), name, game: about.game })
+}
+
+/// What an Electron app's files say about it.
+#[derive(Clone)]
+struct AppAbout {
+    /// Its name in package.json.
+    product: Option<String>,
+    /// They show a game: an engine's files, an engine among its packages, or a page with a canvas.
+    game: bool,
+}
+
+/// Which app (its folder, the `--app-path` it was given) in which state (its archive's or
+/// package.json's time and size) said what. The games list asks for every process of every
+/// Electron app, every second while it's shown: opening their archives each time and parsing
+/// each one's index took 2/3 of the 0.7 s it took (Bitwarden's 328 MB, seven processes), about
+/// 70% of a core with Ferret just open.
+type AppKey = (PathBuf, Option<PathBuf>, Option<std::time::SystemTime>, u64);
+static APPS: Mutex<Option<HashMap<AppKey, Option<AppAbout>>>> = Mutex::new(None);
+
+/// Where an Electron app's files are.
+enum AppFiles {
+    Asar(PathBuf),
+    Folder(PathBuf),
+}
+
+impl AppFiles {
+    /// What they say, looked at again only when they change.
+    fn about(&self, dir: &Path, app_path: Option<&Path>) -> Option<AppAbout> {
+        let stamp = match self {
+            AppFiles::Asar(file) => std::fs::metadata(file),
+            AppFiles::Folder(folder) => std::fs::metadata(folder.join("package.json")),
+        };
+        let (time, size) = stamp.map_or((None, 0), |m| (m.modified().ok(), m.len()));
+        let key = (dir.to_path_buf(), app_path.map(Path::to_path_buf), time, size);
+        if let Some(known) = APPS.lock().unwrap().get_or_insert_with(HashMap::new).get(&key) {
+            return known.clone();
+        }
+        let about = self.read_about();
+        APPS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, about.clone());
+        about
+    }
+
+    fn read_about(&self) -> Option<AppAbout> {
+        let files: Box<dyn Files> = match self {
+            AppFiles::Asar(file) => Box::new(Asar::open(file)?),
+            AppFiles::Folder(folder) => Box::new(Folder(folder.clone())),
+        };
+        let names = files.names();
+        let engine = names.iter().any(|n| ENGINES.iter().any(|e| n.to_ascii_lowercase().contains(e)));
+        let package = files.read("package.json").and_then(|b| crate::json::parse(&String::from_utf8_lossy(&b)));
+        let depends = package.as_ref().is_some_and(|p| {
+            ["dependencies", "devDependencies"].iter().any(|d| match p.get(d) {
+                Some(crate::json::Value::Obj(deps)) => deps.iter().any(|(k, _)| ENGINE_PACKAGES.contains(&k.as_str())),
+                _ => false,
+            })
+        });
+        let canvas = names.iter().filter(|n| n.ends_with(".html") && n.matches('/').count() <= 2).take(16).any(|n| files.read(n).is_some_and(|b| b.windows(7).any(|w| w.eq_ignore_ascii_case(b"<canvas"))));
+        let product = package.as_ref().and_then(|p| p.get("productName").or_else(|| p.get("name"))).and_then(|v| v.str()).map(str::to_owned);
+        Some(AppAbout { product, game: engine || depends || canvas })
+    }
 }
 
 /// An app's files: their paths ('/'-separated, a few folders deep) and contents (the first
