@@ -192,6 +192,14 @@ static FOUND: Mutex<Vec<(u32, u64, u64, MonoPath)>> = Mutex::new(Vec::new());
 /// 1.6 GB under Windows, while the new value stayed off the list. Reused while young and live.
 static RECENT: Mutex<Vec<(u32, String, Vec<u64>, std::time::Instant)>> = Mutex::new(Vec::new());
 const RECENT_FOR: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long no objects at all counts: shorter than `NAMED_REFIND`, or the objects of a level
+/// that just started would wait for a later search.
+const NONE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+/// Held while searching. Particle Fleet's gems and omni, two fields of one class, each searched
+/// from the limiter's threads and from the Values tab: up to four passes over memory every
+/// 10 s in a menu, where the class has no objects, two or more at once. The ones waiting here
+/// find the first one's result in `RECENT`.
+static SEARCHING: Mutex<()> = Mutex::new(());
 
 /// Fields looked up this run (a walk runs 4 times a second for a limit; Terraria's Main
 /// declares 1178 fields): (pid, class, name, static) -> offset and type.
@@ -940,22 +948,30 @@ fn classes_named(heap: &Heap, path: &MonoPath) -> Vec<u64> {
 
 /// The live objects of the path's class (a pass over memory, three on a new run).
 pub fn find_roots(heap: &Heap, path: &MonoPath) -> Vec<u64> {
+    let _one_at_a_time = SEARCHING.lock().unwrap_or_else(|e| e.into_inner());
     if !path.via.is_empty() {
         return find_static(heap, path).map(|(_, data)| vec![data]).unwrap_or_default();
     }
     let key = format!("{}::{}", path.namespace, path.class);
     let live_of = |m: &Mono, obj: u64| m.class_of(obj).is_some_and(|k| m.is(k, path) && m.live(obj, k));
+    let recent = RECENT.lock().unwrap().iter().find(|r| r.0 == heap.pid && r.1 == key && r.3.elapsed() < RECENT_FOR).map(|r| (r.2.clone(), r.3.elapsed()));
+    if recent.as_ref().is_some_and(|(objs, age)| objs.is_empty() && *age < NONE_FOR) {
+        return Vec::new();
+    }
     if let Some(lay) = known_layout(heap.pid) {
         let m = Mono::new(heap, lay);
-        let recent = RECENT.lock().unwrap().iter().find(|r| r.0 == heap.pid && r.1 == key && r.3.elapsed() < RECENT_FOR).map(|r| r.2.clone());
-        if let Some(objs) = recent.filter(|o| !o.is_empty() && o.iter().all(|&obj| live_of(&m, obj))) {
+        if let Some((objs, _)) = recent.filter(|(o, _)| !o.is_empty() && o.iter().all(|&obj| live_of(&m, obj))) {
             return objs;
         }
     }
     let vts = vtables(heap, path);
-    let (Some(lay), false) = (known_layout(heap.pid), vts.is_empty()) else { return Vec::new() };
-    let m = Mono::new(heap, lay);
-    let objs: Vec<u64> = heap.referrers(&vts).into_iter().filter(|&obj| live_of(&m, obj)).collect();
+    let objs: Vec<u64> = match (known_layout(heap.pid), vts.is_empty()) {
+        (Some(lay), false) => {
+            let m = Mono::new(heap, lay);
+            heap.referrers(&vts).into_iter().filter(|&obj| live_of(&m, obj)).collect()
+        }
+        _ => Vec::new(),
+    };
     let mut recent = RECENT.lock().unwrap();
     recent.retain(|r| r.0 == heap.pid && r.1 != key && r.3.elapsed() < RECENT_FOR);
     recent.push((heap.pid, key, objs.clone(), std::time::Instant::now()));
