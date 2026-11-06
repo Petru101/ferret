@@ -179,8 +179,10 @@ struct Layout {
 }
 
 static LAYOUT: Mutex<Option<(u32, Layout)>> = Mutex::new(None);
-/// The vtables of classes searched for this run: (pid, namespace::class, vtables).
-static VTABLES: Mutex<Vec<(u32, String, Vec<u64>)>> = Mutex::new(Vec::new());
+/// The vtables of classes searched for this run: (pid, namespace::class, the classes (Mono's;
+/// `vtable_referrers`), vtables).
+#[allow(clippy::type_complexity)]
+static VTABLES: Mutex<Vec<(u32, String, Vec<u64>, Vec<u64>)>> = Mutex::new(Vec::new());
 /// Classes whose static data was found this run: (pid, class, its static data).
 static STATICS: Mutex<Vec<(u32, u64, u64)>> = Mutex::new(Vec::new());
 /// Static paths found this run (field left empty): the next value of the same object (mana
@@ -890,23 +892,49 @@ fn find_name(heap: &Heap, runtime: Runtime, bytes: &[u8]) -> Vec<u64> {
 /// name in the metadata, one pass). Kept for the run.
 fn vtables(heap: &Heap, path: &MonoPath) -> Vec<u64> {
     let key = format!("{}::{}", path.namespace, path.class);
-    if let Some((_, _, v)) = VTABLES.lock().unwrap().iter().find(|(p, t, _)| *p == heap.pid && *t == key) {
+    if let Some((_, _, _, v)) = VTABLES.lock().unwrap().iter().find(|(p, t, _, _)| *p == heap.pid && *t == key) {
         return v.clone();
     }
     let classes = classes_named(heap, path);
     if classes.is_empty() {
         return Vec::new();
     }
-    let vts = match path.runtime {
-        Runtime::Mono => heap.referrers(&classes),
-        Runtime::Il2cpp => classes,
+    let (made, vts) = match path.runtime {
+        Runtime::Mono => {
+            let vts = heap.referrers(&classes);
+            (classes, vts)
+        }
+        Runtime::Il2cpp => (Vec::new(), classes),
     };
     if !vts.is_empty() {
         let mut cache = VTABLES.lock().unwrap();
-        cache.retain(|(p, _, _)| *p == heap.pid);
-        cache.push((heap.pid, key, vts.clone()));
+        cache.retain(|(p, _, _, _)| *p == heap.pid);
+        cache.push((heap.pid, key, made, vts.clone()));
     }
     vts
+}
+
+/// What points to these vtables, among it the class's objects: one pass over memory, which also
+/// brings the list of vtables up to date. Mono makes a class's vtable when it's first used, so
+/// the list from a menu may not hold the real one yet (FinalShot's PlayerShooter: 48 things
+/// pointed to the class in the menu, none its vtable, and a limit set there was never found in
+/// the level). Only a vtable new to the list takes another pass, for its objects.
+fn vtable_referrers(heap: &Heap, key: &str, vts: &[u64]) -> Vec<u64> {
+    let classes = VTABLES.lock().unwrap().iter().find(|(p, t, _, _)| *p == heap.pid && t == key).map(|c| c.2.clone()).unwrap_or_default();
+    let mut found = heap.referrers(&[vts, &classes[..]].concat());
+    if classes.is_empty() {
+        return found;
+    }
+    let w = heap.width() as u64;
+    let now: Vec<u64> = found.iter().copied().filter(|&at| word(heap.mem(), at, w).is_some_and(|v| classes.binary_search(&v).is_ok())).collect();
+    let new: Vec<u64> = now.iter().copied().filter(|v| !vts.contains(v)).collect();
+    if let Some(cached) = VTABLES.lock().unwrap().iter_mut().find(|(p, t, _, _)| *p == heap.pid && t == key).filter(|_| !now.is_empty()) {
+        cached.3 = now;
+    }
+    if !new.is_empty() {
+        found.extend(heap.referrers(&new));
+    }
+    found
 }
 
 /// The classes named like the path's (sorted), found by their name (a pass over memory, two on
@@ -968,7 +996,7 @@ pub fn find_roots(heap: &Heap, path: &MonoPath) -> Vec<u64> {
     let objs: Vec<u64> = match (known_layout(heap.pid), vts.is_empty()) {
         (Some(lay), false) => {
             let m = Mono::new(heap, lay);
-            heap.referrers(&vts).into_iter().filter(|&obj| live_of(&m, obj)).collect()
+            vtable_referrers(heap, &key, &vts).into_iter().filter(|&obj| live_of(&m, obj)).collect()
         }
         _ => Vec::new(),
     };
