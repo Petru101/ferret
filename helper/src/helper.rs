@@ -1837,7 +1837,7 @@ static NOT_DRAWING: Mutex<BTreeMap<u32, (Instant, Instant)>> = Mutex::new(BTreeM
 /// A new program may still be loading its libraries: looked at on every refresh this long.
 const DRAWS_NEW_FOR: Duration = Duration::from_secs(30);
 /// After that, how late a program that starts drawing shows up in the games list.
-const DRAWS_LOOK_EVERY: Duration = Duration::from_secs(5);
+const DRAWS_LOOK_EVERY: Duration = Duration::from_secs(3);
 
 /// `draws_like_a_game` for the games list.
 fn draws_now(pid: u32) -> bool {

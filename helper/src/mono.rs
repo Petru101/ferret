@@ -194,7 +194,7 @@ static RECENT: Mutex<Vec<(u32, String, Vec<u64>, std::time::Instant)>> = Mutex::
 const RECENT_FOR: std::time::Duration = std::time::Duration::from_secs(15);
 /// How long no objects at all counts: shorter than `NAMED_REFIND`, or the objects of a level
 /// that just started would wait for a later search.
-const NONE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+const NONE_FOR: std::time::Duration = std::time::Duration::from_secs(3);
 /// Held while searching. Particle Fleet's gems and omni, two fields of one class, each searched
 /// from the limiter's threads and from the Values tab: up to four passes over memory every
 /// 10 s in a menu, where the class has no objects, two or more at once. The ones waiting here
