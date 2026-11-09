@@ -141,8 +141,10 @@ jobs:
         shell: msys2 {0}
         run: cargo --offline build --release --locked --workspace
 
-      # Each new version gets a delta from the one players have now.
+      # Each new version gets a delta from the one players have now. Not for a test build: its
+      # version is usually the one on the site, and vpk refuses to pack that again.
       - name: Fetch the newest release from the update site
+        if: github.ref_type == 'tag'
         run: |
           $env:DOTNET_ROOT = 'C:\dev\dotnet'
           C:\dev\vpk\vpk.exe download http --url https://petru101.github.io/ferret-updates/windows/ --outputDir C:\dev\velopack-releases

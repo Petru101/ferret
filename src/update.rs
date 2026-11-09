@@ -24,10 +24,67 @@ pub enum Check {
 mod velopack_updates {
     use super::Check;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use velopack::{sources::FileSource, sources::HttpSource, UpdateCheck, UpdateManager, VelopackApp};
+    use velopack::{
+        bundle::Manifest,
+        sources::{FileSource, HttpSource, UpdateSource},
+        Error, UpdateCheck, UpdateManager, VelopackApp, VelopackAsset, VelopackAssetFeed,
+    };
 
     /// The feed `vpk pack` makes (releases.win.json and the packages), on the update site.
     const FEED: &str = "https://petru101.github.io/ferret-updates/windows/";
+
+    /// The public half of the key the feed is signed with (data/release/from-github.sh; its
+    /// secret half never goes on GitHub). The feed holds each package's hash, which Velopack
+    /// checks, so a signed feed vouches for what it lists. A test build can be given another.
+    const KEY: &str = match option_env!("FERRET_UPDATE_KEY") {
+        Some(key) => key,
+        None => "RWRljgNns5TlK0m+OWBxhqMKwbZMcz4+l2p2d+H3J8ZAjqTrDsBv8gut",
+    };
+
+    /// A feed read only if its signature holds; the packages come through the source as usual.
+    struct Signed<S> {
+        source: S,
+        /// The feed's location: a URL or, in tests, a folder.
+        at: String,
+    }
+
+    impl<S> Signed<S> {
+        fn read(&self, name: &str) -> Result<String, String> {
+            if !self.at.contains("://") {
+                return std::fs::read_to_string(std::path::Path::new(&self.at).join(name)).map_err(|e| format!("{name}: {e}"));
+            }
+            let url = format!("{}{name}", self.at);
+            let mut reply = ureq::get(&url).call().map_err(|e| format!("{name}: {e}"))?;
+            reply.body_mut().read_to_string().map_err(|e| format!("{name}: {e}"))
+        }
+    }
+
+    /// Whether `feed` is what was signed with `key`.
+    fn signature_holds(feed: &str, signature: &str, key: &str) -> Result<(), String> {
+        let key = minisign_verify::PublicKey::from_base64(key).map_err(|e| format!("Ferret's own update key can't be read: {e}"))?;
+        let signature = minisign_verify::Signature::decode(signature).map_err(|e| format!("the update list's signature can't be read: {e}"))?;
+        key.verify(feed.as_bytes(), &signature, false).map_err(|_| "the update list's signature doesn't match Ferret's key".to_owned())
+    }
+
+    impl<S: UpdateSource> UpdateSource for Signed<S> {
+        fn get_release_feed(&self, channel: &str, _app: &Manifest, _staged_user_id: &str) -> Result<VelopackAssetFeed, Error> {
+            let refused = |why: String| Error::Other(why);
+            let name = format!("releases.{channel}.json");
+            let feed = self.read(&name).map_err(refused)?;
+            let signature = self.read(&format!("{name}.minisig")).map_err(refused)?;
+            signature_holds(&feed, &signature, KEY).map_err(refused)?;
+            Ok(serde_json::from_str(&feed)?)
+        }
+
+        fn download_release_entry(
+            &self,
+            asset: &VelopackAsset,
+            local_file: &std::path::Path,
+            progress: Option<std::sync::mpsc::Sender<i16>>,
+        ) -> Result<(), Error> {
+            self.source.download_release_entry(asset, local_file, progress)
+        }
+    }
 
     /// The player asked for the downloaded build now (the banner's Restart): applied once the
     /// window has closed and the helper with it.
@@ -43,8 +100,8 @@ mod velopack_updates {
     /// The feed: the update site's, or FERRET_UPDATE_FEED's (tests: a folder `vpk pack` wrote to).
     fn manager() -> Option<UpdateManager> {
         match std::env::var("FERRET_UPDATE_FEED") {
-            Ok(dir) if !dir.is_empty() => UpdateManager::new(FileSource::new(dir), None, None).ok(),
-            _ => UpdateManager::new(HttpSource::new(FEED), None, None).ok(),
+            Ok(dir) if !dir.is_empty() => UpdateManager::new(Signed { source: FileSource::new(&dir), at: dir }, None, None).ok(),
+            _ => UpdateManager::new(Signed { source: HttpSource::new(FEED), at: FEED.to_owned() }, None, None).ok(),
         }
     }
 

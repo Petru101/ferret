@@ -4,6 +4,8 @@
 # https://petru101.github.io/ferret-updates/. Players add it once (ferret.flatpakref) and get
 # every later build through `flatpak update` or their software centre. Run on the host:
 #   data/flatpak/publish.sh          build, sign, update the site's flatpak/ and run/ferret.flatpak
+#   data/flatpak/publish.sh import <tar>   the same with GitHub's build instead of building here
+#                                    (data/release/from-github.sh, which checks it came from GitHub)
 #   data/flatpak/publish.sh push     then publish the site (one fresh commit, history dropped);
 #                                    run this one in the distrobox, where gh's login is (on the
 #                                    host git has no credentials and KDE asked for a password)
@@ -12,21 +14,35 @@
 # for the GitHub release) points at the site too, so bundle installs get updates as well.
 set -eu
 cd "$(dirname "$0")/../.."
-KEY=C51EB562EB46BFD6A7C8D44B9BE8966D9AF9B957
+KEY=${FERRET_KEY:-C51EB562EB46BFD6A7C8D44B9BE8966D9AF9B957}
 GNUPG=${FERRET_GNUPG:-$HOME/.local/share/ferret-signing/gnupg}
 SITE=${FERRET_SITE:-$HOME/Projects/ferret-updates}
 URL=https://petru101.github.io/ferret-updates/flatpak/
 APP=io.github.Petru101.Ferret
 BRANCH=stable
 # The repo's history stays here between builds (deltas are made from the previous build).
-REPO=flatpak-repo
+REPO=${FERRET_REPO:-flatpak-repo}
 
 if [ "${1:-}" != push ]; then
-    # flatpak-builder signs what it exports, the store data (appstream branches, made while
-    # exporting) too: signed only afterwards, those stayed unsigned and Discover's pull of
-    # them failed ("GPG verification enabled, but no signatures found").
-    flatpak run --user org.flatpak.Builder --user --force-clean --disable-rofiles-fuse \
-        --default-branch=$BRANCH --gpg-sign=$KEY --gpg-homedir="$GNUPG" --repo=$REPO build-dir $APP.yml
+    if [ "${1:-}" = import ]; then
+        # A new commit on top of the repo's own history (so players get deltas), with exactly
+        # the files GitHub built: the listing with every file's checksum must match.
+        built=$(mktemp -d)
+        trap 'rm -rf "$built"' EXIT
+        tar --zstd -xf "$2" -C "$built"
+        for ref in $(ostree refs --repo="$built/repo" | grep -E '^(app|runtime)/'); do
+            flatpak build-commit-from --src-repo="$built/repo" --src-ref="$ref" --gpg-sign=$KEY --gpg-homedir="$GNUPG" \
+                --no-update-summary $REPO "$ref"
+            [ "$(ostree ls --repo="$built/repo" -R -C "$ref" / | sha256sum)" = "$(ostree ls --repo=$REPO -R -C "$ref" / | sha256sum)" ]
+            echo "$ref: the same files GitHub built"
+        done
+    else
+        # flatpak-builder signs what it exports, the store data (appstream branches, made while
+        # exporting) too: signed only afterwards, those stayed unsigned and Discover's pull of
+        # them failed ("GPG verification enabled, but no signatures found").
+        flatpak run --user org.flatpak.Builder --user --force-clean --disable-rofiles-fuse \
+            --default-branch=$BRANCH --gpg-sign=$KEY --gpg-homedir="$GNUPG" --repo=$REPO build-dir $APP.yml
+    fi
     # Anything still unsigned gets signed, and its deltas made again (a delta carries the
     # signatures its commit had when it was made).
     for ref in $(ostree refs --repo=$REPO); do

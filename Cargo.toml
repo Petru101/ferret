@@ -26,7 +26,10 @@ zbus = "5"
 
 [target.'cfg(windows)'.dependencies]
 # Updates of the Windows build (Velopack: its installer, update feed and apply on restart).
-velopack = "1.2.161"
+velopack = { version = "1.2.161", features = ["public-utils"] }
+# Checks the update list's signature (update.rs).
+minisign-verify = "0.3"
+serde_json = "1"
 # COM objects of Ferret's own (#[implement]: the notification activator in gui/notify.rs).
 windows-core = "0.62"
 # Windows.Graphics.Capture and Direct3D 11 (capture_windows.rs), hotkeys and notifications

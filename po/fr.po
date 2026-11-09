@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 04:58+0000\n"
+"POT-Creation-Date: 2026-11-09 05:54+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -13,7 +13,7 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n > 1);\n"
 
-#: data/io.github.Petru101.Ferret.desktop:4 src/gui/about.rs:234
+#: data/io.github.Petru101.Ferret.desktop:4 src/gui/about.rs:244
 msgid "Find and change values in your games"
 msgstr "Trouvez et modifiez des valeurs dans vos jeux"
 
@@ -915,13 +915,19 @@ msgid ""
 "Each time it starts, Ferret looks for a new version and downloads it. It's "
 "installed when you press Restart or the next time Ferret starts. Turned off, "
 "Ferret never looks by itself."
-msgstr "À chaque démarrage, Ferret cherche une nouvelle version et la télécharge. Elle s'installe quand vous appuyez sur Redémarrer ou au prochain démarrage de Ferret. Si c'est désactivé, Ferret ne cherche jamais de lui-même."
+msgstr ""
+"À chaque démarrage, Ferret cherche une nouvelle version et la télécharge. "
+"Elle s'installe quand vous appuyez sur Redémarrer ou au prochain démarrage "
+"de Ferret. Si c'est désactivé, Ferret ne cherche jamais de lui-même."
 
 #: src/gui/about.rs:57
 msgid ""
 "New versions come when Flatpak or your software centre updates your apps. "
 "Turned off, Ferret stays on this version until you install one here."
-msgstr "Les nouvelles versions arrivent quand Flatpak ou votre logithèque met à jour vos applications. Si c'est désactivé, Ferret reste sur cette version jusqu'à ce que vous en installiez une ici."
+msgstr ""
+"Les nouvelles versions arrivent quand Flatpak ou votre logithèque met à jour "
+"vos applications. Si c'est désactivé, Ferret reste sur cette version jusqu'à "
+"ce que vous en installiez une ici."
 
 #: src/gui/about.rs:65
 msgid ""
@@ -932,7 +938,15 @@ msgid ""
 "certificate, so Windows may warn about an unknown publisher, and an "
 "antivirus may flag the helper, because some malware changes other programs' "
 "memory too."
-msgstr "Pour changer les nombres d'un jeu, Ferret lit et écrit la mémoire du jeu que vous choisissez, grâce à un petit programme auxiliaire qui a les mêmes droits que vous. Un bogue ou une mauvaise mise à jour pourrait donc toucher vos fichiers, pas seulement le jeu. Il refuse les jeux avec anti-triche et les jeux uniquement en ligne. Ferret n'est pas signé avec un certificat : Windows peut donc signaler un éditeur inconnu, et un antivirus peut signaler le programme auxiliaire, car certains logiciels malveillants changent aussi la mémoire d'autres programmes."
+msgstr ""
+"Pour changer les nombres d'un jeu, Ferret lit et écrit la mémoire du jeu que "
+"vous choisissez, grâce à un petit programme auxiliaire qui a les mêmes "
+"droits que vous. Un bogue ou une mauvaise mise à jour pourrait donc toucher "
+"vos fichiers, pas seulement le jeu. Il refuse les jeux avec anti-triche et "
+"les jeux uniquement en ligne. Ferret n'est pas signé avec un certificat : "
+"Windows peut donc signaler un éditeur inconnu, et un antivirus peut signaler "
+"le programme auxiliaire, car certains logiciels malveillants changent aussi "
+"la mémoire d'autres programmes."
 
 #: src/gui/about.rs:76
 msgid ""
@@ -943,7 +957,15 @@ msgid ""
 "games with anti-cheat and online-only games. On some systems it asks for "
 "your password so the helper may open games, and the helper keeps only that "
 "one permission."
-msgstr "Pour changer les nombres d'un jeu, Ferret lit et écrit la mémoire du jeu que vous choisissez, grâce à un petit programme auxiliaire qui tourne hors du bac à sable de Flatpak avec les mêmes droits que vous. Le bac à sable ne vous protège donc pas de Ferret : un bogue ou une mauvaise mise à jour pourrait toucher vos fichiers, pas seulement le jeu. Il refuse les jeux avec anti-triche et les jeux uniquement en ligne. Sur certains systèmes, il demande votre mot de passe pour que le programme auxiliaire puisse ouvrir les jeux, et celui-ci ne garde que cette seule permission."
+msgstr ""
+"Pour changer les nombres d'un jeu, Ferret lit et écrit la mémoire du jeu que "
+"vous choisissez, grâce à un petit programme auxiliaire qui tourne hors du "
+"bac à sable de Flatpak avec les mêmes droits que vous. Le bac à sable ne "
+"vous protège donc pas de Ferret : un bogue ou une mauvaise mise à jour "
+"pourrait toucher vos fichiers, pas seulement le jeu. Il refuse les jeux avec "
+"anti-triche et les jeux uniquement en ligne. Sur certains systèmes, il "
+"demande votre mot de passe pour que le programme auxiliaire puisse ouvrir "
+"les jeux, et celui-ci ne garde que cette seule permission."
 
 #: src/gui/about.rs:89 src/gui/about.rs:95
 msgid "Ferret's Update Site (petru101.github.io, on GitHub)"
@@ -953,14 +975,20 @@ msgstr "Le site de mises à jour de Ferret (petru101.github.io, sur GitHub)"
 msgid ""
 "Ferret asks it for new versions each time it starts, unless updates are off, "
 "and when you press Check Now. New versions download from there."
-msgstr "Ferret lui demande les nouvelles versions à chaque démarrage, sauf si les mises à jour sont désactivées, et quand vous appuyez sur Vérifier. Les nouvelles versions se téléchargent depuis ce site."
+msgstr ""
+"Ferret lui demande les nouvelles versions à chaque démarrage, sauf si les "
+"mises à jour sont désactivées, et quand vous appuyez sur Vérifier. Les "
+"nouvelles versions se téléchargent depuis ce site."
 
 #: src/gui/about.rs:96
 msgid ""
 "Flatpak or your software centre asks it for new versions when they look for "
 "updates, and Ferret does when you press Check Now. New versions download "
 "from there."
-msgstr "Flatpak ou votre logithèque lui demande les nouvelles versions quand ils cherchent des mises à jour, et Ferret quand vous appuyez sur Vérifier. Les nouvelles versions se téléchargent depuis ce site."
+msgstr ""
+"Flatpak ou votre logithèque lui demande les nouvelles versions quand ils "
+"cherchent des mises à jour, et Ferret quand vous appuyez sur Vérifier. Les "
+"nouvelles versions se téléchargent depuis ce site."
 
 #: src/gui/about.rs:98
 msgid "Flathub"
@@ -970,7 +998,9 @@ msgstr "Flathub"
 msgid ""
 "Flatpak downloads the GNOME libraries Ferret runs on from there, and their "
 "updates."
-msgstr "Flatpak y télécharge les bibliothèques GNOME sur lesquelles Ferret tourne, ainsi que leurs mises à jour."
+msgstr ""
+"Flatpak y télécharge les bibliothèques GNOME sur lesquelles Ferret tourne, "
+"ainsi que leurs mises à jour."
 
 #: src/gui/about.rs:101
 msgid "Send Feedback (ferret.petru101.workers.dev, on Cloudflare)"
@@ -980,7 +1010,9 @@ msgstr "Envoyer un avis (ferret.petru101.workers.dev, chez Cloudflare)"
 msgid ""
 "Only when you press Send: your message, and the log and saved values if you "
 "leave them in. You can read all of it first."
-msgstr "Seulement quand vous appuyez sur Envoyer : votre message et, si vous les laissez, le journal et les valeurs enregistrées. Vous pouvez tout lire avant."
+msgstr ""
+"Seulement quand vous appuyez sur Envoyer : votre message et, si vous les "
+"laissez, le journal et les valeurs enregistrées. Vous pouvez tout lire avant."
 
 #: src/gui/about.rs:105
 msgid "The Shared Library (the same server)"
@@ -991,151 +1023,165 @@ msgid ""
 "When you browse it: the game's name and Steam id. When you share: the values "
 "you saved. When you keep or remove a value you took from it: whether it "
 "worked. Each request carries a random id made for this install."
-msgstr "Quand vous la parcourez : le nom du jeu et son identifiant Steam. Quand vous partagez : les valeurs que vous avez enregistrées. Quand vous gardez ou retirez une valeur qui en vient : si elle a marché. Chaque requête contient un identifiant aléatoire créé pour cette installation."
+msgstr ""
+"Quand vous la parcourez : le nom du jeu et son identifiant Steam. Quand vous "
+"partagez : les valeurs que vous avez enregistrées. Quand vous gardez ou "
+"retirez une valeur qui en vient : si elle a marché. Chaque requête contient "
+"un identifiant aléatoire créé pour cette installation."
 
 #: src/gui/about.rs:113
 msgid "Automatic Updates"
 msgstr "Mises à jour automatiques"
 
-#: src/gui/about.rs:134
+#: src/gui/about.rs:133
 #, rust-format
 msgid "Ferret couldn't change this: {e}"
 msgstr "Ferret n'a pas pu changer cela : {e}"
 
-#: src/gui/about.rs:147
+#: src/gui/about.rs:164
 msgid "Look for a New Version"
 msgstr "Chercher une nouvelle version"
 
-#: src/gui/about.rs:147
+#: src/gui/about.rs:164
 #, rust-format
 msgid "You have {version}."
 msgstr "Vous avez la {version}."
 
-#: src/gui/about.rs:148
+#: src/gui/about.rs:165
 msgid "Check Now"
 msgstr "Vérifier"
 
-#: src/gui/about.rs:149 src/gui/mod.rs:1331
-msgid "Restart"
-msgstr "Redémarrer"
-
-#: src/gui/about.rs:153
-msgid "Install"
-msgstr "Installer"
-
-#: src/gui/about.rs:158
-msgid "Installing…"
-msgstr "Installation…"
-
-#: src/gui/about.rs:166
-msgid "Installed. Restart Ferret to use it."
-msgstr "Installée. Redémarrez Ferret pour l'utiliser."
-
-#: src/gui/about.rs:170
-#, rust-format
-msgid "Ferret couldn't install it: {e}"
-msgstr "Ferret n'a pas pu l'installer : {e}"
-
-#: src/gui/about.rs:182
+#: src/gui/about.rs:183
 msgid "Asking…"
 msgstr "Demande en cours…"
 
-#: src/gui/about.rs:190
+#: src/gui/about.rs:188
 #, rust-format
 msgid "You have the newest version, {version}."
 msgstr "Vous avez la version la plus récente, {version}."
 
-#: src/gui/about.rs:196
+#: src/gui/about.rs:191
+msgid "Install"
+msgstr "Installer"
+
+#: src/gui/about.rs:193
 #, rust-format
 msgid "Ferret {new} is out."
 msgstr "Ferret {new} est sorti."
 
-#: src/gui/about.rs:197
+#: src/gui/about.rs:194
 msgid "A new version of Ferret is out."
 msgstr "Une nouvelle version de Ferret est sortie."
 
-#: src/gui/about.rs:205 src/gui/mod.rs:1331
+#: src/gui/about.rs:199 src/gui/about.rs:204 src/gui/about.rs:217
+#: src/gui/mod.rs:1331
+msgid "Restart"
+msgstr "Redémarrer"
+
+#: src/gui/about.rs:200 src/gui/mod.rs:1331
 msgid "A newer version of Ferret is installed"
 msgstr "Une version plus récente de Ferret est installée"
 
-#: src/gui/about.rs:212 src/gui/mod.rs:1508
+#: src/gui/about.rs:205 src/gui/mod.rs:1508
 #, rust-format
 msgid "Ferret {version} is ready to install"
 msgstr "Ferret {version} est prêt à être installé"
 
-#: src/gui/about.rs:214
+#: src/gui/about.rs:207
 #, rust-format
 msgid "Ferret couldn't ask for new versions: {e}"
 msgstr "Ferret n'a pas pu demander les nouvelles versions : {e}"
 
-#: src/gui/about.rs:236
+#: src/gui/about.rs:213
+msgid "Installing…"
+msgstr "Installation…"
+
+#: src/gui/about.rs:218
+msgid "Installed. Restart Ferret to use it."
+msgstr "Installée. Redémarrez Ferret pour l'utiliser."
+
+#: src/gui/about.rs:222
+#, rust-format
+msgid "Ferret couldn't install it: {e}"
+msgstr "Ferret n'a pas pu l'installer : {e}"
+
+#: src/gui/about.rs:246
 #, rust-format
 msgid "Version {version}"
 msgstr "Version {version}"
 
-#: src/gui/about.rs:241
+#: src/gui/about.rs:251
 msgid "Updates"
 msgstr "Mises à jour"
 
-#: src/gui/about.rs:246
+#: src/gui/about.rs:256
 msgid ""
 "This copy wasn't installed the usual way, so it doesn't update: it stays on "
 "this version."
-msgstr "Cette copie n'a pas été installée de la façon habituelle, elle ne se met donc pas à jour : elle reste sur cette version."
+msgstr ""
+"Cette copie n'a pas été installée de la façon habituelle, elle ne se met "
+"donc pas à jour : elle reste sur cette version."
 
-#: src/gui/about.rs:251
+#: src/gui/about.rs:261
 msgid "Who Makes It"
 msgstr "Qui le fait"
 
-#: src/gui/about.rs:253
+#: src/gui/about.rs:263
 msgid ""
 "Ferret is made by one person (Petru101 on GitHub), not a company. Nobody "
 "independent has checked it. Its code is public, so anyone can read it or "
-"build it themselves. The downloads are built on its maker's computer, so "
-"nothing proves they match that code."
-msgstr "Ferret est fait par une seule personne (Petru101 sur GitHub), pas par une entreprise. Personne d'indépendant ne l'a vérifié. Son code est public : tout le monde peut le lire ou le compiler. Les téléchargements sont compilés sur l'ordinateur de son auteur, donc rien ne prouve qu'ils correspondent à ce code."
+"build it themselves. New versions are built on GitHub's servers from that "
+"code, then signed with its maker's key, and updates without that signature "
+"are refused. On Windows, you can check where a download came from: gh "
+"attestation verify FILE -R Petru101/ferret (GitHub's gh tool, signed in). "
+"That shows where the file came from, not that the code is safe."
+msgstr "Ferret est fait par une seule personne (Petru101 sur GitHub), pas par une entreprise. Personne d'indépendant ne l'a vérifié. Son code est public : tout le monde peut le lire ou le compiler. Les nouvelles versions sont compilées sur les serveurs de GitHub à partir de ce code, puis signées avec la clé de son auteur, et les mises à jour sans cette signature sont refusées. Sous Windows, vous pouvez vérifier d'où vient un téléchargement : gh attestation verify FILE -R Petru101/ferret (l'outil gh de GitHub, connecté). Cela montre d'où vient le fichier, pas que le code est sûr."
 
-#: src/gui/about.rs:258
+#: src/gui/about.rs:271
 msgid "The Code"
 msgstr "Le code"
 
-#: src/gui/about.rs:258
+#: src/gui/about.rs:271
 msgid "Open source, under the GPL (version 3 or later)."
 msgstr "Open source, sous licence GPL (version 3 ou ultérieure)."
 
-#: src/gui/about.rs:258
+#: src/gui/about.rs:271
 msgid "On GitHub"
 msgstr "Sur GitHub"
 
-#: src/gui/about.rs:259
+#: src/gui/about.rs:272
 msgid "What Changed"
 msgstr "Ce qui a changé"
 
-#: src/gui/about.rs:259
+#: src/gui/about.rs:272
 msgid "Every version, with what's new in it."
 msgstr "Chaque version, avec ses nouveautés."
 
-#: src/gui/about.rs:259
+#: src/gui/about.rs:272
 msgid "Releases"
 msgstr "Versions"
 
-#: src/gui/about.rs:262
+#: src/gui/about.rs:275
 msgid "What It Can Do on Your Computer"
 msgstr "Ce qu'il peut faire sur votre ordinateur"
 
-#: src/gui/about.rs:265
+#: src/gui/about.rs:278
 msgid "What It Connects To"
 msgstr "À quoi il se connecte"
 
-#: src/gui/about.rs:267
+#: src/gui/about.rs:280
 msgid ""
 "Nothing about you or what you play goes to Ferret's maker unless you send it "
 "or use the shared library. Ferret has no tracking or usage statistics, and "
 "the game pictures it reads numbers from stay on this computer. Each site "
 "below sees your internet address."
-msgstr "Rien sur vous ou vos jeux ne va à l'auteur de Ferret, sauf si vous l'envoyez ou utilisez la bibliothèque partagée. Ferret n'a ni pistage ni statistiques d'utilisation, et les images du jeu dont il lit les nombres restent sur cet ordinateur. Chaque site ci-dessous voit votre adresse internet."
+msgstr ""
+"Rien sur vous ou vos jeux ne va à l'auteur de Ferret, sauf si vous l'envoyez "
+"ou utilisez la bibliothèque partagée. Ferret n'a ni pistage ni statistiques "
+"d'utilisation, et les images du jeu dont il lit les nombres restent sur cet "
+"ordinateur. Chaque site ci-dessous voit votre adresse internet."
 
-#: src/gui/about.rs:280 src/gui/share.rs:66
+#: src/gui/about.rs:293 src/gui/share.rs:66
 msgid "About Ferret"
 msgstr "À propos de Ferret"
 

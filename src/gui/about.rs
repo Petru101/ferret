@@ -261,8 +261,11 @@ pub fn open(ui: &Rc<Ui>) {
         .title(tr!("Who Makes It"))
         .description(tr!(
             "Ferret is made by one person (Petru101 on GitHub), not a company. Nobody independent has checked it. \
-             Its code is public, so anyone can read it or build it themselves. The downloads are built on its \
-             maker's computer, so nothing proves they match that code."
+             Its code is public, so anyone can read it or build it themselves. New versions are built on GitHub's \
+             servers from that code, then signed with its maker's key, and updates without that signature are \
+             refused. On Windows, you can check where a download came from: gh attestation verify FILE -R \
+             Petru101/ferret (GitHub's gh tool, signed in). That shows where the file came from, not that the code \
+             is safe."
         ))
         .build();
     who.add(&link_row(tr!("The Code"), tr!("Open source, under the GPL (version 3 or later)."), tr!("On GitHub"), SOURCE));
