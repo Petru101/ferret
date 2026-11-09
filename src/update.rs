@@ -234,8 +234,12 @@ mod flatpak_updates {
         let newest = flatpak(&["remote-info", me.level, "--show-commit", &origin, &me.reference])?;
         let installed = flatpak(&["info", me.level, "--show-commit", &me.reference])?;
         if newest != installed {
+            // remote-info takes the version from this computer's copy of the site's store data,
+            // which may be older than the commit it just read: it said 0.1.4 with 0.1.5 out.
+            flatpak(&["update", me.level, "--appstream", &origin]).ok();
             let about = flatpak(&["remote-info", me.level, &origin, &me.reference]).unwrap_or_default();
             let version = about.lines().find_map(|l| l.trim().strip_prefix("Version:")).map(|v| v.trim().to_owned());
+            let version = version.filter(|v| v != env!("CARGO_PKG_VERSION"));
             return Ok(Check::Available(version));
         }
         Ok(if flatpak_info("app-commit").is_some_and(|running| running != installed) { Check::Restart } else { Check::Newest })
