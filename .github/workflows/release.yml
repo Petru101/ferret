@@ -107,6 +107,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
+          cache: false
           install: >-
             mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-rust
             mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gettext-tools
