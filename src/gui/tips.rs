@@ -52,7 +52,7 @@ impl Tip {
 fn settings_path() -> PathBuf {
     crate::core::config_file("settings", |text| {
         let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty()).peekable();
-        lines.peek().is_some() && lines.all(|l| ["hide-tip ", "warned-online ", "warned-scrambled "].iter().any(|k| l.starts_with(k)))
+        lines.peek().is_some() && lines.all(|l| ["hide-tip ", "warned-online ", "warned-scrambled ", "updates "].iter().any(|k| l.starts_with(k)))
     })
 }
 
@@ -71,6 +71,14 @@ pub fn add_setting(line: &str) -> std::io::Result<()> {
     text.push('\n');
     std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
     std::fs::write(&path, text)
+}
+
+#[cfg(windows)]
+pub fn remove_setting(line: &str) -> std::io::Result<()> {
+    let path = settings_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let kept: String = text.lines().filter(|l| l.trim() != line).map(|l| format!("{l}\n")).collect();
+    std::fs::write(&path, kept)
 }
 
 fn hidden(tip: Tip) -> bool {

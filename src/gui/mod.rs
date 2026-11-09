@@ -2,6 +2,7 @@
 // (scans, OCR, the window picker, tracing) never blocks the window; the
 // interface sends it jobs and gets events back.
 
+mod about;
 mod browse;
 mod feedback;
 mod find;
@@ -1495,10 +1496,10 @@ fn build(app: &adw::Application) {
             glib::ControlFlow::Continue
         });
     }
-    // Windows: a newer build downloaded in the background, once per start; the banner offers
-    // to install it now (else the next start does).
+    // Windows: a newer build downloaded in the background, once per start unless the player
+    // turned that off (About); the banner offers to install it now (else the next start does).
     #[cfg(windows)]
-    {
+    if about::automatic() {
         let banners = banners.clone();
         glib::timeout_add_seconds_local_once(5, move || {
             glib::spawn_future_local(async move {

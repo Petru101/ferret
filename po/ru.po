@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-26 04:25+0000\n"
+"POT-Creation-Date: 2026-11-09 04:58+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Russian\n"
 "Language: ru\n"
@@ -14,7 +14,7 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && "
 "n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
 
-#: data/io.github.Petru101.Ferret.desktop:4
+#: data/io.github.Petru101.Ferret.desktop:4 src/gui/about.rs:234
 msgid "Find and change values in your games"
 msgstr "Находите и меняйте значения в своих играх"
 
@@ -516,7 +516,9 @@ msgstr ""
 msgid ""
 "{name} not written: a tweak in the Browse tab keeps this place while it's "
 "on. Turn it off there first."
-msgstr "{name} не записано: настройка на вкладке «Обзор» удерживает это место, пока она включена. Сначала выключите её там."
+msgstr ""
+"{name} не записано: настройка на вкладке «Обзор» удерживает это место, пока "
+"она включена. Сначала выключите её там."
 
 #: src/core.rs:3813
 #, rust-format
@@ -888,6 +890,235 @@ msgstr ""
 "Отчёт с этим идентификатором уже отправлен: закройте это окно и напишите его "
 "заново."
 
+#: src/gui/about.rs:49
+msgid ""
+"Each time it starts, Ferret looks for a new version and downloads it. It's "
+"installed when you press Restart or the next time Ferret starts. Turned off, "
+"Ferret never looks by itself."
+msgstr "При каждом запуске Ferret ищет новую версию и скачивает её. Она устанавливается, когда вы нажимаете «Перезапустить» или при следующем запуске Ferret. Если это выключено, Ferret никогда не ищет сам."
+
+#: src/gui/about.rs:57
+msgid ""
+"New versions come when Flatpak or your software centre updates your apps. "
+"Turned off, Ferret stays on this version until you install one here."
+msgstr "Новые версии приходят, когда Flatpak или ваш центр приложений обновляет приложения. Если это выключено, Ferret остаётся на этой версии, пока вы не установите новую здесь."
+
+#: src/gui/about.rs:65
+msgid ""
+"To change a game's numbers, Ferret reads and writes the memory of the game "
+"you pick, through a small helper program with the same rights as you. So a "
+"bug or a bad update could reach your files, not only the game. It refuses "
+"games with anti-cheat and online-only games. Ferret isn't signed with a "
+"certificate, so Windows may warn about an unknown publisher, and an "
+"antivirus may flag the helper, because some malware changes other programs' "
+"memory too."
+msgstr "Чтобы менять числа в игре, Ferret читает и записывает память выбранной вами игры через небольшую вспомогательную программу с теми же правами, что и у вас. Поэтому ошибка или плохое обновление могут затронуть ваши файлы, а не только игру. Игры с античитом и только сетевые игры он отклоняет. Ferret не подписан сертификатом, поэтому Windows может предупредить о неизвестном издателе, а антивирус может отметить вспомогательную программу: некоторые вредоносные программы тоже меняют память других программ."
+
+#: src/gui/about.rs:76
+msgid ""
+"To change a game's numbers, Ferret reads and writes the memory of the game "
+"you pick, through a small helper program that runs outside Flatpak's sandbox "
+"with the same rights as you. So the sandbox doesn't protect you from Ferret: "
+"a bug or a bad update could reach your files, not only the game. It refuses "
+"games with anti-cheat and online-only games. On some systems it asks for "
+"your password so the helper may open games, and the helper keeps only that "
+"one permission."
+msgstr "Чтобы менять числа в игре, Ferret читает и записывает память выбранной вами игры через небольшую вспомогательную программу, которая работает вне песочницы Flatpak с теми же правами, что и у вас. Поэтому песочница не защищает вас от Ferret: ошибка или плохое обновление могут затронуть ваши файлы, а не только игру. Игры с античитом и только сетевые игры он отклоняет. В некоторых системах он спрашивает ваш пароль, чтобы вспомогательная программа могла открывать игры, и она сохраняет только это одно разрешение."
+
+#: src/gui/about.rs:89 src/gui/about.rs:95
+msgid "Ferret's Update Site (petru101.github.io, on GitHub)"
+msgstr "Сайт обновлений Ferret (petru101.github.io, на GitHub)"
+
+#: src/gui/about.rs:90
+msgid ""
+"Ferret asks it for new versions each time it starts, unless updates are off, "
+"and when you press Check Now. New versions download from there."
+msgstr "Ferret спрашивает его о новых версиях при каждом запуске, если обновления не выключены, и когда вы нажимаете «Проверить». Новые версии скачиваются оттуда."
+
+#: src/gui/about.rs:96
+msgid ""
+"Flatpak or your software centre asks it for new versions when they look for "
+"updates, and Ferret does when you press Check Now. New versions download "
+"from there."
+msgstr "Flatpak или ваш центр приложений спрашивает его о новых версиях, когда ищет обновления, а Ferret — когда вы нажимаете «Проверить». Новые версии скачиваются оттуда."
+
+#: src/gui/about.rs:98
+msgid "Flathub"
+msgstr "Flathub"
+
+#: src/gui/about.rs:98
+msgid ""
+"Flatpak downloads the GNOME libraries Ferret runs on from there, and their "
+"updates."
+msgstr "Flatpak скачивает оттуда библиотеки GNOME, на которых работает Ferret, и их обновления."
+
+#: src/gui/about.rs:101
+msgid "Send Feedback (ferret.petru101.workers.dev, on Cloudflare)"
+msgstr "Отправить отзыв (ferret.petru101.workers.dev, на Cloudflare)"
+
+#: src/gui/about.rs:102
+msgid ""
+"Only when you press Send: your message, and the log and saved values if you "
+"leave them in. You can read all of it first."
+msgstr "Только когда вы нажимаете «Отправить»: ваше сообщение и, если вы их оставите, журнал и сохранённые значения. Всё это можно прочитать заранее."
+
+#: src/gui/about.rs:105
+msgid "The Shared Library (the same server)"
+msgstr "Общая библиотека (тот же сервер)"
+
+#: src/gui/about.rs:106
+msgid ""
+"When you browse it: the game's name and Steam id. When you share: the values "
+"you saved. When you keep or remove a value you took from it: whether it "
+"worked. Each request carries a random id made for this install."
+msgstr "Когда вы её просматриваете: название игры и её id в Steam. Когда вы делитесь: сохранённые вами значения. Когда вы оставляете или удаляете взятое из неё значение: сработало ли оно. Каждый запрос содержит случайный id, созданный для этой установки."
+
+#: src/gui/about.rs:113
+msgid "Automatic Updates"
+msgstr "Автоматические обновления"
+
+#: src/gui/about.rs:134
+#, rust-format
+msgid "Ferret couldn't change this: {e}"
+msgstr "Ferret не смог это изменить: {e}"
+
+#: src/gui/about.rs:147
+msgid "Look for a New Version"
+msgstr "Поиск новой версии"
+
+#: src/gui/about.rs:147
+#, rust-format
+msgid "You have {version}."
+msgstr "У вас {version}."
+
+#: src/gui/about.rs:148
+msgid "Check Now"
+msgstr "Проверить"
+
+#: src/gui/about.rs:149 src/gui/mod.rs:1331
+msgid "Restart"
+msgstr "Перезапустить"
+
+#: src/gui/about.rs:153
+msgid "Install"
+msgstr "Установить"
+
+#: src/gui/about.rs:158
+msgid "Installing…"
+msgstr "Установка…"
+
+#: src/gui/about.rs:166
+msgid "Installed. Restart Ferret to use it."
+msgstr "Установлено. Перезапустите Ferret, чтобы её использовать."
+
+#: src/gui/about.rs:170
+#, rust-format
+msgid "Ferret couldn't install it: {e}"
+msgstr "Ferret не смог её установить: {e}"
+
+#: src/gui/about.rs:182
+msgid "Asking…"
+msgstr "Запрос…"
+
+#: src/gui/about.rs:190
+#, rust-format
+msgid "You have the newest version, {version}."
+msgstr "У вас самая новая версия, {version}."
+
+#: src/gui/about.rs:196
+#, rust-format
+msgid "Ferret {new} is out."
+msgstr "Вышел Ferret {new}."
+
+#: src/gui/about.rs:197
+msgid "A new version of Ferret is out."
+msgstr "Вышла новая версия Ferret."
+
+#: src/gui/about.rs:205 src/gui/mod.rs:1331
+msgid "A newer version of Ferret is installed"
+msgstr "Установлена более новая версия Ferret"
+
+#: src/gui/about.rs:212 src/gui/mod.rs:1508
+#, rust-format
+msgid "Ferret {version} is ready to install"
+msgstr "Ferret {version} готов к установке"
+
+#: src/gui/about.rs:214
+#, rust-format
+msgid "Ferret couldn't ask for new versions: {e}"
+msgstr "Ferret не смог спросить о новых версиях: {e}"
+
+#: src/gui/about.rs:236
+#, rust-format
+msgid "Version {version}"
+msgstr "Версия {version}"
+
+#: src/gui/about.rs:241
+msgid "Updates"
+msgstr "Обновления"
+
+#: src/gui/about.rs:246
+msgid ""
+"This copy wasn't installed the usual way, so it doesn't update: it stays on "
+"this version."
+msgstr "Эта копия установлена не обычным способом, поэтому не обновляется: она остаётся на этой версии."
+
+#: src/gui/about.rs:251
+msgid "Who Makes It"
+msgstr "Кто это делает"
+
+#: src/gui/about.rs:253
+msgid ""
+"Ferret is made by one person (Petru101 on GitHub), not a company. Nobody "
+"independent has checked it. Its code is public, so anyone can read it or "
+"build it themselves. The downloads are built on its maker's computer, so "
+"nothing proves they match that code."
+msgstr "Ferret делает один человек (Petru101 на GitHub), а не компания. Никто независимый его не проверял. Его код открыт, так что любой может его прочитать или собрать сам. Загружаемые файлы собираются на компьютере автора, поэтому ничто не доказывает, что они соответствуют этому коду."
+
+#: src/gui/about.rs:258
+msgid "The Code"
+msgstr "Код"
+
+#: src/gui/about.rs:258
+msgid "Open source, under the GPL (version 3 or later)."
+msgstr "Открытый исходный код, под лицензией GPL (версия 3 или новее)."
+
+#: src/gui/about.rs:258
+msgid "On GitHub"
+msgstr "На GitHub"
+
+#: src/gui/about.rs:259
+msgid "What Changed"
+msgstr "Что изменилось"
+
+#: src/gui/about.rs:259
+msgid "Every version, with what's new in it."
+msgstr "Каждая версия с её новшествами."
+
+#: src/gui/about.rs:259
+msgid "Releases"
+msgstr "Выпуски"
+
+#: src/gui/about.rs:262
+msgid "What It Can Do on Your Computer"
+msgstr "Что он может делать на вашем компьютере"
+
+#: src/gui/about.rs:265
+msgid "What It Connects To"
+msgstr "К чему он подключается"
+
+#: src/gui/about.rs:267
+msgid ""
+"Nothing about you or what you play goes to Ferret's maker unless you send it "
+"or use the shared library. Ferret has no tracking or usage statistics, and "
+"the game pictures it reads numbers from stay on this computer. Each site "
+"below sees your internet address."
+msgstr "Ничего о вас или о том, во что вы играете, не попадает к автору Ferret, если вы сами это не отправите или не используете общую библиотеку. В Ferret нет слежки и статистики использования, а кадры игры, с которых он читает числа, остаются на этом компьютере. Каждый сайт ниже видит ваш интернет-адрес."
+
+#: src/gui/about.rs:280 src/gui/share.rs:66
+msgid "About Ferret"
+msgstr "О Ferret"
+
 #: src/gui/browse.rs:53
 #, rust-format
 msgid "Your character ({class})"
@@ -1010,7 +1241,9 @@ msgstr "Настройка включена: Ferret удерживает её, �
 msgid ""
 "Tweak on. It changes {names} too, which you saved: your own setting for it "
 "waits until the tweak is off."
-msgstr "Настройка включена. Она также меняет {names}, что вы сохранили: ваша собственная настройка ждёт, пока эта не будет выключена."
+msgstr ""
+"Настройка включена. Она также меняет {names}, что вы сохранили: ваша "
+"собственная настройка ждёт, пока эта не будет выключена."
 
 #: src/gui/browse.rs:231
 msgid "Tweak off: the game has its own values back"
@@ -1134,8 +1367,8 @@ msgstr ""
 
 #: src/gui/browse.rs:474 src/gui/feedback.rs:69 src/gui/find.rs:239
 #: src/gui/find.rs:2359 src/gui/guide.rs:162 src/gui/guide.rs:610
-#: src/gui/guide.rs:616 src/gui/share.rs:256 src/gui/share.rs:447
-#: src/gui/share.rs:475 src/gui/values.rs:145 src/gui/values.rs:176
+#: src/gui/guide.rs:616 src/gui/share.rs:258 src/gui/share.rs:449
+#: src/gui/share.rs:477 src/gui/values.rs:145 src/gui/values.rs:176
 msgid "Cancel"
 msgstr "Отмена"
 
@@ -1207,23 +1440,23 @@ msgstr "Что отправляется"
 msgid "All Types"
 msgstr "Все типы"
 
-#: src/gui/find.rs:208 src/gui/mod.rs:1623
+#: src/gui/find.rs:208 src/gui/mod.rs:1624
 msgid "2 Bytes"
 msgstr "2 байта"
 
-#: src/gui/find.rs:209 src/gui/mod.rs:1619
+#: src/gui/find.rs:209 src/gui/mod.rs:1620
 msgid "4 Bytes"
 msgstr "4 байта"
 
-#: src/gui/find.rs:210 src/gui/mod.rs:1620
+#: src/gui/find.rs:210 src/gui/mod.rs:1621
 msgid "Float"
 msgstr "Float"
 
-#: src/gui/find.rs:211 src/gui/mod.rs:1621
+#: src/gui/find.rs:211 src/gui/mod.rs:1622
 msgid "Double"
 msgstr "Double"
 
-#: src/gui/find.rs:212 src/gui/mod.rs:1622
+#: src/gui/find.rs:212 src/gui/mod.rs:1623
 msgid "Encoded 4 Bytes"
 msgstr "Закодированные 4 байта"
 
@@ -1547,7 +1780,7 @@ msgid "Capturing the game window…"
 msgstr "Захват окна игры…"
 
 #: src/gui/find.rs:1066 src/gui/find.rs:1990 src/gui/guide.rs:207
-#: src/gui/mod.rs:983
+#: src/gui/mod.rs:984
 msgid "Click the number you want to find"
 msgstr "Нажмите на число, которое хотите найти"
 
@@ -2100,7 +2333,7 @@ msgid "Type the number the game holds below, or click one in the picture."
 msgstr ""
 "Введите ниже число, которое хранит игра, или нажмите на число на изображении."
 
-#: src/gui/find.rs:1990 src/gui/guide.rs:207 src/gui/mod.rs:983
+#: src/gui/find.rs:1990 src/gui/guide.rs:207 src/gui/mod.rs:984
 msgid "In the picture of your game below, or drag a box around it."
 msgstr "На изображении вашей игры ниже, или обведите его рамкой."
 
@@ -2777,16 +3010,16 @@ msgstr ""
 msgid "Set Up Hotkeys…"
 msgstr "Настроить горячие клавиши…"
 
-#: src/gui/mod.rs:232
+#: src/gui/mod.rs:233
 #, rust-format
 msgid "Ferret hit a bug and stopped: {what}"
 msgstr "Ferret столкнулся с ошибкой и остановился: {what}"
 
-#: src/gui/mod.rs:326 src/gui/mod.rs:339
+#: src/gui/mod.rs:327 src/gui/mod.rs:340
 msgid "Ferret Is Still Running"
 msgstr "Ferret всё ещё работает"
 
-#: src/gui/mod.rs:327 src/gui/mod.rs:340
+#: src/gui/mod.rs:328 src/gui/mod.rs:341
 #, rust-format
 msgid ""
 "It keeps {values} in range while you play, and quits when the game does."
@@ -2794,43 +3027,43 @@ msgstr ""
 "Он удерживает {values} в диапазоне, пока вы играете, и закроется вместе с "
 "игрой."
 
-#: src/gui/mod.rs:328 src/gui/mod.rs:342 src/gui/mod.rs:640 src/gui/mod.rs:655
-#: src/gui/mod.rs:676 src/gui/mod.rs:690 src/gui/share.rs:66
+#: src/gui/mod.rs:329 src/gui/mod.rs:343 src/gui/mod.rs:641 src/gui/mod.rs:656
+#: src/gui/mod.rs:677 src/gui/mod.rs:691 src/gui/share.rs:67
 msgid "Quit Ferret"
 msgstr "Закрыть Ferret"
 
-#: src/gui/mod.rs:378
+#: src/gui/mod.rs:379
 #, rust-format
 msgid "To keep {values} in range while you play"
 msgstr "Чтобы удерживать {values} в диапазоне, пока вы играете"
 
-#: src/gui/mod.rs:405
+#: src/gui/mod.rs:406
 #, rust-format
 msgid "Keeping {values} in range"
 msgstr "Удерживает {values} в диапазоне"
 
-#: src/gui/mod.rs:427 src/gui/mod.rs:428 src/gui/mod.rs:430 src/gui/mod.rs:431
-#: src/gui/mod.rs:432
+#: src/gui/mod.rs:428 src/gui/mod.rs:429 src/gui/mod.rs:431 src/gui/mod.rs:432
+#: src/gui/mod.rs:433
 msgid "Can't search yet"
 msgstr "Пока нельзя искать"
 
-#: src/gui/mod.rs:427 src/gui/mod.rs:430
+#: src/gui/mod.rs:428 src/gui/mod.rs:431
 msgid "Open the game in Ferret first."
 msgstr "Сначала откройте игру в Ferret."
 
-#: src/gui/mod.rs:429
+#: src/gui/mod.rs:430
 msgid "Can't scan again yet"
 msgstr "Пока нельзя сканировать снова"
 
-#: src/gui/mod.rs:507
+#: src/gui/mod.rs:508
 msgid "Allow With Your Password"
 msgstr "Разрешить с паролем"
 
-#: src/gui/mod.rs:540 src/gui/tips.rs:96
+#: src/gui/mod.rs:541 src/gui/tips.rs:104
 msgid "Close"
 msgstr "Закрыть"
 
-#: src/gui/mod.rs:558
+#: src/gui/mod.rs:559
 msgid ""
 "Only change values while you play alone and offline. If anti-cheat starts in "
 "the game, Ferret lets go of it at once."
@@ -2838,12 +3071,12 @@ msgstr ""
 "Меняйте значения, только когда играете один и офлайн. Если в игре запустится "
 "античит, Ferret сразу её отпустит."
 
-#: src/gui/mod.rs:561
+#: src/gui/mod.rs:562
 #, rust-format
 msgid "{name} has online features"
 msgstr "У {name} есть сетевые функции"
 
-#: src/gui/mod.rs:575
+#: src/gui/mod.rs:576
 #, rust-format
 msgid ""
 "{name} uses {scrambler}, which keeps its numbers scrambled in memory. Ferret "
@@ -2855,21 +3088,21 @@ msgstr ""
 "которые он находит, — приманки, которые игра восстанавливает, и игра может "
 "заметить их изменение."
 
-#: src/gui/mod.rs:581
+#: src/gui/mod.rs:582
 #, rust-format
 msgid "{name} hides its numbers"
 msgstr "{name} прячет свои числа"
 
-#: src/gui/mod.rs:634
+#: src/gui/mod.rs:635
 msgid "Valve Anti-Cheat"
 msgstr "Valve Anti-Cheat"
 
-#: src/gui/mod.rs:638
+#: src/gui/mod.rs:639
 #, rust-format
 msgid "{game} has anti-cheat"
 msgstr "В {game} есть античит"
 
-#: src/gui/mod.rs:639
+#: src/gui/mod.rs:640
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while you play it."
@@ -2877,12 +3110,12 @@ msgstr ""
 "Некоторые античиты ищут программы для читов на всём компьютере. Закройте "
 "Ferret, пока играете."
 
-#: src/gui/mod.rs:648
+#: src/gui/mod.rs:649
 #, rust-format
 msgid "Quit Ferret While You Play {game}?"
 msgstr "Закрыть Ferret, пока вы играете в {game}?"
 
-#: src/gui/mod.rs:650
+#: src/gui/mod.rs:651
 #, rust-format
 msgid ""
 "{game} runs {anticheat}. Some anti-cheat looks for cheat tools anywhere on "
@@ -2895,16 +3128,16 @@ msgstr ""
 "Ferret не откроет эту игру, но безопаснее всего закрыть Ferret, пока вы в "
 "неё играете."
 
-#: src/gui/mod.rs:655 src/gui/mod.rs:690
+#: src/gui/mod.rs:656 src/gui/mod.rs:691
 msgid "Keep Ferret Open"
 msgstr "Оставить Ferret открытым"
 
-#: src/gui/mod.rs:674
+#: src/gui/mod.rs:675
 #, rust-format
 msgid "{anticheat} is running"
 msgstr "Запущен {anticheat}"
 
-#: src/gui/mod.rs:675
+#: src/gui/mod.rs:676
 msgid ""
 "Some anti-cheat looks for cheat tools anywhere on your computer. Quit Ferret "
 "while it runs."
@@ -2912,12 +3145,12 @@ msgstr ""
 "Некоторые античиты ищут программы для читов на всём компьютере. Закройте "
 "Ferret, пока он работает."
 
-#: src/gui/mod.rs:684
+#: src/gui/mod.rs:685
 #, rust-format
 msgid "Quit Ferret While {anticheat} Runs?"
 msgstr "Закрыть Ferret, пока работает {anticheat}?"
 
-#: src/gui/mod.rs:686
+#: src/gui/mod.rs:687
 #, rust-format
 msgid ""
 "{anticheat} is running on your computer. Some anti-cheat looks for cheat "
@@ -2930,35 +3163,35 @@ msgstr ""
 "них банить. Ferret не откроет ни одну игру, пока он работает, но безопаснее "
 "всего закрыть Ferret."
 
-#: src/gui/mod.rs:710
+#: src/gui/mod.rs:711
 #, rust-format
 msgid "{name} started again: opening it"
 msgstr "{name} снова запущена: открываем"
 
-#: src/gui/mod.rs:732
+#: src/gui/mod.rs:733
 #, rust-format
 msgid "Process {pid}"
 msgstr "Процесс {pid}"
 
-#: src/gui/mod.rs:734
+#: src/gui/mod.rs:735
 #, rust-format
 msgid "Steam app {id}"
 msgstr "Приложение Steam {id}"
 
-#: src/gui/mod.rs:747
+#: src/gui/mod.rs:748
 msgid "Needs your password"
 msgstr "Нужен ваш пароль"
 
-#: src/gui/mod.rs:748
+#: src/gui/mod.rs:749
 msgid "Blocked by your system until it restarts"
 msgstr "Заблокировано системой до перезагрузки"
 
-#: src/gui/mod.rs:755
+#: src/gui/mod.rs:756
 #, rust-format
 msgid "{anticheat} is running. Ferret won't attach while anti-cheat runs."
 msgstr "Запущен {anticheat}. Ferret не подключается, пока работает античит."
 
-#: src/gui/mod.rs:757
+#: src/gui/mod.rs:758
 #, rust-format
 msgid ""
 "{anticheat} is running on your computer. Ferret won't attach to any game "
@@ -2967,11 +3200,11 @@ msgstr ""
 "На вашем компьютере работает {anticheat}. Ferret не подключается ни к одной "
 "игре, пока он работает."
 
-#: src/gui/mod.rs:759
+#: src/gui/mod.rs:760
 msgid "Online-only game. Ferret won't attach to online games."
 msgstr "Только сетевая игра. Ferret не подключается к сетевым играм."
 
-#: src/gui/mod.rs:761
+#: src/gui/mod.rs:762
 msgid ""
 "Uses Valve Anti-Cheat. Ferret won't attach to it. Source games started with "
 "-insecure in their launch options are allowed."
@@ -2979,7 +3212,7 @@ msgstr ""
 "Использует Valve Anti-Cheat. Ferret к ней не подключается. Игры на Source, "
 "запущенные с -insecure в параметрах запуска, разрешены."
 
-#: src/gui/mod.rs:764
+#: src/gui/mod.rs:765
 msgid ""
 "This game flags edited characters when they go online. Ferret won't attach "
 "to it."
@@ -2987,30 +3220,30 @@ msgstr ""
 "Эта игра помечает изменённых персонажей, когда они выходят в сеть. Ferret к "
 "ней не подключается."
 
-#: src/gui/mod.rs:773
+#: src/gui/mod.rs:774
 msgid "Online features"
 msgstr "Сетевые функции"
 
-#: src/gui/mod.rs:794 src/gui/phase.rs:44
+#: src/gui/mod.rs:795 src/gui/phase.rs:44
 #, rust-format
 msgid "Opening {game}…"
 msgstr "Открываем {game}…"
 
-#: src/gui/mod.rs:873
+#: src/gui/mod.rs:874
 #, rust-format
 msgid "{name} closed. Ferret opens it again when it starts."
 msgstr "{name} закрылась. Ferret откроет её снова, когда она запустится."
 
-#: src/gui/mod.rs:874
+#: src/gui/mod.rs:875
 #, rust-format
 msgid "{name} closed"
 msgstr "{name} закрылась"
 
-#: src/gui/mod.rs:874
+#: src/gui/mod.rs:875
 msgid "Ferret opens it again when it starts."
 msgstr "Ferret откроет её снова, когда она запустится."
 
-#: src/gui/mod.rs:880
+#: src/gui/mod.rs:881
 #, rust-format
 msgid ""
 "Ferret's helper stopped and started again. {name} keeps its values in range; "
@@ -3019,19 +3252,19 @@ msgstr ""
 "Вспомогательная программа Ferret остановилась и запустилась снова. {name} по-"
 "прежнему держит значения в пределах; поиск начинается заново."
 
-#: src/gui/mod.rs:889 src/gui/mod.rs:900
+#: src/gui/mod.rs:890 src/gui/mod.rs:901
 #, rust-format
 msgid "Ferret let go of {name}"
 msgstr "Ferret отпустил {name}"
 
-#: src/gui/mod.rs:889
+#: src/gui/mod.rs:890
 #, rust-format
 msgid "Ferret's helper stopped, and the new one couldn't open the game: {why}"
 msgstr ""
 "Вспомогательная программа Ferret остановилась, а новая не смогла открыть "
 "игру: {why}"
 
-#: src/gui/mod.rs:903
+#: src/gui/mod.rs:904
 #, rust-format
 msgid ""
 "{anticheat} started in {name}. Ferret stopped keeping values in range and "
@@ -3040,7 +3273,7 @@ msgstr ""
 "В {name} запустился {anticheat}. Ferret перестал удерживать значения в "
 "диапазоне и ничего не будет менять в игре, пока работает античит."
 
-#: src/gui/mod.rs:909
+#: src/gui/mod.rs:910
 #, rust-format
 msgid ""
 "{anticheat} started on your computer. Ferret stopped keeping values in range "
@@ -3050,168 +3283,155 @@ msgstr ""
 "значения в диапазоне и ничего не будет менять в {name}, пока работает "
 "античит."
 
-#: src/gui/mod.rs:970
+#: src/gui/mod.rs:971
 msgid "Saved"
 msgstr "Сохранено"
 
-#: src/gui/mod.rs:978
+#: src/gui/mod.rs:979
 msgid "More like this"
 msgstr "Ещё такие же"
 
-#: src/gui/mod.rs:979
+#: src/gui/mod.rs:980
 msgid "Nothing saved"
 msgstr "Ничего не сохранено"
 
-#: src/gui/mod.rs:992
+#: src/gui/mod.rs:993
 msgid "Limits on"
 msgstr "Ограничения включены"
 
-#: src/gui/mod.rs:992
+#: src/gui/mod.rs:993
 #, rust-format
 msgid "Ferret keeps {values} in range again."
 msgstr "Ferret снова удерживает {values} в диапазоне."
 
-#: src/gui/mod.rs:993
+#: src/gui/mod.rs:994
 msgid "Limits off"
 msgstr "Ограничения выключены"
 
-#: src/gui/mod.rs:993
+#: src/gui/mod.rs:994
 #, rust-format
 msgid "{values} can change freely until you turn limits on again."
 msgstr ""
 "{values} может свободно меняться, пока вы снова не включите ограничения."
 
-#: src/gui/mod.rs:1001
+#: src/gui/mod.rs:1002
 msgid "Limits"
 msgstr "Ограничения"
 
-#: src/gui/mod.rs:1020
+#: src/gui/mod.rs:1021
 msgid "Ferret Can't Open This Game"
 msgstr "Ferret не может открыть эту игру"
 
-#: src/gui/mod.rs:1042
+#: src/gui/mod.rs:1043
 msgid "Running games"
 msgstr "Запущенные игры"
 
-#: src/gui/mod.rs:1043
+#: src/gui/mod.rs:1044
 msgid "Pick the game to attach to. Ferret only works with single-player games."
 msgstr ""
 "Выберите игру для подключения. Ferret работает только с одиночными играми."
 
-#: src/gui/mod.rs:1061
+#: src/gui/mod.rs:1062
 msgid "No Games Running"
 msgstr "Нет запущенных игр"
 
-#: src/gui/mod.rs:1062
+#: src/gui/mod.rs:1063
 msgid "Start a game and it shows up here."
 msgstr "Запустите игру, и она появится здесь."
 
-#: src/gui/mod.rs:1310
+#: src/gui/mod.rs:1311
 msgid "Values"
 msgstr "Значения"
 
-#: src/gui/mod.rs:1311
+#: src/gui/mod.rs:1312
 msgid "Find Value"
 msgstr "Найти значение"
 
-#: src/gui/mod.rs:1313
+#: src/gui/mod.rs:1314
 msgid "Browse"
 msgstr "Обзор"
 
-#: src/gui/mod.rs:1330
-msgid "A newer version of Ferret is installed"
-msgstr "Установлена более новая версия Ferret"
-
-#: src/gui/mod.rs:1330
-msgid "Restart"
-msgstr "Перезапустить"
-
-#: src/gui/mod.rs:1365
+#: src/gui/mod.rs:1366
 msgid "Game"
 msgstr "Игра"
 
-#: src/gui/mod.rs:1371
+#: src/gui/mod.rs:1372
 msgid "Ferret Could Not Start"
 msgstr "Ferret не удалось запустить"
 
-#: src/gui/mod.rs:1374
+#: src/gui/mod.rs:1375
 msgid "Refresh"
 msgstr "Обновить"
 
-#: src/gui/mod.rs:1507
-#, rust-format
-msgid "Ferret {version} is ready to install"
-msgstr "Ferret {version} готов к установке"
-
-#: src/gui/mod.rs:1596
+#: src/gui/mod.rs:1597
 #, rust-format
 msgid "{names} and {last}"
 msgstr "{names} и {last}"
 
-#: src/gui/mod.rs:1624
+#: src/gui/mod.rs:1625
 msgid "GameMaker number"
 msgstr "Число GameMaker"
 
-#: src/gui/mod.rs:1625
+#: src/gui/mod.rs:1626
 msgid "Lua number"
 msgstr "Число Lua"
 
-#: src/gui/mod.rs:1626
+#: src/gui/mod.rs:1627
 msgid "Python number"
 msgstr "Число Python"
 
-#: src/gui/mod.rs:1627
+#: src/gui/mod.rs:1628
 msgid "JavaScript whole number"
 msgstr "Целое число JavaScript"
 
-#: src/gui/mod.rs:1628
+#: src/gui/mod.rs:1629
 msgid "on/off flag"
 msgstr "флаг вкл./выкл."
 
-#: src/gui/mod.rs:1629
+#: src/gui/mod.rs:1630
 msgid "JavaScript on/off flag"
 msgstr "флаг вкл./выкл. JavaScript"
 
-#: src/gui/mod.rs:1630
+#: src/gui/mod.rs:1631
 msgid "1-byte whole number"
 msgstr "1-байтовое целое число"
 
-#: src/gui/mod.rs:1631
+#: src/gui/mod.rs:1632
 msgid "8-byte whole number"
 msgstr "8-байтовое целое число"
 
-#: src/gui/mod.rs:1632
+#: src/gui/mod.rs:1633
 msgid "JavaScript number"
 msgstr "число JavaScript"
 
-#: src/gui/mod.rs:1639
+#: src/gui/mod.rs:1640
 msgid "On"
 msgstr "Включено"
 
-#: src/gui/mod.rs:1640 src/gui/values.rs:111 src/gui/values.rs:122
+#: src/gui/mod.rs:1641 src/gui/values.rs:111 src/gui/values.rs:122
 msgid "Off"
 msgstr "Выключено"
 
-#: src/gui/mod.rs:1649
+#: src/gui/mod.rs:1650
 #, rust-format
 msgid "at most {max}"
 msgstr "не больше {max}"
 
-#: src/gui/mod.rs:1650
+#: src/gui/mod.rs:1651
 #, rust-format
 msgid "at least {min}"
 msgstr "не меньше {min}"
 
-#: src/gui/mod.rs:1651
+#: src/gui/mod.rs:1652
 #, rust-format
 msgid "between {min} and {max}"
 msgstr "между {min} и {max}"
 
-#: src/gui/mod.rs:1652
+#: src/gui/mod.rs:1653
 msgid "unlimited"
 msgstr "без ограничений"
 
-#: src/gui/mod.rs:1658
+#: src/gui/mod.rs:1659
 #, rust-format
 msgid "one kind of place"
 msgid_plural "{n} kinds of places"
@@ -3219,16 +3439,16 @@ msgstr[0] "{n} вид мест"
 msgstr[1] "{n} вида мест"
 msgstr[2] "{n} видов мест"
 
-#: src/gui/mod.rs:1665
+#: src/gui/mod.rs:1666
 msgid "It can be played with other people."
 msgstr "В неё можно играть с другими людьми."
 
-#: src/gui/mod.rs:1668
+#: src/gui/mod.rs:1669
 #, rust-format
 msgid "It comes with {anticheat}, which isn't running now."
 msgstr "В комплекте с ней идёт {anticheat}, который сейчас не запущен."
 
-#: src/gui/mod.rs:1672
+#: src/gui/mod.rs:1673
 msgid ""
 "Its publisher marks accounts whose saves were changed: a marked account may "
 "be kept off leaderboards, events or co-op."
@@ -3236,12 +3456,12 @@ msgstr ""
 "Издатель помечает учётные записи с изменёнными сохранениями: помеченную "
 "учётную запись могут не пускать в таблицы лидеров, события или кооператив."
 
-#: src/gui/mod.rs:1677
+#: src/gui/mod.rs:1678
 msgid "Its scores go on online leaderboards that other players see."
 msgstr ""
 "Её результаты попадают в онлайн-таблицы лидеров, которые видят другие игроки."
 
-#: src/gui/mod.rs:1681
+#: src/gui/mod.rs:1682
 #, rust-format
 msgid ""
 "{anticheat} runs on your computer all the time, for other games. It may take "
@@ -3284,7 +3504,7 @@ msgstr "Импортировать значения…"
 msgid "Paste Values"
 msgstr "Вставить значения"
 
-#: src/gui/share.rs:55 src/gui/share.rs:74
+#: src/gui/share.rs:55 src/gui/share.rs:75
 msgid "Main Menu"
 msgstr "Главное меню"
 
@@ -3292,40 +3512,40 @@ msgstr "Главное меню"
 msgid "Send Feedback…"
 msgstr "Отправить отзыв…"
 
-#: src/gui/share.rs:97
+#: src/gui/share.rs:99
 msgid "Nothing to paste: copy a game's values first"
 msgstr "Нечего вставить: сначала скопируйте значения игры"
 
-#: src/gui/share.rs:104
+#: src/gui/share.rs:106
 msgid "Ferret Files"
 msgstr "Файлы Ferret"
 
-#: src/gui/share.rs:107
+#: src/gui/share.rs:109
 msgid "All Files"
 msgstr "Все файлы"
 
-#: src/gui/share.rs:112
+#: src/gui/share.rs:114
 msgid "Import Values"
 msgstr "Импорт значений"
 
-#: src/gui/share.rs:120
+#: src/gui/share.rs:122
 msgid "This is too big to be a Ferret file"
 msgstr "Это слишком большой файл для Ferret"
 
-#: src/gui/share.rs:125
+#: src/gui/share.rs:127
 #, rust-format
 msgid "Could not read the file: {e}"
 msgstr "Не удалось прочитать файл: {e}"
 
-#: src/gui/share.rs:145
+#: src/gui/share.rs:147
 msgid "Nothing Exported"
 msgstr "Ничего не экспортировано"
 
-#: src/gui/share.rs:154
+#: src/gui/share.rs:156
 msgid "Some Values Stayed Out"
 msgstr "Некоторые значения не вошли"
 
-#: src/gui/share.rs:163
+#: src/gui/share.rs:165
 #, rust-format
 msgid "Copied {n} value: paste it anywhere"
 msgid_plural "Copied {n} values: paste them anywhere"
@@ -3333,11 +3553,11 @@ msgstr[0] "Скопировано {n} значение: вставьте его 
 msgstr[1] "Скопировано {n} значения: вставьте их куда угодно"
 msgstr[2] "Скопировано {n} значений: вставьте их куда угодно"
 
-#: src/gui/share.rs:167
+#: src/gui/share.rs:169
 msgid "Export Values"
 msgstr "Экспорт значений"
 
-#: src/gui/share.rs:179
+#: src/gui/share.rs:181
 #, rust-format
 msgid "Exported {n} value"
 msgid_plural "Exported {n} values"
@@ -3345,16 +3565,16 @@ msgstr[0] "Экспортировано {n} значение"
 msgstr[1] "Экспортировано {n} значения"
 msgstr[2] "Экспортировано {n} значений"
 
-#: src/gui/share.rs:182
+#: src/gui/share.rs:184
 #, rust-format
 msgid "Could not export: {e}"
 msgstr "Не удалось экспортировать: {e}"
 
-#: src/gui/share.rs:193
+#: src/gui/share.rs:195
 msgid "Nothing Imported"
 msgstr "Ничего не импортировано"
 
-#: src/gui/share.rs:196
+#: src/gui/share.rs:198
 #, rust-format
 msgid "Imported {n} Value"
 msgid_plural "Imported {n} Values"
@@ -3362,7 +3582,7 @@ msgstr[0] "Импортировано {n} значение"
 msgstr[1] "Импортировано {n} значения"
 msgstr[2] "Импортировано {n} значений"
 
-#: src/gui/share.rs:198
+#: src/gui/share.rs:200
 #, rust-format
 msgid ""
 "{names}. Check it in the Values tab: if the game shows the number Ferret "
@@ -3383,7 +3603,7 @@ msgstr[2] ""
 "которое читает Ferret, скажите об этом там. До этого Ferret ничего не будет "
 "менять."
 
-#: src/gui/share.rs:206
+#: src/gui/share.rs:208
 msgid "It comes from another version of the game, so it may not be found."
 msgid_plural ""
 "They come from another version of the game, so some may not be found."
@@ -3391,16 +3611,16 @@ msgstr[0] "Значение из другой версии игры, поэто�
 msgstr[1] "Значения из другой версии игры, поэтому некоторые могут не найтись."
 msgstr[2] "Значения из другой версии игры, поэтому некоторые могут не найтись."
 
-#: src/gui/share.rs:213
+#: src/gui/share.rs:215
 #, rust-format
 msgid "You have a value called {theirs} already: the imported one is {now}."
 msgstr "У вас уже есть значение {theirs}: импортированное называется {now}."
 
-#: src/gui/share.rs:216
+#: src/gui/share.rs:218
 msgid "Not imported:"
 msgstr "Не импортировано:"
 
-#: src/gui/share.rs:226
+#: src/gui/share.rs:228
 msgid ""
 "Anyone using Ferret can download these for this game. Only values you "
 "confirmed are in it, and nothing about you or your computer."
@@ -3408,38 +3628,38 @@ msgstr ""
 "Любой пользователь Ferret сможет скачать их для этой игры. Там только "
 "подтверждённые вами значения и ничего о вас или вашем компьютере."
 
-#: src/gui/share.rs:246
+#: src/gui/share.rs:248
 #, rust-format
 msgid "Left out: {values}"
 msgstr "Не вошли: {values}"
 
-#: src/gui/share.rs:255 src/gui/share.rs:291
+#: src/gui/share.rs:257 src/gui/share.rs:293
 msgid "Share"
 msgstr "Поделиться"
 
-#: src/gui/share.rs:263
+#: src/gui/share.rs:265
 msgid "Share These Values?"
 msgstr "Поделиться этими значениями?"
 
-#: src/gui/share.rs:274
+#: src/gui/share.rs:276
 msgid "Sharing…"
 msgstr "Отправка…"
 
-#: src/gui/share.rs:284
+#: src/gui/share.rs:286
 msgid "Thanks for Sharing"
 msgstr "Спасибо, что поделились"
 
-#: src/gui/share.rs:285
+#: src/gui/share.rs:287
 msgid "Players of this game find them in Browse Shared Values now. Their id:"
 msgstr ""
 "Игроки этой игры теперь найдут их в «Обзоре общих значений». Их "
 "идентификатор:"
 
-#: src/gui/share.rs:304
+#: src/gui/share.rs:306
 msgid "Nobody has said whether it works yet"
 msgstr "Пока никто не сообщил, работает ли это"
 
-#: src/gui/share.rs:305
+#: src/gui/share.rs:307
 #, rust-format
 msgid "Worked for {n} player"
 msgid_plural "Worked for {n} players"
@@ -3447,7 +3667,7 @@ msgstr[0] "Сработало у {n} игрока"
 msgstr[1] "Сработало у {n} игроков"
 msgstr[2] "Сработало у {n} игроков"
 
-#: src/gui/share.rs:306
+#: src/gui/share.rs:308
 #, rust-format
 msgid "Didn't work for {n} player"
 msgid_plural "Didn't work for {n} players"
@@ -3455,7 +3675,7 @@ msgstr[0] "Не сработало у {n} игрока"
 msgstr[1] "Не сработало у {n} игроков"
 msgstr[2] "Не сработало у {n} игроков"
 
-#: src/gui/share.rs:307
+#: src/gui/share.rs:309
 #, rust-format
 msgid "Worked for {n} player, not for {failed}"
 msgid_plural "Worked for {n} players, not for {failed}"
@@ -3463,32 +3683,32 @@ msgstr[0] "Сработало у {n} игрока, не сработало у {f
 msgstr[1] "Сработало у {n} игроков, не сработало у {failed}"
 msgstr[2] "Сработало у {n} игроков, не сработало у {failed}"
 
-#: src/gui/share.rs:309
+#: src/gui/share.rs:311
 #, rust-format
 msgid "Shared {day}"
 msgstr "Опубликовано {day}"
 
-#: src/gui/share.rs:311
+#: src/gui/share.rs:313
 msgid "Your version of the game"
 msgstr "Ваша версия игры"
 
-#: src/gui/share.rs:312
+#: src/gui/share.rs:314
 msgid "Another version of the game"
 msgstr "Другая версия игры"
 
-#: src/gui/share.rs:316
+#: src/gui/share.rs:318
 msgid "Shared by you"
 msgstr "Опубликовано вами"
 
-#: src/gui/share.rs:329
+#: src/gui/share.rs:331
 msgid "Looking for Shared Values…"
 msgstr "Поиск общих значений…"
 
-#: src/gui/share.rs:332
+#: src/gui/share.rs:334
 msgid "Nothing Shared Yet"
 msgstr "Пока ничего нет"
 
-#: src/gui/share.rs:333
+#: src/gui/share.rs:335
 msgid ""
 "Nobody has shared values for this game yet. Once you find some, you could be "
 "the first."
@@ -3496,35 +3716,35 @@ msgstr ""
 "Для этой игры пока никто не поделился значениями. Когда найдёте свои, можете "
 "стать первым."
 
-#: src/gui/share.rs:335
+#: src/gui/share.rs:337
 msgid "Couldn't Look"
 msgstr "Не удалось найти"
 
-#: src/gui/share.rs:345
+#: src/gui/share.rs:347
 msgid "Share Yours"
 msgstr "Поделиться своими"
 
-#: src/gui/share.rs:351
+#: src/gui/share.rs:353
 msgid "Shared Values"
 msgstr "Общие значения"
 
-#: src/gui/share.rs:391 src/gui/share.rs:475
+#: src/gui/share.rs:393 src/gui/share.rs:477
 msgid "Delete"
 msgstr "Удалить"
 
-#: src/gui/share.rs:392
+#: src/gui/share.rs:394
 msgid "Import"
 msgstr "Импортировать"
 
-#: src/gui/share.rs:397 src/gui/share.rs:447
+#: src/gui/share.rs:399 src/gui/share.rs:449
 msgid "Report"
 msgstr "Пожаловаться"
 
-#: src/gui/share.rs:442
+#: src/gui/share.rs:444
 msgid "Report This Upload?"
 msgstr "Пожаловаться на эту публикацию?"
 
-#: src/gui/share.rs:444
+#: src/gui/share.rs:446
 msgid ""
 "For rude names, or values that are clearly junk. Reports from three players "
 "take it off the list until Ferret's developer looks at it."
@@ -3532,26 +3752,26 @@ msgstr ""
 "На грубые имена или явно бессмысленные значения. Жалобы трёх игроков убирают "
 "публикацию из списка, пока разработчик Ferret её не проверит."
 
-#: src/gui/share.rs:458
+#: src/gui/share.rs:460
 msgid "Reported"
 msgstr "Жалоба отправлена"
 
-#: src/gui/share.rs:472
+#: src/gui/share.rs:474
 msgid "Delete Your Upload?"
 msgstr "Удалить вашу публикацию?"
 
-#: src/gui/share.rs:473
+#: src/gui/share.rs:475
 msgid ""
 "Players who imported it keep what they have; nobody else can find it anymore."
 msgstr ""
 "У игроков, которые её импортировали, всё останется; больше никто не сможет "
 "её найти."
 
-#: src/gui/share.rs:488
+#: src/gui/share.rs:490
 msgid "Couldn't Delete It"
 msgstr "Не удалось удалить"
 
-#: src/gui/share.rs:489
+#: src/gui/share.rs:491
 msgid "OK"
 msgstr "ОК"
 
@@ -3586,7 +3806,7 @@ msgstr ""
 "всем остальным. Сохраните игру, прежде чем переключать флаг, и переключите "
 "его обратно, если что-то пойдёт не так."
 
-#: src/gui/tips.rs:93
+#: src/gui/tips.rs:101
 msgid "Don't Show Again"
 msgstr "Больше не показывать"
 

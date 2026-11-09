@@ -1,6 +1,6 @@
 // The main menus: sharing saved values (`.ferret` files, core::export / core::import) from
 // the game page's, to a file or the clipboard (pasted in a chat), from a file or the
-// clipboard; Send Feedback on both pages (feedback.rs).
+// clipboard; Send Feedback (feedback.rs) and About (about.rs) on both pages.
 
 use std::rc::Rc;
 
@@ -63,6 +63,7 @@ pub fn menu_button() -> gtk::MenuButton {
 fn feedback_section() -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some(&tr!("Send Feedback…")), Some("app.feedback"));
+    menu.append(Some(&tr!("About Ferret")), Some("app.about"));
     menu.append(Some(&tr!("Quit Ferret")), Some("app.quit"));
     menu
 }
@@ -90,6 +91,7 @@ pub fn add_actions(app: &adw::Application, ui: &Rc<Ui>) {
     add("browse", |ui| ui.worker.run(|core| Event::Browse(core.library_key())));
     add("share-values", |ui| ui.worker.run(|core| Event::Exported(core.export(), To::Library)));
     add("feedback", super::feedback::open);
+    add("about", super::about::open);
     add("paste-values", |ui| {
         let ui = ui.clone();
         ui.window.clipboard().read_text_async(gio::Cancellable::NONE, move |text| match text {

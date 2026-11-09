@@ -18,7 +18,7 @@ use crate::ocr::{self, Rect, Shown, Word};
 use crate::shapes::{self, Learned, Shape};
 use crate::share;
 
-fn flatpak_info(key: &str) -> Option<String> {
+pub(crate) fn flatpak_info(key: &str) -> Option<String> {
     let info = fs::read_to_string("/.flatpak-info").ok()?;
     info.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(str::to_owned)
 }

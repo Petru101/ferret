@@ -28,8 +28,8 @@ pub fn log(line: &str) {
 
 /// Words on, or actions behind, what it must not press: quitting, anything sent to Ferret's
 /// server, file dialogs, links.
-const SKIP: [&str; 13] =
-    ["quit", "send", "feedback", "share", "upload", "report", "export", "import", "delete", "take", "restart", "website", "github"];
+const SKIP: [&str; 14] =
+    ["quit", "send", "feedback", "about", "share", "upload", "report", "export", "import", "delete", "take", "restart", "website", "github"];
 
 /// Text typed into entries.
 const JUNK: [&str; 12] = ["1000", "0", "-5", "1.5", "3:17", "abc", "", "99999999999999999999", "%s%n", "ünï", "1e308", "  42  "];

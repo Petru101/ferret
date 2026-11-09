@@ -16,7 +16,6 @@ mod online;
 mod reader;
 mod shapes;
 mod share;
-#[cfg(windows)]
 mod update;
 
 fn main() {
