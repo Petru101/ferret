@@ -119,7 +119,6 @@ jobs:
           ./dotnet-install.ps1 -Channel 8.0 -InstallDir C:\dev\dotnet -NoPath
           $env:DOTNET_ROOT = 'C:\dev\dotnet'
           C:\dev\dotnet\dotnet.exe tool install vpk --version 1.2.161 --tool-path C:\dev\vpk
-          C:\dev\vpk\vpk.exe --version
           Remove-Item dotnet-install.ps1
 
       - name: Fetch the crates and the OCR models
