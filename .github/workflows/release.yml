@@ -1,0 +1,207 @@
+# Builds Ferret for Linux and Windows on GitHub's servers and records where each file came from,
+# so anyone can check that a download was built from this repository's public code:
+#   gh attestation verify Ferret-<version>-setup.exe -R Petru101/ferret
+#
+# A vX.Y.Z tag builds both and leaves a draft release to test, sign, write notes for and publish.
+# Nothing here has a signing key or publishes anything: data/release/from-github.sh signs on its
+# maker's computer and updates the update site from there. A release-test/* branch only builds,
+# to try a change to this file. Actions are pinned by commit and nothing is cached, so that one
+# build's leftovers can't reach another.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+    branches: ["release-test/**"]
+
+permissions: {}
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The update site's clients compare versions: a tag that isn't Cargo.toml's would offer the
+      # same update for ever.
+      - name: Check the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          helper=$(sed -n 's/^version = "\(.*\)"/\1/p' helper/Cargo.toml | head -1)
+          [ "$version" = "$helper" ]
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "The tag $GITHUB_REF_NAME isn't Cargo.toml's version $version" >&2
+            exit 1
+          fi
+
+      # Ubuntu 24.04 stops the sandbox Flatpak builds in unless this is off.
+      - name: Install Flatpak and the SDK
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak flatpak-builder > /dev/null
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.gnome.Platform//50 org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      # The manifest builds offline from vendor/, which isn't in the repository. Cargo.lock's
+      # checksums say what may go in it.
+      - name: Fetch the crates
+        run: |
+          mv .cargo/config.toml config.toml.aside
+          flatpak run --user --share=network --filesystem="$PWD" --command=sh org.gnome.Sdk//50 -c \
+            'cd "$1" && PATH=/usr/lib/sdk/rust-stable/bin:$PATH cargo vendor --locked --versioned-dirs vendor > /dev/null' sh "$PWD"
+          mv config.toml.aside .cargo/config.toml
+
+      - name: Build
+        run: |
+          flatpak-builder --user --force-clean --disable-rofiles-fuse --default-branch=stable \
+            --repo=repo build-dir io.github.Petru101.Ferret.yml
+
+      - name: Check what was built
+        run: |
+          flatpak repo --branches repo
+          flatpak remote-add --user --no-gpg-verify built "$PWD/repo"
+          flatpak install --user -y --noninteractive built io.github.Petru101.Ferret//stable
+          flatpak run --user --command=sh io.github.Petru101.Ferret//stable -c 'test -x /app/bin/ferret && test -x /app/bin/ferret-helper && test -f /app/share/ferret/ocr/det.onnx'
+          tar --zstd -cf ferret-flatpak-repo.tar.zst repo
+          sha256sum ferret-flatpak-repo.tar.zst
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ferret-flatpak-repo.tar.zst
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flatpak
+          path: ferret-flatpak-repo.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      # Translations and scripts must reach MSYS2's tools as they are in the repository.
+      - name: Keep line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-rust
+            mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gettext-tools
+            mingw-w64-ucrt-x86_64-ntldd
+
+      - name: Install Velopack's packer
+        run: |
+          Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile dotnet-install.ps1
+          ./dotnet-install.ps1 -Channel 8.0 -InstallDir C:\dev\dotnet -NoPath
+          $env:DOTNET_ROOT = 'C:\dev\dotnet'
+          C:\dev\dotnet\dotnet.exe tool install vpk --version 1.2.161 --tool-path C:\dev\vpk
+          C:\dev\vpk\vpk.exe --version
+          Remove-Item dotnet-install.ps1
+
+      - name: Fetch the crates and the OCR models
+        shell: msys2 {0}
+        run: |
+          rustc --version
+          mv .cargo/config.toml config.toml.aside
+          cargo vendor --locked --versioned-dirs vendor > /dev/null
+          mv config.toml.aside .cargo/config.toml
+          # The manifest says where they come from and what they must hash to.
+          mkdir -p target/share/ferret/ocr
+          awk '/^ *url: https:\/\/huggingface/ {u = $2} /^ *sha256:/ {s = $2} /dest-filename:/ && u {print u, s, $2; u = ""}' io.github.Petru101.Ferret.yml |
+            while read -r url sum name; do
+              curl -fsSL --retry 3 -o "target/share/ferret/ocr/$name" "$url"
+              echo "$sum  target/share/ferret/ocr/$name" | sha256sum -c -
+            done
+          test -f target/share/ferret/ocr/det.onnx
+
+      - name: Build
+        shell: msys2 {0}
+        run: cargo --offline build --release --locked --workspace
+
+      # Each new version gets a delta from the one players have now.
+      - name: Fetch the newest release from the update site
+        run: |
+          $env:DOTNET_ROOT = 'C:\dev\dotnet'
+          C:\dev\vpk\vpk.exe download http --url https://petru101.github.io/ferret-updates/windows/ --outputDir C:\dev\velopack-releases
+
+      - name: Package
+        shell: msys2 {0}
+        run: bash data/windows/package.sh
+
+      - name: Gather the files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          Copy-Item dist\Ferret-*-setup.exe, dist\Ferret-*-portable.zip out\
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory out\feed | Out-Null
+          Copy-Item "C:\dev\velopack-releases\Petru101.Ferret-$version-*.nupkg", C:\dev\velopack-releases\releases.win.json, C:\dev\velopack-releases\RELEASES, C:\dev\velopack-releases\assets.win.json out\feed\
+          Get-ChildItem -Recurse out | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            out/Ferret-*
+            out/feed/*
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: out
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  # Apart from the builds, so what compiles the code can't change releases and what can change
+  # releases runs none of the code. A draft: nothing reaches anyone until it's published.
+  release:
+    if: github.ref_type == 'tag'
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows
+
+      - name: Check the attestation
+        run: |
+          for file in Ferret-*; do
+            gh attestation verify "$file" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml" --source-ref "$GITHUB_REF"
+          done
+
+      - name: Make the draft release
+        run: |
+          notes="**Before publishing:** run \`data/release/from-github.sh $GITHUB_REF_NAME\`, which signs both systems' updates and adds the Linux bundle. Then replace this text.
+
+          Built on GitHub from this tag's code ([the build]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID))."
+          gh release create "$GITHUB_REF_NAME" Ferret-* --draft --verify-tag --title "Ferret ${GITHUB_REF_NAME#v}" --notes "$notes"
