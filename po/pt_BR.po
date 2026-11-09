@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 05:54+0000\n"
+"POT-Creation-Date: 2026-11-09 06:02+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Brazilian Portuguese\n"
 "Language: pt_BR\n"
@@ -1106,7 +1106,15 @@ msgid ""
 "are refused. On Windows, you can check where a download came from: gh "
 "attestation verify FILE -R Petru101/ferret (GitHub's gh tool, signed in). "
 "That shows where the file came from, not that the code is safe."
-msgstr "O Ferret é feito por uma pessoa só (Petru101 no GitHub), não por uma empresa. Ninguém independente o verificou. O código é público, então qualquer um pode lê-lo ou compilá-lo. Novas versões são compiladas nos servidores do GitHub a partir desse código e depois assinadas com a chave do autor, e atualizações sem essa assinatura são recusadas. No Windows, você pode verificar de onde veio um download: gh attestation verify FILE -R Petru101/ferret (a ferramenta gh do GitHub, com login). Isso mostra de onde veio o arquivo, não que o código é seguro."
+msgstr ""
+"O Ferret é feito por uma pessoa só (Petru101 no GitHub), não por uma "
+"empresa. Ninguém independente o verificou. O código é público, então "
+"qualquer um pode lê-lo ou compilá-lo. Novas versões são compiladas nos "
+"servidores do GitHub a partir desse código e depois assinadas com a chave do "
+"autor, e atualizações sem essa assinatura são recusadas. No Windows, você "
+"pode verificar de onde veio um download: gh attestation verify FILE -R "
+"Petru101/ferret (a ferramenta gh do GitHub, com login). Isso mostra de onde "
+"veio o arquivo, não que o código é seguro."
 
 #: src/gui/about.rs:271
 msgid "The Code"
@@ -4237,6 +4245,20 @@ msgstr "Este arquivo do Ferret não diz para qual jogo é."
 #: src/share.rs:262
 msgid "This Ferret file has no values in it."
 msgstr "Este arquivo do Ferret não tem valores."
+
+#: src/update.rs:65
+#, rust-format
+msgid "Ferret's own update key can't be read: {e}"
+msgstr "A chave de atualização do Ferret não pode ser lida: {e}"
+
+#: src/update.rs:66
+#, rust-format
+msgid "the update list's signature can't be read: {e}"
+msgstr "a assinatura da lista de atualizações não pode ser lida: {e}"
+
+#: src/update.rs:67
+msgid "the update list's signature doesn't match Ferret's key"
+msgstr "a assinatura da lista de atualizações não corresponde à chave do Ferret"
 
 #~ msgid "whole number"
 #~ msgstr "número inteiro"

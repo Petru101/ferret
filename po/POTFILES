@@ -18,3 +18,4 @@ src/gui/values.rs
 src/library.rs
 src/online.rs
 src/share.rs
+src/update.rs

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 05:54+0000\n"
+"POT-Creation-Date: 2026-11-09 06:02+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Russian\n"
 "Language: ru\n"
@@ -1113,7 +1113,14 @@ msgid ""
 "are refused. On Windows, you can check where a download came from: gh "
 "attestation verify FILE -R Petru101/ferret (GitHub's gh tool, signed in). "
 "That shows where the file came from, not that the code is safe."
-msgstr "Ferret делает один человек (Petru101 на GitHub), а не компания. Никто независимый его не проверял. Его код открыт, так что любой может его прочитать или собрать сам. Новые версии собираются из этого кода на серверах GitHub, затем подписываются ключом автора, а обновления без этой подписи отклоняются. В Windows можно проверить, откуда взят загруженный файл: gh attestation verify FILE -R Petru101/ferret (инструмент gh от GitHub, после входа). Это показывает, откуда файл, а не то, что код безопасен."
+msgstr ""
+"Ferret делает один человек (Petru101 на GitHub), а не компания. Никто "
+"независимый его не проверял. Его код открыт, так что любой может его "
+"прочитать или собрать сам. Новые версии собираются из этого кода на серверах "
+"GitHub, затем подписываются ключом автора, а обновления без этой подписи "
+"отклоняются. В Windows можно проверить, откуда взят загруженный файл: gh "
+"attestation verify FILE -R Petru101/ferret (инструмент gh от GitHub, после "
+"входа). Это показывает, откуда файл, а не то, что код безопасен."
 
 #: src/gui/about.rs:271
 msgid "The Code"
@@ -4303,6 +4310,20 @@ msgstr "В этом файле Ferret не сказано, для какой о�
 #: src/share.rs:262
 msgid "This Ferret file has no values in it."
 msgstr "В этом файле Ferret нет значений."
+
+#: src/update.rs:65
+#, rust-format
+msgid "Ferret's own update key can't be read: {e}"
+msgstr "Не удаётся прочитать ключ обновлений Ferret: {e}"
+
+#: src/update.rs:66
+#, rust-format
+msgid "the update list's signature can't be read: {e}"
+msgstr "не удаётся прочитать подпись списка обновлений: {e}"
+
+#: src/update.rs:67
+msgid "the update list's signature doesn't match Ferret's key"
+msgstr "подпись списка обновлений не соответствует ключу Ferret"
 
 #~ msgid "whole number"
 #~ msgstr "целое число"

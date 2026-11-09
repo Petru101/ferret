@@ -23,6 +23,7 @@ pub enum Check {
 #[cfg(windows)]
 mod velopack_updates {
     use super::Check;
+    use crate::i18n::tr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use velopack::{
         bundle::Manifest,
@@ -61,9 +62,9 @@ mod velopack_updates {
 
     /// Whether `feed` is what was signed with `key`.
     fn signature_holds(feed: &str, signature: &str, key: &str) -> Result<(), String> {
-        let key = minisign_verify::PublicKey::from_base64(key).map_err(|e| format!("Ferret's own update key can't be read: {e}"))?;
-        let signature = minisign_verify::Signature::decode(signature).map_err(|e| format!("the update list's signature can't be read: {e}"))?;
-        key.verify(feed.as_bytes(), &signature, false).map_err(|_| "the update list's signature doesn't match Ferret's key".to_owned())
+        let key = minisign_verify::PublicKey::from_base64(key).map_err(|e| tr!("Ferret's own update key can't be read: {e}", e))?;
+        let signature = minisign_verify::Signature::decode(signature).map_err(|e| tr!("the update list's signature can't be read: {e}", e))?;
+        key.verify(feed.as_bytes(), &signature, false).map_err(|_| tr!("the update list's signature doesn't match Ferret's key"))
     }
 
     impl<S: UpdateSource> UpdateSource for Signed<S> {

@@ -19,6 +19,11 @@ case $name in
     *) ref=refs/heads/$name; release= ;;
 esac
 [ -f "$secret" ] || { echo "no update key at $secret" >&2; exit 1; }
+# A build that doesn't know this key would refuse every update after it.
+if [ -z "${FERRET_UPDATE_SECRET:-}" ]; then
+    git fetch -q origin "$ref:$ref" 2>/dev/null || true
+    git show "$ref:src/update.rs" | grep -qF "\"$(sed -n 2p "$public")\"" || { echo "$ref's Ferret doesn't know this key" >&2; exit 1; }
+fi
 # Apt's gh can be too old to have `gh attestation`.
 checker=$HOME/.config/lobby-release/gh; [ -x "$checker" ] || checker=gh
 "$checker" attestation verify --help >/dev/null 2>&1 || { echo "$checker can't check attestations: it needs gh 2.49 or newer" >&2; exit 1; }

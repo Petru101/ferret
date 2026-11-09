@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 05:54+0000\n"
+"POT-Creation-Date: 2026-11-09 06:02+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -1008,7 +1008,12 @@ msgid ""
 "are refused. On Windows, you can check where a download came from: gh "
 "attestation verify FILE -R Petru101/ferret (GitHub's gh tool, signed in). "
 "That shows where the file came from, not that the code is safe."
-msgstr "Ferret 由一个人（GitHub 上的 Petru101）开发，而不是公司。没有独立方检查过它。它的代码是公开的，任何人都可以阅读或自行构建。新版本在 GitHub 的服务器上由这些代码构建，然后用作者的密钥签名，没有该签名的更新会被拒绝。在 Windows 上，你可以检查下载文件的来源：gh attestation verify FILE -R Petru101/ferret（GitHub 的 gh 工具，需登录）。这只能说明文件的来源，并不代表代码是安全的。"
+msgstr ""
+"Ferret 由一个人（GitHub 上的 Petru101）开发，而不是公司。没有独立方检查过它。"
+"它的代码是公开的，任何人都可以阅读或自行构建。新版本在 GitHub 的服务器上由这"
+"些代码构建，然后用作者的密钥签名，没有该签名的更新会被拒绝。在 Windows 上，你"
+"可以检查下载文件的来源：gh attestation verify FILE -R Petru101/ferret"
+"（GitHub 的 gh 工具，需登录）。这只能说明文件的来源，并不代表代码是安全的。"
 
 #: src/gui/about.rs:271
 msgid "The Code"
@@ -3914,6 +3919,20 @@ msgstr "这个 Ferret 文件没有说明是哪个游戏的。"
 #: src/share.rs:262
 msgid "This Ferret file has no values in it."
 msgstr "这个 Ferret 文件里没有数值。"
+
+#: src/update.rs:65
+#, rust-format
+msgid "Ferret's own update key can't be read: {e}"
+msgstr "无法读取 Ferret 自己的更新密钥：{e}"
+
+#: src/update.rs:66
+#, rust-format
+msgid "the update list's signature can't be read: {e}"
+msgstr "无法读取更新列表的签名：{e}"
+
+#: src/update.rs:67
+msgid "the update list's signature doesn't match Ferret's key"
+msgstr "更新列表的签名与 Ferret 的密钥不匹配"
 
 #~ msgid "whole number"
 #~ msgstr "整数"

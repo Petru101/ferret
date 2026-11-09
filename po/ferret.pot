@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 05:54+0000\n"
+"POT-Creation-Date: 2026-11-09 06:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -3753,4 +3753,18 @@ msgstr ""
 
 #: src/share.rs:262
 msgid "This Ferret file has no values in it."
+msgstr ""
+
+#: src/update.rs:65
+#, rust-format
+msgid "Ferret's own update key can't be read: {e}"
+msgstr ""
+
+#: src/update.rs:66
+#, rust-format
+msgid "the update list's signature can't be read: {e}"
+msgstr ""
+
+#: src/update.rs:67
+msgid "the update list's signature doesn't match Ferret's key"
 msgstr ""
