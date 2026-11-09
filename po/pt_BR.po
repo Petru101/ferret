@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 06:02+0000\n"
+"POT-Creation-Date: 2026-11-09 06:40+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Brazilian Portuguese\n"
 "Language: pt_BR\n"
@@ -1099,56 +1099,50 @@ msgstr "Quem faz"
 
 #: src/gui/about.rs:263
 msgid ""
-"Ferret is made by one person (Petru101 on GitHub), not a company. Nobody "
-"independent has checked it. Its code is public, so anyone can read it or "
-"build it themselves. New versions are built on GitHub's servers from that "
-"code, then signed with its maker's key, and updates without that signature "
-"are refused. On Windows, you can check where a download came from: gh "
-"attestation verify FILE -R Petru101/ferret (GitHub's gh tool, signed in). "
-"That shows where the file came from, not that the code is safe."
-msgstr ""
-"O Ferret é feito por uma pessoa só (Petru101 no GitHub), não por uma "
-"empresa. Ninguém independente o verificou. O código é público, então "
-"qualquer um pode lê-lo ou compilá-lo. Novas versões são compiladas nos "
-"servidores do GitHub a partir desse código e depois assinadas com a chave do "
-"autor, e atualizações sem essa assinatura são recusadas. No Windows, você "
-"pode verificar de onde veio um download: gh attestation verify FILE -R "
-"Petru101/ferret (a ferramenta gh do GitHub, com login). Isso mostra de onde "
-"veio o arquivo, não que o código é seguro."
+"Ferret is made by one person (Petru101 on GitHub), not a company. Most of "
+"its code was written by Claude (Anthropic's AI), directed and tested on real "
+"games by that person. Nobody independent has checked it. Its code is public, "
+"so anyone can read it or build it themselves. New versions are built on "
+"GitHub's servers from that code, then signed with its maker's key, and "
+"updates without that signature are refused. On Windows, you can check where "
+"a download came from: gh attestation verify FILE -R Petru101/ferret "
+"(GitHub's gh tool, signed in). That shows where the file came from, not that "
+"the code is safe."
+msgstr "O Ferret é feito por uma pessoa só (Petru101 no GitHub), não por uma empresa. A maior parte do código foi escrita pelo Claude (a IA da Anthropic), sob a direção dessa pessoa, que o testou em jogos reais. Ninguém independente o verificou. O código é público, então qualquer um pode lê-lo ou compilá-lo. Novas versões são compiladas nos servidores do GitHub a partir desse código e depois assinadas com a chave do autor, e atualizações sem essa assinatura são recusadas. No Windows, você pode verificar de onde veio um download: gh attestation verify FILE -R Petru101/ferret (a ferramenta gh do GitHub, com login). Isso mostra de onde veio o arquivo, não que o código é seguro."
 
-#: src/gui/about.rs:271
+#: src/gui/about.rs:272
 msgid "The Code"
 msgstr "O código"
 
-#: src/gui/about.rs:271
+#: src/gui/about.rs:272
 msgid "Open source, under the GPL (version 3 or later)."
 msgstr "Código aberto, sob a GPL (versão 3 ou posterior)."
 
-#: src/gui/about.rs:271
+#: src/gui/about.rs:272
 msgid "On GitHub"
 msgstr "No GitHub"
 
-#: src/gui/about.rs:272
+#: src/gui/about.rs:273
 msgid "What Changed"
 msgstr "O que mudou"
 
-#: src/gui/about.rs:272
+#: src/gui/about.rs:273
 msgid "Every version, with what's new in it."
 msgstr "Cada versão, com as novidades."
 
-#: src/gui/about.rs:272
+#: src/gui/about.rs:273
 msgid "Releases"
 msgstr "Versões"
 
-#: src/gui/about.rs:275
+#: src/gui/about.rs:276
 msgid "What It Can Do on Your Computer"
 msgstr "O que ele pode fazer no seu computador"
 
-#: src/gui/about.rs:278
+#: src/gui/about.rs:279
 msgid "What It Connects To"
 msgstr "A que ele se conecta"
 
-#: src/gui/about.rs:280
+#: src/gui/about.rs:281
 msgid ""
 "Nothing about you or what you play goes to Ferret's maker unless you send it "
 "or use the shared library. Ferret has no tracking or usage statistics, and "
@@ -1160,7 +1154,7 @@ msgstr ""
 "nem estatísticas de uso, e as imagens do jogo de que ele lê números ficam "
 "neste computador. Cada site abaixo vê seu endereço de internet."
 
-#: src/gui/about.rs:293 src/gui/share.rs:66
+#: src/gui/about.rs:294 src/gui/share.rs:66
 msgid "About Ferret"
 msgstr "Sobre o Ferret"
 
@@ -4258,7 +4252,8 @@ msgstr "a assinatura da lista de atualizações não pode ser lida: {e}"
 
 #: src/update.rs:67
 msgid "the update list's signature doesn't match Ferret's key"
-msgstr "a assinatura da lista de atualizações não corresponde à chave do Ferret"
+msgstr ""
+"a assinatura da lista de atualizações não corresponde à chave do Ferret"
 
 #~ msgid "whole number"
 #~ msgstr "número inteiro"

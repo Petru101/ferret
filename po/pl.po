@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 06:02+0000\n"
+"POT-Creation-Date: 2026-11-09 06:40+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Polish\n"
 "Language: pl\n"
@@ -1114,55 +1114,50 @@ msgstr "Kto to robi"
 
 #: src/gui/about.rs:263
 msgid ""
-"Ferret is made by one person (Petru101 on GitHub), not a company. Nobody "
-"independent has checked it. Its code is public, so anyone can read it or "
-"build it themselves. New versions are built on GitHub's servers from that "
-"code, then signed with its maker's key, and updates without that signature "
-"are refused. On Windows, you can check where a download came from: gh "
-"attestation verify FILE -R Petru101/ferret (GitHub's gh tool, signed in). "
-"That shows where the file came from, not that the code is safe."
-msgstr ""
-"Ferret robi jedna osoba (Petru101 na GitHubie), nie firma. Nikt niezależny "
-"go nie sprawdził. Jego kod jest publiczny, więc każdy może go przeczytać lub "
-"sam zbudować. Nowe wersje są budowane z tego kodu na serwerach GitHuba, a "
-"potem podpisywane kluczem autora, a aktualizacje bez tego podpisu są "
-"odrzucane. W Windows możesz sprawdzić, skąd pochodzi pobrany plik: gh "
-"attestation verify FILE -R Petru101/ferret (narzędzie gh od GitHuba, po "
-"zalogowaniu). To pokazuje, skąd pochodzi plik, a nie że kod jest bezpieczny."
+"Ferret is made by one person (Petru101 on GitHub), not a company. Most of "
+"its code was written by Claude (Anthropic's AI), directed and tested on real "
+"games by that person. Nobody independent has checked it. Its code is public, "
+"so anyone can read it or build it themselves. New versions are built on "
+"GitHub's servers from that code, then signed with its maker's key, and "
+"updates without that signature are refused. On Windows, you can check where "
+"a download came from: gh attestation verify FILE -R Petru101/ferret "
+"(GitHub's gh tool, signed in). That shows where the file came from, not that "
+"the code is safe."
+msgstr "Ferret robi jedna osoba (Petru101 na GitHubie), nie firma. Większość jego kodu napisał Claude (AI firmy Anthropic) pod kierunkiem tej osoby, która testowała go na prawdziwych grach. Nikt niezależny go nie sprawdził. Jego kod jest publiczny, więc każdy może go przeczytać lub sam zbudować. Nowe wersje są budowane z tego kodu na serwerach GitHuba, a potem podpisywane kluczem autora, a aktualizacje bez tego podpisu są odrzucane. W Windows możesz sprawdzić, skąd pochodzi pobrany plik: gh attestation verify FILE -R Petru101/ferret (narzędzie gh od GitHuba, po zalogowaniu). To pokazuje, skąd pochodzi plik, a nie że kod jest bezpieczny."
 
-#: src/gui/about.rs:271
+#: src/gui/about.rs:272
 msgid "The Code"
 msgstr "Kod"
 
-#: src/gui/about.rs:271
+#: src/gui/about.rs:272
 msgid "Open source, under the GPL (version 3 or later)."
 msgstr "Otwarte oprogramowanie, na licencji GPL (wersja 3 lub nowsza)."
 
-#: src/gui/about.rs:271
+#: src/gui/about.rs:272
 msgid "On GitHub"
 msgstr "Na GitHubie"
 
-#: src/gui/about.rs:272
+#: src/gui/about.rs:273
 msgid "What Changed"
 msgstr "Co się zmieniło"
 
-#: src/gui/about.rs:272
+#: src/gui/about.rs:273
 msgid "Every version, with what's new in it."
 msgstr "Każda wersja wraz z nowościami."
 
-#: src/gui/about.rs:272
+#: src/gui/about.rs:273
 msgid "Releases"
 msgstr "Wydania"
 
-#: src/gui/about.rs:275
+#: src/gui/about.rs:276
 msgid "What It Can Do on Your Computer"
 msgstr "Co może zrobić na twoim komputerze"
 
-#: src/gui/about.rs:278
+#: src/gui/about.rs:279
 msgid "What It Connects To"
 msgstr "Z czym się łączy"
 
-#: src/gui/about.rs:280
+#: src/gui/about.rs:281
 msgid ""
 "Nothing about you or what you play goes to Ferret's maker unless you send it "
 "or use the shared library. Ferret has no tracking or usage statistics, and "
@@ -1174,7 +1169,7 @@ msgstr ""
 "statystyk użycia, a obrazy gry, z których odczytuje liczby, zostają na tym "
 "komputerze. Każda strona poniżej widzi twój adres internetowy."
 
-#: src/gui/about.rs:293 src/gui/share.rs:66
+#: src/gui/about.rs:294 src/gui/share.rs:66
 msgid "About Ferret"
 msgstr "O Ferret"
 

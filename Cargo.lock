@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "ferret"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-channel",
  "getrandom 0.2.17",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "ferret-helper"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
 ]

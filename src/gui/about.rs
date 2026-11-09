@@ -260,7 +260,8 @@ pub fn open(ui: &Rc<Ui>) {
     let who = adw::PreferencesGroup::builder()
         .title(tr!("Who Makes It"))
         .description(tr!(
-            "Ferret is made by one person (Petru101 on GitHub), not a company. Nobody independent has checked it. \
+            "Ferret is made by one person (Petru101 on GitHub), not a company. Most of its code was written by Claude \
+             (Anthropic's AI), directed and tested on real games by that person. Nobody independent has checked it. \
              Its code is public, so anyone can read it or build it themselves. New versions are built on GitHub's \
              servers from that code, then signed with its maker's key, and updates without that signature are \
              refused. On Windows, you can check where a download came from: gh attestation verify FILE -R \
