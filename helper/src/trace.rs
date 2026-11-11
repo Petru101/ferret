@@ -46,6 +46,7 @@ fn refuse_when_stopping() -> std::io::Result<()> {
 
 /// Watches up to 4 instructions until `done`, calling `on_hit` at each run of one (false =
 /// stop): without stopping the game where that works (Linux's `Quiet`), else with `Tracer`.
+#[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
 pub fn watch_execute(pid: u32, instrs: &[u64], mut done: impl FnMut() -> bool, mut on_hit: impl FnMut(&Hit) -> bool) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     if let Ok(mut quiet) = Quiet::open(pid, instrs) {
