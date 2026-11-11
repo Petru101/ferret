@@ -798,6 +798,8 @@ impl Air {
         match s.ty {
             Ty::F64 => Val::Num(at, "f64"),
             Ty::I32 | Ty::U32 => Val::Num(at, "i32"),
+            // A Boolean slot: 4 bytes holding 0 or 1 (an on/off flag).
+            Ty::Bool => Val::Num(at, "bit0"),
             Ty::Obj => ptr(mem, at).map_or(Val::Other, Val::Obj),
             Ty::Atom => match u(mem, at) {
                 Some(a) if a & 7 == ATOM_OBJECT && a > 7 => Val::Obj(a & !7),

@@ -312,3 +312,8 @@ pub fn clear_left(pid: u32) -> usize {
 
 /// Linux waits for SIGCHLD; nothing to set up here.
 pub fn block_sigchld() {}
+
+/// Linux only (perf breakpoints): there, instructions can be watched without stopping the game.
+pub fn quiet() -> bool {
+    false
+}

@@ -2287,17 +2287,24 @@ impl Ue {
 }
 
 /// The game's Unreal objects (found once per game, shared with the limits' thread); an error
-/// for games that aren't Unreal (asked again after a while: the engine may still be starting).
+/// for games that aren't Unreal, asked again after a while: the engine may still be starting.
+/// After 2 s at first, then twice as long each time up to 30 s: Minecraft Dungeons II attached
+/// a second into its start had no Unreal tables yet, and with a flat 30 s its saved values
+/// showed up so late it looked like "found only after I changed it".
 pub fn shared(pid: u32, mem: &Mem, exe: &str, mods: impl FnOnce() -> Vec<Module>) -> Result<Arc<Ue>, String> {
-    static FOUND: Mutex<Option<(u32, Result<Arc<Ue>, String>, std::time::Instant)>> = Mutex::new(None);
+    // The game, what the last lookup gave, when, and how many failed in a row.
+    static FOUND: Mutex<Option<(u32, Result<Arc<Ue>, String>, std::time::Instant, u32)>> = Mutex::new(None);
     let mut found = FOUND.lock().unwrap();
-    if let Some((p, r, at)) = found.as_ref() {
-        if *p == pid && (r.is_ok() || at.elapsed() < std::time::Duration::from_secs(30)) {
+    let mut failed = 0;
+    if let Some((_, r, at, tries)) = found.as_ref().filter(|f| f.0 == pid) {
+        let wait = std::time::Duration::from_secs((2u64 << (*tries).min(4)).min(30));
+        if r.is_ok() || at.elapsed() < wait {
             return r.clone();
         }
+        failed = *tries;
     }
     let r = Ue::locate(pid, mem, &mods(), exe).map(Arc::new);
-    *found = Some((pid, r.clone(), std::time::Instant::now()));
+    *found = Some((pid, r.clone(), std::time::Instant::now(), if r.is_ok() { 0 } else { failed + 1 }));
     r
 }
 

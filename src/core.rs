@@ -651,6 +651,9 @@ pub enum Kind {
     Bit(u8),
     /// A JavaScript true or false (RPG Maker's switches and flags).
     JsBool,
+    /// A Lua true or false, and a Python True or False (the helper's lua.rs and python.rs).
+    LuaBool,
+    PyBool,
     /// A 1-byte whole number (an Unreal enum: the movement mode the Fly tweak sets).
     U8,
     /// A 1-byte whole number, signed (a Java `byte`). Listed by the Browse tab; never searched for.
@@ -683,6 +686,8 @@ impl Kind {
             Kind::Smi => "smi",
             Kind::Bit(n) => BITS[n as usize & 7],
             Kind::JsBool => "jsbool",
+            Kind::LuaBool => "luabool",
+            Kind::PyBool => "pybool",
             Kind::U8 => "u8",
             Kind::I8 => "i8",
             Kind::I64 => "i64",
@@ -694,12 +699,12 @@ impl Kind {
         if let Some(n) = BITS.iter().position(|b| *b == s) {
             return Some(Kind::Bit(n as u8));
         }
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8, Kind::I8, Kind::I64, Kind::JsVar]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::LuaBool, Kind::PyBool, Kind::U8, Kind::I8, Kind::I64, Kind::JsVar]).find(|k| k.name() == s)
     }
 
     /// On or off (1 or 0), not a number: the window shows a switch.
     pub fn flag(self) -> bool {
-        matches!(self, Kind::Bit(_) | Kind::JsBool)
+        matches!(self, Kind::Bit(_) | Kind::JsBool | Kind::LuaBool | Kind::PyBool)
     }
 
     fn with_article(self) -> String {
@@ -709,7 +714,7 @@ impl Kind {
 
     /// Whole numbers in memory (a game may still show them with decimals: 12 as "1.2").
     pub fn whole(self) -> bool {
-        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 | Kind::I8 | Kind::I64)
+        matches!(self, Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::LuaBool | Kind::PyBool | Kind::U8 | Kind::I8 | Kind::I64)
     }
 
     pub fn describe(self) -> &'static str {
@@ -725,6 +730,8 @@ impl Kind {
             Kind::Smi => "JavaScript whole number",
             Kind::Bit(_) => "on/off flag",
             Kind::JsBool => "JavaScript on/off flag",
+            Kind::LuaBool => "Lua on/off flag",
+            Kind::PyBool => "Python on/off flag",
             Kind::U8 | Kind::I8 => "1-byte whole number",
             Kind::I64 => "8-byte whole number",
             Kind::JsVar => "JavaScript number",
@@ -943,6 +950,10 @@ struct Entry {
     /// The game's build its code patterns were traced or last checked in (helper `build`):
     /// after an update they are checked against its name before being trusted.
     build: Option<String>,
+    /// Code patterns that turned out to read other values too (a restore saw the instruction
+    /// read two places: Minecraft Dungeons' "get a currency" routine, which brought back the
+    /// other currency): never followed again, and left out when the value is saved again.
+    shared: Vec<String>,
     /// The game's build in which tracing a value found by name saw nothing touch it (ULTRAKILL's
     /// health while the player isn't hit): not traced again at restores until the next build
     /// (saving it again traces it).
@@ -1002,6 +1013,7 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 decimals: 0,
                 last: None,
                 build: None,
+                shared: Vec::new(),
                 untraced: None,
                 imported: false,
                 suggested: None,
@@ -1015,6 +1027,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.kind = kind;
         } else if let (Some(site), Some(e)) = (line.strip_prefix("site "), entries.last_mut()) {
             e.sites.push(site.trim().to_owned());
+        } else if let (Some(site), Some(e)) = (line.strip_prefix("shared "), entries.last_mut()) {
+            e.shared.push(site.trim().to_owned());
         } else if let (Some(key), Some(e)) = (line.strip_prefix("key ").and_then(parse_key), entries.last_mut()) {
             e.key = Some(key);
         } else if let (Some(path), Some(e)) = (line.strip_prefix("path "), entries.last_mut()) {
@@ -1072,6 +1086,9 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         for s in &e.sites {
             text.push_str(&format!("site {s}\n"));
+        }
+        for s in &e.shared {
+            text.push_str(&format!("shared {s}\n"));
         }
         if let Some((off, v)) = e.key {
             text.push_str(&format!("key {off} {v}\n"));
@@ -1493,7 +1510,12 @@ const RESTORE_WAIT: Duration = Duration::from_secs(2);
 /// How a code pattern's miss starts when what it found can't be the value.
 const IMPLAUSIBLE: &str = "it read a number no game keeps";
 /// The helper's reason when a value's code didn't run while it waited.
+/// How long a typed number's step waits before its second look (`typed_search`).
+const SECOND_LOOK: Duration = Duration::from_secs(1);
 const NOT_RUN: &str = "none of its code ran meanwhile";
+/// The helper's error when every code pattern of a value read two places while it was looked
+/// for (the same text in helper.rs).
+const SHARED: &str = "its code is shared with other values";
 
 /// How often values seen in trusted places are written to the profile as `last`.
 const LAST_EVERY: Duration = Duration::from_secs(10);
@@ -2147,8 +2169,9 @@ impl Core {
         // while it holds a number (a table that grew left the old place freed).
         let loc = match &named {
             Some((text, _, _, _)) if text.starts_with("gml:") => Loc { kind: Kind::Gm, ..loc },
-            Some((text, _, _, _)) if text.starts_with("lua:") => Loc { kind: Kind::Lua, ..loc },
-            Some((text, _, _, _)) if text.starts_with("py:") => Loc { kind: Kind::Py, ..loc },
+            // (A flag listed there keeps its own type.)
+            Some((text, _, _, _)) if text.starts_with("lua:") && !loc.kind.flag() => Loc { kind: Kind::Lua, ..loc },
+            Some((text, _, _, _)) if text.starts_with("py:") && !loc.kind.flag() => Loc { kind: Kind::Py, ..loc },
             Some((_, _, _, kind)) => Loc { kind: *kind, ..loc },
             _ => loc,
         };
@@ -2159,12 +2182,14 @@ impl Core {
         for l in reply.iter().filter(|l| !l.starts_with("site ")) {
             self.say(l);
         }
-        let mut sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
+        let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
+        let mut sites = self.unshared(name, sites)?;
+        let known_shared = reply.iter().any(|l| l.starts_with("site ")) && sites.is_empty();
         let (mut paths, mut candidates) = (Vec::new(), Vec::new());
         let pid = self.game()?.pid;
         if sites.is_empty() && named.is_none() {
             let accessed = reply.iter().find_map(|l| l.strip_suffix(" instructions accessed it")).and_then(|n| n.parse::<usize>().ok());
-            let shared = reply.iter().any(|l| l.contains(": shared code,"));
+            let shared = known_shared || reply.iter().any(|l| l.contains(": shared code,"));
             let why = match accessed {
                 Some(0) => "nothing in the game touched the value while Ferret watched",
                 _ if shared => "the game only reads this value through code it shares with other values (one routine for every object of its kind: GameMaker games, RTS players)",
@@ -2173,7 +2198,8 @@ impl Core {
             self.say(&format!("{why}; looking for objects the game names that lead to it"));
             named = self.named_path(loc, false);
             if named.is_none() && accessed == Some(0) {
-                sites = self.sites_when_changed(loc);
+                let found = self.sites_when_changed(loc);
+                sites = self.unshared(name, found)?;
             }
         }
         if sites.is_empty() && named.is_none() {
@@ -2213,6 +2239,7 @@ impl Core {
         // code is the same (shared with other values of its kind).
         let limit = entries.iter().find(|e| e.name == name).and_then(|e| e.limit.clone());
         let key = entries.iter().find(|e| e.name == name && e.sites.iter().any(|s| sites.contains(s))).and_then(|e| e.key);
+        let shared = entries.iter().find(|e| e.name == name).map(|e| e.shared.clone()).unwrap_or_default();
         entries.retain(|e| e.name != name);
         let named_text: Vec<String> = named.iter().map(|(t, _, _, _)| t.clone()).collect();
         let mut entry = Entry {
@@ -2228,6 +2255,7 @@ impl Core {
             decimals,
             last,
             build,
+            shared,
             untraced: None,
             imported: false,
             suggested: None,
@@ -2309,6 +2337,7 @@ impl Core {
             decimals,
             last,
             build,
+            shared: Vec::new(),
             untraced: None,
             imported: false,
             suggested: None,
@@ -3020,6 +3049,7 @@ impl Core {
                 run: Some(pid),
                 named: Vec::new(),
                 last: None,
+                shared: Vec::new(),
                 untraced: None,
                 imported: false,
                 suggested: None,
@@ -3193,6 +3223,7 @@ impl Core {
                 decimals: v.decimals,
                 last: None,
                 build: v.build,
+                shared: Vec::new(),
                 untraced: None,
                 imported: true,
                 suggested: v.limit,
@@ -3422,6 +3453,14 @@ impl Core {
             let entry = confirmed.as_ref().unwrap_or(entry);
             match resolved {
                 Some((loc, v)) => self.found_by_site(entry, loc, v)?,
+                None if why_not.as_ref().is_some_and(|w| w.starts_with(SHARED)) => {
+                    // The first place they read was taken for the value before (Minecraft
+                    // Dungeons' emeralds came back as the other currency).
+                    self.say(&format!("{name}: the game reads it only through code it shares with other values, so Ferret can't tell which one is {name}: find it again and save it as {name}"));
+                    let game = self.game()?;
+                    game.entries.retain(|(n, _)| n != name);
+                    game.entries.push((name.clone(), Loc { addr: 0, kind: entry.kind }));
+                }
                 None if why_not.as_ref().is_some_and(|w| w.starts_with(IMPLAUSIBLE)) => {
                     // Looking again would find the same wrong place (and a limit write there).
                     let why = why_not.unwrap_or_default();
@@ -3467,6 +3506,20 @@ impl Core {
             let name = &e.name;
             self.game()?.via.retain(|(n, _)| n != name);
             let mine: Vec<&str> = reply.iter().filter_map(|l| l.strip_prefix(name.as_str())?.strip_prefix(' ')).collect();
+            // Patterns that read a second place while watched: never followed again.
+            let shared: Vec<String> = mine
+                .iter()
+                .filter_map(|l| l.strip_prefix("shared "))
+                .flat_map(str::split_whitespace)
+                .filter_map(|n| e.sites.get(n.parse::<usize>().ok()?).cloned())
+                .collect();
+            if !shared.is_empty() {
+                self.say(&format!("{name}: {} of its {} code patterns read other values too: no longer used", shared.len(), e.sites.len()));
+                self.update_entry(name, |e| {
+                    e.sites.retain(|s| !shared.contains(s));
+                    e.shared.extend(shared.iter().filter(|s| !e.shared.contains(s)).cloned().collect::<Vec<_>>());
+                })?;
+            }
             let result = match mine.iter().find_map(|l| l.strip_prefix("error: ")) {
                 Some(why) => Err(why.to_owned()),
                 None => match parse_exact_values(&mine.iter().map(|l| l.to_string()).collect::<Vec<_>>()).first() {
@@ -3514,7 +3567,7 @@ impl Core {
             Err(why) if why.starts_with(NOT_RUN) || why.starts_with("cannot trace") => return Ok(()),
             Err(why) => why,
         };
-        let wrong = why.starts_with("they led") || why.starts_with(IMPLAUSIBLE);
+        let wrong = why.starts_with("they led") || why.starts_with(IMPLAUSIBLE) || why.starts_with(SHARED);
         if tried && !wrong {
             return Ok(());
         }
@@ -3528,6 +3581,7 @@ impl Core {
         let build = self.game()?.build.clone();
         let reply = self.helper.call(&format!("sites {loc}"));
         let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
+        let sites = self.unshared(name, sites)?;
         if !sites.is_empty() {
             self.say(&format!("{name}: {} new code patterns saved: the next restart finds it fast again", sites.len()));
             return self.update_entry(name, |e| {
@@ -3546,6 +3600,19 @@ impl Core {
             }
             e.untraced = build.clone();
         })
+    }
+
+    /// `sites` without the code patterns the saved value `name` knows to read other values too
+    /// (`Entry.shared`).
+    fn unshared(&mut self, name: &str, sites: Vec<String>) -> Result<Vec<String>, String> {
+        let exe = self.game()?.exe.clone();
+        let known = read_profile(&exe).into_iter().find(|e| e.name == name).map(|e| e.shared).unwrap_or_default();
+        let before = sites.len();
+        let kept: Vec<String> = sites.into_iter().filter(|s| !known.contains(s)).collect();
+        if kept.len() < before {
+            self.say(&format!("{} code patterns known to read other values too left out", before - kept.len()));
+        }
+        Ok(kept)
     }
 
     /// Changes a saved value in the profile.
@@ -5695,7 +5762,24 @@ impl Core {
                 self.helper.call("mark");
                 let reply = self.helper.call(&format!("next {}", n.search()));
                 self.say(&format!("typed {n}: {}", reply.join(" ")));
-                let count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
+                let mut count = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
+                // A step that leaves one place or none decides the search, and it only sees
+                // the instant it runs in: memory that didn't hold the number just then (the
+                // game still writing it, a counter on its way) loses every real place at once,
+                // and something that happened to hold it is left (Minecraft Dungeons II once
+                // went 225 -> 262 -> 263 and ended on a 2-byte leftover). So it is taken back
+                // and done once more a second later; the bigger answer counts.
+                // (A step that leaves none isn't one in the helper: it keeps the places as they were.)
+                if count <= 1 && count < before && (count == 0 || match_count(&self.helper.call("undo")).is_some()) {
+                    std::thread::sleep(SECOND_LOOK);
+                    self.helper.call("mark");
+                    let reply = self.helper.call(&format!("next {}", n.search()));
+                    let again = match_count(&reply).ok_or_else(|| first_error(&reply).unwrap_or("scan failed".into()))?;
+                    if again > count {
+                        self.say(&format!("a second later {again} places hold {n} (the game was still changing it): going on with those"));
+                    }
+                    count = again;
+                }
                 if count == 0 {
                     self.say("nothing went from the last number to this one, starting over");
                     self.lost_shape();
@@ -5817,6 +5901,7 @@ mod tests {
             decimals,
             last: None,
             build: None,
+            shared: Vec::new(),
             untraced: None,
             imported: false,
             suggested: None,

@@ -431,7 +431,7 @@ impl BrowseView {
 /// numbers.
 fn holds(kind: core::Kind, v: Option<f64>, n: &Shown) -> bool {
     let step = 10f64.powi(-(n.decimals() as i32));
-    !matches!(kind, core::Kind::Bit(_) | core::Kind::JsBool) && v.is_some_and(|v| (v - n.value()).abs() < step)
+    !kind.flag() && v.is_some_and(|v| (v - n.value()).abs() < step)
 }
 
 /// A tweak's title and what it does (helper/src/tweaks.rs ids); None for one this build doesn't

@@ -152,11 +152,13 @@ fn test_number(value: &str, shown: Option<f64>) -> String {
 
 /// 5040383 -> "5,040,383".
 pub(super) fn grouped(n: usize) -> String {
+    // Translators: the sign between groups of three digits in big numbers ("5,040,383").
+    let between = tr!(",");
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
+            out.push_str(&between);
         }
         out.push(c);
     }

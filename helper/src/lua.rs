@@ -105,6 +105,41 @@ pub fn number(b: &[u8]) -> Option<f64> {
     is_number(w).then(|| f64::from_bits(w))
 }
 
+/// A TValue's true or false (either layout). LuaJIT keeps them as tags with nothing behind:
+/// with 8-byte references (GC64) the whole word, false `ffff7fff ffffffff` and true `fffeffff
+/// ffffffff`; with 4-byte ones the upper half, `fffffffe` and `fffffffd` (the lower half is
+/// whatever was there).
+pub fn boolean(b: &[u8]) -> Option<bool> {
+    let w = u64::from_le_bytes(b.get(..8)?.try_into().ok()?);
+    match (w, (w >> 32) as u32) {
+        (GC64_FALSE, _) | (_, 0xffff_fffe) => Some(false),
+        (GC64_TRUE, _) | (_, 0xffff_fffd) => Some(true),
+        _ => None,
+    }
+}
+
+const GC64_FALSE: u64 = 0xffff_7fff_ffff_ffff;
+const GC64_TRUE: u64 = 0xfffe_ffff_ffff_ffff;
+
+/// Turns a TValue holding true or false into the other; refused while it holds anything else
+/// (the table may have grown and left this place to something new).
+pub fn write_bool(mem: &Mem, addr: u64, on: bool) -> std::io::Result<()> {
+    let mut b = [0u8; 8];
+    mem.read_exact_at(&mut b, addr)?;
+    if boolean(&b).is_none() {
+        return Err(std::io::Error::other("not a Lua true or false now"));
+    }
+    match u64::from_le_bytes(b) {
+        GC64_FALSE | GC64_TRUE => mem.write_all_at(&(if on { GC64_TRUE } else { GC64_FALSE }).to_le_bytes(), addr),
+        _ => mem.write_all_at(&(if on { 0xffff_fffdu32 } else { 0xffff_fffe }).to_le_bytes(), addr + 4),
+    }
+}
+
+/// A number or a true/false: what Ferret lists and follows names to.
+fn listable(w: u64) -> bool {
+    is_number(w) || boolean(&w.to_le_bytes()).is_some()
+}
+
 impl Layout {
     /// The object type a TValue holds (the complement of its tag), when not a number.
     fn kind(self, w: u64) -> Option<u8> {
@@ -543,7 +578,7 @@ fn follow(lj: &Lj, mem: &Mem, steps: &[Step]) -> Option<u64> {
             }
         };
     }
-    is_number(cur).then_some(at)
+    listable(cur).then_some(at)
 }
 
 /// A table (or a function's upvalues) whose numbers are listed.
@@ -621,7 +656,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         };
         let mut g = Group { path: path.clone(), locals: kind == FUNC, numbers: Vec::new() };
         for (step, w, at) in entries {
-            if is_number(w) {
+            if listable(w) {
                 if g.numbers.len() < MAX_PER_TABLE && numbers_seen.insert(at) {
                     let label = match &step {
                         Step::Key(Key::Name(n)) | Step::Up(n) => n.clone(),
@@ -673,7 +708,13 @@ fn constant(name: &str) -> bool {
 pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     let groups = groups(heap)?;
     let mut out = Vec::new();
-    let listed = |numbers: Vec<(String, u64, LuaPath)>| numbers.into_iter().map(|(label, addr, _)| Listed { label, addr, kind: "lua" }).collect::<Vec<_>>();
+    let mem = heap.mem();
+    // A true or false is a flag (`luabool`), the rest numbers.
+    let kind_at = |addr: u64| match word(mem, addr).is_some_and(|w| boolean(&w.to_le_bytes()).is_some()) {
+        true => "luabool",
+        false => "lua",
+    };
+    let listed = |numbers: Vec<(String, u64, LuaPath)>| numbers.into_iter().map(|(label, addr, _)| Listed { label, addr, kind: kind_at(addr) }).collect::<Vec<_>>();
     for g in groups {
         if g.path.steps.is_empty() {
             let (consts, vars): (Vec<_>, Vec<_>) = g.numbers.into_iter().partition(|(n, _, _)| constant(n));

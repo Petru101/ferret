@@ -21,3 +21,6 @@ flatpak-repo/
 test-game/electron/node_modules/
 test-game/electron/bundle/
 test-game/electron/phaser/dist/
+test-game/target-avx
+test-game/target32-avx.exe
+test-game/fake-ac.so

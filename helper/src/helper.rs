@@ -610,6 +610,12 @@ pub(crate) enum Kind {
     /// V8's two objects for them, written by pointing it to the other; never written while it
     /// holds something else.
     JsBool,
+    /// A Lua true or false (lua.rs): a TValue holding one of LuaJIT's two tags for them,
+    /// written by changing the tag; never written while it holds something else.
+    LuaBool,
+    /// A Python True or False (python.rs): the slot points to one of the interpreter's two
+    /// objects for them, written by pointing it to the other.
+    PyBool,
     /// A 1-byte whole number, unsigned (an Unreal enum: the character's movement mode).
     /// Never searched for: tweaks write it.
     U8,
@@ -645,6 +651,8 @@ impl Kind {
             Kind::Smi => "smi",
             Kind::Bit(n) => BITS[n as usize & 7],
             Kind::JsBool => "jsbool",
+            Kind::LuaBool => "luabool",
+            Kind::PyBool => "pybool",
             Kind::U8 => "u8",
             Kind::I8 => "i8",
             Kind::I64 => "i64",
@@ -668,7 +676,7 @@ impl Kind {
         if let Some(n) = BITS.iter().position(|b| *b == s) {
             return Some(Kind::Bit(n as u8));
         }
-        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::U8, Kind::I8, Kind::I64, Kind::JsVar]).find(|k| k.name() == s)
+        Kind::ALL.into_iter().chain([Kind::Gm, Kind::Lua, Kind::Py, Kind::Smi, Kind::JsBool, Kind::LuaBool, Kind::PyBool, Kind::U8, Kind::I8, Kind::I64, Kind::JsVar]).find(|k| k.name() == s)
     }
 
     fn size(self) -> usize {
@@ -676,7 +684,7 @@ impl Kind {
             Kind::Bit(_) | Kind::U8 | Kind::I8 => 1,
             Kind::U16 => 2,
             Kind::I32 | Kind::F32 | Kind::Smi | Kind::JsVar => 4,
-            Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py | Kind::I64 => 8,
+            Kind::F64 | Kind::Xor | Kind::Lua | Kind::Py | Kind::I64 | Kind::LuaBool | Kind::PyBool => 8,
             Kind::JsBool => js::bool_width(),
             Kind::Gm => 16,
         }
@@ -694,7 +702,8 @@ impl Kind {
             Kind::Gm => gml::rvalue_number(b).unwrap_or(f64::NAN),
             Kind::Lua => lua::number(b).unwrap_or(f64::NAN),
             // Read through the slot (`read_value`).
-            Kind::Py | Kind::JsVar => f64::NAN,
+            Kind::Py | Kind::PyBool | Kind::JsVar => f64::NAN,
+            Kind::LuaBool => lua::boolean(b).map_or(f64::NAN, f64::from),
             Kind::Smi => match i32::from_le_bytes(b[..4].try_into().unwrap()) {
                 w if w & 1 == 0 => (w >> 1) as f64,
                 _ => f64::NAN,
@@ -714,7 +723,9 @@ impl Kind {
     fn fits(self, lo: f64, hi: f64, n: Shown) -> bool {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
         match self {
-            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 | Kind::I8 | Kind::I64 => lo <= n.scaled && n.scaled <= hi,
+            Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::LuaBool | Kind::PyBool | Kind::U8 | Kind::I8 | Kind::I64 => {
+                lo <= n.scaled && n.scaled <= hi
+            }
             Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsVar => lo < n.value + n.step && hi > n.value - n.step,
         }
     }
@@ -753,12 +764,15 @@ fn read_value(mem: &Mem, addr: u64, kind: Kind) -> Option<f64> {
     if kind == Kind::Py {
         return python::read_slot(mem, addr);
     }
+    if kind == Kind::PyBool {
+        return python::read_bool(mem, addr).map(f64::from);
+    }
     if kind == Kind::JsVar {
         return web::read_var(mem, addr);
     }
     let mut b = [0u8; 16];
     mem.read_exact_at(&mut b[..kind.size()], addr).ok()?;
-    Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua | Kind::Smi | Kind::JsBool) || !v.is_nan())
+    Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua | Kind::Smi | Kind::JsBool | Kind::LuaBool) || !v.is_nan())
 }
 
 fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
@@ -813,6 +827,8 @@ fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
             mem.write_all_at(&[new], addr)
         }
         Kind::JsBool => js::write_bool(mem, addr, v != 0.0),
+        Kind::LuaBool => lua::write_bool(mem, addr, v != 0.0),
+        Kind::PyBool => python::write_bool(mem, addr, v != 0.0),
         Kind::U8 => mem.write_all_at(&[v.round().clamp(0.0, 255.0) as u8], addr),
         Kind::I8 => mem.write_all_at(&[v.round().clamp(-128.0, 127.0) as i8 as u8], addr),
         Kind::I64 => mem.write_all_at(&(v.round() as i64).to_le_bytes(), addr),
@@ -889,6 +905,8 @@ struct Limit {
     checked_at: Instant,
     /// Whether all its code patterns were searched for a static pointer to the object.
     searched_code: bool,
+    /// Its code patterns read other values too (`SHARED`): not looked for again.
+    given_up: bool,
     /// A thread is finding it by its code patterns now (`limiter_loop`): not started again.
     finding: bool,
     /// How long until its code patterns are checked again: `RECHECK_EVERY`, doubled every time
@@ -1100,6 +1118,12 @@ const RETRY_EVERY: Duration = Duration::from_secs(5);
 const RECHECK_EVERY: Duration = Duration::from_secs(10);
 const RECHECK_MOST: Duration = Duration::from_secs(160);
 const RESOLVE_WAIT: Duration = Duration::from_secs(2);
+/// Where the game needn't be stopped to watch its code (`trace::quiet`), values not found yet
+/// are watched for this long per 4 instructions, round after round with `QUIET_RETRY` between:
+/// their code may run a few times an hour (Skyrim's gold: only when it changes), and 2 s of
+/// every 7 missed four changes in a row.
+const QUIET_WAIT: Duration = Duration::from_secs(5);
+const QUIET_RETRY: Duration = Duration::from_millis(250);
 
 fn read_guard(mem: &Mem, addr: u64) -> Option<[u8; 4]> {
     let mut g = [0u8; 4];
@@ -1149,9 +1173,11 @@ fn limiter_loop(shared: SharedLimiter) {
             if let Some(r) = (pid != 0).then(|| started_anti_cheat(pid)).flatten() {
                 *shared.lock().unwrap() = Limiter::default();
                 *CAUGHT.lock().unwrap() = Some((pid, r));
+                // A trace or a scan running now ends here, not when it is done.
+                trace::let_go(true);
             }
         }
-        let due: Vec<(String, Vec<Site>, bool)>;
+        let due: Vec<Due>;
         let named_due: Vec<(String, Named)>;
         let (pid, mem, width) = {
             let mut guard = shared.lock().unwrap();
@@ -1238,7 +1264,8 @@ fn limiter_loop(shared: SharedLimiter) {
                 .filter(|_| find)
                 .filter_map(|l| {
                     let n = l.named.as_mut()?;
-                    let due = !n.searching && n.addrs.is_empty() && n.found_at.is_none_or(|t| t.elapsed() >= NAMED_REFIND);
+                    let every = if matches!(n.path, Named::Unreal(_)) { NAMED_REFIND_SCRIPT } else { NAMED_REFIND };
+                    let due = !n.searching && n.addrs.is_empty() && n.found_at.is_none_or(|t| t.elapsed() >= every);
                     n.searching |= due;
                     due.then(|| (l.name.clone(), n.path.clone()))
                 })
@@ -1326,11 +1353,11 @@ fn limiter_loop(shared: SharedLimiter) {
             let now = Instant::now();
             due = limits
                 .iter_mut()
-                .filter(|l| find && !l.finding && l.paths.is_empty() && l.named.is_none())
+                .filter(|l| find && !l.finding && !l.given_up && l.paths.is_empty() && l.named.is_none())
                 .filter(|l| if l.paused.is_some() { l.retry_at <= now } else { l.checked_at + l.recheck_every <= now })
                 .map(|l| {
                     l.finding = true;
-                    (l.name.clone(), l.sites.clone(), !l.searched_code)
+                    Due { name: l.name.clone(), sites: l.sites.clone(), search_code: !l.searched_code, lost: l.paused.is_some() }
                 })
                 .collect();
             let Ok(mem) = mem.try_clone() else { continue };
@@ -1355,9 +1382,11 @@ fn limiter_loop(shared: SharedLimiter) {
         // thread, so the values are still written meanwhile. On this one, From Dust's Jellify
         // timer held at most 0 ran for 4 s of every 14 (the ring jumped back to 59). Values
         // found through the same code are looked for in one trace.
-        let mut groups: Vec<Vec<(String, Vec<Site>, bool)>> = Vec::new();
+        // Without stopping the game, all of them in one watch: it rotates through their code.
+        let quiet = trace::quiet();
+        let mut groups: Vec<Vec<Due>> = Vec::new();
         for d in due {
-            match groups.iter_mut().find(|g| same_code(&g[0].1, &d.1)) {
+            match groups.iter_mut().find(|g| quiet || same_code(&g[0].sites, &d.sites)) {
                 Some(g) => g.push(d),
                 None => groups.push(vec![d]),
             }
@@ -1377,17 +1406,32 @@ fn same_code(a: &[Site], b: &[Site]) -> bool {
 /// Finds limited values by their code patterns again (`limiter_loop`, on a thread of its own):
 /// values going through the same code (From Dust's four power timers) in one trace, else
 /// waiting ones kept the game traced nearly all the time.
-fn refind(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, due: &[(String, Vec<Site>, bool)]) {
-    let all: Vec<Vec<Site>> = due.iter().map(|(_, sites, _)| sites.clone()).collect();
-    let results = resolve_values(pid, mem, &all, width, RESOLVE_WAIT);
-    for ((name, sites, search_code), r) in due.iter().zip(results) {
-        refound(shared, pid, mem, width, name, sites, *search_code, r.ok());
+fn refind(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, due: &[Due]) {
+    let all: Vec<Vec<Site>> = due.iter().map(|d| d.sites.clone()).collect();
+    let wait = match trace::quiet() && due.iter().any(|d| d.lost) {
+        true => QUIET_WAIT,
+        false => RESOLVE_WAIT,
+    };
+    let results = resolve_values(pid, mem, &all, width, wait, true);
+    for (d, r) in due.iter().zip(results) {
+        let gave_up = r.at.as_ref().is_err_and(|e| e.starts_with(SHARED));
+        refound(shared, pid, mem, width, &d.name, &d.sites, d.search_code, r.at.ok(), gave_up);
     }
+}
+
+/// A limited value the limiter looks for by its code patterns now.
+struct Due {
+    name: String,
+    sites: Vec<Site>,
+    /// Its code hasn't been searched for a static pointer to its object yet.
+    search_code: bool,
+    /// Not found yet, or its object changed: nothing can be written until it is found.
+    lost: bool,
 }
 
 /// What `refind` found for one value (`None`: its code didn't run).
 #[allow(clippy::too_many_arguments)]
-fn refound(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, name: &str, sites: &[Site], search_code: bool, r: Option<Resolved>) {
+fn refound(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, name: &str, sites: &[Site], search_code: bool, r: Option<Resolved>, gave_up: bool) {
     let mut found = r.map(|r| {
         let disp = r.disp;
         (r, disp)
@@ -1412,6 +1456,8 @@ fn refound(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, name: &str
     match object {
         Some((r, object, g)) => {
             l.recheck_every = match r.addr == l.addr && l.paused.is_none() {
+                // Watching without stopping the game costs it nothing: no need to check less often.
+                true if trace::quiet() => RECHECK_EVERY,
                 true => (l.recheck_every * 2).min(RECHECK_MOST),
                 false => RECHECK_EVERY,
             };
@@ -1425,7 +1471,12 @@ fn refound(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, name: &str
             // Through the static pointer it is found on every check, without tracing.
             l.paths.extend(r.holder);
         }
-        None if l.paused.is_some() => l.retry_at = Instant::now() + RETRY_EVERY,
+        // Looking again would take the first place its code reads, whatever value that is.
+        None if gave_up => {
+            l.paused = Some("its code patterns read other values too: find it again and save it again");
+            l.given_up = true;
+        }
+        None if l.paused.is_some() => l.retry_at = Instant::now() + if trace::quiet() { QUIET_RETRY } else { RETRY_EVERY },
         // The code didn't run meanwhile (a menu?): nothing says the value moved.
         None => {}
     }
@@ -1518,6 +1569,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         retry_at: Instant::now(),
         checked_at: Instant::now(),
         searched_code: false,
+        given_up: false,
         finding: false,
         recheck_every: RECHECK_EVERY,
     });
@@ -2217,6 +2269,10 @@ impl MemScan<'_> {
             if seen.load(Ordering::Relaxed) > MAX_MATCHES {
                 return MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0, over: true };
             }
+            // Anti-cheat started in the game: nothing more is read from it.
+            if trace::letting_go() {
+                return MemScanned { found: Vec::new(), shaped: Vec::new(), bytes: 0, unreadable: 0, over: false };
+            }
             if let Some(stop) = self.stop {
                 if stop.load(Ordering::Relaxed) || frontend_spoke() {
                     stop.store(true, Ordering::Relaxed);
@@ -2308,7 +2364,9 @@ impl MemScan<'_> {
                 // The scan runs after the screen was read: allow for a fraction
                 // that has moved on by up to 1 since.
                 let hit = match kind {
-                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::U8 | Kind::I8 | Kind::I64 => value == n.scaled,
+                    Kind::I32 | Kind::Xor | Kind::U16 | Kind::Smi | Kind::Bit(_) | Kind::JsBool | Kind::LuaBool | Kind::PyBool | Kind::U8 | Kind::I8 | Kind::I64 => {
+                        value == n.scaled
+                    }
                     Kind::F32 | Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsVar => kind.fits(value - n.step, value + n.step, n),
                 };
                 if hit {
@@ -2613,7 +2671,7 @@ fn snap_step(out: &mut impl Write, s: &mut Session, step: &str, fits: &(dyn Fn(K
                             Kind::Bit(_) | Kind::U8 | Kind::I8 => 1,
                             Kind::U16 => 2,
                             Kind::I32 | Kind::F32 | Kind::Xor | Kind::Smi | Kind::JsVar => 4,
-                            Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsBool | Kind::I64 => 8,
+                            Kind::F64 | Kind::Gm | Kind::Lua | Kind::Py | Kind::JsBool | Kind::LuaBool | Kind::PyBool | Kind::I64 => 8,
                         };
                         for o in (w..w + 8).step_by(step) {
                             let size = kind.size();
@@ -2684,6 +2742,12 @@ fn steady(before: f32, now: f64) -> bool {
     (now - before).abs() <= 0.25 * before.abs() + 1e-6
 }
 
+/// A float or double a game could keep for something it shows: 0, or between a thousandth and
+/// a billion either way.
+fn sane_number(kind: Kind, v: f64) -> bool {
+    !matches!(kind, Kind::F32 | Kind::F64) || v == 0.0 || (1e-3..=1e9).contains(&v.abs())
+}
+
 fn cmd_phase(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     let before = s.candidates.len();
     let arg = arg.trim();
@@ -2691,8 +2755,7 @@ fn cmd_phase(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
         return match arg {
             "moving" => {
                 s.phase_now = Some(true);
-                let sane = |kind: Kind, v: f64| !matches!(kind, Kind::F32 | Kind::F64) || v == 0.0 || (1e-3..=1e9).contains(&v.abs());
-                let fits = |kind: Kind, v0: f64, v1: f64| (sane(kind, v0) && sane(kind, v1) && v0 != v1).then_some(v1 < v0);
+                let fits = |kind: Kind, v0: f64, v1: f64| (sane_number(kind, v0) && sane_number(kind, v1) && v0 != v1).then_some(v1 < v0);
                 snap_step(out, s, "phase moving", &fits, "too many places changed since the copy, kept it: let it move a little longer")?;
                 // The copy's places all moved: that's this phase's first move.
                 for c in s.candidates.iter_mut() {
@@ -2742,6 +2805,17 @@ fn cmd_phase(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
                 .zip(rates)
                 .filter_map(|((c, v), rate)| {
                     let v = v?;
+                    // A number no game keeps counts as a miss, as at the first step (`sane`):
+                    // the 8 bytes ending in a real float read as a double follow it step by
+                    // step (From Dust's 2 timers were listed as 4 places), but leave every
+                    // sensible range once the float passes about 26 or nears 0.
+                    if !sane_number(c.kind(), v) {
+                        if c.has(MISSED) {
+                            return None;
+                        }
+                        kept_rates.push(f32::NAN);
+                        return Some(Candidate { value: v, ..c.with(MISSED, true) });
+                    }
                     let rate_now = since.filter(|&t| t > 0.0 && v != c.value).map_or(f64::NAN, |t| (v - c.value) / t);
                     let fine = match (moving, c.has(MOVED)) {
                         (true, false) if late => return None,
@@ -3348,7 +3422,7 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let wait = it.next() == Some("wait");
     let mut hits: Vec<(u64, trace::Regs)> = Vec::new();
     {
-        let _tracing = TRACING.lock().unwrap();
+        let _tracing = tracing();
         let mut tracer = match trace::Tracer::attach(s.pid) {
             Ok(t) => t,
             Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
@@ -3472,7 +3546,7 @@ fn cmd_first(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let addrs: Vec<u64> = locs.iter().map(|&(a, _)| a).collect();
     let mut changed = None;
     {
-        let _tracing = TRACING.lock().unwrap();
+        let _tracing = tracing();
         let mut tracer = match trace::Tracer::attach(s.pid) {
             Ok(t) => t,
             Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
@@ -3509,7 +3583,7 @@ fn frontend_spoke() -> bool {
 /// The distinct addresses the instruction at `instr` reads as [base + disp] while the game runs
 /// for up to `timeout` (stops early after enough of them).
 fn site_targets(pid: u32, instr: u64, base: u8, disp: i64, timeout: Duration) -> Vec<u64> {
-    let _tracing = TRACING.lock().unwrap();
+    let _tracing = tracing();
     let Ok(mut tracer) = trace::Tracer::attach(pid) else { return Vec::new() };
     tracer.arm(instr, trace::DR7_EXECUTE);
     let mut read: Vec<u64> = Vec::new();
@@ -3525,8 +3599,20 @@ fn site_targets(pid: u32, instr: u64, base: u8, disp: i64, timeout: Duration) ->
     read
 }
 
-/// Only one tracer may run at a time: two would steal each other's events.
+/// Only one tracer may run at a time: two would steal each other's events (and the CPU's 4
+/// breakpoints: the limiter's quiet watch holds them too).
 static TRACING: Mutex<()> = Mutex::new(());
+/// Commands waiting for `TRACING`: the limiter's background watch, which may run for a long
+/// time, lets go when one is.
+static TRACE_WANTED: AtomicUsize = AtomicUsize::new(0);
+
+/// `TRACING` for a command: a background watch holding it ends within milliseconds.
+fn tracing() -> std::sync::MutexGuard<'static, ()> {
+    TRACE_WANTED.fetch_add(1, Ordering::SeqCst);
+    let guard = TRACING.lock().unwrap();
+    TRACE_WANTED.fetch_sub(1, Ordering::SeqCst);
+    guard
+}
 
 /// A saved code pattern: the instruction at `off` reads [`base` + `disp`].
 #[derive(Clone)]
@@ -3636,7 +3722,7 @@ fn resolve_site(pid: u32, mem: &Mem, site: &Site, width: usize, timeout: Duratio
         return Err(format!("pattern found {} times (the game may not have run that code yet)", found.len()));
     };
     let instr = code + site.off;
-    let _tracing = TRACING.lock().unwrap();
+    let _tracing = tracing();
     let mut resolved = None;
     let mut tracer = trace::Tracer::attach(pid).map_err(|e| format!("cannot trace the game: {e}"))?;
     tracer.arm(instr, trace::DR7_EXECUTE);
@@ -3653,11 +3739,44 @@ fn resolve_site(pid: u32, mem: &Mem, site: &Site, width: usize, timeout: Duratio
     resolved.ok_or(format!("the code at 0x{instr:x} did not run within {} s", timeout.as_secs()))
 }
 
+/// A code pattern whose instruction read two places while a value was looked for: one routine
+/// for several values (Minecraft Dungeons' "get a currency", `movsd xmm0,[rax]` after a map
+/// lookup, serves emeralds and the other currency; it passed save's check while only emeralds
+/// were read, and the first place it read after a restart was the other currency). The
+/// frontend knows the text (core.rs `SHARED`).
+const SHARED: &str = "its code is shared with other values";
+/// How much longer an instruction is watched after a value's first hit, for a second place.
+const SHARED_GRACE: Duration = Duration::from_millis(500);
+/// Instructions (of a game, by pid) watched `SHARED_GRACE` past a hit this run: true = read
+/// one place, not watched longer again; false = shared, never armed again. Sites with a key
+/// (More Like This) are shared by design and stay out of it.
+static SITE_CHECKS: Mutex<Vec<(u32, u64, bool)>> = Mutex::new(Vec::new());
+
+fn site_check(pid: u32, instr: u64) -> Option<bool> {
+    SITE_CHECKS.lock().unwrap().iter().find(|c| c.0 == pid && c.1 == instr).map(|c| c.2)
+}
+
+fn set_site_check(pid: u32, instr: u64, single: bool) {
+    let mut checks = SITE_CHECKS.lock().unwrap();
+    checks.retain(|c| c.0 == pid && c.1 != instr);
+    checks.push((pid, instr, single));
+}
+
+/// What `resolve_values` found for one value.
+struct Found {
+    /// Where it led, or why not.
+    at: Result<Resolved, String>,
+    /// Which of its sites (by place in the list given) turned out to be shared code.
+    shared: Vec<usize>,
+}
+
 /// Finds several values by their code patterns at once: up to 4 instructions are armed
 /// together (one per value first), so a restore waits `timeout` per 4 instructions instead of
 /// per instruction (Wolfenstein: three sites of a value only firing runs, 10 s each, held up
-/// everything else). One result per value: where it led, or why not.
-fn resolve_values(pid: u32, mem: &Mem, values: &[Vec<Site>], width: usize, timeout: Duration) -> Vec<Result<Resolved, String>> {
+/// everything else). A site without a key is watched `SHARED_GRACE` longer the first time it
+/// leads somewhere: when it reads a second place it is shared code, dropped, and the value's
+/// other sites go on.
+fn resolve_values(pid: u32, mem: &Mem, values: &[Vec<Site>], width: usize, timeout: Duration, background: bool) -> Vec<Found> {
     let mut results: Vec<Result<Resolved, String>> = values.iter().map(|_| Err("none of its code ran meanwhile".into())).collect();
     // (value, site, instruction), first sites of every value first. Values found through the
     // same code (others like a value: From Dust's four power timers) search the code once.
@@ -3670,13 +3789,18 @@ fn resolve_values(pid: u32, mem: &Mem, values: &[Vec<Site>], width: usize, timeo
     }
     let searched = find_patterns(pid, mem, &pats, 2).map_err(|e| e.to_string());
     let most = values.iter().map(Vec::len).max().unwrap_or(0);
+    // Every site's instruction in the code, known shared ones too (for `shared`).
+    let mut located: Vec<(usize, usize, u64)> = Vec::new();
     for n in 0..most {
         for (v, sites) in values.iter().enumerate() {
             let Some(site) = sites.get(n) else { continue };
             match &searched {
                 Ok(found) => {
                     if let Some([code]) = pats.iter().position(|p| *p == &site.pat[..]).map(|i| &found[i][..]) {
-                        pending.push((v, n, code + site.off));
+                        located.push((v, n, code + site.off));
+                        if site.key.is_some() || site_check(pid, code + site.off) != Some(false) {
+                            pending.push((v, n, code + site.off));
+                        }
                     }
                 }
                 Err(e) => results[v] = Err(e.clone()),
@@ -3686,14 +3810,21 @@ fn resolve_values(pid: u32, mem: &Mem, values: &[Vec<Site>], width: usize, timeo
     // None of its patterns is in the game's code once: changed by an update (or a Mono game
     // hasn't compiled that code yet).
     for (v, sites) in values.iter().enumerate() {
-        if !sites.is_empty() && !pending.iter().any(|p| p.0 == v) && results[v].as_ref().is_err_and(|e| e.starts_with("none of its code")) {
+        if !sites.is_empty() && !located.iter().any(|p| p.0 == v) && results[v].as_ref().is_err_and(|e| e.starts_with("none of its code")) {
             results[v] = Err("its code patterns aren't in the game's code: the game was updated, or hasn't run that code yet".into());
         }
     }
-    let _tracing = TRACING.lock().unwrap();
-    let mut done = vec![false; values.len()];
-    while pending.iter().any(|(v, _, _)| !done[*v]) {
-        pending.retain(|(v, _, _)| !done[*v]);
+    // The limiter's watch gives way to a command that wants to trace.
+    let _tracing = match background {
+        true => TRACING.lock().unwrap(),
+        false => tracing(),
+    };
+    let gave_way = || background && TRACE_WANTED.load(Ordering::SeqCst) > 0;
+    // done: found for good. first: a value's first hit (when, where, which instruction), watched
+    // on for a second place.
+    let state = std::cell::RefCell::new((vec![false; values.len()], vec![None::<(Instant, u64, u64)>; values.len()], results));
+    while pending.iter().any(|(v, _, _)| !state.borrow().0[*v]) && !gave_way() {
+        pending.retain(|(v, _, _)| !state.borrow().0[*v]);
         // Up to 4 instructions (the CPU's breakpoints), each with every value that goes through
         // it: shared code runs for each of them in turn, and its key says whose turn it is.
         let mut instrs: Vec<u64> = Vec::new();
@@ -3704,37 +3835,101 @@ fn resolve_values(pid: u32, mem: &Mem, values: &[Vec<Site>], width: usize, timeo
         }
         let round: Vec<(usize, usize, u64)> = pending.iter().filter(|p| instrs.contains(&p.2)).copied().collect();
         pending.retain(|p| !instrs.contains(&p.2));
-        let mut tracer = match trace::Tracer::attach(pid) {
-            Ok(t) => t,
-            Err(e) => {
-                for (v, _, _) in &round {
-                    results[*v] = Err(format!("cannot trace the game: {e}"));
+        let start = Instant::now();
+        // A first hit that stayed the only place for `SHARED_GRACE`: the value is found.
+        let settle = || {
+            let mut st = state.borrow_mut();
+            let (done, first, _) = &mut *st;
+            for v in 0..done.len() {
+                if let Some((_, _, instr)) = first[v].filter(|(t, _, _)| t.elapsed() >= SHARED_GRACE) {
+                    set_site_check(pid, instr, true);
+                    (done[v], first[v]) = (true, None);
                 }
-                return results;
             }
         };
-        tracer.arm_execute(&instrs);
-        tracer.watch(timeout, |hit| {
-            let Some(&instr) = instrs.get(hit.slot) else { return true };
-            for &(v, n, _) in round.iter().filter(|r| r.2 == instr) {
-                let site = &values[v][n];
-                let addr = trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64);
-                // Shared code ran for another power, unit or slot: not this value.
-                if !done[v] && key_holds(mem, addr, site.key) {
-                    let is_64bit = trace::is_64bit(&hit.regs);
-                    results[v] = Ok(Resolved { addr, disp: site.disp, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
+        let watched = trace::watch_execute(
+            pid,
+            &instrs,
+            || {
+                settle();
+                let st = state.borrow();
+                let checking = st.1.iter().any(Option::is_some);
+                // Nothing left to wait for: every value is found, or its code here is shared.
+                let over = |&(v, n, i): &(usize, usize, u64)| st.0[v] || (values[v][n].key.is_none() && site_check(pid, i) == Some(false));
+                (start.elapsed() >= timeout && !checking) || gave_way() || round.iter().all(over)
+            },
+            |hit| {
+                let Some(&instr) = instrs.get(hit.slot) else { return true };
+                let mut st = state.borrow_mut();
+                let (done, first, results) = &mut *st;
+                for &(v, n, _) in round.iter().filter(|r| r.2 == instr) {
+                    let site = &values[v][n];
+                    let addr = trace::reg(&hit.regs, site.base).wrapping_add(site.disp as u64);
+                    // Shared code ran for another power, unit or slot: not this value.
+                    if done[v] || !key_holds(mem, addr, site.key) {
+                        continue;
+                    }
+                    match first[v] {
+                        None => {
+                            let is_64bit = trace::is_64bit(&hit.regs);
+                            results[v] = Ok(Resolved { addr, disp: site.disp, is_64bit, holder: holder(mem, instr, site, is_64bit, width, addr) });
+                            match site.key.is_some() || site_check(pid, instr) == Some(true) {
+                                true => done[v] = true,
+                                false => first[v] = Some((Instant::now(), addr, instr)),
+                            }
+                        }
+                        // The instruction it is checked on read another place: shared code.
+                        Some((_, before, checked)) if checked == instr && before != addr => {
+                            set_site_check(pid, instr, false);
+                            results[v] = Err(format!("{SHARED}: the same instruction read 0x{before:x} and 0x{addr:x}"));
+                            first[v] = None;
+                        }
+                        Some(_) => {}
+                    }
+                }
+                round.iter().any(|(v, _, _)| !done[*v])
+            },
+        );
+        // Cut short (the time ran out, a command wanted to trace): taken as found, unchecked.
+        {
+            let mut st = state.borrow_mut();
+            let (done, first, results) = &mut *st;
+            for v in 0..done.len() {
+                if first[v].take().is_some() {
                     done[v] = true;
                 }
             }
-            round.iter().any(|(v, _, _)| !done[*v])
-        });
+            if let Err(e) = &watched {
+                for (v, _, _) in &round {
+                    results[*v] = Err(format!("cannot trace the game: {e}"));
+                }
+                break;
+            }
+        }
     }
+    let results = state.into_inner().2;
     results
+        .into_iter()
+        .enumerate()
+        .map(|(v, at)| {
+            let shared: Vec<usize> =
+                located.iter().filter(|l| l.0 == v && values[v][l.1].key.is_none() && site_check(pid, l.2) == Some(false)).map(|l| l.1).collect();
+            // Every pattern it has in the code is shared: said so, whatever the last try gave.
+            let all_shared = !shared.is_empty() && located.iter().filter(|l| l.0 == v).count() == shared.len();
+            let at = match at {
+                Err(e) if all_shared && !e.starts_with(SHARED) => Err(format!("{SHARED}: {} of its code patterns read other places too", shared.len())),
+                at => at,
+            };
+            Found { at, shared }
+        })
+        .collect()
 }
 
 /// resolve-all <seconds> | <name> <type> <pattern> <offset> <register> <displacement> [<pattern>
 /// ...] | <name> ...: every value's code patterns armed together; per value a line "<name>
-/// <addr:type> = <value>" (and "<name> via <path>"), or "<name> error: <why>".
+/// <addr:type> = <value>" (and "<name> via <path>"), or "<name> error: <why>"; before it
+/// "<name> shared <n>..." when some of its patterns (counted from 0 as given) turned out to be
+/// shared code (`SHARED`).
 fn cmd_resolve_all(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
     if s.java {
         return writeln!(out, "error: {JAVA}");
@@ -3758,9 +3953,12 @@ fn cmd_resolve_all(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Resu
         values.push((name.to_string(), kind, sites));
     }
     let sites: Vec<Vec<Site>> = values.iter_mut().map(|(_, _, s)| std::mem::take(s)).collect();
-    let results = resolve_values(s.pid, mem, &sites, s.width, Duration::from_secs_f64(secs));
+    let results = resolve_values(s.pid, mem, &sites, s.width, Duration::from_secs_f64(secs), false);
     for ((name, kind, _), r) in values.iter().zip(results) {
-        match r {
+        if !r.shared.is_empty() {
+            writeln!(out, "{name} shared {}", r.shared.iter().map(usize::to_string).collect::<Vec<_>>().join(" "))?;
+        }
+        match r.at {
             Ok(Resolved { addr, holder, .. }) => match s.read(addr, *kind) {
                 Some(_) => {
                     writeln!(out, "{name} {}", s.describe(addr, *kind))?;
@@ -3828,7 +4026,7 @@ fn cmd_others(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let mut own: Option<Vec<u8>> = None;
     let mut places: Vec<(u64, Option<Vec<u8>>)> = Vec::new();
     {
-        let _tracing = TRACING.lock().unwrap();
+        let _tracing = tracing();
         let mut tracer = match trace::Tracer::attach(s.pid) {
             Ok(t) => t,
             Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
@@ -4159,6 +4357,8 @@ fn named_walk(heap: &Heap, path: &Named, roots: &mut Vec<u64>, found_at: &mut Op
     let every = match path {
         Named::Script(_) if gdscript::knows_tree(heap.pid) => NAMED_REFIND_TREE,
         Named::Script(_) => NAMED_REFIND_SCRIPT,
+        // Unreal's names take a fraction of a second, and a game still loading has none yet.
+        Named::Unreal(_) => NAMED_REFIND_SCRIPT,
         _ => NAMED_REFIND,
     };
     if !leads.is_empty() || found_at.is_some_and(|t| t.elapsed() < every) {
@@ -4494,6 +4694,7 @@ pub fn run(as_user: Option<&str>) {
         }
         // Anti-cheat started in the game: nothing more is written to it, test values included.
         if let Some((pid, r)) = CAUGHT.lock().unwrap().take() {
+            trace::let_go(false);
             if pid == session.pid {
                 session = Session::default();
                 caught = Some(r);

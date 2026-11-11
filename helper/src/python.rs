@@ -197,6 +197,8 @@ pub struct Py {
 enum Val {
     Int(i64),
     Float(f64),
+    /// True or False (a flag, `pybool`).
+    Bool(bool),
     /// A dict (or subclass), list, tuple or an object with attributes.
     Obj(u64),
     Other,
@@ -410,6 +412,17 @@ impl Py {
         mem.read_exact_at(&mut b, at).ok().map(|_| b)
     }
 
+    /// Whether a bool object is True: 2.7 keeps it as an int (a C long), 3.x as a long.
+    fn bool_value(&self, mem: &Mem, o: u64) -> Option<bool> {
+        if self.type_of(mem, o)? != self.t.bool_ {
+            return None;
+        }
+        match self.ver.0 {
+            2 => sized(mem, o + 2 * self.w, self.long, true).map(|v| v != 0),
+            _ => self.int_value(mem, o, self.t.int).map(|v| v != 0),
+        }
+    }
+
     /// What an object is, for listing.
     fn val(&self, mem: &Mem, o: u64) -> Val {
         let Some(t) = self.type_of(mem, o) else { return Val::Other };
@@ -417,7 +430,7 @@ impl Py {
             return word(mem, o + 2 * self.w).map_or(Val::Other, |b| Val::Float(f64::from_bits(b)));
         }
         if t == self.t.bool_ {
-            return Val::Other;
+            return self.bool_value(mem, o).map_or(Val::Other, Val::Bool);
         }
         if t == self.t.int || (self.t.long != 0 && t == self.t.long) {
             return self.int_value(mem, o, t).map_or(Val::Other, Val::Int);
@@ -683,8 +696,37 @@ pub fn read_slot(mem: &Mem, slot: u64) -> Option<f64> {
     match py.val(mem, py.ptr(mem, slot)?) {
         Val::Int(i) => Some(i as f64),
         Val::Float(f) => Some(f),
+        Val::Bool(b) => Some(f64::from(b)),
         _ => None,
     }
+}
+
+/// Whether the slot points to True (None: to neither True nor False).
+pub fn read_bool(mem: &Mem, slot: u64) -> Option<bool> {
+    let py = current()?;
+    py.bool_value(mem, py.ptr(mem, slot)?)
+}
+
+/// Points a slot holding True or False to the other one. Python has one object of each, and
+/// CPython defines them one after the other (boolobject.c), so the other is the bool object
+/// right before or after the slot's.
+pub fn write_bool(mem: &Mem, slot: u64, on: bool) -> std::io::Result<()> {
+    let refused = |why: &str| Err(std::io::Error::other(why.to_owned()));
+    let Some(py) = current() else { return refused("not a Python game") };
+    let Some(o) = py.ptr(mem, slot) else { return refused("unreadable") };
+    let Some(have) = py.bool_value(mem, o) else { return refused("not a Python True or False now") };
+    if have == on {
+        return Ok(());
+    }
+    let w = py.w;
+    let other = [4 * w, 3 * w, 5 * w].into_iter().flat_map(|d| [o.wrapping_add(d), o.wrapping_sub(d)]).find(|&c| py.bool_value(mem, c) == Some(on));
+    let Some(target) = other else { return refused("Ferret can't find the game's other True/False object, not written") };
+    if py.ver < (3, 12) {
+        // Not immortal before 3.12: the slot's new reference is counted, as for small ints.
+        let Some(n) = py.ptr(mem, target).filter(|&n| n > 10) else { return refused("not written") };
+        py.put(mem, target, n + 1)?;
+    }
+    py.put(mem, slot, target)
 }
 
 /// Writes a number to the object a slot points to: in place when only that slot points to
@@ -935,7 +977,7 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &PyPath) -> Vec<u64> {
                 cur = v;
                 slot = at;
             }
-            matches!(py.val(mem, cur), Val::Int(_) | Val::Float(_)).then_some(slot)
+            matches!(py.val(mem, cur), Val::Int(_) | Val::Float(_) | Val::Bool(_)).then_some(slot)
         })
         .collect()
 }
@@ -1015,7 +1057,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
                 Key::Index(i) => Step::Index(*i),
             };
             match py.val(mem, v) {
-                Val::Int(_) | Val::Float(_) => {
+                Val::Int(_) | Val::Float(_) | Val::Bool(_) => {
                     let label = match &k {
                         Key::Name(n) => n.clone(),
                         Key::Index(i) => format!("[{i}]"),
@@ -1043,7 +1085,9 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     let groups = groups(heap)?;
     let mut out = Vec::new();
     for g in groups {
-        let fields = |nums: Vec<(String, u64, PyPath)>| nums.into_iter().map(|(label, addr, _)| Listed { label, addr, kind: "py" }).collect::<Vec<_>>();
+        // True and False are flags (`pybool`), the rest numbers.
+        let kind_at = |slot: u64| if read_bool(heap.mem(), slot).is_some() { "pybool" } else { "py" };
+        let fields = |nums: Vec<(String, u64, PyPath)>| nums.into_iter().map(|(label, addr, _)| Listed { label, addr, kind: kind_at(addr) }).collect::<Vec<_>>();
         if g.path.steps.is_empty() {
             let word = match g.path.root.as_str() {
                 "store" => Some("@variables"),

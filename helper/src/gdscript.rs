@@ -38,6 +38,9 @@ use crate::names::Heap;
 use crate::helper::Kind;
 
 const VARIANT: u64 = 24;
+/// A bool Variant: one byte, 0 or 1, where an int's or real's number is (saved and listed as
+/// the flag type `bit0`).
+const BOOL: u32 = 1;
 const INT: u32 = 2;
 const REAL: u32 = 3;
 /// Variant types in Godot 3 and in Godot 4.
@@ -520,7 +523,7 @@ impl<'a> Godot<'a> {
     }
 
     fn number(&self, v: u64) -> bool {
-        matches!(self.u32_at(v), Some(INT | REAL))
+        matches!(self.u32_at(v), Some(BOOL | INT | REAL))
     }
 
     /// Whether a script instance is still in use: a freed object stays readable a while, but
@@ -876,7 +879,7 @@ struct Partial {
 fn start(heap: &Heap, target: u64) -> Option<(Layout, u64, u64)> {
     let mem = heap.mem();
     let v = target.checked_sub(8)?;
-    if !matches!(mem_u32(mem, v), Some(INT | REAL)) {
+    if !matches!(mem_u32(mem, v), Some(BOOL | INT | REAL)) {
         return None;
     }
     // (where the variables start, the size there, which one the value is, where the size is)
@@ -1354,6 +1357,7 @@ impl Godot<'_> {
                 let kind = match self.u32_at(v)? {
                     INT => "i32",
                     REAL => "f64",
+                    BOOL => "bit0",
                     _ => return None,
                 };
                 Some((name, v + 8, kind))

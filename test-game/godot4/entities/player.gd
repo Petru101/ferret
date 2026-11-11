@@ -5,4 +5,6 @@ extends Node
 const LiveStats = preload("res://entities/live_stats.gd")
 
 var speed := 450
+# An on/off flag (a bool Variant): while on, `hurt` does nothing.
+var invincible := false
 var current_stats := LiveStats.new()

@@ -41,7 +41,8 @@ struct Reader {
 /// A recognised line, with each character's centre x (frame pixels).
 struct Line {
     text: String,
-    chars: Vec<(String, f32)>,
+    /// Each character, where its middle is across the frame, and how likely the reader holds it.
+    chars: Vec<(String, f32, f32)>,
     rect: Rect,
     /// The probability of the least likely digit (1 without digits).
     weakest_digit: f32,
@@ -171,7 +172,7 @@ impl Reader {
                     if c.chars().all(|ch| ch.is_ascii_digit()) {
                         weakest_digit = weakest_digit.min(row[best]);
                     }
-                    chars.push((c.clone(), b.x as f32 + (t as f32 + 0.5) / steps as f32 * b.w as f32));
+                    chars.push((c.clone(), b.x as f32 + (t as f32 + 0.5) / steps as f32 * b.w as f32, row[best]));
                 }
             }
             last = best;
@@ -281,13 +282,15 @@ pub fn numbers(img: &RgbImage) -> Result<Vec<Word>, String> {
         } else {
             l.rect.h as f32 * 0.6
         };
-        let mut run: Vec<&(String, f32)> = Vec::new();
-        let mut flush = |run: &mut Vec<&(String, f32)>| {
+        let mut run: Vec<&(String, f32, f32)> = Vec::new();
+        let mut flush = |run: &mut Vec<&(String, f32, f32)>| {
             let text: String = run.iter().map(|c| c.0.as_str()).collect();
             if let (Some(n), Some(first), Some(last)) = (first_number(&text), run.first(), run.last()) {
                 let x0 = (first.1 - step / 2.0).max(l.rect.x as f32) as u32;
                 let x1 = ((last.1 + step / 2.0) as u32).min(l.rect.x + l.rect.w).max(x0 + 1);
-                found.push(Word { text: n.to_string(), rect: Rect { x: x0, y: l.rect.y, w: x1 - x0, h: l.rect.h }, conf: 90.0 });
+                // How sure the reader is of its least likely digit, in percent.
+                let weakest = run.iter().filter(|c| c.0.chars().all(|ch| ch.is_ascii_digit())).map(|c| c.2).fold(1f32, f32::min);
+                found.push(Word { text: n.to_string(), rect: Rect { x: x0, y: l.rect.y, w: x1 - x0, h: l.rect.h }, conf: weakest * 100.0 });
             }
             run.clear();
         };

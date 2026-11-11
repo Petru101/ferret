@@ -9,7 +9,7 @@
  * refreshed every tick (a search can only end on that copy, which Ferret must reject),
  * plus crystals (an int in the base object, which the code reads from a static pointer, like
  * Particle Fleet's gems),
- * coins N, wood N, gems N, ore N, eat N, crystals N, show, respawn, newroom, newmap) dropped into a
+ * coins N, wood N, silver N, bronze N, purse 0|1, gems N, ore N, eat N, crystals N, show, respawn, newroom, newmap) dropped into a
  * command file, so it can be driven the same way natively, under Proton and inside the Steam
  * runtime. "respawn" moves the player to a new object and frees the old one,
  * like a new mission; "newroom" does the same with the room and its stats. "newmap" moves the
@@ -47,6 +47,7 @@
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
 #else
+#include <dlfcn.h>
 #include <unistd.h>
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
@@ -166,6 +167,14 @@ static struct player *spawn(void)
 
 /* One function reads every number, so its code touches many addresses. */
 __attribute__((noinline, noipa)) static double read_real(const double *v)
+{
+    return *v;
+}
+
+/* Read by one function too, but bronze only while the purse is open (`purse 1`): saved while
+ * it is shut, silver's code pattern looks like its own; after a restart with the purse open
+ * the same instruction reads both (Minecraft Dungeons' "get a currency" routine). */
+__attribute__((noinline, noipa)) static int read_coin(const int *v)
 {
     return *v;
 }
@@ -456,6 +465,8 @@ int main(int argc, char **argv)
     struct player *p = spawn();
     double *coins = malloc(sizeof *coins);
     double *wood = malloc(sizeof *wood);
+    int *silver = malloc(64), *bronze = malloc(64), purse = 0;
+    volatile unsigned purse_total = 0;
     volatile float *hud_food = malloc(sizeof *hud_food);
     volatile int *run_hp = calloc(16, sizeof *run_hp);
     struct player *old;
@@ -480,6 +491,8 @@ int main(int argc, char **argv)
     padding[0] = 1;
     *coins = 30;
     *wood = 12;
+    *silver = 640;
+    *bronze = 15;
     tokens = malloc(4 * sizeof *tokens);
     {
         struct hud *h = calloc(1, sizeof *h);
@@ -559,6 +572,7 @@ int main(int argc, char **argv)
         if (scrap(p) > most_scrap)
             most_scrap = scrap(p);
         total = read_real(coins) + read_real(wood) + read_real(&world->room->stats->gems);
+        purse_total += (unsigned)((purse ? read_coin(bronze) : 0) + read_coin(silver));
         world->ticks++;
         for (n = 0; n < 4; n++)
             if (powers->slot[n].running)
@@ -598,6 +612,19 @@ int main(int argc, char **argv)
             *tokens += n;
         else if (sscanf(line, "wood %d", &n) == 1)
             *wood += n;
+        else if (sscanf(line, "silver %d", &n) == 1)
+            *silver += n;
+        else if (sscanf(line, "bronze %d", &n) == 1)
+            *bronze += n;
+        else if (sscanf(line, "purse %d", &n) == 1)
+            purse = n;
+#ifndef _WIN32
+        else if (strncmp(line, "anticheat ", 10) == 0) {
+            /* Loads a library by that path, as a game starting its anti-cheat when going online. */
+            line[strcspn(line, "\r\n")] = 0;
+            dlopen(line + 10, RTLD_NOW);
+        }
+#endif
         else if (sscanf(line, "eat %d", &n) == 1)
             needs.food += n;
         else if (sscanf(line, "gems %d", &n) == 1)
