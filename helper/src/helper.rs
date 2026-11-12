@@ -1121,8 +1121,10 @@ const RESOLVE_WAIT: Duration = Duration::from_secs(2);
 /// Where the game needn't be stopped to watch its code (`trace::quiet`), values not found yet
 /// are watched for this long per 4 instructions, round after round with `QUIET_RETRY` between:
 /// their code may run a few times an hour (Skyrim's gold: only when it changes), and 2 s of
-/// every 7 missed four changes in a row.
-const QUIET_WAIT: Duration = Duration::from_secs(5);
+/// every 7 missed four changes in a row. Short rounds, so code that runs all the time is found
+/// soon whichever round its instruction is in (From Dust's timers have 5: at 5 s a round they
+/// were found 5 to 8 s after their power was used).
+const QUIET_WAIT: Duration = Duration::from_secs(2);
 const QUIET_RETRY: Duration = Duration::from_millis(250);
 
 fn read_guard(mem: &Mem, addr: u64) -> Option<[u8; 4]> {

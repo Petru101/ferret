@@ -1360,7 +1360,9 @@ impl Ue {
             return Vec::new();
         }
         let (ka, va) = (self.align(mem, kp), self.align(mem, vp));
-        let voff = round_up(kp.size, va);
+        // The engine records where the value sits in a pair as the value property's own
+        // offset (FMapProperty::LinkInternal); worked out from the sizes when that reads odd.
+        let voff = if vp.offset >= kp.size && vp.offset < kp.size + 16 { vp.offset } else { round_up(kp.size, va) };
         let pair = voff + vp.size;
         let stride = round_up(round_up(pair, 4) + 8, ka.max(va).max(4)).max(8);
         (0..num as u64)
