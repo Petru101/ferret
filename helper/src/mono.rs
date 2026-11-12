@@ -574,11 +574,22 @@ impl<'a> Mono<'a> {
     fn live(&self, obj: u64, k: u64) -> bool {
         match self.native(obj, k) {
             Some(0) => false,
-            Some(n) => {
-                self.word(n).is_some_and(|v| self.heap.read_only(v))
-                    && (0..NATIVE_BACK).step_by(self.lay.w as usize).any(|o| self.word(n + o) == Some(obj))
-            }
+            Some(n) => self.live_native(obj, n),
             None => true,
+        }
+    }
+
+    /// Whether `n` is the live native object of the Unity object `obj`.
+    fn live_native(&self, obj: u64, n: u64) -> bool {
+        {
+            {
+                // Newer Unity (seen on 6000.3, IL2CPP) keeps a GC handle there instead: a
+                // pointer to a slot holding the managed object (its low bits may be flags).
+                self.word(n).is_some_and(|v| self.heap.read_only(v))
+                    && (0..NATIVE_BACK).step_by(self.lay.w as usize).any(|o| {
+                        self.word(n + o).is_some_and(|p| p == obj || p >= 0x10000 && self.heap.is_pointer(p) && self.word(p & !7) == Some(obj))
+                    })
+            }
         }
     }
 
@@ -1200,34 +1211,58 @@ fn game_object_layout(pid: u32, m: &Mono, natives: &[u64]) -> Option<(u64, u64)>
 pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
     let runtime = runtime(heap.pid)?;
     let pid = heap.pid;
+    let started = std::time::Instant::now();
+    let lap = |what: &str| {
+        if std::env::var_os("FERRET_DEBUG").is_some() {
+            eprintln!("unity list: {what} at {} ms", started.elapsed().as_millis());
+        }
+    };
     let unity = |class: &str| MonoPath { runtime, namespace: "UnityEngine".into(), class: class.into(), via: Vec::new(), field: String::new() };
     // The class layout is learned from a class's fields: MonoBehaviour declares none,
     // UnityEngine.Object has m_CachedPtr.
     if known_layout(pid).is_none() {
         classes_named(heap, &unity("Object"));
     }
-    let base = classes_named(heap, &unity("MonoBehaviour"));
+    lap("layout");
     let lay = known_layout(pid)?;
     let m = Mono::new(heap, lay);
     let parent = lay.parent?;
-    // The classes below MonoBehaviour, a level a pass: a class points to its parent.
-    let (mut all, mut level) = (Vec::new(), base.clone());
-    for _ in 0..MAX_DEPTH {
-        if level.is_empty() {
-            break;
+    // The classes below MonoBehaviour. Every class points to itself (at `this`): one pass
+    // finds them all, then each one's parents are read (a pass per level took a minute on
+    // Low-Budget Repairs' 4.3 GB).
+    let w = lay.w as usize;
+    let mut classes: Vec<u64> = Vec::new();
+    heap.each_chunk(0, |addr, b, fresh| {
+        for o in (0..fresh.min(b.len() - b.len() % w)).step_by(w) {
+            let v = if w == 8 { u64::from_le_bytes(b[o..o + 8].try_into().unwrap()) } else { u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as u64 };
+            if v >= 0x10000 && v + lay.this == addr + o as u64 {
+                classes.push(v);
+            }
         }
-        let mut next: Vec<u64> = heap
-            .referrers(&level)
-            .into_iter()
-            .filter_map(|at| at.checked_sub(parent))
-            .filter(|&k| m.is_class(k) && m.parent(k).is_some_and(|p| level.contains(&p)))
-            .collect();
-        next.sort_unstable();
-        next.dedup();
-        next.retain(|k| !all.contains(k));
-        all.extend(&next);
-        level = next;
-    }
+    });
+    classes.sort_unstable();
+    classes.dedup();
+    // MonoBehaviour and UnityEngine.Object by their names, among them (no passes).
+    let named = |class: &str| -> Vec<u64> { classes.iter().copied().filter(|&k| m.name(k).is_some_and(|(ns, n)| ns == "UnityEngine" && n == class)).collect() };
+    let base = named("MonoBehaviour");
+    let cached_ptr = named("Object").into_iter().find_map(|k| m.offset(k, "m_CachedPtr"));
+    let _ = &unity;
+    let below = |k: u64| {
+        let mut c = k;
+        for _ in 0..MAX_DEPTH {
+            match m.parent(c) {
+                Some(p) if base.contains(&p) => return true,
+                Some(p) if p != c => c = p,
+                _ => return false,
+            }
+        }
+        false
+    };
+    lap("all classes");
+    let mut all: Vec<u64> = classes.into_iter().filter(|&k| !base.contains(&k) && below(k)).collect();
+    all.sort_unstable();
+    all.dedup();
+    let _ = parent;
     let debug = std::env::var_os("FERRET_DEBUG").is_some();
     if debug {
         eprintln!("unity list: {:?}, {} MonoBehaviour classes, {} classes below them", runtime, base.len(), all.len());
@@ -1239,14 +1274,23 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
         Runtime::Mono => heap.referrers(&games).into_iter().filter(|&vt| m.word(vt).is_some_and(|k| games.binary_search(&k).is_ok()) && !m.is_class(vt)).collect(),
         Runtime::Il2cpp => games.clone(),
     };
-    let mut by_class: Vec<(u64, Vec<u64>)> = Vec::new();
-    for obj in heap.referrers(&firsts) {
-        let Some(k) = m.class_of(obj).filter(|k| games.binary_search(k).is_ok() && m.live(obj, *k)) else { continue };
-        match by_class.iter_mut().find(|(c, _)| *c == k) {
-            Some((_, objs)) => objs.push(obj),
-            None => by_class.push((k, vec![obj])),
-        }
+    lap("vtables");
+    // (Every one of these classes is a UnityEngine.Object: its native pointer is read
+    // straight from the field, not looked up by name for each object; that took 25 s on
+    // Low-Budget Repairs.)
+    let live = |obj: u64, k: u64| match cached_ptr {
+        Some(off) => m.word(obj + off).is_some_and(|n| n != 0 && m.live_native(obj, n)),
+        None => m.live(obj, k),
+    };
+    let mut found: std::collections::HashMap<u64, Vec<u64>> = Default::default();
+    let mut order: Vec<u64> = Vec::new();
+    let refs = heap.referrers(&firsts);
+    lap("pointers to them");
+    for obj in refs {
+        let Some(k) = m.class_of(obj).filter(|k| games.binary_search(k).is_ok() && live(obj, *k)) else { continue };
+        found.entry(k).or_insert_with(|| { order.push(k); Vec::new() }).push(obj);
     }
+    let mut by_class: Vec<(u64, Vec<u64>)> = order.into_iter().map(|k| (k, found.remove(&k).unwrap_or_default())).collect();
     if debug {
         let names: Vec<String> = games.iter().take(12).filter_map(|&k| m.name(k)).map(|(ns, n)| format!("{ns}.{n}")).collect();
         eprintln!("unity list: {} game classes ({}), {} vtables or classes pointed to, {} classes with live objects", games.len(), names.join(" "), firsts.len(), by_class.len());
@@ -1265,6 +1309,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
             (k, objs[0])
         })
         .collect();
+    lap("objects");
     let all_natives: Vec<u64> = shown.iter().filter_map(|&(k, o)| m.native(o, k).filter(|&n| n != 0)).collect();
     game_object_layout(pid, &m, &all_natives);
     // (class, object, GameObject, its name)
@@ -1278,6 +1323,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
         let player = g.as_ref().is_some_and(|(_, n)| player_like(n));
         (!main(*k, g), !player, g.as_ref().map(|(_, n)| n.clone()).unwrap_or_default(), class)
     });
+    lap("game objects");
     // At most `ue::MAX_LISTED` numbers (Creeper World 4 has ~8000 in a mission): the game's
     // are cut, never the player's (they come first).
     let mut total = 0;

@@ -374,12 +374,21 @@ impl<'a> Heap<'a> {
         let (Some(&lo), Some(&hi)) = (t.first(), t.last()) else { return Vec::new() };
         let w = self.width;
         let mut found = Vec::new();
+        // A quick "may be one of them" by a few of the word's bits, before the search: with
+        // thousands of targets spread over the heap most words are in range (a Unity game's
+        // classes: this pass took 13 s of 4.3 GB).
+        let slot = |v: u64| (((v >> 3) ^ (v >> 19)) & 0xFFFF) as usize;
+        let mut maybe = vec![0u64; 1024];
+        for &v in &t {
+            maybe[slot(v) / 64] |= 1 << (slot(v) % 64);
+        }
         self.each_chunk(0, |addr, b, fresh| {
             for off in (0..fresh - fresh % w).step_by(w) {
-                let mut x = [0u8; 8];
-                x[..w].copy_from_slice(&b[off..off + w]);
-                let v = u64::from_le_bytes(x);
-                if v >= lo && v <= hi && t.binary_search(&v).is_ok() {
+                let v = match w {
+                    8 => u64::from_le_bytes(b[off..off + 8].try_into().unwrap()),
+                    _ => u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64,
+                };
+                if v >= lo && v <= hi && maybe[slot(v) / 64] & (1 << (slot(v) % 64)) != 0 && t.binary_search(&v).is_ok() {
                     found.push(addr + off as u64);
                 }
             }
