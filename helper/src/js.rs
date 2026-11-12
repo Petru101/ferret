@@ -117,6 +117,10 @@ pub struct Js {
     /// property's details {kind, constness, attributes (3), location, ...} (location bit 5;
     /// bit 1 in 8.x). Each native context has its own meta map then (`is_map`).
     modern: bool,
+    /// V8 4.1 as some NW.js 0.12 builds have it (7 Pillars, 32-bit): a property's details
+    /// start with its type in 3 bits (a field is 1, a constant 2), so the field index sits a
+    /// bit higher (20). Told by `calibrate_types`.
+    typed: bool,
     /// V8 15.x: a property's details hold its field's offset in words, the object's (or its
     /// property array's) header included (bits 19-29), and whether it's in the object (bit 30),
     /// not an index (Electron 45; web.rs).
@@ -424,7 +428,7 @@ impl Js {
             Some(i) => refs.iter().copied().filter(|&r| l.word(mem, r).is_some_and(|n| names[i].contains(&n))).collect(),
             None => Vec::new(),
         };
-        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, c2_keys, ext: 0, cell_name: 1, modern: false, offsets: false, ept: None, number_map: None, bools: Mutex::default() };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, c2_keys, ext: 0, cell_name: 1, modern: false, offsets: false, ept: None, number_map: None, typed: false, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -558,7 +562,7 @@ impl Js {
                 globals[g].1.push(cell);
             }
         }
-        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, c2_keys: Vec::new(), ext, cell_name, modern: false, offsets: false, ept: None, number_map: None, bools: Mutex::default() };
+        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, c2_keys: Vec::new(), ext, cell_name, modern: false, offsets: false, ept: None, number_map: None, typed: false, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -698,11 +702,35 @@ impl Js {
         self.l.w
     }
 
+    /// Tells the oldest details layout (`typed`) from the objects given: none of their
+    /// properties reads as a field the newer way (kind and location 0) and some do the old
+    /// way (type 1).
+    pub(crate) fn calibrate_types(&mut self, mem: &Mem, objects: &[u64]) {
+        if self.cells != Cells::InDictionary {
+            return;
+        }
+        let (mut newer, mut older) = (0, 0);
+        for &o in objects.iter().take(400) {
+            let Some(m) = self.map_of(mem, o) else { continue };
+            for (_, det) in self.descriptors(mem, m).into_iter().take(40) {
+                newer += usize::from(det & 3 == 0);
+                older += usize::from(det & 7 == 1);
+            }
+        }
+        if newer == 0 && older > 0 {
+            self.typed = true;
+            self.field_shift = 20;
+        }
+        if std::env::var_os("FERRET_DEBUG").is_some() {
+            eprintln!("old V8 details: {newer} fields the newer way, {older} the older: typed {}", self.typed);
+        }
+    }
+
     /// A web game's V8 (web.rs): compressed references into the cage at `base`, V8 14.x or
     /// newer; `offsets`: V8 15.x's field offsets in property details.
     pub(crate) fn web(base: u64, meta: u64, cell_map: u64, offsets: bool) -> Js {
         let l = Layout { w: 4, base };
-        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), c2_keys: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, ept: None, number_map: None, bools: Mutex::default() }
+        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), c2_keys: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, ept: None, number_map: None, typed: false, bools: Mutex::default() }
     }
 
     /// A web game's V8 version, from objects of the game (web.rs): V8 15.x when their
@@ -1041,6 +1069,7 @@ impl Js {
             // Constants and accessors aren't fields.
             let not_field = match self.modern {
                 true => det & 1 != 0 || det >> 5 & 1 != 0,
+                false if self.typed => det & 7 != 1,
                 false => det & 3 != 0,
             };
             if not_field {
@@ -1052,7 +1081,7 @@ impl Js {
                 let off = u64::from((det >> 19) & 0x7ff);
                 let base = if det >> 30 & 1 == 1 { o } else if tagged(props) { props } else { continue };
                 let at = base - 1 + off * l.w;
-                let val = self.tagged_number(mem, at, (det >> 6) & 0x7, self.slot(mem, at, (det >> 6) & 0x7 == 2));
+                let val = self.tagged_number(mem, at, (det >> 6) & 0x7 == 4, self.slot(mem, at, (det >> 6) & 0x7 == 2));
                 if let Some(name) = self.text(mem, k) {
                     out.push((name, val));
                 }
@@ -1065,6 +1094,11 @@ impl Js {
                 Cells::Compressed => (det >> (self.field_shift - 13)) & 0x7 == 2,
                 _ => (det >> (self.field_shift - 14)) & 0xf == 7,
             };
+            // Kept as any value (Tagged): 4 of the 3 bits, 9 of the old 4.
+            let any = match self.cells {
+                Cells::Compressed => (det >> (self.field_shift - 13)) & 0x7 == 4,
+                _ => (det >> (self.field_shift - 14)) & 0xf == 9,
+            };
             let val = if index < inside {
                 let at = o - 1 + start + index * l.w;
                 let raw = match (l.w, l.smi(layout)) {
@@ -1075,14 +1109,14 @@ impl Js {
                 match (double, raw) {
                     (true, true) if l.is_smi(layout) => Val::Real(at),
                     (true, true) => Val::Other,
-                    _ => self.tagged_number(mem, at, (det >> (self.field_shift - 13)) & 0x7, self.slot(mem, at, double)),
+                    _ => self.tagged_number(mem, at, any, self.slot(mem, at, double)),
                 }
             } else {
                 if !tagged(props) {
                     continue;
                 }
                 let at = props - 1 + l.array_data() + (index - inside) * l.w;
-                self.tagged_number(mem, at, (det >> (self.field_shift - 13)) & 0x7, self.slot(mem, at, double))
+                self.tagged_number(mem, at, any, self.slot(mem, at, double))
             };
             if let Some(name) = self.text(mem, k) {
                 out.push((name, val));
@@ -1091,10 +1125,12 @@ impl Js {
         out
     }
 
-    /// A web game's field kept as any value (representation 4, Tagged: compressed V8) holding
-    /// a number: its slot (`Val::Var`). See `number_map`.
-    fn tagged_number(&self, mem: &Mem, at: u64, representation: u32, v: Val) -> Val {
-        let Some(number) = self.number_map.filter(|_| representation == 4 && self.l.compressed()) else { return v };
+    /// A web game's field kept as any value (representation Tagged) holding a number: its
+    /// slot (`Val::Var`), since the game may put a small integer or a HeapNumber there in
+    /// turn (Construct 2's variables after any arithmetic). See `number_map`: only set for
+    /// web games, so RPG Maker's stay as they were.
+    fn tagged_number(&self, mem: &Mem, at: u64, any: bool, v: Val) -> Val {
+        let Some(number) = self.number_map.filter(|_| any) else { return v };
         match v {
             Val::Int(_) => Val::Var(at),
             Val::Obj(o) if self.map_of(mem, o) == Some(number) => Val::Var(at),

@@ -83,6 +83,15 @@ const WINDOW: &[&str] = &[
     "GLOBAL", "__dirname", "__filename", "TEMPORARY", "PERSISTENT",
 ];
 
+/// JavaScript's own constructors. In an old V8 its natives keep objects under these names (and
+/// `$Object`, `$Array`...) in a dictionary that sometimes lies next to the page's: SUPERHOTline
+/// Miami listed "Object" with bare numbers in one run and not in the next.
+const CONSTRUCTORS: &[&str] = &[
+    "Object", "Array", "Function", "String", "Number", "Boolean", "Symbol", "Date", "RegExp", "Error", "EvalError", "RangeError", "ReferenceError",
+    "SyntaxError", "TypeError", "URIError", "Promise", "Map", "Set", "WeakMap", "WeakSet", "Proxy", "ArrayBuffer", "DataView", "Int8Array",
+    "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array", "Float32Array", "Float64Array",
+];
+
 const BUILTINS: &[&str] = &[
     "Math", "JSON", "Reflect", "Intl", "Atomics", "WebAssembly", "console", "CSS", "globalThis", "window", "self", "frames", "parent", "top", "chrome",
     "Iterator", "Temporal", "process", "require", "module", "exports", "global", "Buffer", "navigation", "crossOriginIsolated", "isSecureContext",
@@ -109,10 +118,57 @@ fn smi(x: u32) -> Option<i32> {
 /// without the layout. Set when the game's V8 is located.
 static VARS: Mutex<(Option<u32>, Option<u32>)> = Mutex::new((None, None));
 
+/// The same for an old V8 without compressed references (NW.js before 0.44): its word size
+/// and HeapNumber's map. There a `jsvar` place is a whole slot holding a small integer or a
+/// HeapNumber. Set (and `VARS` left unused) while such a game is attached.
+static OLD_VARS: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+
+fn old_word(mem: &Mem, at: u64, w: u64) -> Option<u64> {
+    match w {
+        8 => f64_at(mem, at).map(f64::to_bits),
+        _ => half(mem, at).map(u64::from),
+    }
+}
+
+/// An old V8's slot as a number: a small integer (64-bit: the upper half; 32-bit: doubled) or
+/// a HeapNumber ({map, double}).
+fn read_old_var(mem: &Mem, slot: u64, w: u64, number: u64) -> Option<f64> {
+    let x = old_word(mem, slot, w)?;
+    match w {
+        8 if x & 0xffff_ffff == 0 => return Some(f64::from((x >> 32) as u32 as i32)),
+        4 if x & 1 == 0 => return Some(f64::from(x as u32 as i32 >> 1)),
+        _ => {}
+    }
+    if x & 3 != 1 || old_word(mem, x - 1, w)? != number {
+        return None;
+    }
+    f64_at(mem, x - 1 + w)
+}
+
+/// Writes a whole number into an old V8's slot as a small integer, while it holds a number
+/// (a HeapNumber is left alone: other variables may hold the same one).
+fn write_old_var(mem: &Mem, slot: u64, w: u64, number: u64, v: f64) -> std::io::Result<()> {
+    let refused = |why: &str| Err(std::io::Error::other(why.to_owned()));
+    if read_old_var(mem, slot, w, number).is_none() {
+        return refused("not a number now");
+    }
+    let limit = if w == 8 { 2147483647.0 } else { 1073741823.0 };
+    if v.fract() != 0.0 || v.abs() > limit {
+        return refused("this variable takes whole numbers only");
+    }
+    match w {
+        8 => mem.write_all_at(&(((v as i32 as u32) as u64) << 32).to_le_bytes(), slot),
+        _ => mem.write_all_at(&((v as i32).wrapping_shl(1) as u32).to_le_bytes(), slot),
+    }
+}
+
 /// A scope variable's number (`Val::Var`): its slot holds a small integer, a HeapNumber
 /// ({map, double}) or a ContextCell (by its state: a constant or small integer in `value`,
 /// an int32 or a double in the last field). None when it holds anything else now.
 pub fn read_var(mem: &Mem, slot: u64) -> Option<f64> {
+    if let Some((w, number)) = *OLD_VARS.lock().unwrap() {
+        return read_old_var(mem, slot, w, number);
+    }
     let (cell, number) = *VARS.lock().unwrap();
     let number = number?;
     let base = slot & !0xffff_ffff;
@@ -150,6 +206,9 @@ pub fn read_var(mem: &Mem, slot: u64) -> Option<f64> {
 /// the slot (a HeapNumber is left alone, other variables may hold the same one: so only whole
 /// numbers there).
 pub fn write_var(mem: &Mem, slot: u64, v: f64) -> std::io::Result<()> {
+    if let Some((w, number)) = *OLD_VARS.lock().unwrap() {
+        return write_old_var(mem, slot, w, number, v);
+    }
     let refused = |why: &str| Err(std::io::Error::other(why.to_owned()));
     let (cell, Some(number)) = *VARS.lock().unwrap() else { return refused("this game's numbers aren't known yet") };
     let whole = v.fract() == 0.0 && v.abs() < f64::from(1 << 30);
@@ -313,8 +372,15 @@ impl Web {
     /// found by JavaScript's own global functions, then every global property (two or three
     /// passes over memory).
     pub fn locate_legacy(heap: &Heap) -> Option<Web> {
-        let js = Js::locate_legacy(heap)?;
+        let mut js = Js::locate_legacy(heap)?;
         let globals = js.all_globals(heap);
+        // HeapNumber's map: the global NaN's (on every page). With it, fields kept as any
+        // value are number places whatever the game stores there next.
+        let mem = heap.mem();
+        js.number_map = globals.iter().filter(|g| g.0 == "NaN" || g.0 == "Infinity").find_map(|g| js.word(mem, g.2).filter(|v| v & 3 == 1).and_then(|v| js.map_of(mem, v)));
+        *OLD_VARS.lock().unwrap() = js.number_map.map(|n| (js.width(), n));
+        let objects: Vec<u64> = globals.iter().filter_map(|g| js.word(mem, g.2)).filter(|v| v & 3 == 1).collect();
+        js.calibrate_types(mem, &objects);
         let function = js.function_type(heap.mem());
         if std::env::var_os("FERRET_DEBUG").is_some() {
             let mut names: Vec<&str> = globals.iter().map(|g| g.0.as_str()).collect();
@@ -325,7 +391,8 @@ impl Web {
         if globals.is_empty() {
             return None;
         }
-        Some(Web { js, scope_map: 0, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }) })
+        let number_map = js.number_map;
+        Some(Web { js, scope_map: 0, cell_map: None, property_map: None, number_map, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }) })
     }
 
     /// A ScopeInfo's kind and variables (None unless every name is a string).
@@ -574,6 +641,7 @@ impl Web {
         });
         let base = self.js.base();
         *VARS.lock().unwrap() = (self.cell_map.map(|c| (c - base) as u32), self.number_map.map(|n| (n - base) as u32));
+        *OLD_VARS.lock().unwrap() = None;
         self.js.number_map = self.number_map;
     }
 
@@ -586,6 +654,18 @@ impl Web {
         (0..len.clamp(0, 1 << 16) as u64).filter_map(|i| self.js.word(mem, dict - 1 + 8 + 4 * i)).filter(|&e| self.js.map_of(mem, e).is_some()).collect()
     }
 
+    /// What an old V8's global holds (its value's slot). A number in a cell V8 lets hold
+    /// anything (mutable, type 3) is a small integer or a HeapNumber in turn, so the slot is
+    /// its place (`Val::Var`). A constant-type cell's code may count on the kind it holds: left
+    /// as it reads.
+    fn old_global(&self, mem: &Mem, slot: u64, cell_type: u32) -> Val {
+        match self.js.slot(mem, slot, false) {
+            Val::Int(_) if cell_type == 3 && self.number_map.is_some() => Val::Var(slot),
+            v @ Val::Obj(_) if cell_type == 3 && self.is_number(mem, v) => Val::Var(slot),
+            v => v,
+        }
+    }
+
     /// The game's global properties: (name, cell, value) of each data property that isn't
     /// JavaScript's or the browser's (PropertyCell {map, name, details, value, dependent code};
     /// details' bit 0: an accessor).
@@ -593,14 +673,17 @@ impl Web {
         if let Some(legacy) = &self.legacy {
             let mut out = Vec::new();
             for (name, cell, slot, cell_type) in &legacy.globals {
-                if BUILTINS.contains(&name.as_str())
+                // (A nameless entry is V8's own: no script can make one.)
+                if name.is_empty()
+                    || BUILTINS.contains(&name.as_str())
                     || WINDOW.contains(&name.as_str())
+                    || CONSTRUCTORS.contains(&name.trim_start_matches('$'))
                     || name.starts_with("on") && name.len() > 2 && name[2..].chars().all(|c| c.is_ascii_lowercase())
                     || !self.js.is_cell(mem, *cell)
                 {
                     continue;
                 }
-                match self.js.slot(mem, *slot, false) {
+                match self.old_global(mem, *slot, *cell_type) {
                     Val::Obj(o) if self.callable(mem, o) || !self.is_object(mem, o) => {}
                     // A number V8 may have built into its compiled code (a constant cell, or
                     // one never set) isn't written.
@@ -815,7 +898,7 @@ impl Web {
             // details, the object}: 7 Pillars.)
             let mut out: Vec<u64> = self.js.c2_keys.iter().flat_map(|&r| [self.js.word(mem, r + w), self.js.word(mem, r + 2 * w)]).flatten().filter(|&o| self.is_object(mem, o) && !self.callable(mem, o)).collect();
             if std::env::var_os("FERRET_DEBUG").is_some() {
-                eprintln!("construct 2: {} places name c2runtime, {} followed by an object; their fields: {:?}", self.js.c2_keys.len(), out.len(), out.iter().take(4).map(|&o| self.js.fields(mem, o).len()).collect::<Vec<_>>());
+                eprintln!("construct 2: {} places name c2runtime, {} followed by an object {:x?} (keys {:x?}); their fields: {:?}", self.js.c2_keys.len(), out.len(), out, self.js.c2_keys, out.iter().take(4).map(|&o| self.js.fields(mem, o).len()).collect::<Vec<_>>());
             }
             // (Also what follows the name in a function's constants: only an object with
             // Construct 2's variables counts, in `c2_runtimes`.)
@@ -826,7 +909,7 @@ impl Web {
                 return out;
             }
         }
-        self.objects_where(heap, |m| self.js.descriptors(mem, m).into_iter().take(80).any(|(k, _)| self.js.text(mem, k).as_deref() == Some("c2runtime")).then(String::new))
+        self.objects_where(heap, |m| self.js.descriptors(mem, m).into_iter().take(200).any(|(k, _)| self.js.text(mem, k).as_deref() == Some("c2runtime")).then(String::new))
             .into_iter()
             .filter_map(|(_, canvas)| match self.js.field(mem, canvas, "c2runtime")? {
                 Val::Obj(r) => Some(r),
@@ -1167,8 +1250,8 @@ fn root_value(web: &Web, mem: &Mem, r: u64, root: &Root) -> Option<Val> {
         }
         Root::Global(name) if web.legacy.is_some() => {
             // (The root is the slot holding the global's value.)
-            let (_, cell, _, _) = web.legacy.as_ref()?.globals.iter().find(|g| g.2 == r && g.0 == *name)?;
-            web.js.is_cell(mem, *cell).then(|| web.js.slot(mem, r, false))
+            let (_, cell, _, cell_type) = web.legacy.as_ref()?.globals.iter().find(|g| g.2 == r && g.0 == *name)?;
+            web.js.is_cell(mem, *cell).then(|| web.old_global(mem, r, *cell_type))
         }
         Root::Global(name) => {
             let n = web.js.word(mem, r - 1 + 4)?;
@@ -1288,8 +1371,13 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     for (name, _, v) in web.globals(mem) {
         let path = WebPath { root: Root::Global(name.clone()), steps: Vec::new() };
         match v {
-            Val::Int(_) | Val::Real(_) | Val::Bool(_) => globals.numbers.push((name, v, path)),
-            Val::Obj(o) => queue.push_back((o, path, 1)),
+            Val::Int(_) | Val::Real(_) | Val::Bool(_) | Val::Var(_) => globals.numbers.push((name, v, path)),
+            Val::Obj(o) => {
+                if std::env::var_os("FERRET_DEBUG").is_some() {
+                    eprintln!("global object {name:?} at {o:x}");
+                }
+                queue.push_back((o, path, 1))
+            }
             _ => {}
         }
     }
