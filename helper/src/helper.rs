@@ -1125,7 +1125,10 @@ const RESOLVE_WAIT: Duration = Duration::from_secs(2);
 /// soon whichever round its instruction is in (From Dust's timers have 5: at 5 s a round they
 /// were found 5 to 8 s after their power was used).
 const QUIET_WAIT: Duration = Duration::from_secs(2);
-const QUIET_RETRY: Duration = Duration::from_millis(250);
+const QUIET_RETRY: Duration = Duration::from_millis(50);
+/// How long one background watch for values not found yet goes on before the limiter starts
+/// the next (`refind`).
+const QUIET_STRETCH: Duration = Duration::from_secs(30);
 
 fn read_guard(mem: &Mem, addr: u64) -> Option<[u8; 4]> {
     let mut g = [0u8; 4];
@@ -1414,7 +1417,25 @@ fn refind(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, due: &[Due]
         true => QUIET_WAIT,
         false => RESOLVE_WAIT,
     };
-    let results = resolve_values(pid, mem, &all, width, wait, true);
+    // Values not found yet are watched round after round here, with no pause between: a
+    // quarter of a second between rounds (the limiter's own pace) is where one change of
+    // Skyrim's gold in four fell. Given up to the limiter after a while, so that it can add
+    // values that got lost meanwhile.
+    let lost = trace::quiet() && due.iter().all(|d| d.lost);
+    let started = Instant::now();
+    let results = loop {
+        let results = resolve_values(pid, mem, &all, width, wait, true);
+        let none_ran = results.iter().all(|r| r.at.as_ref().is_err_and(|e| e.starts_with("none of its code")));
+        let go_on = lost
+            && none_ran
+            && started.elapsed() < QUIET_STRETCH
+            && TRACE_WANTED.load(Ordering::SeqCst) == 0
+            && !trace::letting_go()
+            && shared.lock().unwrap().pid == pid;
+        if !go_on {
+            break results;
+        }
+    };
     for (d, r) in due.iter().zip(results) {
         let gave_up = r.at.as_ref().is_err_and(|e| e.starts_with(SHARED));
         refound(shared, pid, mem, width, &d.name, &d.sites, d.search_code, r.at.ok(), gave_up);
@@ -1434,53 +1455,68 @@ struct Due {
 /// What `refind` found for one value (`None`: its code didn't run).
 #[allow(clippy::too_many_arguments)]
 fn refound(shared: &SharedLimiter, pid: u32, mem: &Mem, width: usize, name: &str, sites: &[Site], search_code: bool, r: Option<Resolved>, gave_up: bool) {
-    let mut found = r.map(|r| {
+    let found = r.map(|r| {
         let disp = r.disp;
         (r, disp)
     });
-    // The code that ran may not show where the object comes from; another site's may
-    // (searching the code for every site is slow: once per value).
-    if let Some((r, _)) = found.as_mut().filter(|(r, _)| r.holder.is_none() && search_code) {
-        r.holder = holder_in_code(pid, mem, sites, r.is_64bit, width, r.addr);
+    // Whether the code that ran showed where the object comes from; if not, another site's
+    // may: looked for below, after the value is in use again (searching the code takes
+    // seconds: Skyrim's gold was found at its one change and then not written or shown for
+    // another 7 s).
+    let search = found.as_ref().filter(|(r, _)| r.holder.is_none() && search_code).map(|(r, _)| (r.is_64bit, r.addr));
+    {
+        let mut guard = shared.lock().unwrap();
+        if guard.pid != pid {
+            return;
+        }
+        let Some(l) = guard.limits.iter_mut().find(|l| l.name == name) else { return };
+        l.finding = search.is_some();
+        l.checked_at = Instant::now();
+        l.searched_code |= search_code && found.is_some();
+        let object = found.and_then(|(r, disp)| {
+            let (object, g) = guard_of(mem, r.addr.wrapping_sub(disp as u64))?;
+            Some((r, object, g))
+        });
+        match object {
+            Some((r, object, g)) => {
+                l.recheck_every = match r.addr == l.addr && l.paused.is_none() {
+                    // Watching without stopping the game costs it nothing: no need to check less often.
+                    true if trace::quiet() => RECHECK_EVERY,
+                    true => (l.recheck_every * 2).min(RECHECK_MOST),
+                    false => RECHECK_EVERY,
+                };
+                if r.addr != l.addr || l.paused.is_some() {
+                    l.restores += 1;
+                }
+                l.addr = r.addr;
+                l.guard_addr = object;
+                l.guard = g;
+                l.paused = None;
+                // Through the static pointer it is found on every check, without tracing.
+                l.paths.extend(r.holder);
+            }
+            // Looking again would take the first place its code reads, whatever value that is.
+            None if gave_up => {
+                l.paused = Some("its code patterns read other values too: find it again and save it again");
+                l.given_up = true;
+            }
+            None if l.paused.is_some() => l.retry_at = Instant::now() + if trace::quiet() { QUIET_RETRY } else { RETRY_EVERY },
+            // The code didn't run meanwhile (a menu?): nothing says the value moved.
+            None => {}
+        }
     }
+    let Some((is_64bit, addr)) = search else { return };
+    let holder = holder_in_code(pid, mem, sites, is_64bit, width, addr);
     let mut guard = shared.lock().unwrap();
     if guard.pid != pid {
         return;
     }
-    let Some(l) = guard.limits.iter_mut().find(|l| l.name == name) else { return };
-    l.finding = false;
-    l.checked_at = Instant::now();
-    l.searched_code |= search_code && found.is_some();
-    let object = found.and_then(|(r, disp)| {
-        let (object, g) = guard_of(mem, r.addr.wrapping_sub(disp as u64))?;
-        Some((r, object, g))
-    });
-    match object {
-        Some((r, object, g)) => {
-            l.recheck_every = match r.addr == l.addr && l.paused.is_none() {
-                // Watching without stopping the game costs it nothing: no need to check less often.
-                true if trace::quiet() => RECHECK_EVERY,
-                true => (l.recheck_every * 2).min(RECHECK_MOST),
-                false => RECHECK_EVERY,
-            };
-            if r.addr != l.addr || l.paused.is_some() {
-                l.restores += 1;
-            }
-            l.addr = r.addr;
-            l.guard_addr = object;
-            l.guard = g;
-            l.paused = None;
-            // Through the static pointer it is found on every check, without tracing.
-            l.paths.extend(r.holder);
+    if let Some(l) = guard.limits.iter_mut().find(|l| l.name == name) {
+        l.finding = false;
+        // Only while it is still where it was found.
+        if l.addr == addr && l.paused.is_none() {
+            l.paths.extend(holder);
         }
-        // Looking again would take the first place its code reads, whatever value that is.
-        None if gave_up => {
-            l.paused = Some("its code patterns read other values too: find it again and save it again");
-            l.given_up = true;
-        }
-        None if l.paused.is_some() => l.retry_at = Instant::now() + if trace::quiet() { QUIET_RETRY } else { RETRY_EVERY },
-        // The code didn't run meanwhile (a menu?): nothing says the value moved.
-        None => {}
     }
 }
 
@@ -3710,8 +3746,11 @@ fn holder(mem: &Mem, instr: u64, site: &Site, is_64bit: bool, width: usize, addr
 
 /// The first of `sites` whose code loads the object holding `addr` from a static pointer.
 fn holder_in_code(pid: u32, mem: &Mem, sites: &[Site], is_64bit: bool, width: usize, addr: u64) -> Option<PtrPath> {
-    sites.iter().find_map(|site| {
-        let [code] = find_pattern(pid, mem, &site.pat, 2).ok()?[..] else { return None };
+    // One pass over the code for all of them.
+    let pats: Vec<&[Option<u8>]> = sites.iter().map(|s| &s.pat[..]).collect();
+    let found = find_patterns(pid, mem, &pats, 2).ok()?;
+    sites.iter().zip(&found).find_map(|(site, at)| {
+        let [code] = at[..] else { return None };
         holder(mem, code + site.off, site, is_64bit, width, addr)
     })
 }
@@ -3764,6 +3803,34 @@ fn set_site_check(pid: u32, instr: u64, single: bool) {
     checks.push((pid, instr, single));
 }
 
+/// Where code patterns are in the game's code (`find_patterns`, up to 2 places each), kept for
+/// the ones found exactly once: a pass over a big game's code takes a second or more
+/// (Skyrim: 1.2 s), and the limiter looks for values not found yet round after round. A kept
+/// place is used only while its bytes still match (code that was unloaded or compiled again).
+fn located_patterns(pid: u32, mem: &Mem, pats: &[&[Option<u8>]]) -> io::Result<Vec<Vec<u64>>> {
+    static KEPT: Mutex<Vec<(u32, Vec<Option<u8>>, u64)>> = Mutex::new(Vec::new());
+    let still_there = |pat: &[Option<u8>], at: u64| {
+        let mut b = vec![0u8; pat.len()];
+        mem.read_exact_at(&mut b, at).is_ok() && pat.iter().zip(&b).all(|(p, b)| p.is_none_or(|p| p == *b))
+    };
+    let mut kept = KEPT.lock().unwrap();
+    kept.retain(|k| k.0 == pid);
+    let mut found: Vec<Option<Vec<u64>>> =
+        pats.iter().map(|pat| kept.iter().find(|k| k.1 == *pat).filter(|k| still_there(pat, k.2)).map(|k| vec![k.2])).collect();
+    let missing: Vec<usize> = (0..pats.len()).filter(|&i| found[i].is_none()).collect();
+    if !missing.is_empty() {
+        let wanted: Vec<&[Option<u8>]> = missing.iter().map(|&i| pats[i]).collect();
+        for (&i, at) in missing.iter().zip(find_patterns(pid, mem, &wanted, 2)?) {
+            kept.retain(|k| k.1 != pats[i]);
+            if let [one] = at[..] {
+                kept.push((pid, pats[i].to_vec(), one));
+            }
+            found[i] = Some(at);
+        }
+    }
+    Ok(found.into_iter().map(Option::unwrap_or_default).collect())
+}
+
 /// What `resolve_values` found for one value.
 struct Found {
     /// Where it led, or why not.
@@ -3789,7 +3856,7 @@ fn resolve_values(pid: u32, mem: &Mem, values: &[Vec<Site>], width: usize, timeo
             pats.push(&site.pat);
         }
     }
-    let searched = find_patterns(pid, mem, &pats, 2).map_err(|e| e.to_string());
+    let searched = located_patterns(pid, mem, &pats).map_err(|e| e.to_string());
     let most = values.iter().map(Vec::len).max().unwrap_or(0);
     // Every site's instruction in the code, known shared ones too (for `shared`).
     let mut located: Vec<(usize, usize, u64)> = Vec::new();
