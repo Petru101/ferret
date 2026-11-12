@@ -11,6 +11,8 @@ mode=${1:-native}
 here=$(cd "$(dirname "$0")/.." && pwd)
 steam="$HOME/.local/share/Steam"
 proton="$steam/steamapps/common/Proton 9.0 (Beta)/proton"
+# Steam keeps Proton in whichever library it was installed to
+[ -e "$proton" ] || proton="/run/media/Petru/Games/SteamLibrary/steamapps/common/Proton 9.0 (Beta)/proton"
 sniper="$steam/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point"
 run="$here/run/$mode"
 cmd="$run/cmd"

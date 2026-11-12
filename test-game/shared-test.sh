@@ -12,6 +12,8 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 bin=${1:-target}
 steam="$HOME/.local/share/Steam"
 proton="$steam/steamapps/common/Proton 9.0 (Beta)/proton"
+# Steam keeps Proton in whichever library it was installed to
+[ -e "$proton" ] || proton="/run/media/Petru/Games/SteamLibrary/steamapps/common/Proton 9.0 (Beta)/proton"
 export FERRET_SESSION=shared-test
 live="$here/test-game/live.sh"
 game_dir="$here/run/shared-test-game"
