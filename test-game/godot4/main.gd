@@ -6,7 +6,8 @@ extends Control
 #   StringName keys, kind 3), wave (keeps a snapshot of the player), invincible 0|1 (the player's flag: hurt does nothing while on), hurt N (health of the
 #   player node, entities/player.gd), despawn / spawn / respawn (frees the player node and
 #   makes a new one, as Brotato does every wave), hit N (health of the enemy named Boss; two
-#   unnamed enemies run the same script), show, quit N. The player's health is also drawn as a
+#   unnamed enemies run the same script), armor N (the player's `effects` dictionary, under
+#   the hash of "stat_armor", as Brotato keeps stats), show, quit N. The player's health is also drawn as a
 #   bar (300x24 at 24,220, redrawn every frame), for bar searches.
 # Run: <binary> -- <cmd file> <log file>
 
@@ -93,6 +94,8 @@ func run(line: String) -> void:
 			RunData.stack(1)["amount"] += int(arg)
 		"charges":
 			RunData.tools[0][&"charges"] += int(arg)
+		"armor":
+			p.effects[RunData.stat_armor_hash] += int(arg)
 		"wave":
 			RunData.next_wave()
 		"hurt":
@@ -127,8 +130,8 @@ func report() -> void:
 		f = FileAccess.open(log_path, FileAccess.WRITE)
 	f.seek_end()
 	var health: int = player.current_stats.health if player != null else -1
-	f.store_line("gold=%d wood=%d hp=%d energy=%.2f iron=%d lumen=%d charges=%d metal_collected=%d wave=%d snapshots=%d health=%d boss=%d invincible=%d" % [
+	f.store_line("gold=%d wood=%d hp=%d energy=%.2f iron=%d lumen=%d charges=%d metal_collected=%d wave=%d snapshots=%d health=%d boss=%d invincible=%d armor=%d" % [
 		p.gold, p.wood, p.hp, p.energy, RunData.stack(0)["amount"], RunData.stack(1)["amount"],
 		RunData.tools[0][&"charges"], RunData.stats["metal_collected"], RunData.wave, RunData.snapshots.size(), health,
-		$Boss.current_stats.health, 1 if player != null and player.invincible else 0])
+		$Boss.current_stats.health, 1 if player != null and player.invincible else 0, p.effects[RunData.stat_armor_hash]])
 	f.close()

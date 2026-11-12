@@ -1,6 +1,9 @@
 extends Node
 
 var wave := 1
+# The keys of PlayerData.effects, by name.
+var stat_armor_hash := "stat_armor".hash()
+var stat_luck_hash := "stat_luck".hash()
 var players_data: Array = [PlayerData.new()]
 var snapshots: Array = []
 var inventory: Array = [

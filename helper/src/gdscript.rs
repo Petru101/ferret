@@ -24,6 +24,12 @@
 // of the variable "players_data" of the (only) object running res://singletons/run_data.gd.
 // gd:entities/enemy.gd@/root/Main/Boss.current_stats.health = the same from the object running
 // enemy.gd at that place in the scene tree (for scripts many objects run).
+// A variable may hold a Dictionary keyed by whole numbers (Brotato's stats: `effects`, keyed by
+// the hashes of their names, which `Keys` keeps in variables named `<stat>_hash`):
+// gd:singletons/run_data.gd.players_data[0].effects{193432} = the entry under that key. Godot 3:
+// the Variant (type 18) points to { refcount; List *; ... }, the list to { first, last, size },
+// its elements { Variant *key; Variant value; next; prev; list }. Godot 4 (type 27): { refcount;
+// read-only; HashMap }, elements { next, prev, Variant key, Variant value }.
 // The scene tree: a Node points to its parent and keeps its children (Godot 3: a Vector<Node *>,
 // Godot 4: a HashMap<StringName, Node *>) and its name (a StringName); the root is named
 // "root". Learned from any node Ferret meets, it finds objects again by pointer reads.
@@ -46,6 +52,9 @@ const REAL: u32 = 3;
 /// Variant types in Godot 3 and in Godot 4.
 const OBJECT: [u32; 2] = [17, 24];
 const ARRAY: [u32; 2] = [19, 28];
+const DICTIONARY: [u32; 2] = [18, 27];
+/// Entries per dictionary looked through.
+const MAX_ENTRIES: usize = 4096;
 /// Where a Vector's or String's size is, in bytes before its data: a u32 right before it
 /// (Godot 3, 4.0-4.2), a u64 8 bytes before (4.3, 4.4) or 16 bytes before (4.5+).
 const SIZES: [u64; 3] = [4, 8, 16];
@@ -64,6 +73,8 @@ const MAX_NAME: usize = 128;
 pub enum Step {
     Member(String),
     Index(u64),
+    /// The entry of a Dictionary under this whole-number key.
+    Key(i64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -108,6 +119,8 @@ impl ScriptPath {
         };
         let mut steps = Vec::new();
         for part in steps_text.split('.') {
+            // name, then [i]..., then {key}
+            let (part, key) = part.split_once('{').map_or((part, ""), |(n, k)| (n, k));
             let (name, mut idx) = part.split_once('[').map_or((part, ""), |(n, i)| (n, i));
             if !good_name(name) {
                 return None;
@@ -121,8 +134,11 @@ impl ScriptPath {
                     return None;
                 }
             }
+            if !key.is_empty() {
+                steps.push(Step::Key(key.strip_suffix('}')?.parse().ok()?));
+            }
         }
-        (good_script(script) && matches!(steps.last(), Some(Step::Member(_)))).then(|| ScriptPath { script: script.to_owned(), nodes, steps })
+        (good_script(script) && matches!(steps.last(), Some(Step::Member(_) | Step::Key(_)))).then(|| ScriptPath { script: script.to_owned(), nodes, steps })
     }
 
     /// What tells the objects it starts from: the script and the place.
@@ -141,6 +157,7 @@ impl ScriptPath {
             .map(|s| match s {
                 Step::Member(n) => format!(".{n}"),
                 Step::Index(i) => format!("[{i}]"),
+                Step::Key(k) => format!("{{{k}}}"),
             })
             .collect()
     }
@@ -335,6 +352,25 @@ fn hash_entries(mem: &Mem, map: u64, most: u64) -> Option<Vec<(u64, u64)>> {
         e = mem_u64(mem, e)?;
     }
     (out.len() as u64 == size && prev == tail).then_some(out)
+}
+
+/// The elements of a Godot 4 HashMap at `map` (empty ones too), in order.
+fn hash_entries_at(mem: &Mem, map: u64) -> Option<Vec<u64>> {
+    let (head, tail) = (mem_u64(mem, map + 0x10)?, mem_u64(mem, map + 0x18)?);
+    let (capacity, size) = (mem_u32(mem, map + 0x20)?, mem_u32(mem, map + 0x24)? as usize);
+    if capacity > 40 || size > MAX_ENTRIES || (size == 0) != (head == 0) {
+        return None;
+    }
+    let (mut out, mut e, mut prev) = (Vec::new(), head, 0);
+    while e != 0 {
+        if out.len() >= size || mem_u64(mem, e + 8)? != prev {
+            return None;
+        }
+        out.push(e);
+        prev = e;
+        e = mem_u64(mem, e)?;
+    }
+    (out.len() == size && prev == tail).then_some(out)
 }
 
 /// The entries of a Map at `map` ({ root, nil, size }): (key, address of the value), in order.
@@ -537,6 +573,49 @@ impl<'a> Godot<'a> {
         Some((private, first, n))
     }
 
+    /// The entries of the Dictionary a Variant holds, those under whole-number keys: (key, the
+    /// value's Variant).
+    fn int_entries(&self, v: u64) -> Option<Vec<(i64, u64)>> {
+        let mem = self.mem();
+        if self.u32_at(v)? != DICTIONARY[self.lay.v4 as usize] {
+            return None;
+        }
+        let private = self.ptr(v + 8)?;
+        let mut out = Vec::new();
+        if self.lay.v4 {
+            let map = [0x10u64, 8, 0x18].into_iter().find(|&m| hash_entries_at(mem, private + m).is_some())?;
+            for e in hash_entries_at(mem, private + map)? {
+                if mem_u32(mem, e + 0x10) == Some(INT) {
+                    out.push((mem_u64(mem, e + 0x18)? as i64, e + 0x28));
+                }
+            }
+            return Some(out);
+        }
+        let list = mem_u64(mem, private + 8)?;
+        if list == 0 {
+            return Some(out);
+        }
+        let mut e = self.ptr(self.heap.is_pointer(list).then_some(list)?)?;
+        let mut prev = 0;
+        while e != 0 {
+            if out.len() >= MAX_ENTRIES || mem_u64(mem, e + 40)? != prev || mem_u64(mem, e + 48)? != list {
+                return None;
+            }
+            let key = self.ptr(e)?;
+            if mem_u32(mem, key) == Some(INT) {
+                out.push((mem_u64(mem, key + 8)? as i64, e + 8));
+            }
+            prev = e;
+            e = mem_u64(mem, e + 32)?;
+        }
+        Some(out)
+    }
+
+    /// The Variant under the whole-number key `k` in the Dictionary a Variant holds.
+    fn entry(&self, v: u64, k: i64) -> Option<u64> {
+        self.int_entries(v)?.into_iter().find(|e| e.0 == k).map(|e| e.1)
+    }
+
     fn number(&self, v: u64) -> bool {
         matches!(self.u32_at(v), Some(BOOL | INT | REAL))
     }
@@ -562,6 +641,7 @@ impl<'a> Godot<'a> {
                     (Step::Member(n), Some(i), _) => self.member(i, n),
                     (Step::Member(n), None, Some(prev)) => self.object(prev).and_then(|i| self.member(i, n)),
                     (Step::Index(e), _, Some(prev)) => self.array(prev).filter(|a| *e < a.2).map(|a| a.1 + e * VARIANT),
+                    (Step::Key(k), _, Some(prev)) => self.entry(prev, *k),
                     _ => None,
                 };
                 inst = None;
@@ -621,6 +701,59 @@ impl<'a> Godot<'a> {
             }
         }
         (members, arrays)
+    }
+
+    /// The variables holding the Dictionary whose entry's number is at `target`, as ways down
+    /// to it: (the script instance, [the variable, the key]). Two passes over memory.
+    fn entry_holders(&self, target: u64) -> Vec<Partial> {
+        let mem = self.mem();
+        let found = || -> Option<(Vec<u64>, i64)> {
+            if self.lay.v4 {
+                // { next, prev, Variant key, Variant value }: the dictionary's map points to
+                // the first and the last element.
+                let e = target.checked_sub(0x30)?;
+                if mem_u32(mem, e + 0x10)? != INT || !self.number(e + 0x28) {
+                    return None;
+                }
+                let key = mem_u64(mem, e + 0x18)? as i64;
+                let mut first = e;
+                for _ in 0..MAX_ENTRIES {
+                    match mem_u64(mem, first + 8)? {
+                        0 => break,
+                        p => first = p,
+                    }
+                }
+                let maps = self.heap.referrers(&[first]).into_iter().filter_map(|at| at.checked_sub(0x10)).filter(|&m| hash_entries_at(mem, m).is_some_and(|es| es.contains(&e)));
+                Some((maps.flat_map(|m| [m.wrapping_sub(0x10), m.wrapping_sub(8), m.wrapping_sub(0x18)]).collect(), key))
+            } else {
+                let e = target.checked_sub(16)?;
+                let (key, list) = (self.ptr(e)?, self.ptr(e + 48)?);
+                if mem_u32(mem, key)? != INT || !self.number(e + 8) {
+                    return None;
+                }
+                let privates = self.heap.referrers(&[list]).into_iter().filter_map(|at| at.checked_sub(8)).collect();
+                Some((privates, mem_u64(mem, key + 8)? as i64))
+            }
+        };
+        let Some((privates, key)) = found() else { return Vec::new() };
+        if privates.is_empty() {
+            return Vec::new();
+        }
+        let vars: Vec<u64> = self
+            .heap
+            .referrers(&privates)
+            .into_iter()
+            .filter_map(|at| at.checked_sub(8))
+            .filter(|&v| self.entry(v, key).map(|x| x + 8) == Some(target))
+            .collect();
+        if vars.is_empty() {
+            return Vec::new();
+        }
+        let (members, _) = self.holders(&vars);
+        members
+            .into_iter()
+            .filter_map(|(inst, i, _)| Some(Partial { inst, steps: vec![Step::Member(self.member_name(inst, i)?), Step::Key(key)] }))
+            .collect()
     }
 
     /// The children of a node (none: empty).
@@ -952,10 +1085,25 @@ fn remember(pid: u32, lay: Layout) {
 /// through the variables and arrays holding it, to a script only one object runs (a
 /// singleton). With the places it leads to now.
 pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
-    let (lay, inst, i) = start(heap, target)?;
-    remember(heap.pid, lay);
-    let g = Godot::new(heap, lay);
-    let own = Partial { inst, steps: vec![Step::Member(g.member_name(inst, i)?)] };
+    if let Some((lay, inst, i)) = start(heap, target) {
+        remember(heap.pid, lay);
+        let g = Godot::new(heap, lay);
+        let own = Partial { inst, steps: vec![Step::Member(g.member_name(inst, i)?)] };
+        return climb_from(&g, vec![own], target);
+    }
+    // An entry of a Dictionary a variable holds.
+    let g = Godot::new(heap, known_layout(heap.pid).or_else(|| learn(heap))?);
+    let own = g.entry_holders(target);
+    if own.is_empty() {
+        return None;
+    }
+    climb_from(&g, own, target)
+}
+
+/// The path to `target` from the ways down to it found so far (`own`: from the object whose
+/// variable holds it).
+fn climb_from(g: &Godot, own: Vec<Partial>, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
+    let (heap, lay) = (g.heap, g.lay);
     // What a new run of the game finds: the objects running the script with this path (its
     // characters must be where the search looks, in writable memory).
     let path_of = |p: &Partial| {
@@ -964,7 +1112,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
         Some(ScriptPath { script: g.script_path(gd)?, nodes: None, steps: p.steps.clone() })
     };
     let owner = |p: &Partial| mem_u64(heap.mem(), p.inst + lay.owner);
-    let mut level = vec![own.clone()];
+    let mut level = own.clone();
     let mut levels = Vec::new();
     let mut own_runs = Vec::new();
     for depth in 0..=MAX_UP {
@@ -1045,7 +1193,7 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(ScriptPath, Vec<u64>)> {
         }
     }
     // Else the value's own variable in every object running its script, when they are few.
-    let path = path_of(&own)?;
+    let path = path_of(own.first()?)?;
     let leads = g.walk(&own_runs, &path.steps);
     (leads.contains(&target) && leads.len() <= MAX_PLACES).then_some((path, leads))
 }
@@ -1325,6 +1473,8 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &ScriptPath) -> Vec<u64> {
 const MAX_ALIKE: usize = 8;
 /// Elements of an array of objects looked into.
 const MAX_LISTED_ELEMENTS: u64 = 8;
+/// Entries of a dictionary listed.
+const MAX_LISTED_ENTRIES: usize = 512;
 /// Elements of an array that may each be a player's (co-op).
 const MAX_PLAYERS: u64 = 4;
 
@@ -1389,24 +1539,59 @@ fn raw_text(mem: &Mem, at: u64, wide: u64) -> Option<String> {
 }
 
 impl Godot<'_> {
-    /// A script instance's number variables, in order: (name, the number's address, helper type).
-    fn numbers(&self, inst: u64) -> Vec<(String, u64, &'static str)> {
+    /// A script instance's number variables, in order: (name, the number's address, helper
+    /// type). After each variable holding a Dictionary, its numbers under whole-number keys:
+    /// "effects.stat_max_hp" when a `<name>_hash` variable of the game holds the key
+    /// (`hashes`), else "effects{<key>}".
+    fn numbers(&self, inst: u64, hashes: &HashMap<i64, String>) -> Vec<(String, u64, &'static str)> {
         let (Some(table), Some((first, n))) = (self.script_of(inst).and_then(|gd| self.table(gd)), self.members(inst)) else { return Vec::new() };
         let mut named: Vec<(String, u64)> = table.into_iter().filter(|(_, i)| *i < n).collect();
         named.sort_by_key(|(_, i)| *i);
-        named
-            .into_iter()
-            .filter_map(|(name, i)| {
-                let v = first + i * VARIANT;
-                let kind = match self.u32_at(v)? {
-                    INT => "i32",
-                    REAL => "f64",
-                    BOOL => "bit0",
-                    _ => return None,
-                };
-                Some((name, v + 8, kind))
+        let kind = |v: u64| match self.u32_at(v)? {
+            INT => Some("i32"),
+            REAL => Some("f64"),
+            BOOL => Some("bit0"),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        for (name, i) in named {
+            let v = first + i * VARIANT;
+            if let Some(kind) = kind(v) {
+                out.push((name, v + 8, kind));
+            } else if let Some(entries) = self.int_entries(v) {
+                for (key, value) in entries.into_iter().take(MAX_LISTED_ENTRIES) {
+                    let Some(kind) = kind(value) else { continue };
+                    let label = match hashes.get(&key) {
+                        Some(stat) => format!("{name}.{stat}"),
+                        None => format!("{name}{{{key}}}"),
+                    };
+                    out.push((label, value + 8, kind));
+                }
+            }
+        }
+        out
+    }
+
+    /// The names of whole-number keys: the game's variables named `<name>_hash` (Brotato's
+    /// `Keys`: `stat_max_hp_hash` holds the key its dictionaries keep max HP under).
+    fn hash_names(&self, insts: impl Iterator<Item = u64>) -> HashMap<i64, String> {
+        // The object with the most of them first (the table of keys): others hold one key
+        // under a name of their own (an item's `key_hash`, `my_id_hash`).
+        let mut tables: Vec<Vec<(i64, String)>> = insts
+            .map(|inst| {
+                let named = self.numbers(inst, &HashMap::new()).into_iter().filter_map(|(name, addr, kind)| {
+                    let stat = name.strip_suffix("_hash").filter(|_| kind == "i32")?;
+                    Some((mem_u64(self.mem(), addr)? as i64, stat.to_owned()))
+                });
+                named.collect()
             })
-            .collect()
+            .collect();
+        tables.sort_by_key(|t: &Vec<(i64, String)>| std::cmp::Reverse(t.len()));
+        let mut out = HashMap::new();
+        for (key, stat) in tables.into_iter().flatten() {
+            out.entry(key).or_insert(stat);
+        }
+        out
     }
 
     /// The script objects a script instance's variables hold, one level: (label, instance,
@@ -1452,6 +1637,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
         })
         .collect();
     let name = |n: u64| g.node_name(&t, n).unwrap_or_else(|| "?".into());
+    let hashes = g.hash_names(nodes.iter().map(|n| n.1));
     // Nodes are listed themselves, not again through a variable holding them (Main's `player`).
     let in_tree: std::collections::HashSet<u64> = nodes.iter().map(|n| n.0).collect();
     // A node is the player's when it's named so or runs a script named so, and isn't the HUD's
@@ -1476,7 +1662,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
         }
         // A name the engine made up ("@Node@2"): the script's instead.
         let node_name = Some(name(n)).filter(|n| !n.starts_with('@')).unwrap_or_else(|| stem(&script));
-        let fields: Vec<crate::ue::Listed> = g.numbers(inst).into_iter().map(|(label, addr, kind)| crate::ue::Listed { label, addr, kind }).collect();
+        let fields: Vec<crate::ue::Listed> = g.numbers(inst, &hashes).into_iter().map(|(label, addr, kind)| crate::ue::Listed { label, addr, kind }).collect();
         let held = g.held(inst);
         let (role, owner) = if parent == root { ("game", None) } else { ("part", Some(name(parent))) };
         let mut groups = Vec::new();
@@ -1489,7 +1675,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
             }
             let Some(script) = g.script_of(o).and_then(file) else { continue };
             let fields: Vec<crate::ue::Listed> =
-                g.numbers(o).into_iter().map(|(l, addr, kind)| crate::ue::Listed { label: format!("{label}.{l}"), addr, kind }).collect();
+                g.numbers(o, &hashes).into_iter().map(|(l, addr, kind)| crate::ue::Listed { label: format!("{label}.{l}"), addr, kind }).collect();
             // A long array named like the player's is the game's data, not the player
             // (Brotato's ItemService.characters: every character there is).
             let main = !ui(&script) && (main || few && (player_like(&label) || player_like(&stem(&script))));
@@ -1524,6 +1710,13 @@ mod tests {
         assert_eq!(p.describe(), "players_data[0].gold in run_data.gd");
         assert_eq!(ScriptPath::parse("gd:a/b.gd.x[1][2].y").unwrap().text(), "gd:a/b.gd.x[1][2].y");
         assert!(ScriptPath::parse("gd:a/b.gd.x[0]").is_none());
+        let t = "gd:singletons/run_data.gd.players_data[0].effects{-193432}";
+        let p = ScriptPath::parse(t).unwrap();
+        assert_eq!(p.steps, vec![Step::Member("players_data".into()), Step::Index(0), Step::Member("effects".into()), Step::Key(-193432)]);
+        assert_eq!(p.text(), t);
+        assert_eq!(p.describe(), "players_data[0].effects{-193432} in run_data.gd");
+        assert!(ScriptPath::parse("gd:a/b.gd.x{1").is_none());
+        assert!(ScriptPath::parse("gd:a/b.gd.x{y}").is_none());
         assert!(ScriptPath::parse("gd:a/b.gd").is_none());
         assert!(ScriptPath::parse("gd:a b.gd.x").is_none());
         assert!(ScriptPath::parse("{amount|id=0}").is_none());
