@@ -4909,6 +4909,21 @@ impl Core {
         if real.is_none() && kept.iter().any(|&k| k) {
             real = self.probe_one_by_one(&tests, &kept);
         }
+        // Places the game put back at once are its own (a display copy, or a number it guards
+        // with a check copy: Northgard), which a place that only kept the test isn't yet: an
+        // unrelated number near the one on screen keeps any write (Northgard's krowns once had
+        // such a third match, and it was taken for the value when the game zeroed it). A
+        // guarded number has a fraction where its display copy is whole: with one among them,
+        // the check copy is looked for before the player is asked to wait.
+        let put_back: Vec<Loc> = (0..tests.len()).filter(|&k| !kept[k] && source(after[k], k).is_none() && chases[k].is_none()).map(|k| tests[k].loc).collect();
+        let fractional = self.peek_exact(&put_back).into_iter().flatten().any(|v| v.fract() != 0.0);
+        if real.is_none() && kept.iter().any(|&k| k) && fractional && !self.cancel.load(Ordering::Relaxed) {
+            if let Some(loc) = self.checked_one(&put_back, n) {
+                self.helper.call(&format!("keep {:x}", loc.addr));
+                self.say(&format!("0x{:012x} kept its test value once its check copy was written with it: the real value", loc.addr));
+                return Ok(Probed::Found(loc));
+            }
+        }
         if real.is_none() && kept.iter().any(|&k| k) {
             let now = self.peek(&locs);
             for (k, t) in tests.iter_mut().enumerate() {
@@ -4938,9 +4953,12 @@ impl Core {
             self.say(&format!("0x{:012x} {how}: the real value (test writes undone)", loc.addr));
             return Ok(Probed::Found(loc));
         }
-        // Every test undone: the game may compare the value with a check copy (Northgard).
-        if !kept.iter().any(|&k| k) && !self.cancel.load(Ordering::Relaxed) {
-            if let Some(loc) = self.checked_one(&locs, n) {
+        // Every test undone: the game may compare the value with a check copy (Northgard). Also
+        // when the places that kept theirs turned out not to be it, and the put-back ones
+        // weren't looked at yet.
+        let all_back = !kept.iter().any(|&k| k);
+        if (all_back || !put_back.is_empty() && !fractional) && !self.cancel.load(Ordering::Relaxed) {
+            if let Some(loc) = self.checked_one(if all_back { &locs } else { &put_back }, n) {
                 self.helper.call(&format!("keep {:x}", loc.addr));
                 self.say(&format!("0x{:012x} kept its test value once its check copy was written with it: the real value", loc.addr));
                 return Ok(Probed::Found(loc));
@@ -5090,6 +5108,23 @@ impl Core {
             if let Some(&k) = watched.iter().find(|&&k| k != i && tests[k].test == v) {
                 return Ok(Some((k, format!("held {} and 0x{:012x} took it from there", tests[k].test, loc.addr))));
             }
+            // The game's own number shows on screen once it changes it. A place it set to
+            // something else (Northgard: an unrelated number went from its test value to 0
+            // while the counter showed 142) isn't the value.
+            if self.area.is_some() {
+                std::thread::sleep(Duration::from_millis(1000));
+                if let Ok(Some(s)) = self.read_stable() {
+                    let now = self.peek(&[tests[i].loc])[0].unwrap_or(v);
+                    let near = |x: i64| [s.value() as i64, s.scaled()].iter().any(|n| (n - x).abs() <= 3);
+                    if !near(v) && !near(now) {
+                        self.say(&format!(
+                            "0x{:012x}: the game changed it from {} to {v}, but the screen shows {s}: not the value",
+                            tests[i].loc.addr, tests[i].test
+                        ));
+                        return Ok(None);
+                    }
+                }
+            }
             return Ok(Some((i, format!("the game changed it first, from {} to {v}", tests[i].test))));
         }
         if reply.iter().any(|l| l == "none") {
@@ -5191,6 +5226,10 @@ impl Core {
         }
         // Or the game compares it with a check copy and undoes what doesn't fit (Northgard):
         // found by watching the value change, then the test is made again with both written.
+        if !checked && self.check_like_saved(loc).is_some() {
+            self.say("testing again with both written");
+            return self.sticks_with(loc, true);
+        }
         if !checked {
             self.status(&tr!("The game undid Ferret's test. Looking for a check copy it keeps of this number: let it change in the game."));
             let cancel = self.cancel.clone();
@@ -5225,10 +5264,12 @@ impl Core {
         places.sort_by_key(|(_, v)| v.fract() == 0.0);
         self.status(&tr!("The game undid Ferret's tests. Looking for a check copy it keeps of this number: let it change in the game."));
         for (loc, _) in places {
-            let cancel = self.cancel.clone();
-            let reply = self.helper.call_cancellable(&format!("guard {loc} {GUARD_WATCH}"), &cancel);
-            if reply.iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check).is_none() {
-                continue;
+            if self.check_like_saved(loc).is_none() {
+                let cancel = self.cancel.clone();
+                let reply = self.helper.call_cancellable(&format!("guard {loc} {GUARD_WATCH}"), &cancel);
+                if reply.iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check).is_none() {
+                    continue;
+                }
             }
             self.say(&format!("0x{:012x}: the game keeps a check copy next to it: testing again with both written", loc.addr));
             if self.sticks_with(loc, true) {
@@ -5240,7 +5281,57 @@ impl Core {
 
     /// The check copy the helper knows for a place (found during this search or save).
     fn known_check(&mut self, loc: Loc) -> Option<Check> {
-        self.helper.call(&format!("guard {loc} 0")).iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check)
+        let known = self.helper.call(&format!("guard {loc} 0")).iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check);
+        known.or_else(|| self.check_like_saved(loc))
+    }
+
+    /// A check copy made the way one of the game's saved values' is (as far from the value,
+    /// with the same key) that fits this place now: a game guards its numbers one way
+    /// (Northgard: every resource, one key). Needs no change in the game, where finding one
+    /// by watching does: food at its storage cap never changes, and written without its
+    /// check copy it went to 0.
+    fn check_like_saved(&mut self, loc: Loc) -> Option<Check> {
+        let exe = self.game.as_ref()?.exe.clone();
+        let mut checks: Vec<Check> = read_profile(&exe).iter().filter_map(|e| e.check).collect();
+        checks.dedup();
+        let fits = |core: &mut Core, (off, key, up): Check| {
+            core.helper.call(&format!("guarded {loc} {off} {key}{}", if up { " up" } else { "" })).iter().any(|l| l == "guarded")
+        };
+        let said = format!("0x{:012x} has a check copy like the one saved for another value of this game", loc.addr);
+        if let Some(&c) = checks.iter().find(|&&c| fits(self, c)) {
+            self.say(&said);
+            return Some(c);
+        }
+        // Or a few ints either side: the copies sit in a row of their own, not in the values'
+        // order (Northgard: food, wood, krowns after food, krowns, wood: 280, 268 and 280
+        // bytes on). Only when exactly one place fits, and not for a number near 0: two
+        // values holding the same number fit each other's copies, and every empty one's.
+        let value = self.peek_exact(&[loc]).pop().flatten()?;
+        if value.abs() < 2.0 {
+            return None;
+        }
+        let mut found: Vec<Check> = Vec::new();
+        for step in (1..=16).flat_map(|i| [-4 * i, 4 * i]) {
+            for &(off, key, up) in &checks {
+                if fits(self, (off + step, key, up)) {
+                    found.push((off + step, key, up));
+                }
+            }
+        }
+        found.dedup();
+        match found[..] {
+            [c] => {
+                // (The last one tried is what the helper holds: set it to the one that fits.)
+                fits(self, c);
+                self.say(&said);
+                Some(c)
+            }
+            _ => {
+                // (The helper holds the last one that fit: none is to be used.)
+                self.helper.call(&format!("guarded {loc} none"));
+                None
+            }
+        }
     }
 
     /// Why the one match left may not be the value: it doesn't hold what the screen shows (`n`;

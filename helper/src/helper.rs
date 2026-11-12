@@ -966,6 +966,11 @@ fn cmd_guard(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 /// set both) when it fits the value now: "guarded", else "error: ...".
 fn cmd_guarded(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     let f: Vec<&str> = arg.split_whitespace().collect();
+    // `guarded <loc> none`: forget the place's check copy (one tried that turned out doubtful).
+    if let (Some((addr, _)), Some(&"none")) = (f.first().and_then(|a| parse_loc(a)), f.get(1)) {
+        GUARDS.lock().unwrap().retain(|g| g.0 != addr);
+        return writeln!(out, "guarded none");
+    }
     let (Some((addr, kind)), Some(off), Some(key), Some(mem)) =
         (f.first().and_then(|a| parse_loc(a)), f.get(1).and_then(|v| v.parse::<i64>().ok()), f.get(2).and_then(|v| v.parse::<i32>().ok()), s.mem.as_ref())
     else {
