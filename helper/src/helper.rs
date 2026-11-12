@@ -261,7 +261,19 @@ fn nwjs_name(pid: u32, dir: &Path) -> String {
         .and_then(|t| crate::json::parse(&t))
         .and_then(|v| v.get("gameTitle").and_then(|t| t.str()).map(|t| t.trim().replace('\t', " ")))
         .filter(|t| !t.is_empty());
-    title.unwrap_or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "NW.js game".into()))
+    // A folder named after the system it's for ("linux64", "win32": how NW.js exports are
+    // unpacked) names no game, and two games would share one profile: the folder above it.
+    let named = |d: &Path| d.file_name().map(|n| n.to_string_lossy().into_owned());
+    let generic = |n: &str| {
+        let n = n.to_ascii_lowercase();
+        ["linux", "linux32", "linux64", "win", "win32", "win64", "windows", "x64", "x86", "ia32", "bin", "nw", "nwjs", "app", "game", "dist", "build"].contains(&n.as_str())
+    };
+    let folder = match named(dir) {
+        Some(n) if generic(&n) => dir.parent().and_then(named).filter(|p| !generic(p)).unwrap_or(n),
+        Some(n) => n,
+        None => "NW.js game".into(),
+    };
+    title.unwrap_or(folder)
 }
 
 /// GameMaker games keep every number as a double; they ship their assets as data.win (or
