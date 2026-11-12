@@ -446,6 +446,14 @@ fn tweak_text(id: &str) -> Option<(String, String)> {
             tr!("Fly"),
             tr!("Your character flies instead of walking or falling. Going up and down depends on the game's controls; turned off, the character falls back down."),
         ),
+        "jump" => (
+            tr!("Jump Higher"),
+            tr!("Your character jumps about four times as high. Games that work out jumps their own way may ignore it."),
+        ),
+        "run" => (
+            tr!("Run Faster"),
+            tr!("Your character moves one and a half times as fast on the ground. Sprinting and anything else the game does to your speed is held at this speed too while it's on."),
+        ),
         "heroes" => (
             tr!("God Mode"),
             tr!("Your heroes' HP and MP don't go down: they stay at the most they've had since you turned this on, so heal once to keep them full. One hit bigger than a hero's HP can still knock them out."),

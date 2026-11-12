@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-11 23:37+0000\n"
+"POT-Creation-Date: 2026-11-12 01:16+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Brazilian Portuguese\n"
 "Language: pt_BR\n"
@@ -1302,7 +1302,7 @@ msgstr "Ajuste desligado: o jogo tem seus próprios valores de volta"
 msgid "Ferret found no numbers in your character's objects."
 msgstr "O Ferret não encontrou números nos objetos do seu personagem."
 
-#: src/gui/browse.rs:286 src/gui/browse.rs:474 src/gui/find.rs:371
+#: src/gui/browse.rs:286 src/gui/browse.rs:482 src/gui/find.rs:371
 #: src/gui/guide.rs:77
 msgid "Save"
 msgstr "Salvar"
@@ -1333,7 +1333,7 @@ msgid_plural "{n} numbers"
 msgstr[0] "{n} número"
 msgstr[1] "{n} números"
 
-#: src/gui/browse.rs:442 src/gui/browse.rs:450
+#: src/gui/browse.rs:442 src/gui/browse.rs:458
 msgid "God Mode"
 msgstr "Modo deus"
 
@@ -1359,7 +1359,28 @@ msgstr ""
 "Seu personagem voa em vez de andar ou cair. Subir e descer depende dos "
 "controles do jogo; desligado, o personagem cai de volta."
 
+#: src/gui/browse.rs:450
+msgid "Jump Higher"
+msgstr "Pular mais alto"
+
 #: src/gui/browse.rs:451
+msgid ""
+"Your character jumps about four times as high. Games that work out jumps "
+"their own way may ignore it."
+msgstr "Seu personagem pula cerca de quatro vezes mais alto. Jogos que calculam os pulos do próprio jeito podem ignorar isso."
+
+#: src/gui/browse.rs:454
+msgid "Run Faster"
+msgstr "Correr mais rápido"
+
+#: src/gui/browse.rs:455
+msgid ""
+"Your character moves one and a half times as fast on the ground. Sprinting "
+"and anything else the game does to your speed is held at this speed too "
+"while it's on."
+msgstr "Seu personagem se move uma vez e meia mais rápido no chão. Correr e qualquer outra coisa que o jogo faça com a sua velocidade também fica nessa velocidade enquanto isto estiver ligado."
+
+#: src/gui/browse.rs:459
 msgid ""
 "Your heroes' HP and MP don't go down: they stay at the most they've had "
 "since you turned this on, so heal once to keep them full. One hit bigger "
@@ -1369,11 +1390,11 @@ msgstr ""
 "que você ligou, então cure uma vez para mantê-los cheios. Um golpe maior que "
 "o HP de um herói ainda pode nocauteá-lo."
 
-#: src/gui/browse.rs:454
+#: src/gui/browse.rs:462
 msgid "Walk Through Walls"
 msgstr "Atravessar paredes"
 
-#: src/gui/browse.rs:455
+#: src/gui/browse.rs:463
 msgid ""
 "You walk through walls, people and water (not off the map). Places the story "
 "hasn't opened yet open too."
@@ -1381,11 +1402,11 @@ msgstr ""
 "Você atravessa paredes, pessoas e água (sem sair do mapa). Lugares que a "
 "história ainda não abriu também se abrem."
 
-#: src/gui/browse.rs:457
+#: src/gui/browse.rs:465
 msgid "No Random Battles"
 msgstr "Sem batalhas aleatórias"
 
-#: src/gui/browse.rs:457
+#: src/gui/browse.rs:465
 msgid ""
 "Walking around starts no random battles. Battles the story starts still "
 "happen."
@@ -1393,32 +1414,32 @@ msgstr ""
 "Andar por aí não inicia batalhas aleatórias. As batalhas que a história "
 "inicia continuam acontecendo."
 
-#: src/gui/browse.rs:458
+#: src/gui/browse.rs:466
 msgid "Walk Faster"
 msgstr "Andar mais rápido"
 
-#: src/gui/browse.rs:458
+#: src/gui/browse.rs:466
 msgid "You walk twice as fast."
 msgstr "Você anda duas vezes mais rápido."
 
-#: src/gui/browse.rs:471
+#: src/gui/browse.rs:479
 #, rust-format
 msgid "Save {name}"
 msgstr "Salvar {name}"
 
-#: src/gui/browse.rs:471
+#: src/gui/browse.rs:479
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr ""
 "O Ferret o encontra de novo por este nome toda vez que você abre o jogo."
 
-#: src/gui/browse.rs:474 src/gui/feedback.rs:69 src/gui/find.rs:241
+#: src/gui/browse.rs:482 src/gui/feedback.rs:69 src/gui/find.rs:241
 #: src/gui/find.rs:2361 src/gui/guide.rs:162 src/gui/guide.rs:610
 #: src/gui/guide.rs:616 src/gui/share.rs:258 src/gui/share.rs:449
 #: src/gui/share.rs:477 src/gui/values.rs:145 src/gui/values.rs:176
 msgid "Cancel"
 msgstr "Cancelar"
 
-#: src/gui/browse.rs:495 src/gui/find.rs:2327
+#: src/gui/browse.rs:503 src/gui/find.rs:2327
 #, rust-format
 msgid "Saved {name}. Ferret finds it again every time you attach."
 msgstr ""

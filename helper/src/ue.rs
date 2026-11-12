@@ -2253,7 +2253,9 @@ impl Ue {
     /// character's `bCanBeDamaged` off, which the engine's damage checks first, and its health,
     /// when Ferret can tell which number it is, kept at the most it has had: games with their own
     /// damage code ignore the flag) and fly (the movement component's mode set to flying, with
-    /// `bCheatFlying` so landing doesn't end it; up and down follow the game's own controls).
+    /// `bCheatFlying` so landing doesn't end it; up and down follow the game's own controls),
+    /// jump higher (the movement component's `JumpZVelocity` doubled) and run faster (its
+    /// `MaxWalkSpeed` times 1.5).
     pub fn tweaks(&self, mem: &Mem) -> Vec<crate::tweaks::Tweak> {
         use crate::tweaks::{How, Part, Tweak};
         let heads = self.heads(mem);
@@ -2284,7 +2286,28 @@ impl Ue {
                 fly.extend(self.find_prop(mem, cc, "bCheatFlying").and_then(|p| flag(comp, &p, true)));
             }
         }
-        vec![Tweak { id: "godmode", parts: god }, Tweak { id: "fly", parts: fly }]
+        // A number of the movement component kept at `times` what it holds now (off: what it
+        // held): jumps twice as fast upward go four times as high.
+        let mut scaled = |name: &str, times: f64| -> Vec<Part> {
+            let mut part = || {
+                if !is_a(class, &["Character"]) {
+                    return None;
+                }
+                let comp = self.object_in(mem, character, "CharacterMovement")?;
+                let p = self.find_prop(mem, self.class_of(mem, comp)?, name).filter(|p| matches!(p.kind.as_str(), "FloatProperty" | "DoubleProperty"))?;
+                let mut b = [0u8; 8];
+                mem.read_exact_at(&mut b[..p.size.min(8) as usize], comp + p.offset).ok()?;
+                let (now, kind) = match p.size {
+                    4 => (f64::from(f32::from_le_bytes(b[..4].try_into().unwrap())), "f32"),
+                    8 => (f64::from_le_bytes(b), "f64"),
+                    _ => return None,
+                };
+                (now.is_finite() && now > 0.0 && now < 1e7).then(|| Part { addr: comp + p.offset, kind, how: How::Set { on: (now * times).round(), off: None } })
+            };
+            part().into_iter().collect()
+        };
+        let (jump, run) = (scaled("JumpZVelocity", 2.0), scaled("MaxWalkSpeed", 1.5));
+        vec![Tweak { id: "godmode", parts: god }, Tweak { id: "fly", parts: fly }, Tweak { id: "jump", parts: jump }, Tweak { id: "run", parts: run }]
     }
 }
 

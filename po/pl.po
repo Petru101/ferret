@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-11 23:37+0000\n"
+"POT-Creation-Date: 2026-11-12 01:16+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Polish\n"
 "Language: pl\n"
@@ -1316,7 +1316,7 @@ msgstr "Zmiana wyłączona: gra ma z powrotem swoje wartości"
 msgid "Ferret found no numbers in your character's objects."
 msgstr "Ferret nie znalazł żadnych liczb w obiektach twojej postaci."
 
-#: src/gui/browse.rs:286 src/gui/browse.rs:474 src/gui/find.rs:371
+#: src/gui/browse.rs:286 src/gui/browse.rs:482 src/gui/find.rs:371
 #: src/gui/guide.rs:77
 msgid "Save"
 msgstr "Zapisz"
@@ -1349,7 +1349,7 @@ msgstr[0] "{n} liczba"
 msgstr[1] "{n} liczby"
 msgstr[2] "{n} liczb"
 
-#: src/gui/browse.rs:442 src/gui/browse.rs:450
+#: src/gui/browse.rs:442 src/gui/browse.rs:458
 msgid "God Mode"
 msgstr "Tryb boga"
 
@@ -1375,7 +1375,28 @@ msgstr ""
 "Twoja postać lata zamiast chodzić lub spadać. Wznoszenie i opadanie zależy "
 "od sterowania gry; po wyłączeniu postać spada z powrotem."
 
+#: src/gui/browse.rs:450
+msgid "Jump Higher"
+msgstr "Skacz wyżej"
+
 #: src/gui/browse.rs:451
+msgid ""
+"Your character jumps about four times as high. Games that work out jumps "
+"their own way may ignore it."
+msgstr "Twoja postać skacze około cztery razy wyżej. Gry, które liczą skoki po swojemu, mogą to zignorować."
+
+#: src/gui/browse.rs:454
+msgid "Run Faster"
+msgstr "Biegaj szybciej"
+
+#: src/gui/browse.rs:455
+msgid ""
+"Your character moves one and a half times as fast on the ground. Sprinting "
+"and anything else the game does to your speed is held at this speed too "
+"while it's on."
+msgstr "Twoja postać porusza się po ziemi półtora raza szybciej. Sprint i wszystko inne, co gra robi z twoją prędkością, też zostaje przy tej prędkości, dopóki to jest włączone."
+
+#: src/gui/browse.rs:459
 msgid ""
 "Your heroes' HP and MP don't go down: they stay at the most they've had "
 "since you turned this on, so heal once to keep them full. One hit bigger "
@@ -1385,11 +1406,11 @@ msgstr ""
 "włączenia, więc ulecz ich raz, żeby były pełne. Cios większy niż PŻ bohatera "
 "wciąż może go znokautować."
 
-#: src/gui/browse.rs:454
+#: src/gui/browse.rs:462
 msgid "Walk Through Walls"
 msgstr "Chodzenie przez ściany"
 
-#: src/gui/browse.rs:455
+#: src/gui/browse.rs:463
 msgid ""
 "You walk through walls, people and water (not off the map). Places the story "
 "hasn't opened yet open too."
@@ -1397,11 +1418,11 @@ msgstr ""
 "Przechodzisz przez ściany, ludzi i wodę (nie poza mapę). Miejsca, których "
 "fabuła jeszcze nie otworzyła, też się otwierają."
 
-#: src/gui/browse.rs:457
+#: src/gui/browse.rs:465
 msgid "No Random Battles"
 msgstr "Bez losowych walk"
 
-#: src/gui/browse.rs:457
+#: src/gui/browse.rs:465
 msgid ""
 "Walking around starts no random battles. Battles the story starts still "
 "happen."
@@ -1409,31 +1430,31 @@ msgstr ""
 "Chodzenie nie rozpoczyna losowych walk. Walki rozpoczynane przez fabułę "
 "nadal się odbywają."
 
-#: src/gui/browse.rs:458
+#: src/gui/browse.rs:466
 msgid "Walk Faster"
 msgstr "Szybsze chodzenie"
 
-#: src/gui/browse.rs:458
+#: src/gui/browse.rs:466
 msgid "You walk twice as fast."
 msgstr "Chodzisz dwa razy szybciej."
 
-#: src/gui/browse.rs:471
+#: src/gui/browse.rs:479
 #, rust-format
 msgid "Save {name}"
 msgstr "Zapisz {name}"
 
-#: src/gui/browse.rs:471
+#: src/gui/browse.rs:479
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr "Ferret znajdzie ją pod tą nazwą za każdym razem, gdy otworzysz grę."
 
-#: src/gui/browse.rs:474 src/gui/feedback.rs:69 src/gui/find.rs:241
+#: src/gui/browse.rs:482 src/gui/feedback.rs:69 src/gui/find.rs:241
 #: src/gui/find.rs:2361 src/gui/guide.rs:162 src/gui/guide.rs:610
 #: src/gui/guide.rs:616 src/gui/share.rs:258 src/gui/share.rs:449
 #: src/gui/share.rs:477 src/gui/values.rs:145 src/gui/values.rs:176
 msgid "Cancel"
 msgstr "Anuluj"
 
-#: src/gui/browse.rs:495 src/gui/find.rs:2327
+#: src/gui/browse.rs:503 src/gui/find.rs:2327
 #, rust-format
 msgid "Saved {name}. Ferret finds it again every time you attach."
 msgstr ""

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Ferret\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-11 23:37+0000\n"
+"POT-Creation-Date: 2026-11-12 01:16+0000\n"
 "Last-Translator: Claude (AI)\n"
 "Language-Team: Simplified Chinese\n"
 "Language: zh_CN\n"
@@ -1192,7 +1192,7 @@ msgstr "调整已关闭：游戏恢复了自己的值"
 msgid "Ferret found no numbers in your character's objects."
 msgstr "Ferret 在你的角色的对象中没有找到数字。"
 
-#: src/gui/browse.rs:286 src/gui/browse.rs:474 src/gui/find.rs:371
+#: src/gui/browse.rs:286 src/gui/browse.rs:482 src/gui/find.rs:371
 #: src/gui/guide.rs:77
 msgid "Save"
 msgstr "保存"
@@ -1221,7 +1221,7 @@ msgid "{n} number"
 msgid_plural "{n} numbers"
 msgstr[0] "{n} 个数字"
 
-#: src/gui/browse.rs:442 src/gui/browse.rs:450
+#: src/gui/browse.rs:442 src/gui/browse.rs:458
 msgid "God Mode"
 msgstr "无敌模式"
 
@@ -1246,7 +1246,28 @@ msgstr ""
 "你的角色会飞，而不是行走或下落。能否上升和下降取决于游戏的操作；关闭后角色会"
 "落回地面。"
 
+#: src/gui/browse.rs:450
+msgid "Jump Higher"
+msgstr "跳得更高"
+
 #: src/gui/browse.rs:451
+msgid ""
+"Your character jumps about four times as high. Games that work out jumps "
+"their own way may ignore it."
+msgstr "你的角色跳得大约有四倍高。用自己的方式计算跳跃的游戏可能会忽略它。"
+
+#: src/gui/browse.rs:454
+msgid "Run Faster"
+msgstr "跑得更快"
+
+#: src/gui/browse.rs:455
+msgid ""
+"Your character moves one and a half times as fast on the ground. Sprinting "
+"and anything else the game does to your speed is held at this speed too "
+"while it's on."
+msgstr "你的角色在地面上的移动速度变为一倍半。开启期间，冲刺以及游戏对你速度所做的其他改动也会保持在这个速度。"
+
+#: src/gui/browse.rs:459
 msgid ""
 "Your heroes' HP and MP don't go down: they stay at the most they've had "
 "since you turned this on, so heal once to keep them full. One hit bigger "
@@ -1255,51 +1276,51 @@ msgstr ""
 "你的英雄的 HP 和 MP 不会下降：它们保持在开启后达到过的最高值，所以治疗一次就"
 "能让它们保持满值。比英雄 HP 更高的一击仍然可能把他击倒。"
 
-#: src/gui/browse.rs:454
+#: src/gui/browse.rs:462
 msgid "Walk Through Walls"
 msgstr "穿墙"
 
-#: src/gui/browse.rs:455
+#: src/gui/browse.rs:463
 msgid ""
 "You walk through walls, people and water (not off the map). Places the story "
 "hasn't opened yet open too."
 msgstr "你可以穿过墙壁、人物和水（不会走出地图）。剧情还没开放的地方也会开放。"
 
-#: src/gui/browse.rs:457
+#: src/gui/browse.rs:465
 msgid "No Random Battles"
 msgstr "无随机战斗"
 
-#: src/gui/browse.rs:457
+#: src/gui/browse.rs:465
 msgid ""
 "Walking around starts no random battles. Battles the story starts still "
 "happen."
 msgstr "四处走动不会触发随机战斗。剧情触发的战斗仍会发生。"
 
-#: src/gui/browse.rs:458
+#: src/gui/browse.rs:466
 msgid "Walk Faster"
 msgstr "走得更快"
 
-#: src/gui/browse.rs:458
+#: src/gui/browse.rs:466
 msgid "You walk twice as fast."
 msgstr "你走路的速度变为两倍。"
 
-#: src/gui/browse.rs:471
+#: src/gui/browse.rs:479
 #, rust-format
 msgid "Save {name}"
 msgstr "保存 {name}"
 
-#: src/gui/browse.rs:471
+#: src/gui/browse.rs:479
 msgid "Ferret finds it again by this name every time you open the game."
 msgstr "每次你打开游戏时，Ferret 都会按这个名称再次找到它。"
 
-#: src/gui/browse.rs:474 src/gui/feedback.rs:69 src/gui/find.rs:241
+#: src/gui/browse.rs:482 src/gui/feedback.rs:69 src/gui/find.rs:241
 #: src/gui/find.rs:2361 src/gui/guide.rs:162 src/gui/guide.rs:610
 #: src/gui/guide.rs:616 src/gui/share.rs:258 src/gui/share.rs:449
 #: src/gui/share.rs:477 src/gui/values.rs:145 src/gui/values.rs:176
 msgid "Cancel"
 msgstr "取消"
 
-#: src/gui/browse.rs:495 src/gui/find.rs:2327
+#: src/gui/browse.rs:503 src/gui/find.rs:2327
 #, rust-format
 msgid "Saved {name}. Ferret finds it again every time you attach."
 msgstr "已保存 {name}。每次连接时 Ferret 都会再找到它。"
