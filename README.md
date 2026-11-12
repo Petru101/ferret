@@ -60,7 +60,7 @@ Feedback in its menu, or an issue here).
 7. **Browse by name** (Unreal Engine, Unity, Godot, GameMaker, RPG Maker MV and MZ, Java, Python (Ren'Py, pygame), Adobe AIR, Lua games such as LÖVE's, and web games in recent Electron versions: plain JavaScript, Phaser, GDevelop or Construct 2): the Browse tab lists your character's numbers by
    the names the game gives them (health, ammo, run speed, jump height; in RPG Maker games the
    party's gold and items, each hero's HP, MP and level, the game's variables), no search needed.
-   In Unreal Engine, Unity, RPG Maker, Godot, Java, Python and web games it lists their on/off flags too, with a switch to
+   In Unreal Engine, Unity, RPG Maker, Godot, Java, Lua, Python and web games it lists their on/off flags too, with a switch to
    flip them: the character's "can be damaged" (off: no damage, in games that take damage the
    engine's way), the game's own flags, and an RPG Maker game's switches by the names its maker
    gave them. Above the list, one-click tweaks: god mode and fly in Unreal Engine games (they

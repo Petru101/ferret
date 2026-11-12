@@ -639,6 +639,9 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         }
     }
     queue.push_front((lj.g, TAB, root.clone(), 0));
+    // `package.loaded` holds `true` for every module that returned nothing (Mr. Rescue: 40 of
+    // them): not flags of the game.
+    let loaded_table = loaded.as_ref().map(|(l, _)| *l);
     if let Some((l, path)) = loaded {
         queue.push_back((l, TAB, path, 2));
     }
@@ -656,6 +659,12 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         };
         let mut g = Group { path: path.clone(), locals: kind == FUNC, numbers: Vec::new() };
         for (step, w, at) in entries {
+            if !is_number(w) && Some(o) == loaded_table && kind == TAB {
+                // (a module's table, a function: followed below)
+                if boolean(&w.to_le_bytes()).is_some() {
+                    continue;
+                }
+            }
             if listable(w) {
                 if g.numbers.len() < MAX_PER_TABLE && numbers_seen.insert(at) {
                     let label = match &step {
