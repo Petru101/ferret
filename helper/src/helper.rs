@@ -775,7 +775,208 @@ fn read_value(mem: &Mem, addr: u64, kind: Kind) -> Option<f64> {
     Some(kind.decode(&b)).filter(|v| !matches!(kind, Kind::Gm | Kind::Lua | Kind::Smi | Kind::JsBool | Kind::LuaBool) || !v.is_nan())
 }
 
+// --- Check copies ---
+//
+// Some games keep a second, disguised copy of a number next to it and compare the two whenever
+// they change it: Northgard keeps each resource as a double and, a little further on in the
+// same object, an int holding `int(value) ^ 0x0fe3ab57`; its setters, finding the two apart,
+// add the difference back, so a number written alone turns back into the old one plus the
+// change. GameMaker's Iron Snout guards its score the same way. Ferret finds such a copy by
+// watching the value change (`detect_guard`): an int near it that changes each time by
+// exactly the XOR of the old and new whole numbers. The key is then that int XOR the whole
+// number, and every write sets both.
+
+/// A value's check copy: where it is from the value, the key, and whether it is made from the
+/// number rounded up (Northgard: krowns 199.4 has a copy saying 200; a whole 1500 one saying
+/// 1500) instead of cut off.
+type Guard = (i64, i32, bool);
+
+/// The check copies known in the attached game, by the value's address (`guard`, `guarded`,
+/// a save's `sites`, `limit`); forgotten at attach.
+static GUARDS: Mutex<Vec<(u64, Guard)>> = Mutex::new(Vec::new());
+
+fn guard_at(addr: u64) -> Option<Guard> {
+    GUARDS.lock().unwrap().iter().find(|g| g.0 == addr).map(|g| g.1)
+}
+
+fn set_guard(addr: u64, guard: Guard) {
+    let mut guards = GUARDS.lock().unwrap();
+    guards.retain(|g| g.0 != addr);
+    guards.push((addr, guard));
+}
+
+/// The whole number a check copy is made from: cut off, as a game's int() does, or rounded up.
+fn whole(v: f64, up: bool) -> i32 {
+    (if up { v.ceil() } else { v.trunc() }) as i64 as i32
+}
+
+/// A check copy as printed and taken: "<offset> <key>[ up]".
+fn guard_text(g: Guard) -> String {
+    format!("{} {}{}", g.0, g.1, if g.2 { " up" } else { "" })
+}
+
+/// How far from a value its check copy is looked for, either way.
+const GUARD_REACH: u64 = 0x400;
+
+/// Watches the value at `addr` until `done` for a check copy: an int within `GUARD_REACH` that
+/// changes, whenever the value's whole number does, by the XOR of the old and the new one
+/// (which needs no key). Two changes settle it (the nearest when several fit); after one change
+/// a lone candidate with a key that isn't a small number is taken too.
+fn detect_guard(mem: &Mem, addr: u64, kind: Kind, done: &dyn Fn() -> bool) -> Option<Guard> {
+    if !matches!(kind, Kind::I32 | Kind::F32 | Kind::F64) {
+        return None;
+    }
+    let from = addr.saturating_sub(GUARD_REACH) & !3;
+    let len = (2 * GUARD_REACH + 8) as usize;
+    // The words around the value, read in pages so that an unmapped one costs only itself.
+    let around = || {
+        let mut buf = vec![0u8; len];
+        let mut readable = vec![false; len / 4];
+        let mut at = from;
+        while at < from + len as u64 {
+            let end = ((at | 0xfff) + 1).min(from + len as u64);
+            let (o, n) = ((at - from) as usize, (end - at) as usize);
+            if mem.read_exact_at(&mut buf[o..o + n], at).is_ok() {
+                readable[o / 4..(o + n) / 4].fill(true);
+            }
+            at = end;
+        }
+        (buf, readable)
+    };
+    let look = || {
+        let v = read_value(mem, addr, kind)?;
+        let (words, readable) = around();
+        (read_value(mem, addr, kind) == Some(v)).then_some((v, words, readable))
+    };
+    let mut last = None;
+    // The candidates for each way the copy may be made (cut off, rounded up).
+    let mut fits: [Option<Vec<Guard>>; 2] = [None, None];
+    let mut changes = 0;
+    while !done() && changes < 2 {
+        let Some(mut now) = look() else {
+            std::thread::sleep(Duration::from_millis(15));
+            continue;
+        };
+        let Some((v0, w0, r0)) = last.as_ref() else {
+            last = Some(now);
+            continue;
+        };
+        if whole(now.0, false) == whole(*v0, false) && whole(now.0, true) == whole(*v0, true) {
+            std::thread::sleep(Duration::from_millis(15));
+            continue;
+        }
+        // The game writes the value and its copy one after the other: looked at again a
+        // moment later, so both are in.
+        std::thread::sleep(Duration::from_millis(3));
+        match look() {
+            Some(again) if whole(again.0, false) == whole(now.0, false) && whole(again.0, true) == whole(now.0, true) => now = again,
+            _ => continue,
+        }
+        let (v1, w1, r1) = &now;
+        let word = |w: &[u8], i: usize| u32::from_le_bytes(w[i * 4..i * 4 + 4].try_into().unwrap());
+        for up in [false, true] {
+            let step = (whole(*v0, up) ^ whole(*v1, up)) as u32;
+            if step == 0 {
+                continue;
+            }
+            let found: Vec<Guard> = (0..len / 4)
+                .filter(|&i| r0[i] && r1[i])
+                .filter(|&i| {
+                    let a = from + i as u64 * 4;
+                    a + 4 <= addr || a >= addr + kind.size() as u64
+                })
+                .filter(|&i| word(w0, i) != word(w1, i) && word(w0, i) ^ word(w1, i) == step)
+                .map(|i| ((from + i as u64 * 4) as i64 - addr as i64, (word(w1, i) ^ whole(*v1, up) as u32) as i32, up))
+                .filter(|g| g.1 != 0)
+                .collect();
+            fits[up as usize] = Some(match fits[up as usize].take() {
+                None => found,
+                Some(before) => before.into_iter().filter(|g| found.contains(g)).collect(),
+            });
+        }
+        changes += 1;
+        last = Some(now);
+        if fits.iter().all(|f| f.as_ref().is_some_and(Vec::is_empty)) {
+            return None;
+        }
+    }
+    // Cut off first: what most games' int() does.
+    fits.into_iter().flatten().find_map(|f| match (changes, &f[..]) {
+        (2.., [_, ..]) => f.iter().copied().min_by_key(|g| g.0.unsigned_abs()),
+        (1, [one]) if one.1 as u32 > 0xffff => Some(*one),
+        _ => None,
+    })
+}
+
+/// Sets a value's check copy to fit `v`.
+fn write_guard(mem: &Mem, addr: u64, v: f64, guard: Guard) -> io::Result<()> {
+    mem.write_all_at(&(whole(v, guard.2) ^ guard.1).to_le_bytes(), addr.wrapping_add(guard.0 as u64))
+}
+
+/// Writes a number, and its check copy when it has one (`GUARDS`).
 fn write_value(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
+    write_guarded(mem, addr, kind, v, guard_at(addr))
+}
+
+/// Writes a number, and the check copy given.
+fn write_guarded(mem: &Mem, addr: u64, kind: Kind, v: f64, guard: Option<Guard>) -> io::Result<()> {
+    write_plain(mem, addr, kind, v)?;
+    match guard {
+        Some(g) => write_guard(mem, addr, v, g),
+        None => Ok(()),
+    }
+}
+
+/// guard <hex addr[:type]> [seconds]: looks for the value's check copy while the game changes
+/// the value (up to `seconds`, 8, or until the frontend sends a line): "guard <offset> <key>
+/// [up]" (kept: writes there set both from now on) or "guard none".
+fn cmd_guard(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let mut it = arg.split_whitespace();
+    let (Some((addr, kind)), Some(mem)) = (it.next().and_then(parse_loc), s.mem.as_ref()) else {
+        return writeln!(out, "error: usage: guard <hex addr[:type]> [seconds] (after attach)");
+    };
+    let secs: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(8.0);
+    // One found before (a save's watch, an earlier `guard`) is the answer at once.
+    if let Some(g) = guard_at(addr) {
+        return writeln!(out, "guard {}", guard_text(g));
+    }
+    let start = Instant::now();
+    match detect_guard(mem, addr, kind, &|| start.elapsed().as_secs_f64() >= secs || frontend_spoke()) {
+        Some(g) => {
+            set_guard(addr, g);
+            writeln!(out, "guard {}", guard_text(g))
+        }
+        None => writeln!(out, "guard none"),
+    }
+}
+
+/// guarded <hex addr[:type]> <offset> <key> [up]: a check copy saved with the value. Kept (writes
+/// set both) when it fits the value now: "guarded", else "error: ...".
+fn cmd_guarded(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
+    let f: Vec<&str> = arg.split_whitespace().collect();
+    let (Some((addr, kind)), Some(off), Some(key), Some(mem)) =
+        (f.first().and_then(|a| parse_loc(a)), f.get(1).and_then(|v| v.parse::<i64>().ok()), f.get(2).and_then(|v| v.parse::<i32>().ok()), s.mem.as_ref())
+    else {
+        return writeln!(out, "error: usage: guarded <hex addr[:type]> <offset> <key> [up] (after attach)");
+    };
+    let up = f.get(3) == Some(&"up");
+    let copy = read_value(mem, addr.wrapping_add(off as u64), Kind::I32).map(|g| g as i32);
+    match (read_value(mem, addr, kind), copy) {
+        (Some(v), Some(g)) if g ^ key == whole(v, up) => {
+            set_guard(addr, (off, key, up));
+            writeln!(out, "guarded")
+        }
+        _ => writeln!(out, "error: the check copy saved with it doesn't fit the value now"),
+    }
+}
+
+/// `guard=<offset>:<key>[:up]` among a limit's tokens.
+fn parse_guard(token: &str) -> Option<Guard> {
+    let mut f = token.strip_prefix("guard=")?.split(':');
+    Some((f.next()?.parse().ok()?, f.next()?.parse().ok()?, f.next() == Some("up")))
+}
+
+fn write_plain(mem: &Mem, addr: u64, kind: Kind, v: f64) -> io::Result<()> {
     match kind {
         Kind::I32 => mem.write_all_at(&(v.round() as i32).to_le_bytes(), addr),
         Kind::F32 => mem.write_all_at(&(v as f32).to_le_bytes(), addr),
@@ -907,6 +1108,8 @@ struct Limit {
     searched_code: bool,
     /// Its code patterns read other values too (`SHARED`): not looked for again.
     given_up: bool,
+    /// Its check copy, set with every write (see `detect_guard`).
+    check: Option<Guard>,
     /// A thread is finding it by its code patterns now (`limiter_loop`): not started again.
     finding: bool,
     /// How long until its code patterns are checked again: `RECHECK_EVERY`, doubled every time
@@ -1309,7 +1512,7 @@ fn limiter_loop(shared: SharedLimiter) {
                             (Some(min), _) if v < min => min,
                             _ => continue,
                         };
-                        match write_value(mem, addr, l.kind, target) {
+                        match write_guarded(mem, addr, l.kind, target, l.check) {
                             Ok(()) => {
                                 l.fixes += 1;
                                 l.paused = None;
@@ -1351,7 +1554,7 @@ fn limiter_loop(shared: SharedLimiter) {
                     (Some(min), _) if v < min => min,
                     _ => continue,
                 };
-                if write_value(mem, l.addr, l.kind, target).is_ok() {
+                if write_guarded(mem, l.addr, l.kind, target, l.check).is_ok() {
                     l.fixes += 1;
                 }
             }
@@ -1532,13 +1735,16 @@ fn bound(v: Option<&&str>) -> Result<Option<f64>, ()> {
 /// "pattern:offset:register:displacement" as saved in the profile, a path
 /// "module+offset,offset,..." ("+static,disp" from resolve), and a named path starts with a
 /// quote (see names.rs; it keeps every place it leads to in range); `key=<offset>:<number>`
-/// goes with the sites (see `Site.key`), `left=<addr>,...` with the paths (see `Limit.left`). No
+/// goes with the sites (see `Site.key`), `left=<addr>,...` with the paths (see `Limit.left`),
+/// `guard=<offset>:<key>[:up]` is the value's check copy (see `detect_guard`). No
 /// bounds: only keeps the address current (see `limiter_loop`).
 fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Result<()> {
     let rising = arg.split_whitespace().any(|s| s == "rising");
     let (f, left): (Vec<&str>, Vec<&str>) = arg.split_whitespace().filter(|&s| s != "rising").partition(|s| !s.starts_with("left="));
     let mut left: Vec<u64> = left.iter().flat_map(|s| s["left=".len()..].split(',')).filter_map(parse_addr).collect();
     let (key, rest) = take_key(f.get(4..).unwrap_or_default());
+    let check = rest.iter().find_map(|t| parse_guard(t));
+    let rest: Vec<&str> = rest.into_iter().filter(|t| !t.starts_with("guard=")).collect();
     let is_named = |s: &&&str| Named::is_named(s);
     let named: Option<Vec<Named>> = rest.iter().filter(is_named).map(|s| Named::parse(s)).collect();
     let rest: Vec<&str> = rest.iter().filter(|s| !is_named(s)).copied().collect();
@@ -1583,6 +1789,9 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
     }
     l.limits.retain(|l| l.name != *name);
     let changed = paths.is_empty();
+    if let (Some(g), true) = (check, addr != 0) {
+        set_guard(addr, g);
+    }
     l.limits.push(Limit {
         name: name.to_string(),
         addr,
@@ -1608,6 +1817,7 @@ fn cmd_limit(out: &mut impl Write, limiter: &SharedLimiter, arg: &str) -> io::Re
         checked_at: Instant::now(),
         searched_code: false,
         given_up: false,
+        check,
         finding: false,
         recheck_every: RECHECK_EVERY,
     });
@@ -2153,6 +2363,7 @@ fn cmd_attach(out: &mut impl Write, s: &mut Session, limiter: &SharedLimiter, ar
     }
     match os::open_mem(pid) {
         Ok(f) => {
+            GUARDS.lock().unwrap().clear();
             let exe = exe_name(pid);
             let modules = pointers::modules(pid, &f);
             let width = pointers::pointer_width(pid, &f, &modules, &exe);
@@ -3393,6 +3604,7 @@ impl<'a> Patterns<'a> {
 /// "What accesses this address": watches it with a hardware breakpoint for a
 /// few seconds and prints a restart-proof pattern for each instruction found.
 /// Output lines: site <pattern> <offset of instruction in pattern> <base register> <displacement>
+/// (and "guard <offset> <key>" when the value changed meanwhile and has a check copy)
 /// build: "build <hex>", a stamp of the files holding the game's code (size and modification
 /// time of the program, IL2CPP's GameAssembly and Mono's Assembly-CSharp.dll): it changes when
 /// the game is updated, when code patterns saved before may find the wrong place.
@@ -3459,11 +3671,20 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     // acts (ammo when firing) go untouched for minutes.
     let wait = it.next() == Some("wait");
     let mut hits: Vec<(u64, trace::Regs)> = Vec::new();
+    // Meanwhile, on a thread of its own (it only reads): whether the value has a check copy.
+    let watched = Arc::new(AtomicBool::new(false));
+    let guard_look = mem.try_clone().ok().map(|mem| {
+        let watched = watched.clone();
+        std::thread::spawn(move || detect_guard(&mem, target, kind, &|| watched.load(Ordering::Relaxed)))
+    });
     {
         let _tracing = tracing();
         let mut tracer = match trace::Tracer::attach(s.pid) {
             Ok(t) => t,
-            Err(e) => return writeln!(out, "error: cannot trace the game: {e}"),
+            Err(e) => {
+                watched.store(true, Ordering::Relaxed);
+                return writeln!(out, "error: cannot trace the game: {e}");
+            }
         };
         let threads = tracer.arm(target, if kind == Kind::U16 { trace::DR7_ACCESS_2 } else { trace::DR7_ACCESS_4 });
         if wait {
@@ -3488,6 +3709,11 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
             }
             hits.len() < 16
         });
+    }
+    watched.store(true, Ordering::Relaxed);
+    if let Some(g) = guard_look.and_then(|t| t.join().ok()).flatten() {
+        set_guard(target, g);
+        writeln!(out, "guard {}", guard_text(g))?;
     }
     let regions = maps(s.pid)?;
     for (after, regs) in &hits {
@@ -4799,6 +5025,8 @@ pub fn run(as_user: Option<&str>) {
             "redo" => cmd_redo(&mut out, &mut session),
             "list" => cmd_list(&mut out, &session, arg),
             "write" => cmd_write(&mut out, &mut session, arg),
+            "guard" => cmd_guard(&mut out, &session, arg),
+            "guarded" => cmd_guarded(&mut out, &session, arg),
             "set" => cmd_set(&mut out, &session, arg),
             "peek" => cmd_peek(&mut out, &session, arg),
             "keep" => cmd_keep(&mut out, &mut session, arg),

@@ -925,6 +925,11 @@ struct Entry {
     /// power or unit): the 4-byte number this far from the value (an index or an id) that
     /// tells it from the others ("More Like This", `Core::find_others`).
     key: Option<(i64, i32)>,
+    /// The value's check copy: a disguised copy of its whole number the game keeps this far
+    /// from it and compares with it (Northgard's resources: an int holding `int(value) ^ key`;
+    /// a number written alone turns back into the old one). Every write sets both.
+    /// The third: made from the number rounded up, not cut off (Northgard).
+    check: Option<Check>,
     /// Pointer paths that led to the value in more than one run of the game,
     /// "<module>+<offset> <offset>...".
     paths: Vec<String>,
@@ -1014,6 +1019,7 @@ fn read_profile(exe: &str) -> Vec<Entry> {
                 last: None,
                 build: None,
                 shared: Vec::new(),
+                check: None,
                 untraced: None,
                 imported: false,
                 suggested: None,
@@ -1027,6 +1033,8 @@ fn read_profile(exe: &str) -> Vec<Entry> {
             e.kind = kind;
         } else if let (Some(site), Some(e)) = (line.strip_prefix("site "), entries.last_mut()) {
             e.sites.push(site.trim().to_owned());
+        } else if let (Some(check), Some(e)) = (line.strip_prefix("check ").and_then(parse_check), entries.last_mut()) {
+            e.check = Some(check);
         } else if let (Some(site), Some(e)) = (line.strip_prefix("shared "), entries.last_mut()) {
             e.shared.push(site.trim().to_owned());
         } else if let (Some(key), Some(e)) = (line.strip_prefix("key ").and_then(parse_key), entries.last_mut()) {
@@ -1075,6 +1083,21 @@ pub fn parse_key(text: &str) -> Option<(i64, i32)> {
     f.next().is_none().then_some(key)
 }
 
+/// A value's check copy (`Entry.check`): how far from the value, the key, and whether it is
+/// made from the number rounded up.
+type Check = (i64, i32, bool);
+
+/// "<offset> <key>[ up]", as the helper prints a check copy and the profile keeps it.
+fn parse_check(text: &str) -> Option<Check> {
+    let mut f = text.split_whitespace();
+    let (off, key) = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
+    match f.next() {
+        None => Some((off, key, false)),
+        Some("up") => Some((off, key, true)),
+        Some(_) => None,
+    }
+}
+
 fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
     let path = profile_path(exe);
     fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -1092,6 +1115,9 @@ fn write_profile(exe: &str, entries: &[Entry]) -> Result<PathBuf, String> {
         }
         if let Some((off, v)) = e.key {
             text.push_str(&format!("key {off} {v}\n"));
+        }
+        if let Some((off, key, up)) = e.check {
+            text.push_str(&format!("check {off} {key}{}\n", if up { " up" } else { "" }));
         }
         for p in &e.paths {
             text.push_str(&format!("path {p}\n"));
@@ -1161,6 +1187,11 @@ impl Entry {
     /// Its key as the helper takes it, next to its code patterns.
     fn key_arg(&self) -> Option<String> {
         self.key.map(|(off, v)| format!("key={off}:{v}"))
+    }
+
+    /// Its check copy as the helper's `limit` takes it.
+    fn check_arg(&self) -> Option<String> {
+        self.check.map(|(off, key, up)| format!("guard={off}:{key}{}", if up { ":up" } else { "" }))
     }
 
     /// Confirmed paths of the game's other values.
@@ -1510,6 +1541,8 @@ const RESTORE_WAIT: Duration = Duration::from_secs(2);
 /// How a code pattern's miss starts when what it found can't be the value.
 const IMPLAUSIBLE: &str = "it read a number no game keeps";
 /// The helper's reason when a value's code didn't run while it waited.
+/// How long (seconds) a value is watched for a check copy after the game undid a test write.
+const GUARD_WATCH: u32 = 10;
 /// How long a typed number's step waits before its second look (`typed_search`).
 const SECOND_LOOK: Duration = Duration::from_secs(1);
 const NOT_RUN: &str = "none of its code ran meanwhile";
@@ -2183,6 +2216,8 @@ impl Core {
             self.say(l);
         }
         let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
+        // The game changed the value while it was watched, and a check copy followed it.
+        let mut seen_check = reply.iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check);
         let mut sites = self.unshared(name, sites)?;
         let known_shared = reply.iter().any(|l| l.starts_with("site ")) && sites.is_empty();
         let (mut paths, mut candidates) = (Vec::new(), Vec::new());
@@ -2232,6 +2267,12 @@ impl Core {
             )
         };
         let last = self.peek_exact(&[loc]).pop().flatten();
+        if seen_check.is_none() {
+            seen_check = self.known_check(loc);
+        }
+        if let Some((off, _, _)) = seen_check {
+            self.say(&format!("the game keeps a check copy of it {off} bytes on: Ferret writes both"));
+        }
         let game = self.game()?;
         let build = game.build.clone();
         let mut entries = read_profile(&game.exe);
@@ -2240,6 +2281,8 @@ impl Core {
         let limit = entries.iter().find(|e| e.name == name).and_then(|e| e.limit.clone());
         let key = entries.iter().find(|e| e.name == name && e.sites.iter().any(|s| sites.contains(s))).and_then(|e| e.key);
         let shared = entries.iter().find(|e| e.name == name).map(|e| e.shared.clone()).unwrap_or_default();
+        // The one found during this search or save, else the one it was saved with before.
+        let check = seen_check.or_else(|| entries.iter().find(|e| e.name == name).and_then(|e| e.check));
         entries.retain(|e| e.name != name);
         let named_text: Vec<String> = named.iter().map(|(t, _, _, _)| t.clone()).collect();
         let mut entry = Entry {
@@ -2256,6 +2299,7 @@ impl Core {
             last,
             build,
             shared,
+            check,
             untraced: None,
             imported: false,
             suggested: None,
@@ -2338,6 +2382,7 @@ impl Core {
             last,
             build,
             shared: Vec::new(),
+            check: None,
             untraced: None,
             imported: false,
             suggested: None,
@@ -2768,6 +2813,7 @@ impl Core {
             .iter()
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(":"))
             .chain(entry.key_arg().filter(|_| !entry.sites.is_empty()))
+            .chain(entry.check_arg())
             .chain(via)
             .chain(followed)
             .chain(entry.named.iter().cloned())
@@ -3050,6 +3096,7 @@ impl Core {
                 named: Vec::new(),
                 last: None,
                 shared: Vec::new(),
+                check: None,
                 untraced: None,
                 imported: false,
                 suggested: None,
@@ -3224,6 +3271,7 @@ impl Core {
                 last: None,
                 build: v.build,
                 shared: Vec::new(),
+                check: None,
                 untraced: None,
                 imported: true,
                 suggested: v.limit,
@@ -3928,6 +3976,12 @@ impl Core {
                 why,
                 name
             ));
+        }
+        // Its check copy goes with it (the helper keeps it for this place from here on).
+        if let Some((off, key, up)) = saved.iter().find(|e| e.name == name).and_then(|e| e.check) {
+            if let Some(e) = first_error(&self.helper.call(&format!("guarded {loc} {off} {key}{}", if up { " up" } else { "" }))) {
+                self.say(&format!("{name}: {e}: written without it"));
+            }
         }
         let reply = self.helper.call(&format!("write {loc} {value}"));
         for l in &reply {
@@ -4872,6 +4926,14 @@ impl Core {
             self.say(&format!("0x{:012x} {how}: the real value (test writes undone)", loc.addr));
             return Ok(Probed::Found(loc));
         }
+        // Every test undone: the game may compare the value with a check copy (Northgard).
+        if !kept.iter().any(|&k| k) && !self.cancel.load(Ordering::Relaxed) {
+            if let Some(loc) = self.checked_one(&locs, n) {
+                self.helper.call(&format!("keep {:x}", loc.addr));
+                self.say(&format!("0x{:012x} kept its test value once its check copy was written with it: the real value", loc.addr));
+                return Ok(Probed::Found(loc));
+            }
+        }
         let why = match (kept.iter().any(|&k| k), self.cancel.load(Ordering::Relaxed)) {
             (false, _) => "the game put every test value back",
             (true, true) => "stopped before the game changed the number",
@@ -5089,6 +5151,11 @@ impl Core {
     /// frame, and a search for a value stored some way Ferret doesn't look for (a 2-byte int,
     /// another encoding) ends on that copy; writing it changes nothing and saving it fails.
     fn sticks(&mut self, loc: Loc) -> bool {
+        self.sticks_with(loc, false)
+    }
+
+    /// `sticks`; `checked`: the place's check copy is known (and written with it) by now.
+    fn sticks_with(&mut self, loc: Loc, checked: bool) -> bool {
         let listed = self.helper.call(&format!("peek {loc}"));
         let (Some(orig), Some(Some(shown))) =
             (listed.first().and_then(|l| l.split_once(" = ")).map(|(_, v)| v.trim().to_owned()), self.peek(&[loc]).first().copied())
@@ -5110,12 +5177,58 @@ impl Core {
             self.helper.call(&format!("write {loc} {}", v - 10));
             return true;
         }
+        // Or the game compares it with a check copy and undoes what doesn't fit (Northgard):
+        // found by watching the value change, then the test is made again with both written.
+        if !checked {
+            self.status(&tr!("The game undid Ferret's test. Looking for a check copy it keeps of this number: let it change in the game."));
+            let cancel = self.cancel.clone();
+            let reply = self.helper.call_cancellable(&format!("guard {loc} {GUARD_WATCH}"), &cancel);
+            if reply.iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check).is_some() {
+                self.say("the game keeps a check copy next to it: testing again with both written");
+                return self.sticks_with(loc, true);
+            }
+        }
         self.say(&format!(
             "wrote {test} to the last match as a test and the game put back {}: it's a copy the game keeps \
              refreshing (for its display), not where it keeps the value",
             now.map_or("something else".into(), |v| v.to_string())
         ));
         false
+    }
+
+    /// Among places whose test values the game all put back: the first that has a check copy
+    /// (found by watching it change) and keeps a test value written together with it. Numbers
+    /// with a fraction first: the game's display copies are whole, and a write to one of those
+    /// with the check copy would be taken up by the game too.
+    fn checked_one(&mut self, locs: &[Loc], n: &Shown) -> Option<Loc> {
+        let now = self.peek_exact(locs);
+        let mut places: Vec<(Loc, f64)> = locs
+            .iter()
+            .zip(now)
+            .filter_map(|(l, v)| Some((*l, v?)))
+            // Still near the number on screen (it moves on while the tests run), not a place
+            // the tests left alone for holding something else.
+            .filter(|(l, v)| matches!(l.kind, Kind::I32 | Kind::F32 | Kind::F64) && (v - n.value()).abs() <= n.value().abs() * 0.2 + 20.0)
+            .collect();
+        places.sort_by_key(|(_, v)| v.fract() == 0.0);
+        self.status(&tr!("The game undid Ferret's tests. Looking for a check copy it keeps of this number: let it change in the game."));
+        for (loc, _) in places {
+            let cancel = self.cancel.clone();
+            let reply = self.helper.call_cancellable(&format!("guard {loc} {GUARD_WATCH}"), &cancel);
+            if reply.iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check).is_none() {
+                continue;
+            }
+            self.say(&format!("0x{:012x}: the game keeps a check copy next to it: testing again with both written", loc.addr));
+            if self.sticks_with(loc, true) {
+                return Some(loc);
+            }
+        }
+        None
+    }
+
+    /// The check copy the helper knows for a place (found during this search or save).
+    fn known_check(&mut self, loc: Loc) -> Option<Check> {
+        self.helper.call(&format!("guard {loc} 0")).iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check)
     }
 
     /// Why the one match left may not be the value: it doesn't hold what the screen shows (`n`;
@@ -5769,8 +5882,13 @@ impl Core {
                 // and something that happened to hold it is left (Minecraft Dungeons II once
                 // went 225 -> 262 -> 263 and ended on a 2-byte leftover). So it is taken back
                 // and done once more a second later; the bigger answer counts.
+                // Only when nothing is left, or one place of a kind that holds a number by chance
+                // (2 bytes, encoded): a lone 4-byte, float or double survivor is usually right, and
+                // a second look would let a copy that lags a second behind back in (the
+                // stand-in's stack leftover of food, next to its display copy).
                 // (A step that leaves none isn't one in the helper: it keeps the places as they were.)
-                if count <= 1 && count < before && (count == 0 || match_count(&self.helper.call("undo")).is_some()) {
+                let weak = count == 1 && self.candidates().first().is_some_and(|c| matches!(c.0.kind, Kind::U16 | Kind::Xor));
+                if (count == 0 || weak) && count < before && (count == 0 || match_count(&self.helper.call("undo")).is_some()) {
                     std::thread::sleep(SECOND_LOOK);
                     self.helper.call("mark");
                     let reply = self.helper.call(&format!("next {}", n.search()));
@@ -5902,6 +6020,7 @@ mod tests {
             last: None,
             build: None,
             shared: Vec::new(),
+            check: None,
             untraced: None,
             imported: false,
             suggested: None,
