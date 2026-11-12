@@ -66,7 +66,27 @@ fn belongs_text(b: &Belongs, class: &str) -> String {
 fn suggested_name(label: &str) -> String {
     let last = label.rsplit('.').next().unwrap_or(label);
     let bare = last.split(['[', '{', ' ']).next().unwrap_or(last);
-    core::one_word(bare)
+    core::one_word(&spaced(bare))
+}
+
+/// An engine's name for a field with its words apart, so the saved name reads ("bCanBeDamaged"
+/// was suggested as "bcanbedamaged"): Unreal's `b` before a flag's name goes, and a capital
+/// after a small letter or a digit, or before the small letters that end a run of capitals
+/// ("HPMax"), starts a word.
+fn spaced(name: &str) -> String {
+    let c: Vec<char> = name.chars().collect();
+    let from = if c.len() > 2 && c[0] == 'b' && c[1].is_uppercase() { 1 } else { 0 };
+    let mut out = String::new();
+    for i in from..c.len() {
+        let starts = i > from
+            && c[i].is_uppercase()
+            && (c[i - 1].is_lowercase() || c[i - 1].is_ascii_digit() || (c[i - 1].is_uppercase() && c.get(i + 1).is_some_and(|n| n.is_lowercase())));
+        if starts {
+            out.push(' ');
+        }
+        out.push(c[i]);
+    }
+    out
 }
 
 impl BrowseView {
@@ -507,6 +527,23 @@ pub fn save(worker: &Worker, name: &str, loc: Loc) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn suggested_names_read() {
+        for (label, name) in [
+            ("bCanBeDamaged", "can_be_damaged"),
+            ("CharacterMovement.MaxWalkSpeed", "max_walk_speed"),
+            ("JumpZVelocity", "jump_z_velocity"),
+            ("HP", "hp"),
+            ("HPMax", "hp_max"),
+            ("currentAmmo", "current_ammo"),
+            ("gold", "gold"),
+            ("players_data[0].gold", "gold"),
+            ("big", "big"),
+        ] {
+            assert_eq!(super::suggested_name(label), name, "{label}");
+        }
+    }
+
     use super::*;
 
     #[test]

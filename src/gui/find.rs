@@ -450,14 +450,26 @@ impl FindView {
             .tooltip_text(tr!("Value types, the game's learned digits and the places of earlier finds"))
             .valign(gtk::Align::Center)
             .build();
-        let tools = frame_box();
+        // Two groups that sit at the row's ends and go on two lines in a narrow window: in one
+        // fixed row they made the window at least 1184 px wide, wider than its default size
+        // and than a small screen (the window controls and the last buttons were cut off).
+        let tools = adw::WrapBox::builder()
+            .child_spacing(12)
+            .line_spacing(8)
+            .margin_start(12)
+            .margin_end(12)
+            .justify(adw::JustifyMode::Spread)
+            .justify_last_line(false)
+            .build();
+        let (picture_tools, typed_tools) = (gtk::Box::builder().spacing(12).build(), gtk::Box::builder().spacing(12).build());
         for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), crop_box.upcast_ref(), unpick.upcast_ref(), undo.upcast_ref(), redo.upcast_ref(), again.upcast_ref(), start_over.upcast_ref()] {
-            tools.append(w);
+            picture_tools.append(w);
         }
-        tools.append(&gtk::Box::builder().hexpand(true).build());
         for w in [typed_label.upcast_ref::<gtk::Widget>(), typed.upcast_ref(), typed_go.upcast_ref(), no_number.upcast_ref(), more_button.upcast_ref()] {
-            tools.append(w);
+            typed_tools.append(w);
         }
+        tools.append(&picture_tools);
+        tools.append(&typed_tools);
 
         // What the player rarely needs (they never used them): behind More.
         let types_row = frame_box();
