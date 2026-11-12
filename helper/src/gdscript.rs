@@ -243,8 +243,21 @@ static SCRIPTS: Mutex<Vec<(u32, String, Vec<u64>)>> = Mutex::new(Vec::new());
 struct Tree {
     parent: u64,
     children: u64,
-    map: bool,
+    kind: Kids,
     name: u64,
+}
+
+/// How a node keeps its children; `Tree.children` is where the list's data pointer is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kids {
+    /// A Vector<Node *>: the size right before the data (Godot 3 up to 3.5 on Linux).
+    Vector,
+    /// A HashMap<StringName, Node *> (Godot 4).
+    Map,
+    /// A LocalVector: {count u32, capacity u32, data} (Brotato's 3.7).
+    Local,
+    /// {first, past the last, past the capacity} (Cassette Beasts' 3.5.1 Windows build).
+    Span,
 }
 
 /// The scene tree's root (the main Viewport or Window, named "root") and the layout, by
@@ -259,6 +272,8 @@ static IN_TREE: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
 static HOMES: Mutex<Vec<(u32, String, Instant, Vec<u64>)>> = Mutex::new(Vec::new());
 const WHOLE_TREE_EVERY: Duration = Duration::from_secs(1);
 const MAX_CHILDREN: u64 = 1 << 16;
+/// Objects tried as a node of the scene tree before giving up.
+const MAX_TREE_TRIES: usize = 20000;
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 1 << 17;
 
@@ -611,7 +626,7 @@ impl<'a> Godot<'a> {
     /// The children of a node (none: empty).
     fn kids(&self, t: &Tree, node: u64) -> Option<Vec<u64>> {
         let (mem, at) = (self.mem(), node + t.children);
-        if t.map {
+        if t.kind == Kids::Map {
             if mem_u64(mem, at + 0x10)? == 0 {
                 return (mem_u32(mem, at + 0x24)? == 0).then(Vec::new);
             }
@@ -619,6 +634,20 @@ impl<'a> Godot<'a> {
         }
         match mem_u64(mem, at)? {
             0 => Some(Vec::new()),
+            data if t.kind == Kids::Span => {
+                let (end, capacity) = (mem_u64(mem, at + 8)?, mem_u64(mem, at + 16)?);
+                if end < data || capacity < end || (end - data) % 8 != 0 || (capacity - data) / 8 > MAX_CHILDREN || !self.heap.is_pointer(data) {
+                    return None;
+                }
+                (0..(end - data) / 8).map(|i| self.ptr(data + 8 * i)).collect()
+            }
+            data if t.kind == Kids::Local => {
+                let (n, capacity) = (mem_u32(mem, at - 8)? as u64, mem_u32(mem, at - 4)? as u64);
+                if n > capacity || capacity > MAX_CHILDREN || !self.heap.is_pointer(data) {
+                    return None;
+                }
+                (0..n).map(|i| self.ptr(data + 8 * i)).collect()
+            }
             data => {
                 let (first, n) = self.vector(self.heap.is_pointer(data).then_some(data)?, MAX_CHILDREN)?;
                 (0..n).map(|i| self.ptr(first + 8 * i)).collect()
@@ -661,8 +690,8 @@ impl<'a> Godot<'a> {
                 continue;
             }
             for children in (parent + 8..parent + 0x40).step_by(8) {
-                for map in [true, false] {
-                    let t = Tree { parent, children, map, name: 0 };
+                for kind in [Kids::Map, Kids::Vector, Kids::Local, Kids::Span] {
+                    let t = Tree { parent, children, kind, name: 0 };
                     if !self.kids(&t, q).is_some_and(|k| k.contains(&obj)) {
                         continue;
                     }
@@ -688,7 +717,9 @@ impl<'a> Godot<'a> {
                 return Some((t, root));
             }
         }
-        let (t, root) = objs.iter().take(8).find_map(|&o| self.detect_tree(o))?;
+        // Most script objects of a real game aren't nodes (Brotato's items, effects and stats
+        // are Resources): many are tried.
+        let (t, root) = objs.iter().take(MAX_TREE_TRIES).find_map(|&o| self.detect_tree(o))?;
         *TREE.lock().unwrap() = Some((self.heap.pid, root, t));
         Some((t, root))
     }
@@ -1294,6 +1325,8 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &ScriptPath) -> Vec<u64> {
 const MAX_ALIKE: usize = 8;
 /// Elements of an array of objects looked into.
 const MAX_LISTED_ELEMENTS: u64 = 8;
+/// Elements of an array that may each be a player's (co-op).
+const MAX_PLAYERS: u64 = 4;
 
 /// Every script instance in memory, and the layout and scene tree learned from them (three
 /// passes over memory; nothing when the layout and the tree are known already).
@@ -1319,13 +1352,24 @@ fn learn(heap: &Heap) -> Option<Layout> {
         scripts.sort_unstable();
         scripts.dedup();
         let ats = heap.referrers(&scripts);
+        let debug = std::env::var_os("FERRET_DEBUG").is_some();
+        if debug {
+            eprintln!("godot learn: {wide}-byte text, {} script paths, {} pointers to them, {} places pointing near those", strings.len(), refs.len(), ats.len());
+        }
         let Some((lay, _)) = layout_from(heap, &ats) else { continue };
         remember(heap.pid, lay);
         let g = Godot::new(heap, lay);
         let insts = g.instances_at(ats.iter().copied().filter(|&at| mem_u64(heap.mem(), at).is_some_and(|gd| g.script_path(gd).is_some())));
         let objs: Vec<u64> = insts.iter().filter_map(|&i| mem_u64(heap.mem(), i + lay.owner)).collect();
         // Any node will do: the tree is the same from each.
-        g.tree(&objs);
+        let tree = g.tree(&objs);
+        if debug {
+            eprintln!(
+                "godot learn: owner +{:x} script +{:x} members +{:x} instance +{:x} indices +{:x} path +{:x} size {} before v4 {}; {} instances; tree {:x?}",
+                lay.owner, lay.script, lay.members, lay.instance, lay.indices, lay.path, lay.cow, lay.v4, insts.len(),
+                tree.map(|(t, root)| (t.parent, t.children, t.kind, t.name, root))
+            );
+        }
         return Some(lay);
     }
     None
@@ -1365,8 +1409,9 @@ impl Godot<'_> {
             .collect()
     }
 
-    /// The script objects a script instance's variables hold, one level: (label, instance).
-    fn held(&self, inst: u64) -> Vec<(String, u64)> {
+    /// The script objects a script instance's variables hold, one level: (label, instance,
+    /// whether it's one of a few: not an element of a long array).
+    fn held(&self, inst: u64) -> Vec<(String, u64, bool)> {
         let (Some(table), Some((first, n))) = (self.script_of(inst).and_then(|gd| self.table(gd)), self.members(inst)) else { return Vec::new() };
         let mut named: Vec<(String, u64)> = table.into_iter().filter(|(_, i)| *i < n).collect();
         named.sort_by_key(|(_, i)| *i);
@@ -1374,11 +1419,11 @@ impl Godot<'_> {
         for (name, i) in named {
             let v = first + i * VARIANT;
             if let Some(o) = self.object(v).filter(|&o| o != inst) {
-                out.push((name, o));
+                out.push((name, o, true));
             } else if let Some((_, elems, count)) = self.array(v) {
                 for e in 0..count.min(MAX_LISTED_ELEMENTS) {
                     if let Some(o) = self.object(elems + e * VARIANT) {
-                        out.push((format!("{name}[{e}]"), o));
+                        out.push((format!("{name}[{e}]"), o, count <= MAX_PLAYERS));
                     }
                 }
             }
@@ -1414,7 +1459,8 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
     // its flashlights and sprites.
     let ui = |script: &str| {
         let lower = script.to_ascii_lowercase();
-        lower.split('/').any(|d| d == "ui" || d == "hud") || ["ui.gd", "hud.gd"].iter().any(|e| lower.ends_with(e))
+        // (Nor the sound's: Cassette Beasts' nodes/audio/MusicPlayer.gd.)
+        lower.split('/').any(|d| matches!(d, "ui" | "hud" | "audio" | "music" | "sound" | "menus")) || ["ui.gd", "hud.gd"].iter().any(|e| lower.ends_with(e))
     };
     let mine = |n: u64, script: &str| !ui(script) && (player_like(&name(n)) || player_like(&stem(script)));
     let mut alike: HashMap<String, usize> = HashMap::new();
@@ -1437,14 +1483,16 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
         if !fields.is_empty() {
             groups.push((main, crate::ue::ListedObject { name: node_name.clone(), class: script.clone(), role, owner, more: !main, fields }));
         }
-        for (label, o) in held {
+        for (label, o, few) in held {
             if mem_u64(heap.mem(), o + lay.owner).is_some_and(|obj| in_tree.contains(&obj)) {
                 continue;
             }
             let Some(script) = g.script_of(o).and_then(file) else { continue };
             let fields: Vec<crate::ue::Listed> =
                 g.numbers(o).into_iter().map(|(l, addr, kind)| crate::ue::Listed { label: format!("{label}.{l}"), addr, kind }).collect();
-            let main = !ui(&script) && (main || player_like(&label) || player_like(&stem(&script)));
+            // A long array named like the player's is the game's data, not the player
+            // (Brotato's ItemService.characters: every character there is).
+            let main = !ui(&script) && (main || few && (player_like(&label) || player_like(&stem(&script))));
             if !fields.is_empty() {
                 groups.push((main, crate::ue::ListedObject { name: label, class: script, role: "linked", owner: Some(node_name.clone()), more: !main, fields }));
             }
