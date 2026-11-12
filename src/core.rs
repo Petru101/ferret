@@ -1755,6 +1755,15 @@ fn cancelled_now(c: &AtomicBool) -> bool {
 /// Logs of earlier runs kept next to the current one.
 const OLD_LOGS: usize = 5;
 
+/// The `key <offset> <number>` line of the helper's `sites` reply: its sites are code shared
+/// with other values, and that number next to the value tells it from them.
+fn site_key(reply: &[String]) -> Option<(i64, i32)> {
+    reply.iter().find_map(|l| {
+        let (off, n) = l.strip_prefix("key ")?.split_once(' ')?;
+        Some((off.parse().ok()?, n.parse().ok()?))
+    })
+}
+
 impl Core {
     /// `log_name`: the file in the cache folder the log is also kept in. The last few runs'
     /// logs are kept as `<name>.1` and on (a test run after the player's would lose theirs).
@@ -2218,6 +2227,8 @@ impl Core {
         let sites: Vec<String> = reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect();
         // The game changed the value while it was watched, and a check copy followed it.
         let mut seen_check = reply.iter().find_map(|l| l.strip_prefix("guard ")).and_then(parse_check);
+        // Shared code, saved with the number that tells the value from the others it reads.
+        let mut seen_key = site_key(&reply);
         let mut sites = self.unshared(name, sites)?;
         let known_shared = reply.iter().any(|l| l.starts_with("site ")) && sites.is_empty();
         let (mut paths, mut candidates) = (Vec::new(), Vec::new());
@@ -2233,8 +2244,9 @@ impl Core {
             self.say(&format!("{why}; looking for objects the game names that lead to it"));
             named = self.named_path(loc, false);
             if named.is_none() && accessed == Some(0) {
-                let found = self.sites_when_changed(loc);
+                let (found, key) = self.sites_when_changed(loc);
                 sites = self.unshared(name, found)?;
+                seen_key = key;
             }
         }
         if sites.is_empty() && named.is_none() {
@@ -2279,7 +2291,7 @@ impl Core {
         // Saving a value again (to find it a better way) keeps its limit, and its key while its
         // code is the same (shared with other values of its kind).
         let limit = entries.iter().find(|e| e.name == name).and_then(|e| e.limit.clone());
-        let key = entries.iter().find(|e| e.name == name && e.sites.iter().any(|s| sites.contains(s))).and_then(|e| e.key);
+        let key = seen_key.filter(|_| !sites.is_empty()).or_else(|| entries.iter().find(|e| e.name == name && e.sites.iter().any(|s| sites.contains(s))).and_then(|e| e.key));
         let shared = entries.iter().find(|e| e.name == name).map(|e| e.shared.clone()).unwrap_or_default();
         // The one found during this search or save, else the one it was saved with before.
         let check = seen_check.or_else(|| entries.iter().find(|e| e.name == name).and_then(|e| e.check));
@@ -5017,9 +5029,9 @@ impl Core {
     /// find them (pointer paths to Wolfenstein's ammo were luck and broke at a restart). The
     /// player changes the number in the game; Ferret watches until the game touches it or the
     /// player cancels. Only with a window to ask in (the CLI's scripts expect the old way).
-    fn sites_when_changed(&mut self, loc: Loc) -> Vec<String> {
+    fn sites_when_changed(&mut self, loc: Loc) -> (Vec<String>, Option<(i64, i32)>) {
         if self.on_phase.is_none() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         self.cancel.store(false, Ordering::Relaxed);
         self.phase(Phase::SaveTurn);
@@ -5037,7 +5049,7 @@ impl Core {
         if cancelled && !reply.iter().any(|l| l.starts_with("site ")) {
             self.say("stopped waiting for the game to change it");
         }
-        reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect()
+        (reply.iter().filter_map(|l| l.strip_prefix("site ")).map(str::to_owned).collect(), site_key(&reply))
     }
 
     /// The player changes the number in the game while every candidate that kept its test

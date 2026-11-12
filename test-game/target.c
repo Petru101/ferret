@@ -9,7 +9,8 @@
  * refreshed every tick (a search can only end on that copy, which Ferret must reject),
  * plus crystals (an int in the base object, which the code reads from a static pointer, like
  * Particle Fleet's gems),
- * coins N, wood N, mana N (guarded by a check copy, +1 a second by itself), silver N, bronze N, purse 0|1, gems N, ore N, eat N, crystals N, show, respawn, newroom, newmap) dropped into a
+ * coins N, wood N, mana N (guarded by a check copy, +1 a second by itself), tribute N (the
+ * player's clan's, paid by the routine that pays every clan), silver N, bronze N, purse 0|1, gems N, ore N, eat N, crystals N, show, respawn, newroom, newmap) dropped into a
  * command file, so it can be driven the same way natively, under Proton and inside the Steam
  * runtime. "respawn" moves the player to a new object and frees the old one,
  * like a new mission; "newroom" does the same with the room and its stats. "newmap" moves the
@@ -202,6 +203,26 @@ __attribute__((noinline, noipa)) static void set_mana(struct well *w, double cha
     w->mana_check = (int)v ^ MANA_KEY;
 }
 
+/* Clans, as an RTS keeps its players (Northgard's six): one routine pays every clan's income
+ * each tick, so the code touching the player's tribute also touches the others'. Each clan
+ * carries an id, the only thing that tells them apart; the player's is clans[0]. */
+struct clan {
+    const void *type;
+    long spare;
+    int uid;
+    int flags;
+    double other[2];
+    double tribute;
+};
+
+static const char clan_type[] = "Clan";
+static struct clan *clans[4];
+
+__attribute__((noinline, noipa)) static void pay_clan(struct clan *c, double n)
+{
+    c->tribute += n;
+}
+
 __attribute__((noinline, noipa)) static void write_real(double *v, double x)
 {
     *v = x;
@@ -383,9 +404,9 @@ static void report(const char *log, const struct player *p, const double *coins,
     FILE *f = fopen(log, "a");
 
     if (f) {
-        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f food=%d crystals=%d mana=%.0f",
+        fprintf(f, "gold=%d hp=%d energy=%.2f shield=%.2f scrap=%d coins=%.0f wood=%.0f gems=%.0f ore=%.0f food=%d crystals=%d mana=%.0f tribute=%.0f",
                 p->gold, p->hp, p->energy, p->shield, scrap(p), *coins, *wood, read_real(&world->room->stats->gems),
-                read_real(&world->room->stats->ore), needs.food, base->crystals, well->mana);
+                read_real(&world->room->stats->ore), needs.food, base->crystals, well->mana, clans[0]->tribute);
         print_stacks(f, "logs", inv, logs_info);
         print_stacks(f, "stone", inv, stone_info);
         print_stacks(f, "chestlogs", chest, logs_info);
@@ -517,6 +538,13 @@ int main(int argc, char **argv)
     well = calloc(1, sizeof *well);
     well->mana = 3210;
     well->mana_check = 3210 ^ MANA_KEY;
+    /* The player's clan is made last and has the lowest id, as in Northgard. */
+    for (n = 3; n >= 0; n--) {
+        clans[n] = calloc(1, sizeof **clans);
+        clans[n]->type = clan_type;
+        clans[n]->uid = 4 + 30 * n;
+        clans[n]->tribute = 7650 + 111 * n;
+    }
     *silver = 640;
     *bronze = 15;
     tokens = malloc(4 * sizeof *tokens);
@@ -603,6 +631,8 @@ int main(int argc, char **argv)
         if (world->ticks % 10 == 0)
             set_mana(well, 1);
         for (n = 0; n < 4; n++)
+            pay_clan(clans[n], n);
+        for (n = 0; n < 4; n++)
             if (powers->slot[n].running)
                 tick_power(&powers->slot[n]);
         if (*coins > most_coins)
@@ -648,6 +678,8 @@ int main(int argc, char **argv)
             purse = n;
         else if (sscanf(line, "mana %d", &n) == 1)
             set_mana(well, n);
+        else if (sscanf(line, "tribute %d", &n) == 1)
+            pay_clan(clans[0], n);
 #ifndef _WIN32
         else if (strncmp(line, "anticheat ", 10) == 0) {
             /* Loads a library by that path, as a game starting its anti-cheat when going online. */

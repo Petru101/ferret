@@ -3716,6 +3716,10 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         writeln!(out, "guard {}", guard_text(g))?;
     }
     let regions = maps(s.pid)?;
+    // Instructions that also read other places, with those places: kept when a key tells the
+    // value's place from them.
+    let mut shared: Vec<(String, i64, Vec<u64>)> = Vec::new();
+    let mut own = 0;
     for (after, regs) in &hits {
         let before = 64u64;
         let mut code = vec![0u8; before as usize + 16];
@@ -3737,15 +3741,6 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
             .find(|(_, read)| !read.is_empty())
             .unwrap_or((readings[0], Vec::new()));
         let others = read.iter().filter(|a| *a & 0xFFFF_FFFF != target & 0xFFFF_FFFF).count();
-        if others > 0 {
-            writeln!(
-                out,
-                "instruction at 0x{:x}: shared code, it also reads {others}{} other addresses, skipped",
-                acc.start,
-                if read.len() >= SITE_TARGETS_MAX { "+" } else { "" }
-            )?;
-            continue;
-        }
         let instr = (acc.start - (after - before)) as usize;
         // Grow the pattern backwards until it matches only this spot.
         let mut site = None;
@@ -3757,15 +3752,47 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
                 break;
             }
         }
-        match site {
-            Some((pat, off)) => writeln!(
+        let line = site.map(|(pat, off)| format!("site {} {off} {} {}", pattern_text(&pat), trace::REG_NAMES[acc.base as usize], acc.disp));
+        if others > 0 {
+            writeln!(
                 out,
-                "site {} {off} {} {}",
-                pattern_text(&pat),
-                trace::REG_NAMES[acc.base as usize],
-                acc.disp
-            )?,
+                "instruction at 0x{:x}: shared code, it also reads {others}{} other addresses, skipped",
+                acc.start,
+                if read.len() >= SITE_TARGETS_MAX { "+" } else { "" }
+            )?;
+            // Every place it reads was seen (few enough), and it has a pattern.
+            if let (Some(line), true) = (line, read.len() < SITE_TARGETS_MAX) {
+                shared.push((line, acc.disp, read));
+            }
+            continue;
+        }
+        match line {
+            Some(line) => {
+                own += 1;
+                writeln!(out, "{line}")?
+            }
             None => writeln!(out, "instruction at 0x{:x}: no unique pattern, skipped", acc.start)?,
+        }
+    }
+    // Only shared code touches it (one routine for every player's gold): saved by that code
+    // all the same when a number next to the value tells it from the others' (Northgard's
+    // clans: each one's resources carry an id).
+    if own == 0 && !shared.is_empty() {
+        let mut places: Vec<u64> = Vec::new();
+        let alike = shared.iter().all(|(_, disp, read)| {
+            for a in read.iter().filter(|a| *a & 0xFFFF_FFFF != target & 0xFFFF_FFFF) {
+                if !places.contains(a) {
+                    places.push(*a);
+                }
+            }
+            same_kind(mem, *disp, target, read)
+        });
+        if let Some((off, n)) = alike.then(|| telling_key(mem, target, kind, &places)).flatten() {
+            writeln!(out, "a number {off} bytes from it ({n}) tells it from the {} others that code reads: saved with it", places.len())?;
+            for (line, ..) in &shared {
+                writeln!(out, "{line}")?;
+            }
+            writeln!(out, "key {off} {n}")?;
         }
     }
     writeln!(out, "{} instructions accessed it", hits.len())
@@ -4396,6 +4423,50 @@ fn cmd_others(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         writeln!(out, "other {} {}", s.describe(*a, kind), key.map_or("-".to_owned(), |off| word(now, off).to_string()))?;
     }
     writeln!(out, "{} others", places.len())
+}
+
+/// Whether the places an instruction reads are the same field of objects of one kind: each
+/// object (the base register) starts with the same non-zero word (its type), as the value's.
+fn same_kind(mem: &Mem, disp: i64, target: u64, read: &[u64]) -> bool {
+    let head = |addr: u64| {
+        let object = addr.wrapping_sub(disp as u64);
+        let mut b = [0u8; 8];
+        (object >= 0x10000 && mem.read_exact_at(&mut b, object).is_ok()).then(|| u64::from_le_bytes(b)).filter(|w| *w != 0)
+    };
+    // The addresses come from 64-bit registers; a 32-bit game's target is their low half.
+    let Some(own) = read.iter().find(|a| *a & 0xFFFF_FFFF == target & 0xFFFF_FFFF).or(read.first()).and_then(|a| head(*a)) else {
+        return false;
+    };
+    read.iter().all(|a| head(*a) == Some(own))
+}
+
+/// A 4-byte number near the value that tells it from `others` (the same field of the other
+/// objects its code reads): 0 to 65535, different in each, the same a moment later; the
+/// nearest. As `others` picks one (More Like This).
+fn telling_key(mem: &Mem, target: u64, kind: Kind, others: &[u64]) -> Option<Key> {
+    let around = |addr: u64| -> Option<Vec<u8>> {
+        let mut b = vec![0u8; 2 * KEY_REACH as usize + 8];
+        mem.read_exact_at(&mut b, addr.checked_sub(KEY_REACH as u64)?).ok().map(|_| b)
+    };
+    let all = || std::iter::once(target).chain(others.iter().copied()).map(around).collect::<Option<Vec<_>>>();
+    let seen = all()?;
+    std::thread::sleep(Duration::from_millis(300));
+    let now = all()?;
+    let word = |b: &[u8], off: i64| {
+        let i = (KEY_REACH + off) as usize;
+        i32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
+    };
+    let size = kind.size() as i64;
+    let mut offsets: Vec<i64> = (-KEY_REACH..=KEY_REACH).step_by(4).filter(|&o| o <= -4 || o >= size).collect();
+    offsets.sort_by_key(|&o| (o.abs(), o < 0));
+    let off = offsets.into_iter().find(|&off| {
+        let mut v: Vec<i32> = now.iter().map(|b| word(b, off)).collect();
+        let steady = seen.iter().zip(&now).all(|(a, b)| word(a, off) == word(b, off));
+        let ids = v.iter().all(|n| (0..=0xFFFF).contains(n));
+        v.sort_unstable();
+        steady && ids && v.windows(2).all(|w| w[0] != w[1])
+    })?;
+    Some((off, word(&now[0], off)))
 }
 
 /// ptrscan <hex addr[:type]> [depth] [max offset, hex] [max paths] [loose]: pointer paths to the
