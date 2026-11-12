@@ -72,6 +72,17 @@ const PHASER: &[&str] = &[
 
 /// The global object's own properties that aren't the game's (JavaScript's and the browser's
 /// objects kept as data).
+/// The window's own objects and numbers in old browsers, where they're plain properties (newer
+/// ones keep them behind accessors, which aren't listed anyway).
+const WINDOW: &[&str] = &[
+    "document", "history", "location", "navigator", "screen", "performance", "localStorage", "sessionStorage", "applicationCache", "customElements",
+    "styleMedia", "frameElement", "opener", "external", "speechSynthesis", "crypto", "indexedDB", "webkitIndexedDB", "caches", "clientInformation",
+    "locationbar", "menubar", "personalbar", "scrollbars", "statusbar", "toolbar", "visualViewport", "webkitStorageInfo", "event", "nw", "manifest",
+    "innerWidth", "innerHeight", "outerWidth", "outerHeight", "screenX", "screenY", "screenLeft", "screenTop", "pageXOffset", "pageYOffset", "scrollX",
+    "scrollY", "devicePixelRatio", "length", "closed", "name", "status", "defaultStatus", "defaultstatus", "offscreenBuffering", "origin", "root",
+    "GLOBAL", "__dirname", "__filename", "TEMPORARY", "PERSISTENT",
+];
+
 const BUILTINS: &[&str] = &[
     "Math", "JSON", "Reflect", "Intl", "Atomics", "WebAssembly", "console", "CSS", "globalThis", "window", "self", "frames", "parent", "top", "chrome",
     "Iterator", "Temporal", "process", "require", "module", "exports", "global", "Buffer", "navigation", "crossOriginIsolated", "isSecureContext",
@@ -197,6 +208,17 @@ pub struct Web {
     pub contexts: Vec<Context>,
     /// The native context (tagged), from a script or module context's previous.
     pub native: Option<u64>,
+    /// An old V8 (4.x, 6.x: NW.js before 0.44; `locate_legacy`): no scopes are read, the
+    /// roots are the global objects' properties and the engines' objects.
+    pub legacy: Option<Legacy>,
+}
+
+/// What an old V8 was found with.
+pub struct Legacy {
+    /// Every global property: (name, its cell, the slot holding its value, its cell type).
+    globals: Vec<(String, u64, u64, u32)>,
+    /// JavaScript functions' instance type.
+    function: Option<u16>,
 }
 
 impl Web {
@@ -250,7 +272,7 @@ impl Web {
             if half(mem, meta - 1).map(|m| base | u64::from(m)) != Some(meta) {
                 continue;
             }
-            let mut web = Web { js: Js::web(base, meta, 0, true), scope_map, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None };
+            let mut web = Web { js: Js::web(base, meta, 0, true), scope_map, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: None };
             for &(_, info) in found.iter().filter(|f| f.0 == map32 && f.1 & !0xffff_ffff == base) {
                 if let Some(scope) = web.scope(mem, info) {
                     web.scopes.push(scope);
@@ -285,6 +307,25 @@ impl Web {
         web.js.calibrate_web(mem, &objects);
         web.learn_cells(mem);
         Some(web)
+    }
+
+    /// An old V8 (NW.js before 0.44: Construct 2 exports, hand-written games of those years):
+    /// found by JavaScript's own global functions, then every global property (two or three
+    /// passes over memory).
+    pub fn locate_legacy(heap: &Heap) -> Option<Web> {
+        let js = Js::locate_legacy(heap)?;
+        let globals = js.all_globals(heap);
+        let function = js.function_type(heap.mem());
+        if std::env::var_os("FERRET_DEBUG").is_some() {
+            let mut names: Vec<&str> = globals.iter().map(|g| g.0.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            eprintln!("old V8: {} global properties ({} names), functions' type {function:?}, small integers as {}: {}", globals.len(), names.len(), js.int_kind(), names.join(" "));
+        }
+        if globals.is_empty() {
+            return None;
+        }
+        Some(Web { js, scope_map: 0, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }) })
     }
 
     /// A ScopeInfo's kind and variables (None unless every name is a string).
@@ -549,6 +590,27 @@ impl Web {
     /// JavaScript's or the browser's (PropertyCell {map, name, details, value, dependent code};
     /// details' bit 0: an accessor).
     pub fn globals(&self, mem: &Mem) -> Vec<(String, u64, Val)> {
+        if let Some(legacy) = &self.legacy {
+            let mut out = Vec::new();
+            for (name, cell, slot, cell_type) in &legacy.globals {
+                if BUILTINS.contains(&name.as_str())
+                    || WINDOW.contains(&name.as_str())
+                    || name.starts_with("on") && name.len() > 2 && name[2..].chars().all(|c| c.is_ascii_lowercase())
+                    || !self.js.is_cell(mem, *cell)
+                {
+                    continue;
+                }
+                match self.js.slot(mem, *slot, false) {
+                    Val::Obj(o) if self.callable(mem, o) || !self.is_object(mem, o) => {}
+                    // A number V8 may have built into its compiled code (a constant cell, or
+                    // one never set) isn't written.
+                    Val::Int(_) | Val::Bool(_) if *cell_type < 2 => {}
+                    Val::Other => {}
+                    v => out.push((name.clone(), *slot, v)),
+                }
+            }
+            return out;
+        }
         let Some(pm) = self.property_map else { return Vec::new() };
         let mut out = Vec::new();
         for cell in self.dictionary(mem) {
@@ -625,6 +687,46 @@ impl Web {
     /// objects with the maps named.
     fn objects_where(&self, heap: &Heap, name_of: impl Fn(u64) -> Option<String>) -> Vec<(String, u64)> {
         let mem = heap.mem();
+        if self.legacy.is_some() {
+            // Whole words, one meta map: the maps (their first word is it), then the objects
+            // whose first word is a map named.
+            let ws = self.js.width() as usize;
+            let read = |b: &[u8], off: usize| if ws == 8 { u64::from_le_bytes(b[off..off + 8].try_into().unwrap()) } else { u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64 };
+            let meta = self.js.meta();
+            let mut maps: Vec<u64> = Vec::new();
+            heap.each_chunk(0, |addr, b, fresh| {
+                for off in (0..fresh - fresh % ws).step_by(ws) {
+                    if read(b, off) == meta {
+                        maps.push(addr + off as u64 + 1);
+                    }
+                }
+            });
+            let total = maps.len();
+            let of: HashMap<u64, String> = maps.into_iter().filter_map(|m| Some((m, name_of(m)?))).collect();
+            if std::env::var_os("FERRET_DEBUG").is_some() {
+                eprintln!("old V8 objects: {total} maps, {} of them wanted", of.len());
+            }
+            if of.is_empty() {
+                return Vec::new();
+            }
+            let mut out: Vec<(String, u64)> = Vec::new();
+            let mut count: HashMap<String, usize> = HashMap::new();
+            heap.each_chunk(0, |addr, b, fresh| {
+                for off in (0..fresh - fresh % ws).step_by(ws) {
+                    let Some(name) = of.get(&read(b, off)) else { continue };
+                    let o = addr + off as u64 + 1;
+                    let n = count.entry(name.clone()).or_default();
+                    if *n < MAX_INSTANCES && self.is_object(mem, o) {
+                        *n += 1;
+                        out.push((name.clone(), o));
+                    }
+                }
+            });
+            if std::env::var_os("FERRET_DEBUG").is_some() {
+                eprintln!("old V8 objects: {} objects with those maps", out.len());
+            }
+            return out;
+        }
         let base = self.js.base();
         // A JS object's map's map: the native context's own meta map (the native context is
         // made with one of them).
@@ -694,6 +796,36 @@ impl Web {
     /// runtime's own properties are minified, `name` and `data` of its variables aren't).
     pub fn c2_runtimes(&self, heap: &Heap) -> Vec<u64> {
         let mem = heap.mem();
+        let mut found = self.c2_candidates(heap);
+        // The one with the most variables first: stale copies of the canvas are left around
+        // (SUPERHOTline Miami: five, the first one's runtime unreadable).
+        found.sort_by_key(|&r| std::cmp::Reverse(self.c2_globals(mem, r).map_or(0, |g| g.1.len())));
+        found.dedup();
+        found
+    }
+
+    fn c2_candidates(&self, heap: &Heap) -> Vec<u64> {
+        let mem = heap.mem();
+        if self.legacy.is_some() && !self.js.c2_keys.is_empty() {
+            // Old V8: wherever the name "c2runtime" is followed by an object (an entry of the
+            // canvas's property dictionary, {name, value, details}) or, in a map's own
+            // properties ({name, details, value}), found below.
+            let w = self.js.width();
+            // (V8 4.1 keeps an object set once as a constant in the map's own entry, {name,
+            // details, the object}: 7 Pillars.)
+            let mut out: Vec<u64> = self.js.c2_keys.iter().flat_map(|&r| [self.js.word(mem, r + w), self.js.word(mem, r + 2 * w)]).flatten().filter(|&o| self.is_object(mem, o) && !self.callable(mem, o)).collect();
+            if std::env::var_os("FERRET_DEBUG").is_some() {
+                eprintln!("construct 2: {} places name c2runtime, {} followed by an object; their fields: {:?}", self.js.c2_keys.len(), out.len(), out.iter().take(4).map(|&o| self.js.fields(mem, o).len()).collect::<Vec<_>>());
+            }
+            // (Also what follows the name in a function's constants: only an object with
+            // Construct 2's variables counts, in `c2_runtimes`.)
+            out.retain(|&r| self.c2_globals(mem, r).is_some_and(|g| !g.1.is_empty()));
+            out.sort_unstable();
+            out.dedup();
+            if !out.is_empty() {
+                return out;
+            }
+        }
         self.objects_where(heap, |m| self.js.descriptors(mem, m).into_iter().take(80).any(|(k, _)| self.js.text(mem, k).as_deref() == Some("c2runtime")).then(String::new))
             .into_iter()
             .filter_map(|(_, canvas)| match self.js.field(mem, canvas, "c2runtime")? {
@@ -706,12 +838,17 @@ impl Web {
     /// Construct 2's global variables: the runtime's array whose elements are its variables
     /// (objects with `name` and `data`): the array's field, and each variable's index, name and
     /// value.
-    fn c2_globals(&self, mem: &Mem, runtime: u64) -> Option<(String, Vec<(u32, String, Val)>)> {
-        let mut best: Option<(String, Vec<(u32, String, Val)>)> = None;
+    fn c2_globals(&self, mem: &Mem, runtime: u64) -> Option<(String, Vec<(Step, String, Val)>)> {
+        let mut best: Option<(String, Vec<(Step, String, Val)>)> = None;
         for (field, v) in self.js.fields(mem, runtime) {
             let Val::Obj(list) = v else { continue };
             let mut vars = Vec::new();
-            for (i, e) in self.js.elements(mem, list).into_iter().take(1000) {
+            // A list, or (older runtimes: AsteroidX, 2016) a table of them by their ids.
+            let mut members: Vec<(Step, Val)> = self.js.elements(mem, list).into_iter().take(1000).map(|(i, e)| (Step::Index(i), e)).collect();
+            if members.is_empty() {
+                members = self.js.fields(mem, list).into_iter().take(1000).map(|(k, e)| (Step::Prop(k), e)).collect();
+            }
+            for (i, e) in members {
                 let Val::Obj(var) = e else { continue };
                 let fields = self.js.fields(mem, var);
                 let name = fields.iter().find(|f| f.0 == "name").and_then(|f| match f.1 {
@@ -778,6 +915,12 @@ impl Web {
     /// number): its properties and elements are V8's arrays, the read-only empty ones, or a
     /// PropertyArray or FixedArray (read-only maps).
     fn is_object(&self, mem: &Mem, o: u64) -> bool {
+        if self.legacy.is_some() {
+            // Its properties and elements are objects of V8's (arrays, dictionaries): a map's
+            // next words are sizes and bits, a string's its hash and length.
+            let w = self.js.width();
+            return self.js.map_of(mem, o).is_some() && [w, 2 * w].iter().all(|f| self.js.word(mem, o - 1 + f).is_some_and(|p| self.js.map_of(mem, p).is_some()));
+        }
         let base = self.js.base();
         let read_only = |p: u64| p.wrapping_sub(base) < READ_ONLY || self.js.word(mem, p - 1).is_some_and(|m| m.wrapping_sub(base) < READ_ONLY);
         [4, 8].iter().all(|f| self.js.word(mem, o - 1 + f).is_some_and(|p| p & 1 == 1 && read_only(p)))
@@ -785,6 +928,11 @@ impl Web {
 
     /// Whether an object is a function (its map's bit_field, map +10: callable bit 1).
     fn callable(&self, mem: &Mem, o: u64) -> bool {
+        if let Some(legacy) = &self.legacy {
+            // (The type's low byte: V8 6.2 keeps a count in the byte after it.)
+            let low = |t: Option<u16>| t.map(|t| t & 0xff);
+            return legacy.function.is_some() && low(self.js.map_of(mem, o).and_then(|m| self.js.instance_type(mem, m))) == low(legacy.function);
+        }
         self.js.map_of(mem, o).and_then(|m| half(mem, m - 1 + 8)).is_some_and(|w| (w >> 16) & 0x2 != 0)
     }
 
@@ -804,6 +952,17 @@ impl Web {
     }
 }
 
+impl Web {
+    /// The value type of a place: a small integer is a plain i32 in 64-bit V8 without
+    /// compressed references (old NW.js), the doubled `smi` elsewhere.
+    fn kind(&self, v: Val) -> Option<&'static str> {
+        match v {
+            Val::Int(_) => Some(self.js.int_kind()),
+            v => kind_of(v),
+        }
+    }
+}
+
 /// The located V8 of the game attached to, per pid: checked on each use (its first context
 /// still names its scope), found again when not (a reload makes new contexts), a failed search
 /// again after `RETRY`.
@@ -812,12 +971,15 @@ pub fn shared(heap: &Heap) -> Option<Arc<Web>> {
     static FOUND: Mutex<Option<(u32, Option<Arc<Web>>, Instant)>> = Mutex::new(None);
     let mut found = FOUND.lock().unwrap();
     if let Some((pid, web, at)) = found.as_ref() {
-        let valid = web.as_ref().is_some_and(|w| w.contexts.first().is_some_and(|c| w.js.word(heap.mem(), c.at - 1 + 8) == Some(w.scopes[c.scope].info)));
+        let valid = web.as_ref().is_some_and(|w| match &w.legacy {
+            Some(l) => l.globals.first().is_some_and(|g| w.js.is_cell(heap.mem(), g.1)),
+            None => w.contexts.first().is_some_and(|c| w.js.word(heap.mem(), c.at - 1 + 8) == Some(w.scopes[c.scope].info)),
+        });
         if *pid == heap.pid && (valid || web.is_none() && at.elapsed() < RETRY) {
             return web.clone();
         }
     }
-    let web = Web::locate(heap).map(Arc::new);
+    let web = Web::locate(heap).or_else(|| Web::locate_legacy(heap)).map(Arc::new);
     *found = Some((heap.pid, web.clone(), Instant::now()));
     web
 }
@@ -1003,6 +1165,11 @@ fn root_value(web: &Web, mem: &Mem, r: u64, root: &Root) -> Option<Val> {
             let i = web.scopes[c.scope].names.iter().position(|n| n == name)?;
             Some(web.variable(mem, c, i))
         }
+        Root::Global(name) if web.legacy.is_some() => {
+            // (The root is the slot holding the global's value.)
+            let (_, cell, _, _) = web.legacy.as_ref()?.globals.iter().find(|g| g.2 == r && g.0 == *name)?;
+            web.js.is_cell(mem, *cell).then(|| web.js.slot(mem, r, false))
+        }
         Root::Global(name) => {
             let n = web.js.word(mem, r - 1 + 4)?;
             (web.js.map_of(mem, r) == web.property_map && web.js.text(mem, n).as_deref() == Some(name)).then(|| web.js.slot(mem, r - 1 + 12, false))
@@ -1039,7 +1206,7 @@ pub fn kind_now(heap: &Heap, roots: &[u64], path: &WebPath) -> Option<&'static s
             Step::Index(n) => web.js.elements(mem, o).into_iter().find(|(k, _)| k == n)?.1,
         };
     }
-    kind_of(v)
+    web.kind(v)
 }
 
 /// An object (or a scope's or the globals' variables) whose numbers are listed.
@@ -1050,6 +1217,7 @@ struct Group {
     numbers: Vec<(String, Val, WebPath)>,
 }
 
+/// The value type of a number's or flag's place; a small integer's by the V8 (`Web::kind`).
 fn kind_of(v: Val) -> Option<&'static str> {
     match v {
         Val::Int(_) => Some("smi"),
@@ -1137,7 +1305,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     for runtime in web.c2_runtimes(heap).into_iter().take(1) {
         if let Some((field, list)) = web.c2_globals(mem, runtime) {
             let path = WebPath { root: Root::C2, steps: vec![Step::Prop(field)] };
-            let numbers = list.into_iter().map(|(i, name, v)| (name, v, path.then(Step::Index(i)).then(Step::Prop("data".into())))).collect();
+            let numbers = list.into_iter().map(|(step, name, v)| (name, v, path.then(step).then(Step::Prop("data".into())))).collect();
             out.push(Group { path: WebPath { root: Root::C2, steps: Vec::new() }, class: "Global variables".into(), numbers });
         }
         seen.insert(runtime);
@@ -1207,6 +1375,7 @@ fn players(name: &str) -> bool {
 /// (hp, energy, gold, lives...), then the rest under Show Everything.
 pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     let mut groups = groups(heap)?;
+    let web = shared(heap)?;
     groups.retain(|g| !g.numbers.is_empty());
     // An engine's own state found (GDevelop's variables, a Phaser scene): the scripts' top-level
     // variables are then mostly its libraries' (PixiJS's).
@@ -1234,7 +1403,7 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
                 role: if character && main { "character" } else { "game" },
                 owner: None,
                 more: !main,
-                fields: g.numbers.into_iter().filter_map(|(label, v, _)| Some(Listed { label, addr: place(v)?, kind: kind_of(v)? })).collect(),
+                fields: g.numbers.into_iter().filter_map(|(label, v, _)| Some(Listed { label, addr: place(v)?, kind: web.kind(v)? })).collect(),
             }
         })
         .collect();
@@ -1254,7 +1423,8 @@ fn place(v: Val) -> Option<u64> {
 pub fn discover(heap: &Heap, target: u64) -> Option<(WebPath, Vec<u64>, &'static str)> {
     let (_, v, path) = groups(heap)?.into_iter().flat_map(|g| g.numbers).find(|n| place(n.1) == Some(target))?;
     let leads = walk(heap, &find_roots(heap, &path), &path);
-    leads.contains(&target).then_some((path, leads, kind_of(v)?))
+    let kind = shared(heap)?.kind(v)?;
+    leads.contains(&target).then_some((path, leads, kind))
 }
 
 /// Learns the game's true and false (`js::learn_bools`) from its variables' objects.

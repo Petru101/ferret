@@ -37,6 +37,17 @@ const GLOBALS: &[&str] = &[
 ];
 
 /// Elements read from one array or object at most.
+/// JavaScript's own global functions: in every page's global object, their names V8's own
+/// strings (not the browser's), so an old V8 is found by them whatever the game.
+const BUILTIN_FUNCTIONS: &[&str] = &["parseFloat", "parseInt", "isFinite", "isNaN", "decodeURIComponent", "encodeURIComponent", "decodeURI", "encodeURI", "escape", "unescape", C2_RUNTIME];
+/// The property Construct 2 keeps its runtime under, on the game's canvas (looked for with
+/// the names above: `Js::c2_keys`).
+const C2_RUNTIME: &str = "c2runtime";
+
+/// Entries of one global dictionary are at most this far apart (a hash table half full: runs
+/// of empty slots are short).
+const DICTIONARY_GAP: u64 = 1024;
+
 const MAX_ELEMENTS: usize = 5000;
 /// Characters read from one string at most.
 const MAX_TEXT: u32 = 256;
@@ -51,6 +62,9 @@ enum Cells {
     /// V8 4.x: an entry of the global object's dictionary {name, cell, details}, the cell
     /// {map, value, ...}.
     InDictionary,
+    /// V8 4.4 to 5.8 (NW.js 0.13 to 0.2x: Chromium 46 to 58): the dictionary's entries are
+    /// {name, cell}, the cell {map, details, value}. Otherwise read as 4.x.
+    Paired,
     /// V8 8.x with pointer compression: {map, name, details, value}. The names are external
     /// strings whose text is Blink's (`Js::ext`).
     Compressed,
@@ -87,6 +101,10 @@ pub struct Js {
     field_shift: u32,
     /// The cells of each of `GLOBALS` (several when stale copies are left around).
     globals: Vec<(&'static str, Vec<u64>)>,
+    /// Old web games: every place holding the string "c2runtime" (the property Construct 2
+    /// hangs its runtime on: a dictionary entry {name, value, details} when the canvas keeps
+    /// its properties so).
+    pub(crate) c2_keys: Vec<u64>,
     /// V8 8.x: where an external string's resource keeps its Blink string, from the resource
     /// (Blink's string: {refs, length, hash, characters}).
     ext: i64,
@@ -296,15 +314,26 @@ impl Js {
     /// Finds the globals' names (V8 strings: {map, hash, length as a Smi, characters}), what
     /// points to them (their cells) and the layout, in two passes over memory.
     fn locate(heap: &Heap) -> Option<Js> {
+        Js::locate_with(heap, GLOBALS)
+    }
+
+    /// An old V8 (4.x or 6.x: no pointer compression) of any web game, found by JavaScript's
+    /// own global functions, which every page has (web.rs).
+    pub(crate) fn locate_legacy(heap: &Heap) -> Option<Js> {
+        Js::locate_with(heap, BUILTIN_FUNCTIONS)
+    }
+
+    fn locate_with(heap: &Heap, wanted: &'static [&'static str]) -> Option<Js> {
         let l = layout_of(heap);
         let mem = heap.mem();
-        let texts: Vec<&[u8]> = GLOBALS.iter().map(|g| g.as_bytes()).collect();
+        let texts: Vec<&[u8]> = wanted.iter().map(|g| g.as_bytes()).collect();
+        let firsts: Vec<u8> = texts.iter().map(|t| t[0]).collect();
         let longest = texts.iter().map(|t| t.len()).max().unwrap_or(0);
         let mut names: Vec<Vec<u64>> = vec![Vec::new(); texts.len()];
         let (len_at, body) = (l.str_len() as usize, l.str_body() as usize);
         heap.each_chunk(body + longest, |addr, b, fresh| {
             for off in (0..fresh).step_by(l.w as usize) {
-                if b.get(off + body) != Some(&b'$') {
+                if !b.get(off + body).is_some_and(|c| firsts.contains(c)) {
                     continue;
                 }
                 let Some(lw) = b.get(off + len_at..off + len_at + l.w as usize) else { continue };
@@ -338,6 +367,10 @@ impl Js {
         for &r in &refs {
             let Some(name) = l.word(mem, r) else { continue };
             let Some(g) = names.iter().position(|v| v.contains(&name)) else { continue };
+            // (Not one of the globals: only looked for.)
+            if wanted[g] == C2_RUNTIME {
+                continue;
+            }
             if let (Some(m), Some(d)) = (l.word(mem, r - 2 * w), l.word(mem, r - w)) {
                 if is_map(m) && l.is_smi(d) {
                     note((Cells::Named, m), g, r - 2 * w);
@@ -348,21 +381,50 @@ impl Js {
                     note((Cells::InDictionary, l.word(mem, c - 1)?), g, c - 1);
                 }
             }
+            if let Some(c) = l.word(mem, r + w).filter(|&c| tagged(c)) {
+                if let (Some(m), Some(d), Some(v)) = (l.word(mem, c - 1), l.word(mem, c - 1 + w), l.word(mem, c - 1 + 2 * w)) {
+                    if is_map(m) && l.is_smi(d) && tagged(v) {
+                        note((Cells::Paired, m), g, c - 1);
+                    }
+                }
+            }
         }
-        let ((cells, cell_map), got) = found.into_iter().max_by_key(|(_, v)| {
+        // The most globals found; then (other things are shaped like cells too, and a big
+        // game has enough of them to tie: SUPERHOTline Miami's 1.1 GB) the most whose values
+        // are objects of one type, as functions and the games' objects are.
+        let alike = |cells: Cells, v: &[(usize, u64)]| {
+            let slot = match cells {
+                Cells::Named => 3,
+                Cells::Paired => 2,
+                _ => 1,
+            };
+            let mut types: Vec<u8> = v
+                .iter()
+                .filter_map(|&(_, cell)| l.word(mem, cell + slot * w).filter(|&o| tagged(o)))
+                .filter_map(|o| l.word(mem, o - 1).filter(|&m| is_map(m)))
+                .filter_map(|m| byte(mem, m - 1 + l.map_type()))
+                .collect();
+            types.sort_unstable();
+            types.chunk_by(|a, b| a == b).map(|c| c.len()).max().unwrap_or(0)
+        };
+        let ((cells, cell_map), got) = found.into_iter().max_by_key(|((cells, _), v)| {
             let mut gs: Vec<usize> = v.iter().map(|(g, _)| *g).collect();
             gs.sort_unstable();
             gs.dedup();
-            gs.len()
+            (gs.len(), alike(*cells, v))
         })?;
-        let mut globals: Vec<(&'static str, Vec<u64>)> = GLOBALS.iter().map(|g| (*g, Vec::new())).collect();
+        let mut globals: Vec<(&'static str, Vec<u64>)> = wanted.iter().map(|g| (*g, Vec::new())).collect();
         for (g, cell) in got {
             if !globals[g].1.contains(&cell) {
                 globals[g].1.push(cell);
             }
         }
         let field_shift = if cells == Cells::Named { 20 } else { 19 };
-        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, ext: 0, cell_name: 1, modern: false, offsets: false, ept: None, number_map: None, bools: Mutex::default() };
+        let c2_keys: Vec<u64> = match wanted.iter().position(|n| *n == C2_RUNTIME) {
+            Some(i) => refs.iter().copied().filter(|&r| l.word(mem, r).is_some_and(|n| names[i].contains(&n))).collect(),
+            None => Vec::new(),
+        };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, c2_keys, ext: 0, cell_name: 1, modern: false, offsets: false, ept: None, number_map: None, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -496,7 +558,7 @@ impl Js {
                 globals[g].1.push(cell);
             }
         }
-        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, ext, cell_name, modern: false, offsets: false, ept: None, number_map: None, bools: Mutex::default() };
+        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, c2_keys: Vec::new(), ext, cell_name, modern: false, offsets: false, ept: None, number_map: None, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -523,11 +585,124 @@ impl Js {
         }
     }
 
+    /// Every property of every global object in an old V8 (`locate_legacy`): (name, the
+    /// property's cell, the slot holding its value, its cell type: 0 undefined, 1 constant,
+    /// 2 constant type, 3 mutable). V8 6.x: the cells name themselves ({map, details, name,
+    /// value}), one pass; V8 4.x: {map, value} cells named by the global dictionary's entries
+    /// ({name, cell, details}), a second pass for what points to them.
+    pub(crate) fn all_globals(&self, heap: &Heap) -> Vec<(String, u64, u64, u32)> {
+        self.global_entries(heap).into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect()
+    }
+
+    /// `all_globals`, each with the place of its dictionary entry (0 when cells name themselves).
+    fn global_entries(&self, heap: &Heap) -> Vec<(String, u64, u64, u32, u64)> {
+        let (mem, w) = (heap.mem(), self.l.w);
+        let ws = w as usize;
+        let mut cells: Vec<u64> = Vec::new();
+        heap.each_chunk(0, |addr, b, fresh| {
+            for off in (0..fresh - fresh % ws).step_by(ws) {
+                let v = if ws == 8 { u64::from_le_bytes(b[off..off + 8].try_into().unwrap()) } else { u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64 };
+                if v == self.cell_map {
+                    cells.push(addr + off as u64);
+                }
+            }
+        });
+        let mut out = Vec::new();
+        match self.cells {
+            Cells::Named => {
+                for cell in cells {
+                    let (Some(d), Some(n)) = (self.word(mem, cell + w).and_then(|d| self.l.smi(d)), self.word(mem, cell + 2 * w)) else { continue };
+                    if let Some(name) = self.text(mem, n) {
+                        out.push((name, cell, cell + 3 * w, (d as u32 >> 6) & 3, 0));
+                    }
+                }
+            }
+            Cells::InDictionary | Cells::Paired => {
+                let tagged_cells: Vec<u64> = cells.iter().map(|c| c + 1).collect();
+                for r in heap.referrers(&tagged_cells) {
+                    let (Some(n), Some(c)) = (self.word(mem, r - w), self.word(mem, r)) else { continue };
+                    let Some(name) = self.text(mem, n) else { continue };
+                    match self.cells {
+                        // The cell's own details say how settled its value is.
+                        Cells::Paired => {
+                            if let Some(d) = self.word(mem, c - 1 + w).and_then(|d| self.l.smi(d)) {
+                                out.push((name, c - 1, c - 1 + 2 * w, (d as u32 >> 5) & 3, r));
+                            }
+                        }
+                        // V8 4.1 keeps that as a type object: its numbers count as constants.
+                        _ => out.push((name, c - 1, c - 1 + w, 0, r)),
+                    }
+                }
+            }
+            Cells::Compressed => {}
+        }
+        // V8 4.x and 5.x: only the pages' global objects. Their natives have a global object
+        // of their own (kTrig, lastMatchInfo, rngstate...: 7 Pillars listed 1500 objects of
+        // V8's). A dictionary's entries lie together: runs of them, kept when one is the
+        // page's `document`.
+        if out.iter().any(|g| g.4 != 0) {
+            out.sort_by_key(|g| g.4);
+            let mut keep = vec![false; out.len()];
+            let mut start = 0;
+            for i in 1..=out.len() {
+                if i == out.len() || out[i].4 - out[i - 1].4 > DICTIONARY_GAP {
+                    if out[start..i].iter().any(|g| g.0 == "document") {
+                        keep[start..i].fill(true);
+                    }
+                    start = i;
+                }
+            }
+            if keep.iter().any(|k| *k) {
+                let mut k = keep.into_iter();
+                out.retain(|_| k.next().unwrap_or(false));
+            }
+        }
+        out
+    }
+
+    /// Whether `cell` (from `all_globals`) is still a global's cell.
+    pub(crate) fn is_cell(&self, mem: &Mem, cell: u64) -> bool {
+        self.word(mem, cell) == Some(self.cell_map)
+    }
+
+    /// The instance type of JavaScript functions, from one of the built-in ones found.
+    pub(crate) fn function_type(&self, mem: &Mem) -> Option<u16> {
+        self.globals.iter().find_map(|(name, cells)| cells.iter().find_map(|&c| self.cell_value(mem, c, name))).and_then(|f| self.map_of(mem, f)).and_then(|m| self.instance_type(mem, m))
+    }
+
+    /// Diagnostics: an object's own properties as its map lists them: each key's text (or its
+    /// string type and first words when unread) and details.
+    #[allow(dead_code)]
+    pub(crate) fn dump_keys(&self, mem: &Mem, o: u64) -> Vec<String> {
+        let Some(m) = self.map_of(mem, o) else { return Vec::new() };
+        self.descriptors(mem, m)
+            .into_iter()
+            .map(|(k, d)| {
+                let t = self.map_of(mem, k).and_then(|km| self.instance_type(mem, km));
+                let words: Vec<String> = (0..6).map(|i| format!("{:x}", self.word(mem, k - 1 + i * self.l.w).unwrap_or(0))).collect();
+                match self.text(mem, k) {
+                    Some(text) => format!("{text} ({d:x})"),
+                    None => format!("?type {t:x?} details {d:x} words {}", words.join(" ")),
+                }
+            })
+            .collect()
+    }
+
+    /// The meta map (tagged): every map's map.
+    pub(crate) fn meta(&self) -> u64 {
+        self.meta
+    }
+
+    /// The width of a word: 8, or 4 (32-bit V8 and compressed references).
+    pub(crate) fn width(&self) -> u64 {
+        self.l.w
+    }
+
     /// A web game's V8 (web.rs): compressed references into the cage at `base`, V8 14.x or
     /// newer; `offsets`: V8 15.x's field offsets in property details.
     pub(crate) fn web(base: u64, meta: u64, cell_map: u64, offsets: bool) -> Js {
         let l = Layout { w: 4, base };
-        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, ept: None, number_map: None, bools: Mutex::default() }
+        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), c2_keys: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, ept: None, number_map: None, bools: Mutex::default() }
     }
 
     /// A web game's V8 version, from objects of the game (web.rs): V8 15.x when their
@@ -609,7 +784,7 @@ impl Js {
         let at = m - 1 + self.l.map_type();
         match self.cells {
             Cells::Named | Cells::Compressed => half(mem, at).map(|t| t as u16),
-            Cells::InDictionary => byte(mem, at).map(u16::from),
+            Cells::InDictionary | Cells::Paired => byte(mem, at).map(u16::from),
         }
     }
 
@@ -635,6 +810,7 @@ impl Js {
                 self.word(mem, cell + 3 * w)?
             }
             Cells::InDictionary => self.word(mem, cell + w)?,
+            Cells::Paired => self.word(mem, cell + 2 * w)?,
             Cells::Compressed => {
                 let n = self.word(mem, cell + self.cell_name * w)?;
                 if self.text(mem, n).as_deref() != Some(name) {
@@ -704,7 +880,7 @@ impl Js {
         // V8 4.x: representation in bits 0-1, one byte a character = bit 2; 6.x: bits 0-2
         // (thin strings came), bit 3.
         let (one_byte, rep) = match self.cells {
-            Cells::InDictionary => (t & 0x4 != 0, t & 0x3),
+            Cells::InDictionary | Cells::Paired => (t & 0x4 != 0, t & 0x3),
             Cells::Named | Cells::Compressed => (t & 0x8 != 0, t & 0x7),
         };
         let (o, body) = (s - 1, l.str_body());
@@ -731,6 +907,24 @@ impl Js {
             2 if self.cells == Cells::Compressed => {
                 let resource = word(mem, o + body)?;
                 chars(word(mem, resource.checked_add_signed(self.ext)?)? + 12)
+            }
+            // External in older V8 (the browser's own names, which a game's script then
+            // shares: "name"): {.., resource, the resource's characters}; a short one (bit 4)
+            // keeps no pointer to the characters.
+            2 if t & 0x10 == 0 => {
+                let data = self.word(mem, o + body + l.w).filter(|&d| d >= 0x10000)?;
+                chars(data).filter(|t: &String| !t.chars().any(char::is_control))
+            }
+            // A short external one: only the resource, the browser's own string holder
+            // ({vtable, its string, ...}); Blink's string is {refs, length, hash and flags,
+            // characters}: the one whose length is the string's.
+            2 if self.cells != Cells::Compressed => {
+                let resource = self.word(mem, o + body).filter(|&r| r >= 0x10000)?;
+                // (Right before what V8 points to: AsteroidX, Chromium 48, at -16 and -24.)
+                [-2i64, -3, 1, 2].into_iter().find_map(|at| {
+                    let blink = self.word(mem, resource.checked_add_signed(at * l.w as i64)?).filter(|&p| p >= 0x10000)?;
+                    (half(mem, blink + 4) == Some(len)).then(|| chars(blink + 12)).flatten().filter(|t: &String| !t.chars().any(char::is_control))
+                })
             }
             1 => {
                 let a = self.text_in(mem, self.word(mem, o + body)?, depth + 1)?;
@@ -834,7 +1028,7 @@ impl Js {
         let (words, b9) = (u64::from(words), u64::from(b9));
         // V8 4.x keeps the count of in-object fields, 6.x where they start.
         let inside = match self.cells {
-            Cells::InDictionary => b9,
+            Cells::InDictionary | Cells::Paired => b9,
             Cells::Named | Cells::Compressed => words.saturating_sub(b9),
         };
         let start = (words.saturating_sub(inside)) * l.w;
