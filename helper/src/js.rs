@@ -68,6 +68,10 @@ enum Cells {
     /// V8 8.x with pointer compression: {map, name, details, value}. The names are external
     /// strings whose text is Blink's (`Js::ext`).
     Compressed,
+    /// V8 7.x to 9.x without pointer compression (Electron up to 13: GDevelop's games ship
+    /// Electron 8): cells and objects as `Compressed`'s, every reference 8 bytes
+    /// (`Layout.wide`).
+    Wide,
 }
 
 /// A value as a field or element holds it.
@@ -132,6 +136,13 @@ pub struct Js {
     /// Tagged) holding a small integer or a HeapNumber is then a `Val::Var` (its slot; the box
     /// may be shared, so it's never written into). None: RPG Maker's reading.
     pub(crate) number_map: Option<u64>,
+    /// V8 9.x and newer (told by `calibrate_types` on old web games' engines, Electron 13 to
+    /// 20; always with `modern`): a property's details are {kind, constness, attributes (3),
+    /// location}, not {kind, location, constness, attributes}: a constant field has bit 1 set.
+    location5: bool,
+    /// The elements kind takes 6 bits of bit_field2 (from bit 2), not 5 (from bit 3): V8 9.x
+    /// and newer (told as `location5`).
+    kind6: bool,
     /// V8's false and true (tagged), once seen (`boolean`); 0 until then.
     bools: Mutex<[u64; 2]>,
 }
@@ -218,6 +229,10 @@ struct Layout {
     w: u64,
     /// The pointer cage's start (compressed references), else 0.
     base: u64,
+    /// 64-bit V8 7.x to 9.x without pointer compression: laid out as the compressed one
+    /// (a string's length a plain int after its hash, the newer maps and descriptor arrays),
+    /// with 8-byte references.
+    wide: bool,
 }
 
 impl Layout {
@@ -245,6 +260,11 @@ impl Layout {
         self.base != 0
     }
 
+    /// V8 7.x and newer's layouts (with or without compressed references).
+    fn newer(self) -> bool {
+        self.compressed() || self.wide
+    }
+
     fn is_smi(self, x: u64) -> bool {
         match self.w {
             8 => x & 0xffff_ffff == 0,
@@ -268,10 +288,10 @@ impl Layout {
     // Strings: {map, hash, length (a Smi), characters}; cons {.., first, second}, sliced
     // {.., parent, offset}, thin {.., actual}.
     fn str_len(self) -> u64 {
-        self.at(16, 8)
+        if self.wide { 12 } else { self.at(16, 8) }
     }
     fn str_body(self) -> u64 {
-        self.at(24, 12)
+        if self.wide { 16 } else { self.at(24, 12) }
     }
     // Maps: sizes (instance size in words, in-object count or start), instance type, bit
     // fields, then pointers (prototype, constructor, transitions, descriptors, layout).
@@ -290,6 +310,7 @@ impl Layout {
     fn map_descriptors(self) -> u64 {
         match self.compressed() {
             true => 24,
+            false if self.wide => 40,
             false => self.at(48, 28),
         }
     }
@@ -311,24 +332,27 @@ impl Layout {
 
 /// The layout of the game attached to: its pointer width.
 fn layout_of(heap: &Heap) -> Layout {
-    Layout { w: heap.width() as u64, base: 0 }
+    Layout { w: heap.width() as u64, base: 0, wide: false }
 }
 
 impl Js {
     /// Finds the globals' names (V8 strings: {map, hash, length as a Smi, characters}), what
     /// points to them (their cells) and the layout, in two passes over memory.
     fn locate(heap: &Heap) -> Option<Js> {
-        Js::locate_with(heap, GLOBALS)
+        Js::locate_with(heap, GLOBALS, false)
     }
 
     /// An old V8 (4.x or 6.x: no pointer compression) of any web game, found by JavaScript's
     /// own global functions, which every page has (web.rs).
     pub(crate) fn locate_legacy(heap: &Heap) -> Option<Js> {
-        Js::locate_with(heap, BUILTIN_FUNCTIONS)
+        Js::locate_with(heap, BUILTIN_FUNCTIONS, false)
+            .or_else(|| (heap.width() == 8).then(|| Js::locate_with(heap, BUILTIN_FUNCTIONS, true)).flatten())
+            .or_else(|| Js::locate_compressed_with(heap, BUILTIN_FUNCTIONS))
     }
 
-    fn locate_with(heap: &Heap, wanted: &'static [&'static str]) -> Option<Js> {
-        let l = layout_of(heap);
+    /// `wide`: V8 7.x to 9.x without pointer compression (`Cells::Wide`).
+    fn locate_with(heap: &Heap, wanted: &'static [&'static str], wide: bool) -> Option<Js> {
+        let l = Layout { wide, ..layout_of(heap) };
         let mem = heap.mem();
         let texts: Vec<&[u8]> = wanted.iter().map(|g| g.as_bytes()).collect();
         let firsts: Vec<u8> = texts.iter().map(|t| t[0]).collect();
@@ -340,10 +364,18 @@ impl Js {
                 if !b.get(off + body).is_some_and(|c| firsts.contains(c)) {
                     continue;
                 }
-                let Some(lw) = b.get(off + len_at..off + len_at + l.w as usize) else { continue };
+                // The length: a Smi, or (wide) a plain int.
+                let lw = if wide { 4 } else { l.w as usize };
+                let Some(lw) = b.get(off + len_at..off + len_at + lw) else { continue };
                 let mut x = [0u8; 8];
                 x[..lw.len()].copy_from_slice(lw);
-                let Some(len) = l.smi(u64::from_le_bytes(x)) else { continue };
+                let len = match wide {
+                    true => u64::from_le_bytes(x) as i32,
+                    false => match l.smi(u64::from_le_bytes(x)) {
+                        Some(len) => len,
+                        None => continue,
+                    },
+                };
                 for (i, t) in texts.iter().enumerate() {
                     if t.len() as i32 == len && b.get(off + body..off + body + t.len()) == Some(t) {
                         names[i].push(addr + off as u64 + 1);
@@ -375,6 +407,14 @@ impl Js {
             if wanted[g] == C2_RUNTIME {
                 continue;
             }
+            if wide {
+                if let (Some(m), Some(d)) = (l.word(mem, r - w), l.word(mem, r + w)) {
+                    if is_map(m) && l.is_smi(d) {
+                        note((Cells::Wide, m), g, r - w);
+                    }
+                }
+                continue;
+            }
             if let (Some(m), Some(d)) = (l.word(mem, r - 2 * w), l.word(mem, r - w)) {
                 if is_map(m) && l.is_smi(d) {
                     note((Cells::Named, m), g, r - 2 * w);
@@ -398,7 +438,7 @@ impl Js {
         // are objects of one type, as functions and the games' objects are.
         let alike = |cells: Cells, v: &[(usize, u64)]| {
             let slot = match cells {
-                Cells::Named => 3,
+                Cells::Named | Cells::Wide => 3,
                 Cells::Paired => 2,
                 _ => 1,
             };
@@ -428,7 +468,7 @@ impl Js {
             Some(i) => refs.iter().copied().filter(|&r| l.word(mem, r).is_some_and(|n| names[i].contains(&n))).collect(),
             None => Vec::new(),
         };
-        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, c2_keys, ext: 0, cell_name: 1, modern: false, offsets: false, ept: None, number_map: None, typed: false, bools: Mutex::default() };
+        let mut js = Js { l, cells, meta, cell_map, field_shift, globals, c2_keys, ext: 0, cell_name: 1, modern: false, offsets: false, ept: None, number_map: None, typed: false, location5: false, kind6: false, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -440,19 +480,26 @@ impl Js {
     /// external strings pointing to those ({map, hash, length, resource}), and the cells
     /// holding those names ({map, name, details, value}).
     fn locate_compressed(heap: &Heap) -> Option<Js> {
+        Js::locate_compressed_with(heap, GLOBALS)
+    }
+
+    /// `locate_compressed` by these globals' names (any web game's: JavaScript's own global
+    /// functions, `BUILTIN_FUNCTIONS`).
+    fn locate_compressed_with(heap: &Heap, wanted: &'static [&'static str]) -> Option<Js> {
         if heap.width() != 8 {
             return None;
         }
         let mem = heap.mem();
         let u32_at = |b: &[u8], i: usize| b.get(i..i + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
         let u64_at = |b: &[u8], i: usize| b.get(i..i + 8).map(|x| u64::from_le_bytes(x.try_into().unwrap()));
-        let texts: Vec<&[u8]> = GLOBALS.iter().map(|g| g.as_bytes()).collect();
+        let texts: Vec<&[u8]> = wanted.iter().filter(|g| **g != C2_RUNTIME).map(|g| g.as_bytes()).collect();
+        let firsts: Vec<u8> = texts.iter().map(|t| t[0]).collect();
         let longest = texts.iter().map(|t| t.len()).max().unwrap_or(0);
         // (global, address) of Blink's strings and of V8's own.
         let (mut blink, mut names) = (Vec::new(), Vec::new());
         heap.each_chunk(12 + longest, |addr, b, fresh| {
             for off in (0..fresh).step_by(4) {
-                if b.get(off + 12) != Some(&b'$') {
+                if !b.get(off + 12).is_some_and(|c| firsts.contains(c)) {
                     continue;
                 }
                 for (g, t) in texts.iter().enumerate() {
@@ -498,7 +545,7 @@ impl Js {
         // A string's map's map is the meta map, its own map; the cage is the 4 GiB holding it.
         let cage = |a: u64| a & !0xffff_ffff;
         let meta_of = |s: u64| {
-            let l = Layout { w: 4, base: cage(s) };
+            let l = Layout { w: 4, base: cage(s), wide: false };
             let m = l.word(mem, s).filter(|&m| tagged(m))?;
             let meta = l.word(mem, m - 1).filter(|&x| tagged(x))?;
             (l.word(mem, meta - 1) == Some(meta)).then_some(meta)
@@ -526,7 +573,7 @@ impl Js {
                     if base != cage(addr) || u32_at(b, off + 4).is_none_or(|d| d & 1 == 1) {
                         continue;
                     }
-                    let l = Layout { w: 4, base };
+                    let l = Layout { w: 4, base, wide: false };
                     for k in [1u64, 2] {
                         let Some(at) = off.checked_sub(4 * k as usize) else { continue };
                         let Some(m) = u32_at(b, at).filter(|m| m & 1 == 1).map(|m| l.decompress(m)) else { continue };
@@ -550,19 +597,19 @@ impl Js {
             gs.len()
         })?;
         let base = cage(cell_map);
-        let l = Layout { w: 4, base };
+        let l = Layout { w: 4, base, wide: false };
         let meta = l.word(mem, cell_map - 1)?;
         // Where the resources keep Blink's string: the place most of the names agree on.
         let mut places: Vec<i64> = ext.iter().filter(|e| cage(e.1) == base).map(|e| e.2).collect();
         places.sort_unstable();
         let ext = places.chunk_by(|a, b| a == b).max_by_key(|c| c.len()).map_or(0, |c| c[0]);
-        let mut globals: Vec<(&'static str, Vec<u64>)> = GLOBALS.iter().map(|g| (*g, Vec::new())).collect();
+        let mut globals: Vec<(&'static str, Vec<u64>)> = wanted.iter().filter(|g| **g != C2_RUNTIME).map(|g| (*g, Vec::new())).collect();
         for (g, cell) in got {
             if !globals[g].1.contains(&cell) {
                 globals[g].1.push(cell);
             }
         }
-        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, c2_keys: Vec::new(), ext, cell_name, modern: false, offsets: false, ept: None, number_map: None, typed: false, bools: Mutex::default() };
+        let mut js = Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals, c2_keys: Vec::new(), ext, cell_name, modern: false, offsets: false, ept: None, number_map: None, typed: false, location5: false, kind6: false, bools: Mutex::default() };
         js.calibrate(mem);
         Some(js)
     }
@@ -603,9 +650,14 @@ impl Js {
         let (mem, w) = (heap.mem(), self.l.w);
         let ws = w as usize;
         let mut cells: Vec<u64> = Vec::new();
+        let base = self.l.base;
         heap.each_chunk(0, |addr, b, fresh| {
+            // (Compressed references: only in the cage.)
+            if base != 0 && addr & !0xffff_ffff != base {
+                return;
+            }
             for off in (0..fresh - fresh % ws).step_by(ws) {
-                let v = if ws == 8 { u64::from_le_bytes(b[off..off + 8].try_into().unwrap()) } else { u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64 };
+                let v = if ws == 8 { u64::from_le_bytes(b[off..off + 8].try_into().unwrap()) } else { base | u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64 };
                 if v == self.cell_map {
                     cells.push(addr + off as u64);
                 }
@@ -638,7 +690,15 @@ impl Js {
                     }
                 }
             }
-            Cells::Compressed => {}
+            Cells::Wide | Cells::Compressed => {
+                let at = self.cell_name;
+                for cell in cells {
+                    let (Some(n), Some(d)) = (self.word(mem, cell + at * w), self.word(mem, cell + (at + 1) * w).and_then(|d| self.l.smi(d))) else { continue };
+                    if let Some(name) = self.text(mem, n) {
+                        out.push((name, cell, cell + (at + 2) * w, (d as u32 >> 6) & 3, 0));
+                    }
+                }
+            }
         }
         // V8 4.x and 5.x: only the pages' global objects. Their natives have a global object
         // of their own (kTrig, lastMatchInfo, rngstate...: 7 Pillars listed 1500 objects of
@@ -706,6 +766,37 @@ impl Js {
     /// properties reads as a field the newer way (kind and location 0) and some do the old
     /// way (type 1).
     pub(crate) fn calibrate_types(&mut self, mem: &Mem, objects: &[u64]) {
+        if matches!(self.cells, Cells::Wide | Cells::Compressed) {
+            // Where the field index starts (19 with a 3-bit representation, V8 8.0; a bit
+            // more later): the place where the most objects' indices come out as 0, 1, 2...
+            let maps: Vec<u64> = objects.iter().take(400).filter_map(|&o| self.map_of(mem, o)).collect();
+            // Bit 1 of a property's details: its location (a field's index is then 0) or,
+            // V8 9.x and newer, its constness (constant fields have indices).
+            let bit1: Vec<u32> = maps.iter().flat_map(|&m| self.descriptors(mem, m)).map(|d| d.1).filter(|d| d & 3 == 2).collect();
+            let indexed = bit1.iter().filter(|&&d| (d >> 19) & 0x7ff != 0).count();
+            self.location5 = indexed > 0 && indexed * 8 > bit1.len();
+            // The elements kind's place: a plain object's is 3 (holey).
+            let kinds: Vec<u8> = maps.iter().filter_map(|&m| byte(mem, m - 1 + self.l.map_bit_field2())).collect();
+            self.kind6 = kinds.iter().filter(|&&b| b >> 2 & 0x3f == 3).count() > kinds.iter().filter(|&&b| b >> 3 == 3).count();
+            let field = |d: u32| if self.location5 { d & 1 == 0 && d >> 5 & 1 == 0 } else { d & 3 == 0 };
+            let fits = |s: u32| {
+                maps.iter()
+                    .filter(|&&m| {
+                        let mut idx: Vec<u32> = self.descriptors(mem, m).into_iter().filter(|(_, d)| field(*d)).map(|(_, d)| (d >> s) & 0x3ff).collect();
+                        idx.sort_unstable();
+                        idx.len() > 1 && idx.iter().enumerate().all(|(i, &x)| x == i as u32)
+                    })
+                    .count()
+            };
+            let counts: Vec<(usize, u32)> = (16..24).map(|s| (fits(s), s)).collect();
+            if let Some(&(_, s)) = counts.iter().filter(|f| f.0 > 0).max_by_key(|f| (f.0, std::cmp::Reverse(f.1))) {
+                self.field_shift = s;
+            }
+            if std::env::var_os("FERRET_DEBUG").is_some() {
+                eprintln!("{:?} V8: {} objects, field index at bit {} ({counts:?}), location in bit 5: {} ({indexed} of {}), 6-bit elements kinds: {}", self.cells, maps.len(), self.field_shift, self.location5, bit1.len(), self.kind6);
+            }
+            return;
+        }
         if self.cells != Cells::InDictionary {
             return;
         }
@@ -729,8 +820,8 @@ impl Js {
     /// A web game's V8 (web.rs): compressed references into the cage at `base`, V8 14.x or
     /// newer; `offsets`: V8 15.x's field offsets in property details.
     pub(crate) fn web(base: u64, meta: u64, cell_map: u64, offsets: bool) -> Js {
-        let l = Layout { w: 4, base };
-        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), c2_keys: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, ept: None, number_map: None, typed: false, bools: Mutex::default() }
+        let l = Layout { w: 4, base, wide: false };
+        Js { l, cells: Cells::Compressed, meta, cell_map, field_shift: 19, globals: Vec::new(), c2_keys: Vec::new(), ext: 0, cell_name: 1, modern: true, offsets, ept: None, number_map: None, typed: false, location5: false, kind6: false, bools: Mutex::default() }
     }
 
     /// A web game's V8 version, from objects of the game (web.rs): V8 15.x when their
@@ -798,7 +889,7 @@ impl Js {
 
     /// The elements kind kept in a map's bit_field2.
     fn elements_kind(&self, mem: &Mem, m: u64) -> Option<u8> {
-        byte(mem, m - 1 + self.l.map_bit_field2()).map(|b| if self.modern { b >> 2 & 0x3f } else { b >> 3 })
+        byte(mem, m - 1 + self.l.map_bit_field2()).map(|b| if self.modern || self.kind6 { b >> 2 & 0x3f } else { b >> 3 })
     }
 
     pub(crate) fn map_of(&self, mem: &Mem, o: u64) -> Option<u64> {
@@ -811,7 +902,7 @@ impl Js {
     pub(crate) fn instance_type(&self, mem: &Mem, m: u64) -> Option<u16> {
         let at = m - 1 + self.l.map_type();
         match self.cells {
-            Cells::Named | Cells::Compressed => half(mem, at).map(|t| t as u16),
+            Cells::Named | Cells::Compressed | Cells::Wide => half(mem, at).map(|t| t as u16),
             Cells::InDictionary | Cells::Paired => byte(mem, at).map(u16::from),
         }
     }
@@ -839,7 +930,7 @@ impl Js {
             }
             Cells::InDictionary => self.word(mem, cell + w)?,
             Cells::Paired => self.word(mem, cell + 2 * w)?,
-            Cells::Compressed => {
+            Cells::Compressed | Cells::Wide => {
                 let n = self.word(mem, cell + self.cell_name * w)?;
                 if self.text(mem, n).as_deref() != Some(name) {
                     return None;
@@ -861,7 +952,8 @@ impl Js {
         let mut b = vec![0u8; 3 * ws * own as usize];
         // Entries after {map, counts, marked count, enum cache} (V8 14.x: a word more; 15.x:
         // the two counts in one word, as before).
-        let first = if self.offsets { 16 } else if self.modern { 20 } else { 4 * l.w };
+        // (Wide: {map, four 16-bit counts, enum cache}.)
+        let first = if self.offsets { 16 } else if self.modern { 20 } else if l.wide { 24 } else { 4 * l.w };
         if mem.read_exact_at(&mut b, d - 1 + first).is_err() {
             return Vec::new();
         }
@@ -894,11 +986,11 @@ impl Js {
         let m = self.map_of(mem, s)?;
         let t = self.instance_type(mem, m)?;
         // Strings' types are the lowest: below 0x80 (0x40 in V8 8.x).
-        if t >= if l.compressed() { 0x40 } else { 0x80 } {
+        if t >= if l.newer() { 0x40 } else { 0x80 } {
             return None;
         }
         // The length: a Smi, a plain int in V8 8.x.
-        let len = match l.compressed() {
+        let len = match l.newer() {
             true => half(mem, s - 1 + l.str_len())?,
             false => l.smi(self.word(mem, s - 1 + l.str_len())?)? as u32,
         };
@@ -909,7 +1001,7 @@ impl Js {
         // (thin strings came), bit 3.
         let (one_byte, rep) = match self.cells {
             Cells::InDictionary | Cells::Paired => (t & 0x4 != 0, t & 0x3),
-            Cells::Named | Cells::Compressed => (t & 0x8 != 0, t & 0x7),
+            Cells::Named | Cells::Compressed | Cells::Wide => (t & 0x8 != 0, t & 0x7),
         };
         let (o, body) = (s - 1, l.str_body());
         let chars = |at: u64| {
@@ -934,7 +1026,7 @@ impl Js {
             }
             2 if self.cells == Cells::Compressed => {
                 let resource = word(mem, o + body)?;
-                chars(word(mem, resource.checked_add_signed(self.ext)?)? + 12)
+                chars(word(mem, resource.checked_add_signed(self.ext)?)? + 12).filter(|t: &String| !t.chars().any(char::is_control))
             }
             // External in older V8 (the browser's own names, which a game's script then
             // shares: "name"): {.., resource, the resource's characters}; a short one (bit 4)
@@ -1047,27 +1139,39 @@ impl Js {
         let Some(bits) = half(mem, m - 1 + l.map_bit_field3()) else { return Vec::new() };
         let props = self.word(mem, o - 1 + l.obj_props()).unwrap_or(0);
         // A dictionary-mode object: bit 20 of bit_field3 (21 in V8 8.x and later).
-        if bits >> if self.cells == Cells::Compressed { 21 } else { 20 } & 1 == 1 {
+        if bits >> if self.l.newer() { 21 } else { 20 } & 1 == 1 {
             // Entries after the prefix (next enumeration index, hash; V8 15.x: flags too).
-            let first = if self.offsets { 6 } else { 5 };
-            return self.dictionary(mem, props, first).into_iter().filter_map(|(k, v)| Some((self.text(mem, k)?, v))).collect();
+            let read = |first: u64| -> Vec<(String, Val)> { self.dictionary(mem, props, first).into_iter().filter_map(|(k, v)| Some((self.text(mem, k)?, v))).collect() };
+            if self.offsets {
+                return read(6);
+            }
+            // (The flags came between V8 9.1 and 10.4, Electron 13 and 20: whichever start
+            // reads more names.)
+            let (five, six) = (read(5), if l.compressed() && !self.modern { read(6) } else { Vec::new() });
+            return if six.len() > five.len() { six } else { five };
         }
         let (Some(words), Some(b9)) = (byte(mem, m - 1 + l.map_words()), byte(mem, m - 1 + l.map_words() + 1)) else { return Vec::new() };
         let (words, b9) = (u64::from(words), u64::from(b9));
         // V8 4.x keeps the count of in-object fields, 6.x where they start.
         let inside = match self.cells {
             Cells::InDictionary | Cells::Paired => b9,
-            Cells::Named | Cells::Compressed => words.saturating_sub(b9),
+            Cells::Named | Cells::Compressed | Cells::Wide => words.saturating_sub(b9),
         };
         let start = (words.saturating_sub(inside)) * l.w;
         // 64-bit: doubles kept in the object itself (no box), a bit each in the layout
         // descriptor (a Smi; a pointer for objects of more fields, not read: those doubles are
         // left out). 32-bit V8 boxes every double field.
-        let layout = if l.w == 8 { word(mem, m - 1 + 56).unwrap_or(0) } else { 0 };
+        // (Wide: the word after the descriptors, when V8 keeps one there: Electron 8's
+        // doesn't, every double field has a box of its own.)
+        let layout = match (l.w, l.wide) {
+            (8, false) => word(mem, m - 1 + 56).unwrap_or(0),
+            (8, true) => word(mem, m - 1 + 48).filter(|&x| l.is_smi(x)).unwrap_or(0),
+            _ => 0,
+        };
         let mut out = Vec::new();
         for (k, det) in self.descriptors(mem, m) {
             // Constants and accessors aren't fields.
-            let not_field = match self.modern {
+            let not_field = match self.modern || self.location5 {
                 true => det & 1 != 0 || det >> 5 & 1 != 0,
                 false if self.typed => det & 7 != 1,
                 false => det & 3 != 0,
@@ -1091,12 +1195,12 @@ impl Js {
             // Representations: ..., Smi 5, Integer32 6, Double 7, HeapObject 8, Tagged 9; in
             // V8 8.x 3 bits 13 lower: None 0, Smi 1, Double 2, HeapObject 3, Tagged 4.
             let double = match self.cells {
-                Cells::Compressed => (det >> (self.field_shift - 13)) & 0x7 == 2,
+                Cells::Compressed | Cells::Wide => (det >> (self.field_shift - 13)) & 0x7 == 2,
                 _ => (det >> (self.field_shift - 14)) & 0xf == 7,
             };
             // Kept as any value (Tagged): 4 of the 3 bits, 9 of the old 4.
             let any = match self.cells {
-                Cells::Compressed => (det >> (self.field_shift - 13)) & 0x7 == 4,
+                Cells::Compressed | Cells::Wide => (det >> (self.field_shift - 13)) & 0x7 == 4,
                 _ => (det >> (self.field_shift - 14)) & 0xf == 9,
             };
             let val = if index < inside {
@@ -1196,7 +1300,7 @@ impl Js {
         // first sort before it: 6-11, the dictionary 12).
         let dictionary = match (self.cells, self.modern) {
             (_, true) => 13,
-            (Cells::Compressed, false) => 12,
+            (Cells::Compressed | Cells::Wide, false) => 12,
             _ => 6,
         };
         match kind {

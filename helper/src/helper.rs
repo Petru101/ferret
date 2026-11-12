@@ -228,7 +228,9 @@ fn dosbox_game(argv0: &str, cwd: &str, home: &str) -> Option<String> {
 /// Under Wine the program is the .exe it maps (RPG Maker MZ games ship for Windows only).
 /// The Electron app a process belongs to (`web::electron_app`).
 fn electron(pid: u32) -> Option<web::App> {
-    let program = os::exe(pid)?;
+    // Under Wine the program is the .exe it maps (GDevelop's games ship Electron for Windows).
+    let windows = exe_name(pid).to_ascii_lowercase().ends_with(".exe");
+    let program = if windows { program_of(pid)? } else { os::exe(pid)? };
     web::electron_app(&program, &cmdline(pid), |p| os::inside(pid, p))
 }
 
@@ -246,7 +248,8 @@ fn nwjs_app(pid: u32) -> Option<PathBuf> {
 /// (`--type=renderer`; NW.js 0.12's renderers are forked from its zygote and keep the zygote's
 /// command line); the window's own process (GTK) and the GPU process hold none of them.
 fn nwjs_renderer(pid: u32) -> bool {
-    let cmd = cmdline(pid);
+    // (Chromium for Windows starts its GPU process with `--ignored=" --type=renderer "`.)
+    let cmd = cmdline(pid).replace("--ignored= --type=renderer", "");
     let parent = os::parent(pid);
     cmd.contains(" --type=renderer") || cmd.contains(" --type=zygote") && parent.is_some_and(|p| cmdline(p).contains(" --type=zygote"))
 }
@@ -4839,7 +4842,7 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
             if is_web(s.pid) {
                 return match web::player(&heap) {
                     Some(list) => print_player(out, s, &list, t),
-                    None => writeln!(out, "none engine JavaScript scopes not found (only V8 with compressed pointers: Electron 21 and newer)"),
+                    None => writeln!(out, "none engine JavaScript engine not found (read: Electron 8, 13 and 20 and newer, NW.js)"),
                 };
             }
             if s.java {

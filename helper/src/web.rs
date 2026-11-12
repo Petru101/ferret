@@ -121,7 +121,7 @@ static VARS: Mutex<(Option<u32>, Option<u32>)> = Mutex::new((None, None));
 /// The same for an old V8 without compressed references (NW.js before 0.44): its word size
 /// and HeapNumber's map. There a `jsvar` place is a whole slot holding a small integer or a
 /// HeapNumber. Set (and `VARS` left unused) while such a game is attached.
-static OLD_VARS: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+static OLD_VARS: Mutex<Option<(u64, u64, u64)>> = Mutex::new(None);
 
 fn old_word(mem: &Mem, at: u64, w: u64) -> Option<u64> {
     match w {
@@ -131,15 +131,17 @@ fn old_word(mem: &Mem, at: u64, w: u64) -> Option<u64> {
 }
 
 /// An old V8's slot as a number: a small integer (64-bit: the upper half; 32-bit: doubled) or
-/// a HeapNumber ({map, double}).
-fn read_old_var(mem: &Mem, slot: u64, w: u64, number: u64) -> Option<f64> {
+/// a HeapNumber ({map, double}). `base`: the cage of compressed references (Electron 13 to
+/// 20), else 0.
+fn read_old_var(mem: &Mem, slot: u64, w: u64, number: u64, base: u64) -> Option<f64> {
     let x = old_word(mem, slot, w)?;
     match w {
         8 if x & 0xffff_ffff == 0 => return Some(f64::from((x >> 32) as u32 as i32)),
         4 if x & 1 == 0 => return Some(f64::from(x as u32 as i32 >> 1)),
         _ => {}
     }
-    if x & 3 != 1 || old_word(mem, x - 1, w)? != number {
+    let x = base | x;
+    if x & 3 != 1 || base | old_word(mem, x - 1, w)? != number {
         return None;
     }
     f64_at(mem, x - 1 + w)
@@ -147,9 +149,9 @@ fn read_old_var(mem: &Mem, slot: u64, w: u64, number: u64) -> Option<f64> {
 
 /// Writes a whole number into an old V8's slot as a small integer, while it holds a number
 /// (a HeapNumber is left alone: other variables may hold the same one).
-fn write_old_var(mem: &Mem, slot: u64, w: u64, number: u64, v: f64) -> std::io::Result<()> {
+fn write_old_var(mem: &Mem, slot: u64, w: u64, number: u64, base: u64, v: f64) -> std::io::Result<()> {
     let refused = |why: &str| Err(std::io::Error::other(why.to_owned()));
-    if read_old_var(mem, slot, w, number).is_none() {
+    if read_old_var(mem, slot, w, number, base).is_none() {
         return refused("not a number now");
     }
     let limit = if w == 8 { 2147483647.0 } else { 1073741823.0 };
@@ -166,8 +168,8 @@ fn write_old_var(mem: &Mem, slot: u64, w: u64, number: u64, v: f64) -> std::io::
 /// ({map, double}) or a ContextCell (by its state: a constant or small integer in `value`,
 /// an int32 or a double in the last field). None when it holds anything else now.
 pub fn read_var(mem: &Mem, slot: u64) -> Option<f64> {
-    if let Some((w, number)) = *OLD_VARS.lock().unwrap() {
-        return read_old_var(mem, slot, w, number);
+    if let Some((w, number, base)) = *OLD_VARS.lock().unwrap() {
+        return read_old_var(mem, slot, w, number, base);
     }
     let (cell, number) = *VARS.lock().unwrap();
     let number = number?;
@@ -206,8 +208,8 @@ pub fn read_var(mem: &Mem, slot: u64) -> Option<f64> {
 /// the slot (a HeapNumber is left alone, other variables may hold the same one: so only whole
 /// numbers there).
 pub fn write_var(mem: &Mem, slot: u64, v: f64) -> std::io::Result<()> {
-    if let Some((w, number)) = *OLD_VARS.lock().unwrap() {
-        return write_old_var(mem, slot, w, number, v);
+    if let Some((w, number, base)) = *OLD_VARS.lock().unwrap() {
+        return write_old_var(mem, slot, w, number, base, v);
     }
     let refused = |why: &str| Err(std::io::Error::other(why.to_owned()));
     let (cell, Some(number)) = *VARS.lock().unwrap() else { return refused("this game's numbers aren't known yet") };
@@ -271,6 +273,10 @@ pub struct Web {
     /// roots are the global objects' properties and the engines' objects.
     pub legacy: Option<Legacy>,
 }
+
+/// GDevelop's games found last (`Web::gd_games`), by process.
+static GD_GAMES: Mutex<Option<(u32, Instant, Vec<u64>)>> = Mutex::new(None);
+const GD_GAMES_FOR: Duration = Duration::from_secs(10);
 
 /// What an old V8 was found with.
 pub struct Legacy {
@@ -378,7 +384,7 @@ impl Web {
         // value are number places whatever the game stores there next.
         let mem = heap.mem();
         js.number_map = globals.iter().filter(|g| g.0 == "NaN" || g.0 == "Infinity").find_map(|g| js.word(mem, g.2).filter(|v| v & 3 == 1).and_then(|v| js.map_of(mem, v)));
-        *OLD_VARS.lock().unwrap() = js.number_map.map(|n| (js.width(), n));
+        *OLD_VARS.lock().unwrap() = js.number_map.map(|n| (js.width(), n, js.base()));
         let objects: Vec<u64> = globals.iter().filter_map(|g| js.word(mem, g.2)).filter(|v| v & 3 == 1).collect();
         js.calibrate_types(mem, &objects);
         let function = js.function_type(heap.mem());
@@ -769,15 +775,26 @@ impl Web {
     /// over the cage: every JS object map (its map is the native context's meta map), then the
     /// objects with the maps named.
     fn objects_where(&self, heap: &Heap, name_of: impl Fn(u64) -> Option<String>) -> Vec<(String, u64)> {
+        self.objects_where_if(heap, name_of, |_| true)
+    }
+
+    /// `objects_where`, only the objects `accept` takes (checked before they count toward
+    /// `MAX_INSTANCES`: Electron 8 has sixteen other things starting with the game's map).
+    fn objects_where_if(&self, heap: &Heap, name_of: impl Fn(u64) -> Option<String>, accept: impl Fn(u64) -> bool) -> Vec<(String, u64)> {
         let mem = heap.mem();
         if self.legacy.is_some() {
             // Whole words, one meta map: the maps (their first word is it), then the objects
             // whose first word is a map named.
             let ws = self.js.width() as usize;
-            let read = |b: &[u8], off: usize| if ws == 8 { u64::from_le_bytes(b[off..off + 8].try_into().unwrap()) } else { u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64 };
+            // (Compressed references, Electron 13 to 20: offsets into the cage, read whole.)
+            let base = self.js.base();
+            let read = |b: &[u8], off: usize| if ws == 8 { u64::from_le_bytes(b[off..off + 8].try_into().unwrap()) } else { base | u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64 };
             let meta = self.js.meta();
             let mut maps: Vec<u64> = Vec::new();
             heap.each_chunk(0, |addr, b, fresh| {
+                if base != 0 && addr & !0xffff_ffff != base {
+                    return;
+                }
                 for off in (0..fresh - fresh % ws).step_by(ws) {
                     if read(b, off) == meta {
                         maps.push(addr + off as u64 + 1);
@@ -795,11 +812,22 @@ impl Web {
             let mut out: Vec<(String, u64)> = Vec::new();
             let mut count: HashMap<String, usize> = HashMap::new();
             heap.each_chunk(0, |addr, b, fresh| {
+                if base != 0 && addr & !0xffff_ffff != base {
+                    return;
+                }
                 for off in (0..fresh - fresh % ws).step_by(ws) {
                     let Some(name) = of.get(&read(b, off)) else { continue };
+                    if base != 0 && off >= 20 && read(b, off - 20) == meta {
+                        continue;
+                    }
+                    // A map's back pointer (map +32 in 64-bit V8) holds the map before it: not
+                    // an object (Electron 8: sixteen of them filled the game's quota).
+                    if ws == 8 && off >= 32 && read(b, off - 32) == meta {
+                        continue;
+                    }
                     let o = addr + off as u64 + 1;
                     let n = count.entry(name.clone()).or_default();
-                    if *n < MAX_INSTANCES && self.is_object(mem, o) {
+                    if *n < MAX_INSTANCES && self.is_object(mem, o) && accept(o) {
                         *n += 1;
                         out.push((name.clone(), o));
                     }
@@ -853,7 +881,7 @@ impl Web {
                 }
                 let o = addr + off as u64 + 1;
                 let n = count.entry(name.clone()).or_default();
-                if *n < MAX_INSTANCES && object(o) {
+                if *n < MAX_INSTANCES && object(o) && accept(o) {
                     *n += 1;
                     out.push((name.clone(), o));
                 }
@@ -866,13 +894,29 @@ impl Web {
     /// and `_data` (the game's runtime keeps its scenes, global variables and project data so).
     pub fn gd_games(&self, heap: &Heap) -> Vec<u64> {
         let mem = heap.mem();
-        self.objects_where(heap, |m| {
-            let names: Vec<String> = self.js.descriptors(mem, m).into_iter().take(80).filter_map(|(k, _)| self.js.text(mem, k)).collect();
-            ["_sceneStack", "_variables", "_data"].iter().all(|n| names.iter().any(|x| x == n)).then(String::new)
-        })
-        .into_iter()
-        .map(|(_, o)| o)
-        .collect()
+        // A game keeps its variables in a container (other things start with such a map too).
+        let game = |g: u64| matches!(self.js.field(mem, g, "_variables"), Some(Val::Obj(c)) if matches!(self.js.field(mem, c, "_variables"), Some(Val::Obj(_))));
+        // Found lately and still games: each search is two passes over memory, and every
+        // saved value of a game starts from it (three values took 10 s to restore).
+        if let Some((_, _, games)) = GD_GAMES.lock().unwrap().as_ref().filter(|(pid, at, games)| *pid == heap.pid && at.elapsed() < GD_GAMES_FOR && !games.is_empty() && games.iter().all(|&g| game(g))) {
+            return games.clone();
+        }
+        let mut games: Vec<u64> = self
+            .objects_where_if(
+                heap,
+                |m| {
+                    let names: Vec<String> = self.js.descriptors(mem, m).into_iter().take(80).filter_map(|(k, _)| self.js.text(mem, k)).collect();
+                    ["_sceneStack", "_variables", "_data"].iter().all(|n| names.iter().any(|x| x == n)).then(String::new)
+                },
+                game,
+            )
+            .into_iter()
+            .map(|(_, o)| o)
+            .collect();
+        // The one running scenes first.
+        games.sort_by_key(|&g| std::cmp::Reverse(self.gd_scenes(mem, g).len()));
+        *GD_GAMES.lock().unwrap() = Some((heap.pid, Instant::now(), games.clone()));
+        games
     }
 
     /// Construct 2's runtimes: the canvas element's `c2runtime` (cr_createRuntime sets it; the
