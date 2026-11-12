@@ -560,7 +560,15 @@ impl<'a> Mono<'a> {
     /// None for other classes.
     fn native(&self, obj: u64, k: u64) -> Option<u64> {
         let unity = self.chain(k).into_iter().find(|&c| self.name(c).is_some_and(|(ns, n)| ns == "UnityEngine" && n == "Object"))?;
-        Some(self.word(obj + self.offset(unity, "m_CachedPtr")?).unwrap_or(0))
+        Some(self.word(obj + self.cached_ptr(unity)?).unwrap_or(0))
+    }
+
+    /// Where a UnityEngine.Object keeps the pointer to its native object: `m_CachedPtr`; in
+    /// Unity 4 inside a struct, `m_UnityRuntimeReferenceData` {int instanceID; IntPtr
+    /// cachedPtr} (7dFPS Vacuum, 4.6: without it nothing could be told from the many things
+    /// that only look like objects, and every class seemed to have dozens).
+    fn cached_ptr(&self, unity: u64) -> Option<u64> {
+        self.offset(unity, "m_CachedPtr").or_else(|| Some(self.offset(unity, "m_UnityRuntimeReferenceData")? + self.lay.w))
     }
 
     /// Whether the object is one, and not a destroyed Unity object. A live Unity object's
@@ -1245,7 +1253,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
     // MonoBehaviour and UnityEngine.Object by their names, among them (no passes).
     let named = |class: &str| -> Vec<u64> { classes.iter().copied().filter(|&k| m.name(k).is_some_and(|(ns, n)| ns == "UnityEngine" && n == class)).collect() };
     let base = named("MonoBehaviour");
-    let cached_ptr = named("Object").into_iter().find_map(|k| m.offset(k, "m_CachedPtr"));
+    let cached_ptr = named("Object").into_iter().find_map(|k| m.cached_ptr(k));
     let _ = &unity;
     let below = |k: u64| {
         let mut c = k;
@@ -1294,6 +1302,14 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
     if debug {
         let names: Vec<String> = games.iter().take(12).filter_map(|&k| m.name(k)).map(|(ns, n)| format!("{ns}.{n}")).collect();
         eprintln!("unity list: {} game classes ({}), {} vtables or classes pointed to, {} classes with live objects", games.len(), names.join(" "), firsts.len(), by_class.len());
+    }
+    if debug {
+        for (k, objs) in &by_class {
+            let mut o = objs.clone();
+            o.sort_unstable();
+            o.dedup();
+            eprintln!("unity list: {:?}: {} live objects ({} found) {:x?}", m.name(*k).map(|n| n.1), o.len(), objs.len(), &o[..o.len().min(6)]);
+        }
     }
     by_class.retain(|(_, objs)| {
         let mut o = objs.clone();
