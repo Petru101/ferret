@@ -7,7 +7,8 @@
 // { const Variant *key; Variant value; Element *next, *prev; void *list }, a Variant is
 // { u32 type; 4 bytes of padding (not always zero); 16 bytes of data }, type 2 = int (an int64),
 // 3 = real (a double),
-// 4 = String (data = pointer to its characters, UTF-32: wchar_t is 4 bytes on Linux).
+// 4 = String (data = pointer to its characters, UTF-32: wchar_t is 4 bytes on Linux; UTF-16 in
+// Godot 3's Windows builds).
 // Godot 4 keeps the entries in a HashMap whose elements are { Element *next, *prev; Variant key;
 // Variant value }, in insertion order; keys are Strings (4) or StringNames (21: data = pointer
 // to { u32 refcount, u32 static count, then its String at +8 (4.5+), else a C string there and
@@ -152,11 +153,13 @@ impl Shape {
 struct Dicts<'a> {
     heap: &'a Heap<'a>,
     keys: RefCell<HashMap<u64, Option<String>>>,
+    /// A Windows build: Godot 3 keeps text as UTF-16 there (wchar_t), Godot 4 as UTF-32.
+    windows: bool,
 }
 
 impl<'a> Dicts<'a> {
     fn new(heap: &'a Heap<'a>) -> Self {
-        Dicts { heap, keys: RefCell::default() }
+        Dicts { heap, keys: RefCell::default(), windows: crate::helper::exe_name(heap.pid).to_lowercase().ends_with(".exe") }
     }
 
     fn mem(&self) -> &Mem {
@@ -217,21 +220,25 @@ impl<'a> Dicts<'a> {
             STRING => self.u64_at(k + 8)?,
             STRING_NAME if shape == Shape::V4 => {
                 let sn = self.u64_at(k + 8).filter(|&p| self.heap.is_pointer(p))?;
-                return [8, 0x10].into_iter().find_map(|at| self.u64_at(sn + at).filter(|&p| self.heap.is_pointer(p)).and_then(|c| self.chars(c)));
+                return [8, 0x10].into_iter().find_map(|at| self.u64_at(sn + at).filter(|&p| self.heap.is_pointer(p)).and_then(|c| self.chars(c, 4)));
             }
             _ => return None,
         };
-        self.chars(chars)
+        self.chars(chars, if shape == Shape::V3 && self.windows { 2 } else { 4 })
     }
 
-    /// A key's UTF-32 characters at `chars`.
-    fn chars(&self, chars: u64) -> Option<String> {
+    /// A key's characters at `chars`, `wide` bytes each (UTF-32, or UTF-16).
+    fn chars(&self, chars: u64, wide: usize) -> Option<String> {
         if let Some(cached) = self.keys.borrow().get(&chars) {
             return cached.clone();
         }
         let mut b = [0u8; 4 * MAX_KEY];
-        let text = self.mem().read_exact_at(&mut b, chars).ok().and_then(|_| {
-            let units: Vec<u32> = b.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).take_while(|&c| c != 0).collect();
+        let text = self.mem().read_exact_at(&mut b[..wide * MAX_KEY], chars).ok().and_then(|_| {
+            let units: Vec<u32> = b[..wide * MAX_KEY]
+                .chunks(wide)
+                .map(|c| if wide == 2 { u16::from_le_bytes([c[0], c[1]]) as u32 } else { u32::from_le_bytes([c[0], c[1], c[2], c[3]]) })
+                .take_while(|&c| c != 0)
+                .collect();
             let t: String = units.iter().map(|&c| char::from_u32(c)).collect::<Option<_>>()?;
             (units.len() < MAX_KEY && good_key(&t)).then_some(t)
         });
@@ -302,6 +309,8 @@ impl<'a> Dicts<'a> {
         let mut found: HashMap<String, Vec<u64>> = HashMap::new();
         let word = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
         let half = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let debug = std::env::var_os("FERRET_DEBUG").is_some();
+        let (mut shaped, mut seen) = (0usize, HashMap::new());
         self.heap.each_chunk(ELEMENT, |addr, b, fresh| {
             for o in (0..fresh).step_by(8).take_while(|o| o + ELEMENT <= b.len()) {
                 let e = addr + o as u64;
@@ -318,12 +327,23 @@ impl<'a> Dicts<'a> {
                     if !self.shaped(shape, k, t, next, prev) {
                         continue;
                     }
+                    if debug {
+                        shaped += 1;
+                        if let Some(k) = self.key(e, shape) {
+                            *seen.entry(k).or_insert(0usize) += 1;
+                        }
+                    }
                     if let Some(key) = self.key(e, shape).filter(|k| keys.contains(k)) {
                         found.entry(key).or_default().push(e);
                     }
                 }
             }
         });
+        if debug {
+            let mut keys: Vec<(String, usize)> = seen.into_iter().collect();
+            keys.sort_by_key(|k| std::cmp::Reverse(k.1));
+            eprintln!("godot dictionaries: {shaped} places shaped like a number entry, {} different keys: {:?}", keys.len(), keys.iter().take(40).collect::<Vec<_>>());
+        }
         found
     }
 

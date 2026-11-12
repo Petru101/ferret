@@ -1228,10 +1228,14 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
         all.extend(&next);
         level = next;
     }
+    let debug = std::env::var_os("FERRET_DEBUG").is_some();
+    if debug {
+        eprintln!("unity list: {:?}, {} MonoBehaviour classes, {} classes below them", runtime, base.len(), all.len());
+    }
     let mut games: Vec<u64> = all.into_iter().filter(|&k| m.name(k).is_some_and(|(ns, _)| !engine_namespace(&ns))).collect();
     games.sort_unstable();
     // Their objects: Mono's point to a vtable, whose first word is the class; IL2CPP's to the class.
-    let firsts = match runtime {
+    let firsts: Vec<u64> = match runtime {
         Runtime::Mono => heap.referrers(&games).into_iter().filter(|&vt| m.word(vt).is_some_and(|k| games.binary_search(&k).is_ok()) && !m.is_class(vt)).collect(),
         Runtime::Il2cpp => games.clone(),
     };
@@ -1242,6 +1246,10 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
             Some((_, objs)) => objs.push(obj),
             None => by_class.push((k, vec![obj])),
         }
+    }
+    if debug {
+        let names: Vec<String> = games.iter().take(12).filter_map(|&k| m.name(k)).map(|(ns, n)| format!("{ns}.{n}")).collect();
+        eprintln!("unity list: {} game classes ({}), {} vtables or classes pointed to, {} classes with live objects", games.len(), names.join(" "), firsts.len(), by_class.len());
     }
     by_class.retain(|(_, objs)| {
         let mut o = objs.clone();
