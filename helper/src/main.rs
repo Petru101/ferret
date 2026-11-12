@@ -2,6 +2,7 @@
 // flatpak runtime. Uses only std and libc.
 mod air;
 mod anticheat;
+mod coreclr;
 mod gdscript;
 mod gml;
 mod lua;

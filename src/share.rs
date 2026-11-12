@@ -153,7 +153,7 @@ fn good_path(path: &str) -> bool {
 /// An engine path or another name, as the helper's `named` takes it: one token of printable
 /// characters starting the way such paths do.
 fn good_named(named: &str) -> bool {
-    const STARTS: [&str; 6] = ["gd:", "mono:", "il2cpp:", "ue:", "{", "\""];
+    const STARTS: [&str; 7] = ["gd:", "cs:", "mono:", "il2cpp:", "ue:", "{", "\""];
     named.len() <= 512 && STARTS.iter().any(|s| named.starts_with(s)) && !named.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 

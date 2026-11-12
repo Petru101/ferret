@@ -29,7 +29,8 @@
 // gd:singletons/run_data.gd.players_data[0].effects{193432} = the entry under that key. Godot 3:
 // the Variant (type 18) points to { refcount; List *; ... }, the list to { first, last, size },
 // its elements { Variant *key; Variant value; next; prev; list }. Godot 4 (type 27): { refcount;
-// read-only; HashMap }, elements { next, prev, Variant key, Variant value }.
+// read-only; (4.0 to 4.3: two words more;) HashMap }, elements { next, prev, Variant key,
+// Variant value }.
 // The scene tree: a Node points to its parent and keeps its children (Godot 3: a Vector<Node *>,
 // Godot 4: a HashMap<StringName, Node *>) and its name (a StringName); the root is named
 // "root". Learned from any node Ferret meets, it finds objects again by pointer reads.
@@ -53,6 +54,8 @@ const REAL: u32 = 3;
 const OBJECT: [u32; 2] = [17, 24];
 const ARRAY: [u32; 2] = [19, 28];
 const DICTIONARY: [u32; 2] = [18, 27];
+/// Where a Godot 4 Dictionary's private part may keep its HashMap.
+const MAP_AT: [u64; 4] = [0x10, 0x20, 8, 0x18];
 /// Entries per dictionary looked through.
 const MAX_ENTRIES: usize = 4096;
 /// Where a Vector's or String's size is, in bytes before its data: a u32 right before it
@@ -583,7 +586,8 @@ impl<'a> Godot<'a> {
         let private = self.ptr(v + 8)?;
         let mut out = Vec::new();
         if self.lay.v4 {
-            let map = [0x10u64, 8, 0x18].into_iter().find(|&m| hash_entries_at(mem, private + m).is_some())?;
+            // (Where the map starts: +0x10 in Godot 4.7, +0x20 in 4.0 to 4.3.)
+            let map = MAP_AT.into_iter().find(|&m| hash_entries_at(mem, private + m).is_some())?;
             for e in hash_entries_at(mem, private + map)? {
                 if mem_u32(mem, e + 0x10) == Some(INT) {
                     out.push((mem_u64(mem, e + 0x18)? as i64, e + 0x28));
@@ -724,7 +728,7 @@ impl<'a> Godot<'a> {
                     }
                 }
                 let maps = self.heap.referrers(&[first]).into_iter().filter_map(|at| at.checked_sub(0x10)).filter(|&m| hash_entries_at(mem, m).is_some_and(|es| es.contains(&e)));
-                Some((maps.flat_map(|m| [m.wrapping_sub(0x10), m.wrapping_sub(8), m.wrapping_sub(0x18)]).collect(), key))
+                Some((maps.flat_map(|m| MAP_AT.map(|at| m.wrapping_sub(at))).collect(), key))
             } else {
                 let e = target.checked_sub(16)?;
                 let (key, list) = (self.ptr(e)?, self.ptr(e + 48)?);
@@ -1018,6 +1022,24 @@ pub fn tree_text(heap: &Heap) -> Option<Vec<String>> {
         }
     }
     Some(out)
+}
+
+/// Whether the engine object at `obj` is a node in the scene tree now; None while the tree
+/// isn't known and can't be learned from this object (it isn't a node in it). For games whose
+/// scripts aren't GDScript (C#: coreclr.rs), where no script instance gives the layout: only
+/// where a string's size is kept is needed, each way tried.
+pub fn node_in_tree(heap: &Heap, obj: u64) -> Option<bool> {
+    static COW: Mutex<Option<(u32, u64)>> = Mutex::new(None);
+    let known = known_layout(heap.pid).map(|l| l.cow).or_else(|| COW.lock().unwrap().filter(|c| c.0 == heap.pid).map(|c| c.1));
+    for cow in SIZES.into_iter().filter(|&c| known.is_none_or(|k| k == c)) {
+        let lay = known_layout(heap.pid).unwrap_or(Layout { owner: 0, script: 0, members: 0, instance: 0, indices: 0, path: 0, wide: 4, cow, v4: true });
+        let g = Godot::new(heap, lay);
+        if let Some((t, root)) = g.tree(&[obj]) {
+            *COW.lock().unwrap() = Some((heap.pid, cow));
+            return Some(g.climb(&t, obj).is_some_and(|c| c.last() == Some(&root)));
+        }
+    }
+    None
 }
 
 /// Whether the path's objects are looked for in the scene tree only (pointer reads), not in

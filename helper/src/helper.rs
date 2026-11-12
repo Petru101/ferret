@@ -25,6 +25,7 @@ use crate::web::{self, WebPath};
 use crate::gml::{self, GmlPath};
 use crate::lua::{self, LuaPath};
 use crate::air::{self, AirPath};
+use crate::coreclr;
 use crate::java::{self, JavaPath};
 use crate::python::{self, PyPath};
 use crate::trace;
@@ -1154,6 +1155,8 @@ enum Named {
     Gml(GmlPath),
     Lua(LuaPath),
     Java(JavaPath),
+    /// A field of a C# Godot game's objects (coreclr.rs).
+    Cs(coreclr::CsPath),
     Py(PyPath),
     Air(AirPath),
     Web(WebPath),
@@ -1188,6 +1191,9 @@ impl Named {
         if text.starts_with("air:") {
             return AirPath::parse(text).map(Named::Air);
         }
+        if text.starts_with("cs:") {
+            return coreclr::CsPath::parse(text).map(Named::Cs);
+        }
         if text.starts_with("web:") {
             return WebPath::parse(text).map(Named::Web);
         }
@@ -1198,7 +1204,7 @@ impl Named {
     }
 
     fn is_named(text: &str) -> bool {
-        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:") || text.starts_with("py:") || text.starts_with("air:") || text.starts_with("web:")
+        text.starts_with('"') || text.starts_with('{') || text.starts_with("ue:") || text.starts_with("gd:") || text.starts_with("mono:") || text.starts_with("il2cpp:") || text.starts_with("js:") || text.starts_with("gml:") || text.starts_with("lua:") || text.starts_with("java:") || text.starts_with("py:") || text.starts_with("air:") || text.starts_with("web:") || text.starts_with("cs:")
     }
 
     /// Walked again right before every write (not only every `LIMIT_FIND_EVERY`): Java and
@@ -1206,7 +1212,7 @@ impl Named {
     /// reused; Python makes a new number object at every change (`hp -= 1`) and frees the old
     /// one.
     fn fresh(&self) -> bool {
-        matches!(self, Named::Java(_) | Named::Py(_) | Named::Js(_) | Named::Web(_))
+        matches!(self, Named::Java(_) | Named::Py(_) | Named::Js(_) | Named::Web(_) | Named::Cs(_))
     }
 
     /// Walked again before a write only when one is due (the number at its last place is out
@@ -1230,6 +1236,7 @@ impl Named {
             Named::Java(p) => java::walk(heap, roots, p),
             Named::Py(p) => python::walk(heap, roots, p),
             Named::Air(p) => air::walk(heap, roots, p),
+            Named::Cs(p) => coreclr::walk(heap, roots, p),
             Named::Web(p) => web::walk(heap, roots, p),
             Named::Unreal(p) => unreal(heap.pid, heap.mem()).map(|ue| ue.walk(heap.mem(), roots, p)).unwrap_or_default(),
         }
@@ -1248,6 +1255,7 @@ impl Named {
             Named::Java(p) => java::find_roots(heap, p),
             Named::Py(p) => python::find_roots(heap, p),
             Named::Air(p) => air::find_roots(heap, p),
+            Named::Cs(p) => coreclr::find_roots(heap, p),
             Named::Web(p) => web::find_roots(heap, p),
             Named::Unreal(p) => unreal(heap.pid, heap.mem()).map(|ue| ue.roots(heap.mem(), p)).unwrap_or_default(),
         }
@@ -1492,7 +1500,7 @@ fn limiter_loop(shared: SharedLimiter) {
                 .filter(|_| find)
                 .filter_map(|l| {
                     let n = l.named.as_mut()?;
-                    let every = if matches!(n.path, Named::Unreal(_)) { NAMED_REFIND_SCRIPT } else { NAMED_REFIND };
+                    let every = if matches!(n.path, Named::Unreal(_) | Named::Cs(_)) { NAMED_REFIND_SCRIPT } else { NAMED_REFIND };
                     let due = !n.searching && n.addrs.is_empty() && n.found_at.is_none_or(|t| t.elapsed() >= every);
                     n.searching |= due;
                     due.then(|| (l.name.clone(), n.path.clone()))
@@ -4683,6 +4691,16 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     if only_unreal {
         return writeln!(out, "0 named paths in {} ms", t.elapsed().as_millis());
     }
+    // A field of a C# Godot game's objects, by its class and the fields from there.
+    if coreclr::runs_coreclr(s.pid) {
+        if let Some((p, leads, field)) = coreclr::discover(&heap, target) {
+            if field != kind.name() {
+                writeln!(out, "type {field}")?;
+            }
+            writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
+            return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
+        }
+    }
     // An entry of a Godot dictionary is named by its key and its dictionary's other entries
     // (no pointer map needed).
     if let Some((p, leads)) = godot::discover(&heap, target) {
@@ -4745,6 +4763,9 @@ fn named_walk(heap: &Heap, path: &Named, roots: &mut Vec<u64>, found_at: &mut Op
         Named::Script(_) => NAMED_REFIND_SCRIPT,
         // Unreal's names take a fraction of a second, and a game still loading has none yet.
         Named::Unreal(_) => NAMED_REFIND_SCRIPT,
+        // A C# Godot game's objects come and go with its scenes (a round of get killed by
+        // circles lasts 10 s: the new player was never found in time); a search is one pass.
+        Named::Cs(_) => NAMED_REFIND_SCRIPT,
         _ => NAMED_REFIND,
     };
     if !leads.is_empty() || found_at.is_some_and(|t| t.elapsed() < every) {
@@ -4869,8 +4890,18 @@ fn cmd_player(out: &mut impl Write, s: &Session) -> io::Result<()> {
                     None => writeln!(out, "none engine Lua globals not found (only LuaJIT games are read)"),
                 };
             }
+            // A Godot game's scripts may be GDScript, C# (.NET objects: coreclr.rs) or both.
             let found = match is_godot(s.pid) {
-                true => gdscript::player(&heap),
+                true => {
+                    let csharp = coreclr::runs_coreclr(s.pid).then(|| coreclr::player(&heap)).flatten();
+                    match (csharp, gdscript::player(&heap)) {
+                        (Some(mut a), Some(b)) => {
+                            a.extend(b);
+                            Some(a)
+                        }
+                        (a, b) => a.or(b),
+                    }
+                }
                 false => mono::player(&heap),
             };
             match found {

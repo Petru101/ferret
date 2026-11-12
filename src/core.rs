@@ -367,7 +367,7 @@ impl Helper {
 /// dictionaries, RPG Maker's globals, GameMaker's variables, Lua tables, Java's, Python's and
 /// ActionScript's objects): nothing better to upgrade it to.
 fn engine_path(text: &str) -> bool {
-    ["ue:", "mono:", "il2cpp:", "gd:", "js:", "gml:", "lua:", "java:", "py:", "air:", "web:", "{"].iter().any(|p| text.starts_with(p))
+    ["ue:", "mono:", "il2cpp:", "gd:", "cs:", "js:", "gml:", "lua:", "java:", "py:", "air:", "web:", "{"].iter().any(|p| text.starts_with(p))
 }
 
 /// A name the helper lists in Ferret's words rather than the game's ("@gold": RPG Maker's
