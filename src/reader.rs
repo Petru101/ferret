@@ -30,6 +30,10 @@ const LINE_H: u32 = 48;
 /// "STORE"), 0.58 and 0.6 (Graveyard Keeper's "0"s), wrong ones as high as 0.52 (Quake's 11
 /// read as 10 by the whole-box fallback), 0.49 ("098P" for 09BP), 0.40 and 0.37: a thin gap.
 const MIN_DIGIT_PROB: f32 = 0.55;
+/// Whole-frame finds (`numbers`) whose least likely digit is under this aren't suggested. On
+/// the test set's frames the 270 finds that match the truth file start at 0.52; 52 other
+/// finds sit below 0.5.
+const MIN_FIND_PROB: f32 = 0.5;
 
 struct Reader {
     det: Model,
@@ -290,7 +294,11 @@ pub fn numbers(img: &RgbImage) -> Result<Vec<Word>, String> {
                 let x1 = ((last.1 + step / 2.0) as u32).min(l.rect.x + l.rect.w).max(x0 + 1);
                 // How sure the reader is of its least likely digit, in percent.
                 let weakest = run.iter().filter(|c| c.0.chars().all(|ch| ch.is_ascii_digit())).map(|c| c.2).fold(1f32, f32::min);
-                found.push(Word { text: n.to_string(), rect: Rect { x: x0, y: l.rect.y, w: x1 - x0, h: l.rect.h }, conf: weakest * 100.0 });
+                // A digit the reader itself doubts is mostly scenery read as a number (rivets,
+                // tiles, a cut-off title); the player can still draw a box there.
+                if weakest >= MIN_FIND_PROB {
+                    found.push(Word { text: n.to_string(), rect: Rect { x: x0, y: l.rect.y, w: x1 - x0, h: l.rect.h }, conf: weakest * 100.0 });
+                }
             }
             run.clear();
         };
