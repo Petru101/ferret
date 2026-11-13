@@ -2276,7 +2276,10 @@ fn cmd_games(out: &mut impl Write) -> io::Result<()> {
         let windows = lower.ends_with(".exe");
         // Steam's runtime starts a launcher service next to Proton games, with the game's app ID
         // (steam-runtime-launcher-service, now <arch>-srt-launcher-service).
-        let not_game = NOT_GAMES.contains(&lower.as_str()) || lower.ends_with("-launcher-service");
+        // A whole computer run in a program isn't a game Ferret can read (the Android
+        // emulator's `qemu-system-x86_64-headless` draws with no toolkit, from the home folder).
+        let machine = lower.starts_with("qemu-system-") || ["qemu-kvm", "crosvm", "vboxheadless", "vmware-vmx"].contains(&lower.as_str());
+        let not_game = NOT_GAMES.contains(&lower.as_str()) || lower.ends_with("-launcher-service") || machine;
         // Anti-cheat's own programs (EasyAntiCheat_EOS.exe, BEService.exe) refuse the game they
         // run beside; they aren't games themselves.
         let anti_cheat = anticheat::named(&exe).is_some();
