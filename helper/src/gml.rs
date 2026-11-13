@@ -149,6 +149,17 @@ fn read_name(mem: &Mem, w: u64, slots: u64, base: u32, key: u32) -> Option<Strin
 
 /// The game's data file: next to the program, or in its assets folder.
 pub fn data_file(pid: u32, program: Option<&Path>) -> Option<PathBuf> {
+    // A runner told which game to run ("-game <file>"): that file, in the folder it was
+    // started from. Deltarune is one runner with a launcher's data next to it and each
+    // chapter's in a folder of its own; the launcher's names fit no chapter's memory.
+    let command = crate::helper::cmdline(pid);
+    if let Some(file) = command.split(" -game ").nth(1).and_then(|rest| rest.split(' ').next()) {
+        let name = file.trim_matches('"').rsplit(['/', '\\']).next().unwrap_or_default();
+        let told = crate::os::inside(pid, &Path::new(&crate::os::cwd(pid)).join(name));
+        if !name.is_empty() && told.exists() {
+            return Some(told);
+        }
+    }
     let dir = program?.parent()?;
     let inside = crate::os::inside(pid, dir);
     ["data.win", "game.unx", "assets/game.unx"].iter().map(|f| inside.join(f)).find(|p| p.exists())

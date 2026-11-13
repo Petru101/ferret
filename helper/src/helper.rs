@@ -57,7 +57,7 @@ fn args(pid: u32) -> Vec<String> {
     os::argv(pid).into_iter().skip(1).filter(|a| !a.is_empty()).collect()
 }
 
-fn cmdline(pid: u32) -> String {
+pub fn cmdline(pid: u32) -> String {
     os::argv(pid).into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
