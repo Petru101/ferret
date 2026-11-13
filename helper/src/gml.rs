@@ -19,7 +19,7 @@ use crate::ue::{Listed, ListedObject};
 use std::collections::{HashMap, HashSet};
 use crate::mem::Mem;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Map keys are a variable's slot in the runner's array of names plus this (newer runners), or
@@ -42,6 +42,8 @@ const REAL: u32 = 0;
 const UNSET: u32 = 0xff_ffff;
 const INT32: u32 = 7;
 const INT64: u32 = 10;
+const ARRAY: u32 = 2;
+const OBJECT: u32 = 6;
 
 /// What the game's data file names: objects by index, and which variables the game uses as
 /// global ones (VARI's instance type -5; YYC builds have no VARI).
@@ -239,7 +241,38 @@ pub struct Gml {
     maps: usize,
     /// GameMaker Studio 1.4: arrays instead of maps.
     flat: Option<Flat>,
+    /// How this runner lays out a GML array (`array_at`), once one was seen.
+    arrays: OnceLock<Option<ArrayAt>>,
 }
+
+/// Where a GML array's object keeps its elements. GameMaker 2.3 and later: a pointer to the
+/// RValues and their count (`rows` false: Noise's Halloween Bash and Digital Tamers 2 +0x8 and
+/// +0x24, Forgodden's 32-bit runner +0x6c and +0x7c, after its object header). Before: {refcount,
+/// rows*, owner, visited, row count}, a row {length, RValue*} (`rows` true: Oak Defenders +0x8
+/// and +0x1c; a 1D array is row 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ArrayAt {
+    rows: bool,
+    data: u64,
+    len: u64,
+}
+
+/// A step into a value: a struct's variable, an array's element, an old 2D array's cell.
+#[derive(Clone, Debug, PartialEq)]
+enum Step {
+    Field(String),
+    Index(u32),
+    Cell(u32, u32),
+}
+
+/// Most elements of one array read, and listed: the first ones, then only those that aren't 0
+/// (Digital Tamers 2 keeps 5001 item counts in one).
+const MAX_ARRAY: u32 = 1 << 16;
+const LIST_FIRST: usize = 16;
+const LIST_ARRAY: usize = 64;
+/// Most numbers listed from inside one object's arrays and structs, and how deep.
+const LIST_DEEP: usize = 4000;
+const MAX_DEPTH: usize = 4;
 
 /// GameMaker Studio 1.4's arrays of variables: how many an instance's and the global object's
 /// hold (the runner's counts of instance and global variable names).
@@ -322,6 +355,57 @@ fn name_tables(heap: &Heap, program: Option<&Path>, vari_names: &[String]) -> Op
         refs * 1000 + vari_names.iter().filter(|v| vari.contains(v)).count()
     };
     found.into_iter().max_by_key(|&(g, i)| agree(i) + agree(g))
+}
+
+/// A compiled (YYC) GameMaker 2 game's variable names by map key: the program's data holds
+/// {name*, key} entries side by side, sorted by name, the keys from 100000 (Boom Boom Explodie
+/// Box 3D: 1169 of them; the runner's "prototype" array of names isn't there). The longest run
+/// of such entries with keys all different (the functions' tables follow, keys from 100000 too).
+fn compiled_names(heap: &Heap) -> HashMap<u32, String> {
+    let w = heap.width() as usize;
+    let mem = heap.mem();
+    let mut best: Vec<(u64, u32)> = Vec::new();
+    // Two runs at once: entries may start at either half of a 2-pointer step.
+    let mut runs: [Vec<(u64, u32)>; 2] = [Vec::new(), Vec::new()];
+    let mut nexts = [0u64; 2];
+    let mut close = |run: &mut Vec<(u64, u32)>| {
+        let keys: HashSet<u32> = run.iter().map(|e| e.1).collect();
+        if run.len() >= 32 && keys.len() == run.len() && run.len() > best.len() {
+            best = std::mem::take(run);
+        }
+        run.clear();
+    };
+    heap.each_chunk(2 * w, |addr, b, fresh| {
+        for off in (0..fresh).step_by(w) {
+            let at = addr + off as u64;
+            let phase = (at as usize / w) % 2;
+            let (run, next) = (&mut runs[phase], &mut nexts[phase]);
+            let entry = ptr_in(b, w as u64, off).filter(|&p| p > 0x1_0000).zip(u32_at(b, off + w).filter(|k| (KEY_BASE..KEY_BASE + MAX_MAP).contains(k)));
+            if at != *next {
+                close(run);
+            }
+            match entry {
+                Some(e) => {
+                    run.push(e);
+                    *next = at + 2 * w as u64;
+                }
+                None => close(run),
+            }
+        }
+    });
+    for run in &mut runs {
+        close(run);
+    }
+    // Any printable name: compiled games name some variables with characters GML's own
+    // identifiers don't have.
+    let name = |p: u64| {
+        let mut b = [0u8; 256];
+        let n = mem.read_at(&mut b, p).ok()?;
+        let end = b[..n].iter().position(|&c| c == 0)?;
+        (end > 0 && b[..end].iter().all(|c| c.is_ascii_graphic())).then(|| String::from_utf8_lossy(&b[..end]).into_owned())
+    };
+    let out: HashMap<u32, String> = best.iter().filter_map(|&(p, k)| Some((k, name(p)?))).collect();
+    if out.len() * 10 >= best.len() * 9 { out } else { HashMap::new() }
 }
 
 /// A variable name: an identifier, as a C string.
@@ -411,6 +495,9 @@ fn entries(mem: &Mem, w: u64, map: u64) -> Option<Vec<(u64, u32)>> {
     let es = w as usize + 8;
     let mut b = vec![0u8; es * size as usize];
     mem.read_exact_at(&mut b, el).ok()?;
+    // REDPULSE's runner (1.4.1804) grows at 0.6 yet keeps {key, RValue*, hash}: told by the
+    // hash, which is the key + 1 there.
+    let key_first = key_first || b.chunks(es).filter(|e| u32_at(e, es - 4) != Some(0)).all(|e| u32_at(e, 0).map(|k| k.wrapping_add(1)) == u32_at(e, es - 4));
     let out: Vec<(u64, u32)> = b
         .chunks(es)
         .filter(|e| u32_at(e, es - 4) != Some(0))
@@ -507,11 +594,17 @@ impl Gml {
         // The runtime's names start "prototype", "@@array@@" (GameMaker Studio 2); GameMaker
         // Studio 1.4 runners have their tables of names (one shared by both kinds of variables
         // here: tables kept apart are read as `Flat`).
+        // Compiled (YYC) GameMaker 2 games have neither: their own table of names, by key.
+        let mut compiled = HashMap::new();
         let slots = refs
             .iter()
             .copied()
             .find(|&r| ptr(mem, w, r).is_some_and(|p| first.contains(&p)) && ptr(mem, w, r + w).is_some_and(|p| second.contains(&p)))
             .or_else(|| name_tables(heap, program, &names.vari_names()).filter(|(g, i)| g == i).map(|(_, i)| i.0))
+            .or_else(|| {
+                compiled = compiled_names(heap);
+                (!compiled.is_empty()).then_some(0)
+            })
             .ok_or(format!(
                 "no array of variable names ({} variable maps, {} \"prototype\", {} \"@@array@@\", {} pointers to them)",
                 heads.len(),
@@ -521,7 +614,7 @@ impl Gml {
             ))?;
         // The keys' base: the one under which the most maps have a name for every key.
         let named = |base: u32| -> (HashMap<u32, String>, HashMap<u64, ()>) {
-            let mut known: HashMap<u32, String> = HashMap::new();
+            let mut known: HashMap<u32, String> = if base == KEY_BASE { compiled.clone() } else { HashMap::new() };
             let mut maps = HashMap::new();
             for (h, e) in &heads {
                 let all = e.iter().all(|&(_, k)| {
@@ -618,7 +711,7 @@ impl Gml {
                 }
             }
         }
-        Ok(Gml { pid: heap.pid, names, w, map_at, base, global_names, global_owner, slots, known, id_at, class, owners, maps: maps.len(), flat: None })
+        Ok(Gml { pid: heap.pid, names, w, map_at, base, global_names, global_owner, slots, known, id_at, class, owners, maps: maps.len(), flat: None, arrays: OnceLock::new() })
     }
 
     /// GameMaker Studio 1.4: the runner's name tables; owners are objects with a C++ vtable,
@@ -680,6 +773,7 @@ impl Gml {
             owners,
             maps,
             flat: Some(flat),
+            arrays: OnceLock::new(),
         })
     }
 
@@ -717,30 +811,170 @@ impl Gml {
             .find(|&k| read_name(mem, self.w, self.slots, self.base, k).as_deref() == Some(name))
     }
 
-    /// The global object: of the owners that aren't instances, the one holding the most of the
-    /// game's global variables (by VARI), or the most variables; of those sharing its map, the
-    /// one that starts with a C++ vtable (a stack frame held a copy of Spelunky SD's pointer).
+    /// The global object: of the owners that aren't instances, one that starts with a C++
+    /// vtable first (a stack frame held a copy of Spelunky SD's pointer; Zombies Days, which
+    /// has no global variables, showed a table of the runner's with every variable name in it
+    /// as "Global variables"), then the one holding the most of the game's global variables
+    /// (by VARI), then the most variables. None when the data file names global variables and
+    /// the best holds none of them, or names none at all.
     fn global(&self, mem: &Mem) -> Option<&Owner> {
         if let Some(g) = self.global_owner {
             return self.owners.iter().find(|o| o.addr == g);
         }
-        let image = crate::helper::maps(self.pid).unwrap_or_default();
-        let vtable = |o: &Owner| ptr(mem, self.w, o.addr).is_some_and(|v| image.iter().any(|r| r.start <= v && v < r.end && !r.perms.contains('w') && r.path.starts_with('/')));
-        self.owners.iter().filter(|o| o.instance.is_none()).max_by_key(|o| {
+        let regions = crate::helper::maps(self.pid).unwrap_or_default();
+        let has = |a: u64, c: char| regions.iter().any(|r| r.start <= a && a < r.end && r.perms.contains(c));
+        let vtable = |o: &Owner| ptr(mem, self.w, o.addr).is_some_and(|v| !has(v, 'w') && ptr(mem, self.w, v).is_some_and(|f| has(f, 'x')));
+        let held = |o: &Owner| {
             let e = entries(mem, self.w, o.map).unwrap_or_default();
-            (e.iter().filter(|&&(_, k)| self.name(mem, k).is_some_and(|n| self.names.globals.contains(&n))).count(), e.len(), vtable(o))
-        })
+            (e.iter().filter(|&&(_, k)| self.name(mem, k).is_some_and(|n| self.names.globals.contains(&n))).count(), e.len())
+        };
+        let best = self.owners.iter().filter(|o| o.instance.is_none()).max_by_key(|o| (vtable(o), held(o)))?;
+        // Compiled games have no VARI to tell by.
+        (self.names.vari.is_empty() || self.flat.is_some() || held(best).0 > 0).then_some(best)
     }
 
-    /// An owner's numbers: (variable name, address, kind).
+    /// An owner's numbers: (variable name, address, kind); after its own, those inside its
+    /// arrays and structs ("stats.hp", "items[3]"), up to `LIST_DEEP`.
     fn numbers(&self, mem: &Mem, o: &Owner) -> Vec<(String, u64, &'static str)> {
-        let mut out: Vec<(String, u64, &'static str)> = self
-            .vars(mem, o.addr, o.map)
-            .into_iter()
-            .filter(|&(rv, _)| holds_number(mem, rv))
-            .filter_map(|(rv, key)| Some((self.name_in(mem, o.addr, key)?, rv, "gm")))
-            .collect();
+        let vars = self.vars(mem, o.addr, o.map);
+        let mut out: Vec<(String, u64, &'static str)> =
+            vars.iter().filter(|&&(rv, _)| holds_number(mem, rv)).filter_map(|&(rv, key)| Some((self.name_in(mem, o.addr, key)?, rv, "gm"))).collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut deep: Vec<(String, u64, &'static str)> = Vec::new();
+        let mut named: Vec<(String, u64)> = vars.iter().filter_map(|&(rv, key)| Some((self.name_in(mem, o.addr, key)?, rv))).collect();
+        named.sort();
+        for (name, rv) in named {
+            if deep.len() >= LIST_DEEP {
+                break;
+            }
+            let found = self.inside(mem, rv, false, LIST_DEEP - deep.len());
+            deep.extend(found.into_iter().map(|(steps, at)| (format!("{name}{}", steps_text(&steps)), at, "gm")));
+        }
+        out.extend(deep);
+        out
+    }
+
+    /// How arrays are laid out: a vote over the arrays the global object and the instances
+    /// hold, each tried every way (a pointer followed within 0x20 bytes by a count, the
+    /// pointer leading to that many RValues, or to rows of them).
+    fn array_at(&self, mem: &Mem) -> Option<ArrayAt> {
+        *self.arrays.get_or_init(|| self.vote_arrays(mem))
+    }
+
+    /// Voted once per located game (it is located again every 2 s): with no array to learn
+    /// from, voting at every array-looking value made Zordak's list take 6 s.
+    fn vote_arrays(&self, mem: &Mem) -> Option<ArrayAt> {
+        let w = self.w;
+        let global = self.global(mem).map(|o| o.addr);
+        let mut votes: HashMap<ArrayAt, usize> = HashMap::new();
+        let mut samples = 0;
+        for o in self.owners.iter().filter(|o| o.instance.is_some() || Some(o.addr) == global) {
+            for (rv, _) in self.vars(mem, o.addr, o.map) {
+                let Some((ARRAY, p)) = rvalue(mem, w, rv) else { continue };
+                let mut b = [0u8; 0xc0];
+                if samples >= 64 || mem.read_exact_at(&mut b, p).is_err() {
+                    continue;
+                }
+                samples += 1;
+                for data in (0..0xa0).step_by(w as usize) {
+                    let Some(q) = ptr_in(&b, w, data as usize).filter(|&q| q > 0x1000) else { continue };
+                    for len in (data + w..=data + 0x20).step_by(4) {
+                        let Some(n) = u32_at(&b, len as usize).filter(|n| (1..=MAX_ARRAY).contains(n)) else { continue };
+                        // Two elements at least: a 1 near any pointer to an object passed for a
+                        // one-element array (Boom Boom Explodie Box 3D: +0x0 and +0x18).
+                        if n >= 2 && rvalues_ok(mem, q, n) {
+                            *votes.entry(ArrayAt { rows: false, data, len }).or_default() += 1;
+                        }
+                        if rows_ok(mem, w, q, n) {
+                            *votes.entry(ArrayAt { rows: true, data, len }).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // The layout most arrays agree on (at least two, or the only one seen); the count
+        // nearest the pointer on a tie (a capacity follows the length in newer runners).
+        let (&best, &n) = votes.iter().max_by_key(|(a, n)| (**n, std::cmp::Reverse(a.len), std::cmp::Reverse(a.data), a.rows))?;
+        (n >= 2 || samples == 1).then_some(best)
+    }
+
+    /// An array's elements: (step, RValue address), from the array object an RValue points to.
+    fn elements(&self, mem: &Mem, array: u64) -> Vec<(Step, u64)> {
+        let Some(at) = self.array_at(mem) else { return Vec::new() };
+        let (Some(q), Some(n)) = (ptr(mem, self.w, array + at.data), half(mem, array + at.len)) else { return Vec::new() };
+        if n == 0 || n > MAX_ARRAY {
+            return Vec::new();
+        }
+        if !at.rows {
+            return (0..n).map(|i| (Step::Index(i), q + 16 * u64::from(i))).collect();
+        }
+        let mut out = Vec::new();
+        for r in 0..n.min(256) {
+            let Some((a, k)) = row(mem, self.w, q, r).filter(|&(_, k)| k > 0) else { continue };
+            out.extend((0..k).map(|i| (if n == 1 { Step::Index(i) } else { Step::Cell(r, i) }, a + 16 * u64::from(i))));
+        }
+        out
+    }
+
+    /// What a value holds inside: an array's elements, a struct's variables; empty for
+    /// anything else. `pointee` is the array or struct itself (to tell a loop).
+    fn children(&self, mem: &Mem, rv: u64) -> (u64, Vec<(Step, u64)>) {
+        match rvalue(mem, self.w, rv) {
+            Some((ARRAY, p)) => (p, self.elements(mem, p)),
+            // A struct: an object with a variable map (not an instance or the global object,
+            // which a variable may also point to: they are listed on their own).
+            Some((OBJECT, p)) if self.flat.is_none() && !self.owners.iter().any(|o| o.addr == p && (o.instance.is_some() || self.global_owner == Some(p))) => {
+                let Some(map) = ptr(mem, self.w, p + self.map_at) else { return (p, Vec::new()) };
+                let vars = entries(mem, self.w, map).unwrap_or_default();
+                (p, vars.into_iter().filter_map(|(rv, key)| Some((Step::Field(self.name(mem, key)?), rv))).collect())
+            }
+            _ => (0, Vec::new()),
+        }
+    }
+
+    /// The numbers inside a variable's arrays and structs: (steps, RValue address). `all`:
+    /// every element (to find one by its address); otherwise what the list shows (`LIST_FIRST`).
+    fn inside(&self, mem: &Mem, rv: u64, all: bool, budget: usize) -> Vec<(Vec<Step>, u64)> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut todo: Vec<(Vec<Step>, u64)> = vec![(Vec::new(), rv)];
+        while let Some((steps, rv)) = todo.pop() {
+            let (pointee, kids) = self.children(mem, rv);
+            if kids.is_empty() || !seen.insert(pointee) || out.len() >= budget {
+                continue;
+            }
+            // One read for an array's elements, which sit side by side.
+            let block = match (kids.first(), kids.last()) {
+                (Some((_, a)), Some((_, z))) if z - a == 16 * (kids.len() as u64 - 1) => {
+                    let mut b = vec![0u8; 16 * kids.len()];
+                    mem.read_exact_at(&mut b, *a).ok().map(|_| b)
+                }
+                _ => None,
+            };
+            let array = block.is_some();
+            let mut shown = 0;
+            for (i, (step, kid)) in kids.into_iter().enumerate() {
+                let mut one = [0u8; 16];
+                let b: &[u8] = match &block {
+                    Some(b) => &b[16 * i..16 * i + 16],
+                    None if mem.read_exact_at(&mut one, kid).is_ok() => &one,
+                    None => continue,
+                };
+                let mut path = steps.clone();
+                path.push(step);
+                match (rvalue_number(b), u32_at(b, 12).unwrap_or(0) & 0xff_ffff) {
+                    (Some(v), _) => {
+                        if all || !array || i < LIST_FIRST || (v != 0.0 && shown < LIST_ARRAY) {
+                            shown += 1;
+                            out.push((path, kid));
+                        }
+                    }
+                    (None, ARRAY | OBJECT) if path.len() < MAX_DEPTH && (all || !array || i < LIST_FIRST) => todo.push((path, kid)),
+                    _ => {}
+                }
+            }
+        }
+        out.truncate(budget);
         out
     }
 
@@ -759,6 +993,57 @@ pub fn rvalue_number(b: &[u8]) -> Option<f64> {
         INT64 => Some(i64::from_le_bytes(v.try_into().unwrap()) as f64),
         _ => None,
     }
+}
+
+/// An RValue's kind and its value as a pointer (arrays, structs).
+fn rvalue(mem: &Mem, w: u64, rv: u64) -> Option<(u32, u64)> {
+    let mut b = [0u8; 16];
+    mem.read_exact_at(&mut b, rv).ok()?;
+    Some((u32_at(&b, 12)? & 0xff_ffff, ptr_in(&b, w, 0).filter(|&p| p > 0x1000)?))
+}
+
+/// Whether `n` RValues are at `at`: the first ones' and the last one's kinds are kinds.
+fn rvalues_ok(mem: &Mem, at: u64, n: u32) -> bool {
+    let kind_ok = |at: u64| half(mem, at + 12).is_some_and(|k| k & 0xff_ffff <= 15 || k & 0xff_ffff == UNSET);
+    at > 0x1000 && at % 4 == 0 && (0..n.min(16)).all(|i| kind_ok(at + 16 * u64::from(i))) && kind_ok(at + 16 * u64::from(n - 1))
+}
+
+/// Row `r` of an older array's rows ({length, RValue*} each): (the RValues, how many); a row
+/// never written to is empty (`a[5, 0] = 1` makes rows 0 to 4 that way).
+fn row(mem: &Mem, w: u64, rows: u64, r: u32) -> Option<(u64, u32)> {
+    let at = rows + 2 * w * u64::from(r);
+    match half(mem, at)? {
+        0 => Some((0, 0)),
+        n if n <= MAX_ARRAY => Some((ptr(mem, w, at + w).filter(|&a| a > 0x1000)?, n)),
+        _ => None,
+    }
+}
+
+/// Whether `n` rows are at `rows`: every one a row (the first 4096 looked at), one at least
+/// holding RValues. Looking at row 0 only took the top half of a pointer (0x7fff) for Oak
+/// Defenders' row count.
+fn rows_ok(mem: &Mem, w: u64, rows: u64, n: u32) -> bool {
+    let mut any = false;
+    for r in 0..n.min(4096) {
+        match row(mem, w, rows, r) {
+            Some((_, 0)) => {}
+            Some((a, k)) if rvalues_ok(mem, a, k) => any = true,
+            _ => return false,
+        }
+    }
+    any
+}
+
+/// Steps as a path's text: ".name", "[3]", "[1,2]".
+fn steps_text(steps: &[Step]) -> String {
+    steps
+        .iter()
+        .map(|s| match s {
+            Step::Field(n) => format!(".{n}"),
+            Step::Index(i) => format!("[{i}]"),
+            Step::Cell(r, c) => format!("[{r},{c}]"),
+        })
+        .collect()
 }
 
 /// Whether an RValue holds a number now.
@@ -791,26 +1076,48 @@ pub struct GmlPath {
     /// None for global.
     object: Option<String>,
     var: String,
+    /// Into the variable's arrays and structs: "gml:global.party[0].hp".
+    steps: Vec<Step>,
 }
 
 impl GmlPath {
     pub fn parse(text: &str) -> Option<GmlPath> {
-        let (object, var) = text.strip_prefix("gml:")?.rsplit_once('.')?;
+        let (object, rest) = text.strip_prefix("gml:")?.split_once('.')?;
         let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let end = rest.find(['.', '[']).unwrap_or(rest.len());
+        let (var, mut rest) = rest.split_at(end);
         if !ok(object) || !ok(var) {
             return None;
         }
-        Some(GmlPath { object: (object != "global").then(|| object.to_owned()), var: var.to_owned() })
+        let mut steps = Vec::new();
+        while !rest.is_empty() {
+            if let Some(r) = rest.strip_prefix('.') {
+                let end = r.find(['.', '[']).unwrap_or(r.len());
+                steps.push(Step::Field(r[..end].to_owned()));
+                if !ok(&r[..end]) {
+                    return None;
+                }
+                rest = &r[end..];
+            } else {
+                let (inner, after) = rest.strip_prefix('[')?.split_once(']')?;
+                steps.push(match inner.split_once(',') {
+                    Some((r, c)) => Step::Cell(r.parse().ok()?, c.parse().ok()?),
+                    None => Step::Index(inner.parse().ok()?),
+                });
+                rest = after;
+            }
+        }
+        Some(GmlPath { object: (object != "global").then(|| object.to_owned()), var: var.to_owned(), steps })
     }
 
     pub fn text(&self) -> String {
-        format!("gml:{}.{}", self.object.as_deref().unwrap_or("global"), self.var)
+        format!("gml:{}.{}{}", self.object.as_deref().unwrap_or("global"), self.var, steps_text(&self.steps))
     }
 
     pub fn describe(&self) -> String {
         match &self.object {
-            Some(o) => format!("{} of every {o}", self.var),
-            None => format!("global.{}", self.var),
+            Some(o) => format!("{}{} of every {o}", self.var, steps_text(&self.steps)),
+            None => format!("global.{}{}", self.var, steps_text(&self.steps)),
         }
     }
 }
@@ -843,7 +1150,10 @@ pub fn walk(heap: &Heap, program: Option<&Path>, roots: &[u64], path: &GmlPath) 
         })
         .filter_map(|&r| {
             let map = ptr(mem, g.w, r + g.map_at)?;
-            let rv = g.vars(mem, r, map).into_iter().find(|&(_, k)| k == key)?.0;
+            let mut rv = g.vars(mem, r, map).into_iter().find(|&(_, k)| k == key)?.0;
+            for step in &path.steps {
+                rv = g.children(mem, rv).1.into_iter().find(|(s, _)| s == step)?.1;
+            }
             holds_number(mem, rv).then_some(rv)
         })
         .collect()
@@ -861,10 +1171,28 @@ pub fn discover(heap: &Heap, program: Option<&Path>, target: u64) -> Option<(Gml
         let Some((rv, key)) = g.vars(mem, o.addr, o.map).into_iter().find(|&(rv, _)| rv == target) else { continue };
         let Some(var) = g.name_in(mem, o.addr, key).filter(|_| holds_number(mem, rv)) else { continue };
         let object = o.instance.map(|(_, obj)| g.object_name(obj));
-        let path = GmlPath { object, var };
+        let path = GmlPath { object, var, steps: Vec::new() };
         let leads = walk(heap, program, &find_roots(heap, program, &path), &path);
         if leads.contains(&rv) {
             return Some((path, leads));
+        }
+    }
+    // Inside a variable's arrays and structs.
+    if !holds_number(mem, target) {
+        return None;
+    }
+    for o in &g.owners {
+        if o.instance.is_none() && Some(o.addr) != global {
+            continue;
+        }
+        for (rv, key) in g.vars(mem, o.addr, o.map) {
+            let Some((steps, _)) = g.inside(mem, rv, true, usize::MAX).into_iter().find(|(_, at)| *at == target) else { continue };
+            let Some(var) = g.name_in(mem, o.addr, key) else { continue };
+            let path = GmlPath { object: o.instance.map(|(_, obj)| g.object_name(obj)), var, steps };
+            let leads = walk(heap, program, &find_roots(heap, program, &path), &path);
+            if leads.contains(&target) {
+                return Some((path, leads));
+            }
         }
     }
     None
@@ -998,6 +1326,26 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
             .collect();
         lines.push(format!("  {} ({id}) at 0x{:x}: {}", g.object_name(obj), o.addr, sample.join(", ")));
     }
+    lines.push(format!("arrays: {:x?}", g.array_at(mem)));
+    // What the first few arrays (kind 2) and structs (kind 6) point to: their layout.
+    let global = g.global(mem).map(|o| o.addr);
+    for (kind, label) in [(ARRAY, "array"), (OBJECT, "struct")] {
+        let mut shown = 0;
+        for o in g.owners.iter().filter(|o| o.instance.is_some() || Some(o.addr) == global) {
+            for (rv, key) in g.vars(mem, o.addr, o.map) {
+                let mut b = [0u8; 16];
+                if shown >= 6 || mem.read_exact_at(&mut b, rv).is_err() || u32_at(&b, 12).unwrap_or(0) & 0xff_ffff != kind {
+                    continue;
+                }
+                let Some(p) = ptr_in(&b, g.w, 0) else { continue };
+                let mut d = vec![0u8; 0xc0];
+                let _ = mem.read_at(&mut d, p);
+                let words: Vec<String> = d.chunks(4).map(|c| format!("{:x}", u32_at(c, 0).unwrap_or(0))).collect();
+                lines.push(format!("  {label} {} at 0x{p:x}: {}", g.name_in(mem, o.addr, key).unwrap_or_default(), words.join(" ")));
+                shown += 1;
+            }
+        }
+    }
     if let Some(f) = g.flat {
         lines.push(format!("GameMaker Studio 1.4 arrays: {} instance variables, {} global ones; instances' class 0x{:x}", f.instance_n, f.global_n, g.class));
     }
@@ -1017,6 +1365,12 @@ mod tests {
             assert_eq!(GmlPath::parse(text).unwrap().text(), text);
         }
         assert_eq!(GmlPath::parse("gml:global.gold").unwrap().object, None);
+        for text in ["gml:global.party[0].hp", "gml:obj_player.stats.hp", "gml:global.grid[2,5]", "gml:o.a[1][2].b.c[3]"] {
+            assert_eq!(GmlPath::parse(text).unwrap().text(), text);
+        }
+        assert_eq!(GmlPath::parse("gml:global.a[1,2].b").unwrap().steps, vec![Step::Cell(1, 2), Step::Field("b".into())]);
+        assert!(GmlPath::parse("gml:global.a[x]").is_none());
+        assert!(GmlPath::parse("gml:global.a[1").is_none());
         assert!(GmlPath::parse("gml:hp").is_none());
         assert!(GmlPath::parse("gml:a b.c").is_none());
     }
