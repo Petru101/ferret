@@ -31,8 +31,8 @@ const KEY_BASE: u32 = 100000;
 const ID_FROM_64: u64 = 0x60;
 const ID_FROM_32: u64 = 0x30;
 const ID_TO: u64 = 0x200;
-/// Where the variable map's pointer is in its owner: 64-bit runners; 32-bit ones are voted on
-/// up to `MAP_AT_MAX`.
+/// Where the variable map's pointer is in its owner: 64-bit runners before GameMaker 2.3 (a
+/// tie goes to it); every offset up to `MAP_AT_MAX` is voted on.
 const MAP_AT_64: u64 = 0x58;
 const MAP_AT_MAX: u64 = 0x80;
 /// Largest variable map read.
@@ -52,8 +52,11 @@ pub struct Names {
     /// VARI's variables by id: (name, instance type: -5 global, -1 self, an object index...;
     /// -7 locals left out).
     vari: Vec<(u32, String, i32)>,
-    /// The first rooms' instances (id, object index), for `gml` (diagnostics).
-    placed: Vec<(u32, u32)>,
+    /// The instances placed in rooms (id, object index): what tells real instances in memory
+    /// from look-alikes (`vote_instances`).
+    placed: HashSet<(u32, u32)>,
+    /// The first rooms' ones, for `gml` (diagnostics).
+    first_placed: Vec<(u32, u32)>,
 }
 
 fn u32_at(d: &[u8], o: usize) -> Option<u32> {
@@ -102,20 +105,24 @@ impl Names {
         // ROOM: offsets to rooms {name, caption, width, height, speed, persistent, colour,
         // show colour, creation code, flags, backgrounds, views, instances*, tiles}; instances
         // {x, y, object index, id, ...}.
-        let mut placed = Vec::new();
+        let mut placed = HashSet::new();
+        let mut first_placed = Vec::new();
         if let Some(&(ro, _)) = chunks.get(&b"ROOM"[..]) {
-            for r in 0..u32_at(d, ro).unwrap_or(0).min(4) as usize {
+            for r in 0..u32_at(d, ro).unwrap_or(0).min(1 << 16) as usize {
                 let Some(room) = u32_at(d, ro + 4 + 4 * r) else { break };
-                let Some(list) = u32_at(d, room as usize + 48) else { break };
-                for k in 0..u32_at(d, list as usize).unwrap_or(0).min(8) as usize {
+                let Some(list) = u32_at(d, room as usize + 48) else { continue };
+                for k in 0..u32_at(d, list as usize).unwrap_or(0).min(1 << 20) as usize {
                     let Some(inst) = u32_at(d, list as usize + 4 + 4 * k) else { break };
                     if let (Some(obj), Some(id)) = (u32_at(d, inst as usize + 8), u32_at(d, inst as usize + 12)) {
-                        placed.push((id, obj));
+                        placed.insert((id, obj));
+                        if r < 4 && k < 8 {
+                            first_placed.push((id, obj));
+                        }
                     }
                 }
             }
         }
-        Some(Names { globals, objects, vari, placed })
+        Some(Names { globals, objects, vari, placed, first_placed })
     }
 }
 
@@ -129,7 +136,9 @@ impl Names {
 /// (map key - 100000), read from memory.
 fn read_name(mem: &Mem, w: u64, slots: u64, base: u32, key: u32) -> Option<String> {
     let p = ptr(mem, w, slots + w * u64::from(key.checked_sub(base)?))?;
-    let mut b = [0u8; 64];
+    // Up to 255 bytes: GameMaker 2.3 keeps its script functions among the global variables,
+    // and Noise's Halloween Bash has names over 64 long.
+    let mut b = [0u8; 256];
     let n = mem.read_at(&mut b, p).ok()?;
     let end = b[..n].iter().position(|&c| c == 0)?;
     let t = std::str::from_utf8(&b[..end]).ok()?;
@@ -317,7 +326,7 @@ fn name_tables(heap: &Heap, program: Option<&Path>, vari_names: &[String]) -> Op
 
 /// A variable name: an identifier, as a C string.
 fn read_cstr(mem: &Mem, at: u64) -> Option<String> {
-    let mut b = [0u8; 64];
+    let mut b = [0u8; 256];
     let n = mem.read_at(&mut b, at).ok()?;
     let end = b[..n].iter().position(|&c| c == 0)?;
     let t = std::str::from_utf8(&b[..end]).ok()?;
@@ -414,13 +423,18 @@ fn entries(mem: &Mem, w: u64, map: u64) -> Option<Vec<(u64, u32)>> {
     (out.len() == used as usize).then_some(out)
 }
 
+/// A vote's score: instances the data file places in a room, instances, the highest id (less is better).
+type Score = (usize, usize, std::cmp::Reverse<u32>);
+
 /// Instances are of one C++ class (one vtable): the class and offset where (nearly) all its
-/// objects hold an id and an object index, all different, the most of them (a constant pair
+/// objects hold an id and an object index, all different; first the one with the most pairs
+/// the data file places in a room (pointers pass for ids: 72 of Forgodden's structs held one
+/// with a 0 after it, more than its instances), then the most of them (a constant pair
 /// passes the checks too: Zordak's renderers all had 0xffffff, 0 at +0x90), then the smallest
 /// (ids count up from 100000). Voting over every owner let thousands of the runtime's own
 /// objects outvote Dunkehr's few instances at its title (+0x138, not +0xbc). `owners` are
 /// windows of memory from each candidate owner's start, `ID_TO` bytes long.
-fn vote_instances(owners: &[Vec<u8>], w: u64, objects: u32) -> Option<((usize, std::cmp::Reverse<u32>), u64, u64)> {
+fn vote_instances(owners: &[Vec<u8>], w: u64, objects: u32, map_at: u64, placed: &HashSet<(u32, u32)>) -> Option<(Score, u64, u64)> {
     let valid = |b: &[u8], at: u64| {
         let (Some(id), Some(obj)) = (u32_at(b, at as usize), u32_at(b, at as usize + 4)) else { return false };
         (KEY_BASE..100_000_000).contains(&id) && obj < objects
@@ -431,10 +445,16 @@ fn vote_instances(owners: &[Vec<u8>], w: u64, objects: u32) -> Option<((usize, s
             classes.entry(vt).or_default().push(b);
         }
     }
-    let mut best: Option<((usize, std::cmp::Reverse<u32>), u64, u64)> = None;
+    let mut best: Option<(Score, u64, u64)> = None;
     for (vt, members) in &classes {
         for at in (if w == 8 { ID_FROM_64 } else { ID_FROM_32 }..ID_TO - 8).step_by(4) {
+            // Not the map's pointer itself read as an id (the word after it, 0, as an object
+            // index: Forgodden's 850 structs outvoted its instances that way).
+            if at + 8 > map_at && at < map_at + w {
+                continue;
+            }
             let mut ids: Vec<u32> = members.iter().filter(|b| valid(b, at)).filter_map(|b| u32_at(b, at as usize)).collect();
+            let known = members.iter().filter(|b| u32_at(b, at as usize).zip(u32_at(b, at as usize + 4)).is_some_and(|p| placed.contains(&p))).count();
             if ids.len() * 10 < members.len() * 9 || ids.is_empty() {
                 continue;
             }
@@ -445,7 +465,7 @@ fn vote_instances(owners: &[Vec<u8>], w: u64, objects: u32) -> Option<((usize, s
             if ids.len() * 10 < found * 9 {
                 continue;
             }
-            let score = (ids.len(), std::cmp::Reverse(ids.last().copied().unwrap_or(u32::MAX)));
+            let score = (known, ids.len(), std::cmp::Reverse(ids.last().copied().unwrap_or(u32::MAX)));
             if best.as_ref().is_none_or(|(b, _, _)| score > *b) {
                 best = Some((score, *vt, at));
             }
@@ -525,6 +545,15 @@ impl Gml {
         let objects = names.objects.len() as u32;
         let regions = crate::helper::maps(heap.pid).unwrap_or_default();
         let in_image = |a: u64| regions.iter().any(|r| r.start <= a && a < r.end && !r.path.is_empty() && !r.path.starts_with('['));
+        // A C++ vtable: its first entry a function, in executable memory (a function's own
+        // address, as GameMaker 2.3's objects keep three before their map, isn't one). Not by
+        // the program's file: Wine maps a Windows program's code without it.
+        let code = |a: u64| regions.iter().any(|r| r.start <= a && a < r.end && r.perms.contains('x'));
+        // The table itself is never in writable memory (an object on the heap that starts with
+        // its own vtable isn't one: old Linux runners keep vtables in their code segment, so
+        // "points to code" alone took a field of Zordak's instances for their class).
+        let writable = |a: u64| regions.iter().any(|r| r.start <= a && a < r.end && r.perms.contains('w'));
+        let is_vtable = |a: u64| !writable(a) && ptr(mem, w, a).is_some_and(|f| code(f) || (in_image(a) && in_image(f)));
         // For each way of keying, its named maps, what points to them (with the memory around:
         // from MAP_AT_MAX before, an owner's start, to ID_TO after) and the instance vote.
         let try_base = |base: u32| {
@@ -543,14 +572,16 @@ impl Gml {
             let owners_at = |at: u64| -> Vec<Vec<u8>> {
                 windows.iter().filter_map(|(_, _, b)| b.get((MAP_AT_MAX - at) as usize..).map(|x| x.to_vec())).collect()
             };
-            let offsets: Vec<u64> = if w == 8 { vec![MAP_AT_64] } else { (w..=MAP_AT_MAX).step_by(w as usize).collect() };
-            // Offsets that find the same instances tie (a field before the map, shared by them,
-            // at +0x4 on Mobility's runner; its map is at +0x2c): the one whose class is a
-            // vtable, in the program's image, wins.
-            let vote = offsets
-                .into_iter()
-                .filter_map(|at| vote_instances(&owners_at(at), w, objects).map(|(score, vt, id)| (score, at, (vt, id))))
-                .max_by_key(|(score, at, (vt, _))| (*score, in_image(*vt), std::cmp::Reverse(*at)));
+            // The map's offset differs by runner (64-bit: +0x58 before GameMaker 2.3, less
+            // after), so every one is tried. A class that is a vtable wins over more
+            // "instances" (junk at a wrong offset), then the most instances; offsets finding
+            // the same ones tie (a field before the map, shared by them, at +0x4 on Mobility's
+            // runner; its map is at +0x2c).
+            let vote = (w..=MAP_AT_MAX)
+                .step_by(w as usize)
+                .filter_map(|at| vote_instances(&owners_at(at), w, objects, at, &names.placed).map(|(score, vt, id)| (score, at, (vt, id))))
+                .inspect(|(score, at, (vt, id))| if std::env::var_os("FERRET_DEBUG").is_some() { eprintln!("gml vote: base {base} map +{at:#x}: {score:?} class {vt:#x} (vtable {}) id +{id:#x}", is_vtable(*vt)) })
+                .max_by_key(|(score, at, (vt, _))| (score.0, is_vtable(*vt), *score, *at == MAP_AT_64 && w == 8, std::cmp::Reverse(*at)));
             (base, known, maps, windows, vote)
         };
         // The keying that finds the most instances (keyed from 0, many unrelated maps get names
@@ -618,7 +649,7 @@ impl Gml {
         windows.retain(|(_, arr, _)| flat_ok(mem, *arr, flat.instance_n.min(flat.global_n.max(1)).min(64)));
         let objects = names.objects.len() as u32;
         let bytes: Vec<Vec<u8>> = windows.iter().map(|(_, _, b)| b.clone()).collect();
-        let (_, class, id_at) = vote_instances(&bytes, w, objects).ok_or(format!("no instances among {} objects with variable arrays", windows.len()))?;
+        let (_, class, id_at) = vote_instances(&bytes, w, objects, 0, &names.placed).ok_or(format!("no instances among {} objects with variable arrays", windows.len()))?;
         let mut owners: Vec<Owner> = windows
             .iter()
             .map(|(addr, arr, b)| {
@@ -876,7 +907,7 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
     // Where the first rooms' instances are (their id and object index side by side), with the
     // words before them: an instance's layout.
     let mut seen = 0;
-    for &(id, obj) in names.placed.iter().take(4) {
+    for &(id, obj) in names.first_placed.iter().take(4) {
         let mut hits = Vec::new();
         heap.each_chunk(8, |addr, b, fresh| {
             for off in (0..fresh).step_by(4) {
@@ -893,8 +924,8 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
             seen += 1;
         }
     }
-    if seen == 0 && !names.placed.is_empty() {
-        lines.push(format!("none of the first rooms' {} instances found by id", names.placed.len()));
+    if seen == 0 && !names.first_placed.is_empty() {
+        lines.push(format!("none of the first rooms' {} instances found by id", names.first_placed.len()));
     }
     // Every map header, valid keys or not: the biggest, with their key ranges.
     let mem = heap.mem();
