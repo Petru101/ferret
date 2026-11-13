@@ -44,6 +44,12 @@ const INT32: u32 = 7;
 const INT64: u32 = 10;
 const ARRAY: u32 = 2;
 const OBJECT: u32 = 6;
+const STRING: u32 = 1;
+/// A reference to a data structure (GameMaker 2024 and later).
+const REF: u32 = 15;
+/// A ds_map's value marked as a ds_list's or a ds_map's index (ds_map_add_list, json_decode).
+const HOLDS_LIST: u32 = 0x4000_0000;
+const HOLDS_MAP: u32 = 0x8000_0000;
 
 /// What the game's data file names: objects by index, and which variables the game uses as
 /// global ones (VARI's instance type -5; YYC builds have no VARI).
@@ -59,6 +65,105 @@ pub struct Names {
     placed: HashSet<(u32, u32)>,
     /// The first rooms' ones, for `gml` (diagnostics).
     first_placed: Vec<(u32, u32)>,
+    /// Variables the game's code gives a new ds_list, ds_map or ds_grid (`ds_variables`).
+    ds: HashMap<String, Ds>,
+}
+
+/// A data structure a variable holds only the index of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Ds {
+    List,
+    Map,
+    Grid,
+    Stack,
+    Queue,
+    Priority,
+}
+
+impl Ds {
+    /// The kind a reference names (the high half of its value): one bit each.
+    fn of_ref(kind: u32) -> Option<Ds> {
+        match kind & 0xff_ffff {
+            1 => Some(Ds::List),
+            2 => Some(Ds::Map),
+            4 => Some(Ds::Grid),
+            8 => Some(Ds::Queue),
+            0x10 => Some(Ds::Stack),
+            0x20 => Some(Ds::Priority),
+            _ => None,
+        }
+    }
+}
+
+/// Which variables hold a ds_list, ds_map or ds_grid: those the game's bytecode stores the
+/// result of ds_list_create, ds_map_create, json_decode or ds_grid_create in (a call followed
+/// at once by a pop into the variable). A variable holds only a number, the structure's index
+/// in the runner's table of its kind, so nothing in memory tells. FUNC lists each function's
+/// calls and VARI each variable's uses as chains through the code: an instruction's operand
+/// holds the distance to the next one (bytecode 15 and later). A name the code uses for two
+/// kinds is left out; compiled games have no bytecode.
+fn ds_variables(d: &[u8], chunks: &HashMap<&[u8], (usize, usize)>) -> HashMap<String, Ds> {
+    let mut out: HashMap<String, Ds> = HashMap::new();
+    let bytecode = chunks.get(&b"GEN8"[..]).and_then(|&(g, _)| d.get(g + 1).copied()).unwrap_or(0);
+    let (Some(&(fo, fs)), Some(&(vo, vs))) = (chunks.get(&b"FUNC"[..]), chunks.get(&b"VARI"[..])) else { return out };
+    if bytecode < 15 || fs < 4 {
+        return out;
+    }
+    // The instructions of a chain. For a function's calls GameMaker 2.3 and later point at the
+    // instruction's operand, 4 bytes in: told by where the first call's opcode (0xd9) is.
+    let mut operand = 0usize;
+    let chain = |first: usize, uses: usize, operand: usize| -> Vec<usize> {
+        let Some(mut at) = first.checked_sub(operand) else { return Vec::new() };
+        let mut all = Vec::new();
+        for _ in 0..uses.min(1 << 20) {
+            let Some(next) = u32_at(d, at + 4) else { break };
+            all.push(at);
+            at += (next & 0x07ff_ffff) as usize;
+        }
+        all
+    };
+    let mut calls: HashMap<usize, Ds> = HashMap::new();
+    for k in 0..u32_at(d, fo).unwrap_or(0).min(1 << 20) as usize {
+        let e = fo + 4 + 12 * k;
+        let (Some(name), Some(uses), Some(first)) = (u32_at(d, e).and_then(|n| cstr(d, n as usize)), u32_at(d, e + 4), u32_at(d, e + 8)) else { break };
+        let kind = match name.as_str() {
+            "ds_list_create" => Ds::List,
+            "ds_map_create" | "json_decode" => Ds::Map,
+            "ds_grid_create" => Ds::Grid,
+            "ds_stack_create" => Ds::Stack,
+            "ds_queue_create" => Ds::Queue,
+            "ds_priority_create" => Ds::Priority,
+            _ => continue,
+        };
+        if first as i32 > 4 {
+            if d.get(first as usize + 3) != Some(&0xd9) && d.get(first as usize - 1) == Some(&0xd9) {
+                operand = 4;
+            }
+            calls.extend(chain(first as usize, uses as usize, operand).into_iter().map(|a| (a, kind)));
+        }
+    }
+    // The pop right after such a call: whose variable it is.
+    let wanted: HashMap<usize, Ds> = calls.into_iter().filter(|&(a, _)| d.get(a + 11) == Some(&0x45)).map(|(a, k)| (a + 8, k)).collect();
+    let mut twice = HashSet::new();
+    let mut p = vo + 12;
+    while p + 20 <= vo + vs && !wanted.is_empty() {
+        let (Some(name), Some(uses), Some(first)) = (u32_at(d, p).and_then(|n| cstr(d, n as usize)), u32_at(d, p + 12), u32_at(d, p + 16)) else { break };
+        let local = u32_at(d, p + 4) == Some(-7i32 as u32);
+        p += 20;
+        if local || first as i32 <= 0 {
+            continue;
+        }
+        // A variable's uses point at the instruction in every version.
+        for at in chain(first as usize, uses as usize, 0) {
+            if let Some(&kind) = wanted.get(&at) {
+                if out.insert(name.clone(), kind).is_some_and(|old| old != kind) {
+                    twice.insert(name.clone());
+                }
+            }
+        }
+    }
+    out.retain(|n, _| !twice.contains(n));
+    out
 }
 
 fn u32_at(d: &[u8], o: usize) -> Option<u32> {
@@ -124,7 +229,8 @@ impl Names {
                 }
             }
         }
-        Some(Names { globals, objects, vari, placed, first_placed })
+        let ds = ds_variables(d, &chunks);
+        Some(Names { globals, objects, vari, placed, first_placed, ds })
     }
 }
 
@@ -254,6 +360,18 @@ pub struct Gml {
     flat: Option<Flat>,
     /// How this runner lays out a GML array (`array_at`), once one was seen.
     arrays: OnceLock<Option<ArrayAt>>,
+    /// The runner's tables of ds_lists, ds_maps and ds_grids (`tables`), once looked for.
+    tables: OnceLock<Tables>,
+}
+
+/// The runner's tables of data structures, arrays of pointers by index: for each kind the
+/// address of the runner's own pointer to its table (read at every use: a table that grows
+/// moves); the lists' with their C++ class.
+#[derive(Clone, Copy, Debug, Default)]
+struct Tables {
+    lists: Option<(u64, u64)>,
+    maps: Option<u64>,
+    grids: Option<u64>,
 }
 
 /// Where a GML array's object keeps its elements. GameMaker 2.3 and later: a pointer to the
@@ -268,13 +386,21 @@ struct ArrayAt {
     len: u64,
 }
 
-/// A step into a value: a struct's variable, an array's element, an old 2D array's cell.
+/// A step into a value: a struct's variable, an array's or a ds_list's element, an old 2D
+/// array's cell or a ds_grid's (x, y), a ds_map's value by its key: a text or a number (its
+/// bits).
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
     Field(String),
     Index(u32),
     Cell(u32, u32),
+    Key(String),
+    Num(u64),
 }
+
+/// The largest index of a data structure looked for, and the largest grid side.
+const MAX_DS: u32 = 4096;
+const MAX_GRID: u32 = 4096;
 
 /// Most elements of one array read, and listed: the first ones, then only those that aren't 0
 /// (Digital Tamers 2 keeps 5001 item counts in one).
@@ -722,7 +848,7 @@ impl Gml {
                 }
             }
         }
-        Ok(Gml { pid: heap.pid, names, w, map_at, base, global_names, global_owner, slots, known, id_at, class, owners, maps: maps.len(), flat: None, arrays: OnceLock::new() })
+        Ok(Gml { pid: heap.pid, names, w, map_at, base, global_names, global_owner, slots, known, id_at, class, owners, maps: maps.len(), flat: None, arrays: OnceLock::new(), tables: OnceLock::new() })
     }
 
     /// GameMaker Studio 1.4: the runner's name tables; owners are objects with a C++ vtable,
@@ -785,6 +911,7 @@ impl Gml {
             maps,
             flat: Some(flat),
             arrays: OnceLock::new(),
+            tables: OnceLock::new(),
         })
     }
 
@@ -846,7 +973,8 @@ impl Gml {
 
     /// An owner's numbers: (variable name, address, kind); after its own, those inside its
     /// arrays and structs ("stats.hp", "items[3]"), up to `LIST_DEEP`.
-    fn numbers(&self, mem: &Mem, o: &Owner) -> Vec<(String, u64, &'static str)> {
+    fn numbers(&self, heap: &Heap, o: &Owner) -> Vec<(String, u64, &'static str)> {
+        let mem = heap.mem();
         let vars = self.vars(mem, o.addr, o.map);
         let mut out: Vec<(String, u64, &'static str)> =
             vars.iter().filter(|&&(rv, _)| holds_number(mem, rv)).filter_map(|&(rv, key)| Some((self.name_in(mem, o.addr, key)?, rv, "gm"))).collect();
@@ -858,7 +986,7 @@ impl Gml {
             if deep.len() >= LIST_DEEP {
                 break;
             }
-            let found = self.inside(mem, rv, false, LIST_DEEP - deep.len());
+            let found = self.inside(heap, rv, &name, false, LIST_DEEP - deep.len());
             deep.extend(found.into_iter().map(|(steps, at)| (format!("{name}{}", steps_text(&steps)), at, "gm")));
         }
         out.extend(deep);
@@ -879,6 +1007,13 @@ impl Gml {
         let global = self.global(mem).map(|o| o.addr);
         let mut votes: HashMap<ArrayAt, usize> = HashMap::new();
         let mut samples = 0;
+        // A double too small to be a game's number among the first elements: a pointer or a
+        // whole number read as one, so not RValues (the 2026 Linux runner's arrays start with
+        // a pointer to an object of all zeros after its vtable, their elements' comes next).
+        let tiny = |q: u64, n: u32| {
+            let mut e = vec![0u8; 16 * n.min(16) as usize];
+            mem.read_exact_at(&mut e, q).is_err() || e.chunks(16).any(|r| u32_at(r, 12) == Some(REAL) && rvalue_number(r).is_some_and(|v| v != 0.0 && v.abs() < 1e-300))
+        };
         for o in self.owners.iter().filter(|o| o.instance.is_some() || Some(o.addr) == global) {
             for (rv, _) in self.vars(mem, o.addr, o.map) {
                 let Some((ARRAY, p)) = rvalue(mem, w, rv) else { continue };
@@ -889,11 +1024,16 @@ impl Gml {
                 samples += 1;
                 for data in (0..0xa0).step_by(w as usize) {
                     let Some(q) = ptr_in(&b, w, data as usize).filter(|&q| q > 0x1000) else { continue };
-                    for len in (data + w..=data + 0x20).step_by(4) {
+                    for len in (data + w..=data + 0x28).step_by(4) {
                         let Some(n) = u32_at(&b, len as usize).filter(|n| (1..=MAX_ARRAY).contains(n)) else { continue };
+                        // Not a pointer's upper half (0x7f52 passed for the length of Snack
+                        // Hoard's only array on the 2026 Linux runner).
+                        if w == 8 && len % 8 == 4 && u32_at(&b, len as usize - 4).is_some_and(|low| low > 0x1_0000) {
+                            continue;
+                        }
                         // Two elements at least: a 1 near any pointer to an object passed for a
                         // one-element array (Boom Boom Explodie Box 3D: +0x0 and +0x18).
-                        if n >= 2 && rvalues_ok(mem, q, n) {
+                        if n >= 2 && rvalues_ok(mem, q, n) && !tiny(q, n) {
                             *votes.entry(ArrayAt { rows: false, data, len }).or_default() += 1;
                         }
                         if rows_ok(mem, w, q, n) {
@@ -927,6 +1067,367 @@ impl Gml {
         out
     }
 
+    /// The data structure an RValue stands for and its index in the runner's table of that
+    /// kind. Newer runners (2024 and later) keep a reference: kind 15, the index in the low
+    /// half and the kind of structure in the high half. Before, a plain number: told by the
+    /// entry's mark when a ds_map holds it (ds_map_add_list, json_decode), else by what the
+    /// game's code keeps in a variable of that name (`typed`).
+    fn ds_of(&self, mem: &Mem, rv: u64, typed: Option<Ds>) -> Option<(Ds, u32)> {
+        let mut b = [0u8; 16];
+        mem.read_exact_at(&mut b, rv).ok()?;
+        let kind = u32_at(&b, 12)?;
+        if kind & 0xff_ffff == REF {
+            return Some((Ds::of_ref(u32_at(&b, 4)?)?, u32_at(&b, 0)?)).filter(|x| x.1 < MAX_DS);
+        }
+        let ds = match (kind & HOLDS_LIST != 0, kind & HOLDS_MAP != 0) {
+            (true, _) => Ds::List,
+            (_, true) => Ds::Map,
+            _ => typed?,
+        };
+        let v = rvalue_number(&b)?;
+        (v >= 0.0 && v < f64::from(MAX_DS) && v.fract() == 0.0).then_some((ds, v as u32))
+    }
+
+    /// The indexes the game's variables hold now, by kind of structure (a destroyed one's
+    /// index stays in its variable).
+    fn ds_held(&self, mem: &Mem) -> HashMap<Ds, Vec<u32>> {
+        let global = self.global(mem).map(|o| o.addr);
+        let mut held: HashMap<Ds, Vec<u32>> = HashMap::new();
+        for o in &self.owners {
+            let named = !self.names.ds.is_empty() && (o.instance.is_some() || Some(o.addr) == global);
+            for (rv, key) in self.vars(mem, o.addr, o.map) {
+                let typed = if named { self.name_in(mem, o.addr, key).and_then(|n| self.names.ds.get(&n).copied()) } else { None };
+                if let Some((kind, i)) = self.ds_of(mem, rv, typed) {
+                    held.entry(kind).or_default().push(i);
+                }
+            }
+        }
+        for v in held.values_mut() {
+            v.sort_unstable();
+            v.dedup();
+        }
+        held
+    }
+
+    /// A ds_list (a stack and a queue look the same): {vtable, count, capacity, RValue*}, a
+    /// pointer's width apart: (count, the RValues).
+    fn list_at(&self, mem: &Mem, p: u64) -> Option<(u32, u64)> {
+        let (n, room, items) = (half(mem, p + self.w)?, half(mem, p + 2 * self.w)?, ptr(mem, self.w, p + 3 * self.w)?);
+        (n <= room && room <= MAX_ARRAY && (n == 0 || rvalues_ok(mem, items, n))).then_some((n, items))
+    }
+
+    /// A ds_map's table: the object starts with a pointer to {buckets*, mask, count}: (the
+    /// buckets, mask, count).
+    fn map_at(&self, mem: &Mem, p: u64) -> Option<(u64, u32, u32)> {
+        let h = ptr(mem, self.w, p).filter(|&h| h > 0x1000)?;
+        let (buckets, mask, count) = (ptr(mem, self.w, h).filter(|&b| b > 0x1000)?, half(mem, h + self.w)?, half(mem, h + self.w + 4)?);
+        (mask >= 1 && mask < 1 << 20 && (mask + 1).is_power_of_two() && count < 1 << 20).then_some((buckets, mask, count))
+    }
+
+    /// What a ds_map holds: (key, the value's RValue). A bucket is {first, last}; a node
+    /// {next, previous, hash, pair*}, the pair a key's RValue and the value's. None unless
+    /// the nodes found are as many as the map counts.
+    fn map_entries(&self, mem: &Mem, p: u64) -> Option<Vec<(Step, u64)>> {
+        let w = self.w as usize;
+        let (buckets, mask, count) = self.map_at(mem, p)?;
+        let mut b = vec![0u8; (mask as usize + 1) * 2 * w];
+        mem.read_exact_at(&mut b, buckets).ok()?;
+        let mut todo: Vec<u64> = (0..b.len() / w).filter_map(|i| ptr_in(&b, self.w, i * w)).filter(|&n| n != 0).collect();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        while let Some(n) = todo.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            let mut node = [0u8; 32];
+            if seen.len() > count as usize || mem.read_exact_at(&mut node[..4 * w], n).is_err() {
+                return None;
+            }
+            todo.extend([ptr_in(&node, self.w, 0)?, ptr_in(&node, self.w, w)?].into_iter().filter(|&l| l != 0));
+            let pair = ptr_in(&node, self.w, 3 * w).filter(|&p| p > 0x1000)?;
+            let mut kv = [0u8; 16];
+            mem.read_exact_at(&mut kv, pair).ok()?;
+            let step = match (u32_at(&kv, 12)? & 0xff_ffff, rvalue_number(&kv)) {
+                (STRING, _) => match ptr_in(&kv, self.w, 0).and_then(|s| ptr(mem, self.w, s)).and_then(|s| key_text(mem, s)) {
+                    Some(t) => Step::Key(t),
+                    None => continue,
+                },
+                (_, Some(v)) => Step::Num(v.to_bits()),
+                _ => continue,
+            };
+            out.push((step, pair + 16));
+        }
+        out.sort_by_cached_key(|(s, _)| steps_text(std::slice::from_ref(s)));
+        (seen.len() == count as usize).then_some(out)
+    }
+
+    /// A ds_grid: {RValue*, width, height}, or the sizes first: (width, height, the cells,
+    /// row after row).
+    fn grid_at(&self, mem: &Mem, p: u64) -> Option<(u32, u32, u64)> {
+        let side = |n: u32| (1..=MAX_GRID).contains(&n);
+        let ok = |gw: u32, gh: u32, cells: u64| (side(gw) && side(gh) && rvalues_ok(mem, cells, gw * gh)).then_some((gw, gh, cells));
+        ok(half(mem, p + self.w)?, half(mem, p + self.w + 4)?, ptr(mem, self.w, p)?).or_else(|| ok(half(mem, p)?, half(mem, p + 4)?, ptr(mem, self.w, p + 8)?))
+    }
+
+    /// Whether `p` is a structure of the kind, as a table of that kind holds.
+    fn ds_ok(&self, mem: &Mem, kind: Ds, class: u64, p: u64) -> bool {
+        match kind {
+            Ds::Map => self.map_at(mem, p).is_some(),
+            Ds::Grid => self.grid_at(mem, p).is_some(),
+            _ => ptr(mem, self.w, p) == Some(class) && self.list_at(mem, p).is_some(),
+        }
+    }
+
+    /// A table's first slots: None when one holds something that isn't a structure of the kind.
+    fn table_slots(&self, heap: &Heap, kind: Ds, class: u64, at: u64, n: u32) -> Option<Vec<u64>> {
+        let mem = heap.mem();
+        (0..u64::from(n)).map(|i| ptr(mem, self.w, at + self.w * i).filter(|&p| p == 0 || (heap.is_pointer(p) && self.ds_ok(mem, kind, class, p)))).collect()
+    }
+
+    /// For each set of objects, the runner's table of them: where the pointers to them sit
+    /// side by side (gaps: destroyed ones), starting where another pointer (the runner's own)
+    /// points, at or before the first of them, empty slots between: (that pointer's address,
+    /// the table) for each such pointer. Two passes over memory for all sets.
+    fn tables_of(&self, heap: &Heap, sets: &[Vec<u64>]) -> Vec<Vec<(u64, u64)>> {
+        let mem = heap.mem();
+        let which: HashMap<u64, usize> = sets.iter().enumerate().flat_map(|(i, s)| s.iter().map(move |&o| (o, i))).collect();
+        let all: Vec<u64> = which.keys().copied().collect();
+        let mut by: Vec<Vec<u64>> = vec![Vec::new(); sets.len()];
+        for r in heap.referrers(&all) {
+            if let Some(&i) = ptr(mem, self.w, r).and_then(|t| which.get(&t)) {
+                by[i].push(r);
+            }
+        }
+        let starts: Vec<Vec<u64>> = by
+            .into_iter()
+            .map(|mut refs| {
+                refs.sort_unstable();
+                let mut run: Vec<u64> = Vec::new();
+                let mut longest: Vec<u64> = Vec::new();
+                for r in refs {
+                    if run.last().is_some_and(|&l| r - l > self.w * 64) {
+                        if run.len() > longest.len() {
+                            longest = std::mem::take(&mut run);
+                        }
+                        run.clear();
+                    }
+                    run.push(r);
+                }
+                if run.len() > longest.len() {
+                    longest = run;
+                }
+                let Some(&first) = longest.first() else { return Vec::new() };
+                (0..u64::from(MAX_DS)).filter_map(|k| first.checked_sub(k * self.w)).take_while(|&a| a == first || ptr(mem, self.w, a) == Some(0)).collect()
+            })
+            .collect();
+        let pointed: Vec<(u64, u64)> = heap.referrers(&starts.concat()).into_iter().filter_map(|r| Some((r, ptr(mem, self.w, r)?))).collect();
+        starts
+            .iter()
+            .map(|s| {
+                let Some(&at) = s.iter().find(|&&a| pointed.iter().any(|&(_, v)| v == a)) else { return Vec::new() };
+                pointed.iter().filter(|&&(_, v)| v == at).map(|&(r, _)| (r, at)).collect()
+            })
+            .collect()
+    }
+
+    /// The runner's tables of ds_lists, ds_maps and ds_grids, for the kinds the game's
+    /// variables hold now (`ds_held`). Kept per game: finding them reads all of its memory
+    /// several times (10 s on Noise's Halloween Bash); a kind not found is looked for again
+    /// only once the variables hold other indexes of that kind.
+    fn tables(&self, heap: &Heap) -> Tables {
+        *self.tables.get_or_init(|| {
+            type Held = HashMap<Ds, Vec<u32>>;
+            static KNOWN: Mutex<Option<(u32, Tables, Held)>> = Mutex::new(None);
+            let mem = heap.mem();
+            let held = self.ds_held(mem);
+            let wanted = |k: Ds| held.get(&k).is_some_and(|v| !v.is_empty());
+            let known = KNOWN.lock().unwrap().clone();
+            if let Some((_, mut t, before)) = known.filter(|k| k.0 == self.pid) {
+                // Still tables of their kind (a table that grew is read where the runner's
+                // pointer leads now).
+                let still = |kind: Ds, class: u64, at: Option<u64>| at.filter(|&a| ptr(mem, self.w, a).is_some_and(|t| heap.is_pointer(t) && self.table_slots(heap, kind, class, t, 8).is_some()));
+                let had = (t.lists.is_some(), t.maps.is_some(), t.grids.is_some());
+                t.lists = t.lists.filter(|&(a, class)| still(Ds::List, class, Some(a)).is_some());
+                t.maps = still(Ds::Map, 0, t.maps);
+                t.grids = still(Ds::Grid, 0, t.grids);
+                let again = |k: Ds, found: bool| !found && wanted(k) && held.get(&k) != before.get(&k);
+                // Looked for again too when a table found before no longer is one.
+                let lost = had != (t.lists.is_some(), t.maps.is_some(), t.grids.is_some());
+                if !lost && !again(Ds::List, t.lists.is_some()) && !again(Ds::Map, t.maps.is_some()) && !again(Ds::Grid, t.grids.is_some()) {
+                    return t;
+                }
+            }
+            let t = if [Ds::List, Ds::Map, Ds::Grid].into_iter().any(wanted) { self.find_tables(heap, &held) } else { Tables::default() };
+            *KNOWN.lock().unwrap() = Some((self.pid, t, held));
+            t
+        })
+    }
+
+    /// Looks for the tables. Lists: objects of one C++ class, {vtable, count, capacity,
+    /// RValue*}; stacks, queues and priority queues are classes of that shape too, each with
+    /// a table of its own, and nothing in a runner without symbols tells the classes apart
+    /// (their order differs between the Linux and the Windows runner): the tables are given
+    /// to the kinds the way most indexes the variables hold lead to a structure; lists are
+    /// shown only when one table is theirs that way. Maps and grids have no vtable: their
+    /// tables are looked for next to the runner's pointers to those tables (it keeps all six
+    /// side by side), then by shape through all of memory.
+    fn find_tables(&self, heap: &Heap, held: &HashMap<Ds, Vec<u32>>) -> Tables {
+        let mem = heap.mem();
+        let w = self.w as usize;
+        let debug = std::env::var_os("FERRET_DEBUG").is_some();
+        let of = |k: Ds| held.get(&k).map(Vec::as_slice).unwrap_or_default();
+        let mut classes: HashMap<u64, Vec<u64>> = HashMap::new();
+        heap.each_chunk(4 * w, |addr, b, fresh| {
+            for off in (0..fresh).step_by(w) {
+                let (Some(vt), Some(count), Some(room), Some(items)) = (ptr_in(b, self.w, off), u32_at(b, off + w), u32_at(b, off + 2 * w), ptr_in(b, self.w, off + 3 * w)) else { break };
+                if vt < 0x1_0000 || count > room || room == 0 || room > MAX_ARRAY || !heap.read_only(vt) || !heap.is_pointer(items) {
+                    continue;
+                }
+                let of = classes.entry(vt).or_default();
+                if of.len() < 1 << 16 {
+                    of.push(addr + off as u64);
+                }
+            }
+        });
+        let regions = crate::helper::maps(self.pid).unwrap_or_default();
+        let has = |a: u64, c: char| regions.iter().any(|r| r.start <= a && a < r.end && r.perms.contains(c));
+        // Classes none of whose objects holds what can't be RValues.
+        let classes: Vec<(u64, Vec<u64>)> = classes
+            .into_iter()
+            .filter(|(vt, objects)| ptr(mem, self.w, *vt).is_some_and(|f| has(f, 'x')) && objects.iter().take(256).all(|&o| self.list_at(mem, o).is_some()))
+            .collect();
+        let sets: Vec<Vec<u64>> = classes.iter().map(|(_, o)| o.clone()).collect();
+        let found = if sets.is_empty() { Vec::new() } else { self.tables_of(heap, &sets) };
+        // (class, the runner's pointer, objects) of each class with a table. Of several
+        // pointers to one table, the one nearest another class's.
+        let all: Vec<u64> = found.iter().flatten().map(|x| x.0).collect();
+        let mut cands: Vec<(u64, u64, usize)> = Vec::new();
+        for (i, tables) in found.iter().enumerate() {
+            let near = |r: u64| all.iter().filter(|&&o| !tables.iter().any(|t| t.0 == o)).map(|&o| o.abs_diff(r)).min().unwrap_or(u64::MAX);
+            if let Some(&(r, at)) = tables.iter().min_by_key(|t| near(t.0)) {
+                if debug {
+                    eprintln!("gml ds: class {:#x}: {} objects, table {at:#x}, the runner's pointer at {r:#x}", classes[i].0, classes[i].1.len());
+                }
+                cands.push((classes[i].0, r, classes[i].1.len()));
+            }
+        }
+        let mut t = Tables::default();
+        // Each kind's fit to each table: the indexes leading to an object of the class
+        // first, then the fewest that don't (a destroyed list's index stays in its variable:
+        // DsBasic's one live and one destroyed list came to nothing, counted one for one).
+        let fit = |c: &(u64, u64, usize), kind: Ds| -> i64 {
+            let Some(at) = ptr(mem, self.w, c.1) else { return 0 };
+            of(kind).iter().map(|&i| if ptr(mem, self.w, at + self.w * u64::from(i)).is_some_and(|p| p != 0 && ptr(mem, self.w, p) == Some(c.0)) { 1024 } else { -1 }).sum()
+        };
+        let kinds: Vec<Ds> = [Ds::List, Ds::Stack, Ds::Queue, Ds::Priority].into_iter().filter(|&k| !of(k).is_empty()).collect();
+        if kinds.first() == Some(&Ds::List) {
+            // Every way of giving the kinds a table each (or none): the best total.
+            let mut best: Vec<(i64, Option<usize>)> = Vec::new();
+            let mut choice: Vec<Option<usize>> = vec![None; kinds.len()];
+            fn each(k: usize, n: usize, choice: &mut Vec<Option<usize>>, f: &mut dyn FnMut(&[Option<usize>])) {
+                if k == choice.len() {
+                    return f(choice);
+                }
+                for c in std::iter::once(None).chain((0..n).map(Some)) {
+                    if c.is_none() || !choice[..k].contains(&c) {
+                        choice[k] = c;
+                        each(k + 1, n, choice, f);
+                    }
+                }
+            }
+            each(0, cands.len().min(6), &mut choice, &mut |choice| {
+                let total: i64 = choice.iter().zip(&kinds).map(|(c, &k)| c.map_or(0, |c| fit(&cands[c], k))).sum();
+                best.push((total, choice[0]));
+            });
+            let top = best.iter().map(|b| b.0).max().unwrap_or(0);
+            let mut lists: Vec<usize> = best.iter().filter(|b| b.0 == top).filter_map(|b| b.1).filter(|&c| fit(&cands[c], Ds::List) > 0).collect();
+            lists.sort_unstable();
+            lists.dedup();
+            // Lists are the most of them, when the indexes can't tell.
+            let most = lists.iter().map(|&c| cands[c].2).max().unwrap_or(0);
+            lists.retain(|&c| cands[c].2 == most);
+            if debug {
+                eprintln!("gml ds: held {held:?}, lists' table: {:x?}", lists.iter().map(|&c| cands[c]).collect::<Vec<_>>());
+            }
+            if let [c] = lists[..] {
+                t.lists = Some((cands[c].1, cands[c].0));
+            }
+        }
+        // Maps and grids: a pointer near the classes' pointers to a table whose slots all
+        // hold a map (a grid), the indexes the variables hold among them.
+        let fits = |kind: Ds, at: u64| -> Option<(usize, usize)> {
+            let n = of(kind).last().map_or(0, |&i| i + 1).max(16);
+            let slots = self.table_slots(heap, kind, 0, at, n).or_else(|| self.table_slots(heap, kind, 0, at, 16))?;
+            let live = of(kind).iter().filter(|&&i| slots.get(i as usize).is_some_and(|&p| p != 0)).count();
+            (live > 0).then_some((live, slots.iter().filter(|&&p| p != 0).count()))
+        };
+        for kind in [Ds::Map, Ds::Grid].into_iter().filter(|&k| !of(k).is_empty()) {
+            let near = cands.iter().flat_map(|c| (c.1.saturating_sub(0x100)..=c.1 + 0x100).step_by(w)).filter(|a| !cands.iter().any(|c| c.1 == *a));
+            let best = near.filter_map(|a| Some((fits(kind, ptr(mem, self.w, a).filter(|&p| heap.is_pointer(p))?)?, a))).max();
+            match kind {
+                Ds::Map => t.maps = best.map(|b| b.1),
+                _ => t.grids = best.map(|b| b.1),
+            }
+        }
+        // By shape through all of memory: the hash tables' heads, then what points to one
+        // first (a map); pointers followed by two sizes, leading to that many RValues (a grid).
+        if !of(Ds::Map).is_empty() && t.maps.is_none() {
+            let mut heads: Vec<u64> = Vec::new();
+            heap.each_chunk(w + 8, |addr, b, fresh| {
+                for off in (0..fresh).step_by(w) {
+                    let (Some(buckets), Some(mask), Some(count)) = (ptr_in(b, self.w, off), u32_at(b, off + w), u32_at(b, off + w + 4)) else { break };
+                    if mask >= 7 && mask < 1 << 20 && (mask + 1).is_power_of_two() && count <= mask.saturating_mul(8) && heap.is_pointer(buckets) && heads.len() < 1 << 18 {
+                        heads.push(addr + off as u64);
+                    }
+                }
+            });
+            let maps: Vec<u64> = heap.referrers(&heads).into_iter().filter(|&p| self.map_at(mem, p).is_some()).take(1 << 16).collect();
+            t.maps = self.tables_of(heap, &[maps]).concat().into_iter().filter_map(|(r, at)| Some((fits(Ds::Map, at)?, r))).max().map(|b| b.1);
+        }
+        if !of(Ds::Grid).is_empty() && t.grids.is_none() {
+            let mut grids: Vec<u64> = Vec::new();
+            let side = |n: Option<u32>| n.is_some_and(|n| (1..=MAX_GRID).contains(&n));
+            heap.each_chunk(w + 8, |addr, b, fresh| {
+                for off in (0..fresh).step_by(w) {
+                    let first = ptr_in(b, self.w, off).is_some_and(|p| heap.is_pointer(p)) && side(u32_at(b, off + w)) && side(u32_at(b, off + w + 4));
+                    let last = side(u32_at(b, off)) && side(u32_at(b, off + 4)) && ptr_in(b, self.w, off + 8).is_some_and(|p| heap.is_pointer(p));
+                    if (first || last) && grids.len() < 1 << 18 {
+                        grids.push(addr + off as u64);
+                    }
+                }
+            });
+            grids.retain(|&p| self.grid_at(mem, p).is_some());
+            grids.truncate(1 << 16);
+            t.grids = self.tables_of(heap, &[grids]).concat().into_iter().filter_map(|(r, at)| Some((fits(Ds::Grid, at)?, r))).max().map(|b| b.1);
+        }
+        if debug {
+            eprintln!("gml ds: tables {t:x?}");
+        }
+        t
+    }
+
+    /// What a ds_list, ds_map or ds_grid holds: (step, RValue address), by its index. Nothing
+    /// for a destroyed one (its slot is empty) or when the table of its kind wasn't found.
+    fn ds_elements(&self, heap: &Heap, kind: Ds, index: u32) -> Vec<(Step, u64)> {
+        let mem = heap.mem();
+        let t = self.tables(heap);
+        let slot = |at: u64| ptr(mem, self.w, ptr(mem, self.w, at).filter(|&t| heap.is_pointer(t))? + self.w * u64::from(index)).filter(|&p| heap.is_pointer(p));
+        let found = match kind {
+            Ds::List => t.lists.and_then(|(at, class)| {
+                let p = slot(at).filter(|&p| ptr(mem, self.w, p) == Some(class))?;
+                let (n, items) = self.list_at(mem, p)?;
+                Some((0..n).map(|i| (Step::Index(i), items + 16 * u64::from(i))).collect())
+            }),
+            Ds::Map => t.maps.and_then(|at| self.map_entries(mem, slot(at)?)),
+            Ds::Grid => t.grids.and_then(|at| {
+                let (gw, gh, cells) = self.grid_at(mem, slot(at)?)?;
+                Some((0..gw * gh).map(|k| (Step::Cell(k % gw, k / gw), cells + 16 * u64::from(k))).collect())
+            }),
+            _ => None,
+        };
+        found.unwrap_or_default()
+    }
+
     /// What a value holds inside: an array's elements, a struct's variables; empty for
     /// anything else. `pointee` is the array or struct itself (to tell a loop).
     fn children(&self, mem: &Mem, rv: u64) -> (u64, Vec<(Step, u64)>) {
@@ -943,14 +1444,26 @@ impl Gml {
         }
     }
 
-    /// The numbers inside a variable's arrays and structs: (steps, RValue address). `all`:
+    /// What a value holds inside (`children`), or the data structure it stands for holds
+    /// (`ds_of`, `typed`: what the code keeps in a variable of its name).
+    fn kids(&self, heap: &Heap, rv: u64, typed: Option<Ds>) -> (u64, Vec<(Step, u64)>) {
+        let (pointee, kids) = self.children(heap.mem(), rv);
+        match self.ds_of(heap.mem(), rv, typed) {
+            Some((kind, index)) if kids.is_empty() => (u64::MAX - ((kind as u64) << 32) - u64::from(index), self.ds_elements(heap, kind, index)),
+            _ => (pointee, kids),
+        }
+    }
+
+    /// The numbers inside a variable's arrays, structs and data structures: (steps, RValue address). `all`:
     /// every element (to find one by its address); otherwise what the list shows (`LIST_FIRST`).
-    fn inside(&self, mem: &Mem, rv: u64, all: bool, budget: usize) -> Vec<(Vec<Step>, u64)> {
+    /// `name`: the variable's, which tells whether its number is a data structure's index.
+    fn inside(&self, heap: &Heap, rv: u64, name: &str, all: bool, budget: usize) -> Vec<(Vec<Step>, u64)> {
+        let mem = heap.mem();
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-        let mut todo: Vec<(Vec<Step>, u64)> = vec![(Vec::new(), rv)];
-        while let Some((steps, rv)) = todo.pop() {
-            let (pointee, kids) = self.children(mem, rv);
+        let mut todo: Vec<(Vec<Step>, u64, Option<Ds>)> = vec![(Vec::new(), rv, self.names.ds.get(name).copied())];
+        while let Some((steps, rv, ds)) = todo.pop() {
+            let (pointee, kids) = self.kids(heap, rv, ds);
             if kids.is_empty() || !seen.insert(pointee) || out.len() >= budget {
                 continue;
             }
@@ -971,16 +1484,33 @@ impl Gml {
                     None if mem.read_exact_at(&mut one, kid).is_ok() => &one,
                     None => continue,
                 };
+                // A struct's variable may hold a list or a grid by its index too.
+                let held = match &step {
+                    Step::Field(n) => self.names.ds.get(n).copied(),
+                    _ => None,
+                };
                 let mut path = steps.clone();
                 path.push(step);
-                match (rvalue_number(b), u32_at(b, 12).unwrap_or(0) & 0xff_ffff) {
+                let kind = u32_at(b, 12).unwrap_or(0);
+                let near = all || !array || i < LIST_FIRST;
+                match (rvalue_number(b), kind & 0xff_ffff) {
+                    // A number a ds_map marks as a list's or a map's index: what it holds.
+                    (Some(_), _) if kind & (HOLDS_LIST | HOLDS_MAP) != 0 => {
+                        if path.len() < MAX_DEPTH && near {
+                            todo.push((path, kid, None));
+                        }
+                    }
+                    (None, REF) if path.len() < MAX_DEPTH && near => todo.push((path, kid, None)),
                     (Some(v), _) => {
+                        if held.is_some() && path.len() < MAX_DEPTH {
+                            todo.push((path.clone(), kid, held));
+                        }
                         if all || !array || i < LIST_FIRST || (v != 0.0 && shown < LIST_ARRAY) {
                             shown += 1;
                             out.push((path, kid));
                         }
                     }
-                    (None, ARRAY | OBJECT) if path.len() < MAX_DEPTH && (all || !array || i < LIST_FIRST) => todo.push((path, kid)),
+                    (None, ARRAY | OBJECT) if path.len() < MAX_DEPTH && near => todo.push((path, kid, None)),
                     _ => {}
                 }
             }
@@ -1045,7 +1575,8 @@ fn rows_ok(mem: &Mem, w: u64, rows: u64, n: u32) -> bool {
     any
 }
 
-/// Steps as a path's text: ".name", "[3]", "[1,2]".
+/// Steps as a path's text: ".name", "[3]", "[1,2]", a ds_map's keys "[\"gold\"]" (a quote
+/// or a backslash in one after a backslash) and "[=42]".
 fn steps_text(steps: &[Step]) -> String {
     steps
         .iter()
@@ -1053,8 +1584,19 @@ fn steps_text(steps: &[Step]) -> String {
             Step::Field(n) => format!(".{n}"),
             Step::Index(i) => format!("[{i}]"),
             Step::Cell(r, c) => format!("[{r},{c}]"),
+            Step::Key(k) => format!("[\"{}\"]", k.replace('\\', "\\\\").replace('"', "\\\"")),
+            Step::Num(n) => format!("[={}]", f64::from_bits(*n)),
         })
         .collect()
+}
+
+/// A ds_map's key as text: up to 64 bytes, nothing a path can't carry.
+fn key_text(mem: &Mem, at: u64) -> Option<String> {
+    let mut b = [0u8; 65];
+    let n = mem.read_at(&mut b, at).ok()?;
+    let end = b[..n].iter().position(|&c| c == 0)?;
+    let t = std::str::from_utf8(&b[..end]).ok()?;
+    (!t.is_empty() && !t.chars().any(char::is_control)).then(|| t.to_owned())
 }
 
 /// Whether an RValue holds a number now.
@@ -1109,16 +1651,36 @@ impl GmlPath {
                     return None;
                 }
                 rest = &r[end..];
+            } else if let Some(r) = rest.strip_prefix("[\"") {
+                // A key: up to the quote no backslash stands before.
+                let mut key = String::new();
+                let mut chars = r.char_indices();
+                let end = loop {
+                    match chars.next()? {
+                        (_, '\\') => key.push(chars.next()?.1),
+                        (i, '"') => break i,
+                        (_, c) => key.push(c),
+                    }
+                };
+                steps.push(Step::Key(key));
+                rest = r[end + 1..].strip_prefix(']')?;
             } else {
                 let (inner, after) = rest.strip_prefix('[')?.split_once(']')?;
-                steps.push(match inner.split_once(',') {
-                    Some((r, c)) => Step::Cell(r.parse().ok()?, c.parse().ok()?),
-                    None => Step::Index(inner.parse().ok()?),
+                steps.push(match (inner.strip_prefix('='), inner.split_once(',')) {
+                    (Some(n), _) => Step::Num(n.parse::<f64>().ok()?.to_bits()),
+                    (_, Some((r, c))) => Step::Cell(r.parse().ok()?, c.parse().ok()?),
+                    _ => Step::Index(inner.parse().ok()?),
                 });
                 rest = after;
             }
         }
         Some(GmlPath { object: (object != "global").then(|| object.to_owned()), var: var.to_owned(), steps })
+    }
+
+    /// Whether the game may move the value: one inside an array, a list, a map or a grid,
+    /// which get a new block when they grow (a variable's own RValue stays where it is).
+    pub fn moves(&self) -> bool {
+        !self.steps.is_empty()
     }
 
     pub fn text(&self) -> String {
@@ -1162,8 +1724,13 @@ pub fn walk(heap: &Heap, program: Option<&Path>, roots: &[u64], path: &GmlPath) 
         .filter_map(|&r| {
             let map = ptr(mem, g.w, r + g.map_at)?;
             let mut rv = g.vars(mem, r, map).into_iter().find(|&(_, k)| k == key)?.0;
+            let mut typed = g.names.ds.get(&path.var).copied();
             for step in &path.steps {
-                rv = g.children(mem, rv).1.into_iter().find(|(s, _)| s == step)?.1;
+                rv = g.kids(heap, rv, typed).1.into_iter().find(|(s, _)| s == step)?.1;
+                typed = match step {
+                    Step::Field(n) => g.names.ds.get(n).copied(),
+                    _ => None,
+                };
             }
             holds_number(mem, rv).then_some(rv)
         })
@@ -1197,8 +1764,8 @@ pub fn discover(heap: &Heap, program: Option<&Path>, target: u64) -> Option<(Gml
             continue;
         }
         for (rv, key) in g.vars(mem, o.addr, o.map) {
-            let Some((steps, _)) = g.inside(mem, rv, true, usize::MAX).into_iter().find(|(_, at)| *at == target) else { continue };
             let Some(var) = g.name_in(mem, o.addr, key) else { continue };
+            let Some((steps, _)) = g.inside(heap, rv, &var, true, usize::MAX).into_iter().find(|(_, at)| *at == target) else { continue };
             let path = GmlPath { object: o.instance.map(|(_, obj)| g.object_name(obj)), var, steps };
             let leads = walk(heap, program, &find_roots(heap, program, &path), &path);
             if leads.contains(&target) {
@@ -1216,7 +1783,7 @@ pub fn player(heap: &Heap, program: Option<&Path>) -> Option<Vec<ListedObject>> 
     let mem = heap.mem();
     let mut out = Vec::new();
     if let Some(o) = g.global(mem) {
-        let fields = g.numbers(mem, o).into_iter().map(|(label, addr, kind)| Listed { label, addr, kind }).collect();
+        let fields = g.numbers(heap, o).into_iter().map(|(label, addr, kind)| Listed { label, addr, kind }).collect();
         out.push(ListedObject { name: "@global".into(), class: "global".into(), role: "game", owner: None, more: false, fields });
     }
     let mut instances: Vec<&Owner> = g.owners.iter().filter(|o| o.instance.is_some()).collect();
@@ -1225,7 +1792,7 @@ pub fn player(heap: &Heap, program: Option<&Path>) -> Option<Vec<ListedObject>> 
     for o in instances {
         let (id, obj) = o.instance.unwrap_or_default();
         let class = g.object_name(obj);
-        let fields: Vec<Listed> = g.numbers(mem, o).into_iter().map(|(label, addr, kind)| Listed { label, addr, kind }).collect();
+        let fields: Vec<Listed> = g.numbers(heap, o).into_iter().map(|(label, addr, kind)| Listed { label, addr, kind }).collect();
         if fields.is_empty() || listed > crate::ue::MAX_LISTED {
             continue;
         }
@@ -1325,7 +1892,7 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
     ));
     for o in g.owners.iter().filter(|o| o.instance.is_some()).take(15) {
         let (id, obj) = o.instance.unwrap_or_default();
-        let nums = g.numbers(mem, o);
+        let nums = g.numbers(heap, o);
         let sample: Vec<String> = nums
             .iter()
             .take(6)
@@ -1338,6 +1905,9 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
         lines.push(format!("  {} ({id}) at 0x{:x}: {}", g.object_name(obj), o.addr, sample.join(", ")));
     }
     lines.push(format!("arrays: {:x?}", g.array_at(mem)));
+    let mut held: Vec<(Ds, Vec<u32>)> = g.ds_held(mem).into_iter().collect();
+    held.sort_by_key(|h| h.0 as u8);
+    lines.push(format!("data structures: {} variables typed by the code, held now {held:?}, tables {:x?}", g.names.ds.len(), g.tables(heap)));
     // What the first few arrays (kind 2) and structs (kind 6) point to: their layout.
     let global = g.global(mem).map(|o| o.addr);
     for (kind, label) in [(ARRAY, "array"), (OBJECT, "struct")] {
@@ -1361,7 +1931,7 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
         lines.push(format!("GameMaker Studio 1.4 arrays: {} instance variables, {} global ones; instances' class 0x{:x}", f.instance_n, f.global_n, g.class));
     }
     if let Some(o) = g.global(mem) {
-        lines.push(format!("global object 0x{:x}: {} numbers", o.addr, g.numbers(mem, o).len()));
+        lines.push(format!("global object 0x{:x}: {} numbers", o.addr, g.numbers(heap, o).len()));
     }
     lines
 }
@@ -1380,6 +1950,11 @@ mod tests {
             assert_eq!(GmlPath::parse(text).unwrap().text(), text);
         }
         assert_eq!(GmlPath::parse("gml:global.a[1,2].b").unwrap().steps, vec![Step::Cell(1, 2), Step::Field("b".into())]);
+        for text in ["gml:global.stats[\"gold\"]", "gml:global.save[\"party\"][2]", "gml:obj_a.m[=42]", "gml:global.m[=-1.5].x", r#"gml:global.m["a \"b\" ]\\."][0]"#] {
+            assert_eq!(GmlPath::parse(text).unwrap().text(), text, "{text}");
+        }
+        assert_eq!(GmlPath::parse(r#"gml:global.m["a \"b\" ]\\."]"#).unwrap().steps, vec![Step::Key(r#"a "b" ]\."#.into())]);
+        assert_eq!(GmlPath::parse("gml:global.m[=42]").unwrap().steps, vec![Step::Num(42f64.to_bits())]);
         assert!(GmlPath::parse("gml:global.a[x]").is_none());
         assert!(GmlPath::parse("gml:global.a[1").is_none());
         assert!(GmlPath::parse("gml:hp").is_none());

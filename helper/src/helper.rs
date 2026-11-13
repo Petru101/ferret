@@ -1210,9 +1210,10 @@ impl Named {
     /// Walked again right before every write (not only every `LIMIT_FIND_EVERY`): Java and
     /// V8 (RPG Maker) move their objects when they compact memory, and the old place is
     /// reused; Python makes a new number object at every change (`hp -= 1`) and frees the old
-    /// one.
+    /// one; a GameMaker array, list, map or grid that grows moves what it holds and frees the
+    /// old block (a list element kept there crashed Snack Hoard 13 additions later).
     fn fresh(&self) -> bool {
-        matches!(self, Named::Java(_) | Named::Py(_) | Named::Js(_) | Named::Web(_) | Named::Cs(_))
+        matches!(self, Named::Java(_) | Named::Py(_) | Named::Js(_) | Named::Web(_) | Named::Cs(_)) || matches!(self, Named::Gml(p) if p.moves())
     }
 
     /// Walked again before a write only when one is due (the number at its last place is out
@@ -1220,7 +1221,7 @@ impl Named {
     /// the game's memory map each time). A number that moved and stayed in range waits for
     /// the next `LIMIT_FIND_EVERY` walk; a write always follows a walk.
     fn walk_when_due(&self) -> bool {
-        matches!(self, Named::Js(_) | Named::Web(_))
+        matches!(self, Named::Js(_) | Named::Web(_) | Named::Gml(_))
     }
 
     /// Where it leads from the roots found before (no search).
