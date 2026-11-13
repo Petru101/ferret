@@ -48,6 +48,13 @@ const NAMING_FIELDS: [&str; 6] = ["type", "id", "Id", "ID", "itemId", "netID"];
 /// MonoTypeEnum: a 4-byte int, a class, a single-dimension array.
 const TYPE_I4: u8 = 0x08;
 const TYPE_CLASS: u8 = 0x12;
+const TYPE_VALUETYPE: u8 = 0x11;
+const TYPE_I8: u8 = 0x0a;
+const TYPE_U8: u8 = 0x0b;
+/// A generic class with its type arguments (`Dictionary<K, V>`).
+const TYPE_GENERICINST: u8 = 0x15;
+/// The most entries of a Dictionary listed.
+const MAX_DICT: u64 = 256;
 const TYPE_SZARRAY: u8 = 0x1d;
 
 /// How the game runs its C#: Mono's runtime, or IL2CPP's (compiled to native code in
@@ -118,6 +125,17 @@ impl Step {
     }
 }
 
+/// A path's last field, and the key when it names a Dictionary's value: "_amounts[3]".
+fn keyed(field: &str) -> (&str, Option<i64>) {
+    match field.strip_suffix(']').and_then(|f| f.split_once('[')) {
+        Some((f, k)) => match k.parse() {
+            Ok(k) => (f, Some(k)),
+            Err(_) => (field, None),
+        },
+        None => (field, None),
+    }
+}
+
 fn ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "_<>`$".contains(c))
 }
@@ -133,7 +151,7 @@ impl MonoPath {
         let via = steps.iter().map(|s| Step::parse(s)).collect::<Option<Vec<_>>>()?;
         let ns_ok = namespace.is_empty() || namespace.split('.').all(ident);
         let runtime_ok = via.is_empty() || runtime == Runtime::Mono;
-        (ns_ok && runtime_ok && ident(class) && ident(field)).then(|| MonoPath { runtime, namespace: namespace.into(), class: class.into(), via, field: field.into() })
+        (ns_ok && runtime_ok && ident(class) && ident(keyed(field).0)).then(|| MonoPath { runtime, namespace: namespace.into(), class: class.into(), via, field: field.into() })
     }
 
     /// The class and the steps after it: "Main.player[0].inventory[type=9]".
@@ -520,7 +538,59 @@ impl<'a> Mono<'a> {
     /// Where the value a static path leads to is.
     fn static_walk(&self, pid: u32, k: u64, data: u64, path: &MonoPath) -> Option<u64> {
         let obj = self.static_object(pid, k, data, path)?;
-        Some(obj + self.field(pid, self.class_of(obj)?, &path.field, false)?.0)
+        let (field, key) = keyed(&path.field);
+        self.keyed_at(pid, obj + self.field(pid, self.class_of(obj)?, field, false)?.0, key)
+    }
+
+    /// Where a field's value is: the field itself, or with a key the value the Dictionary
+    /// it points to keeps under it.
+    fn keyed_at(&self, pid: u32, at: u64, key: Option<i64>) -> Option<u64> {
+        let Some(key) = key else { return Some(at) };
+        self.dict_numbers(pid, self.word(at)?).into_iter().find(|e| e.0 == key).map(|e| e.1)
+    }
+
+    /// The numbers a `Dictionary<K, V>` keeps under whole-number keys (an enum's too): (key,
+    /// the value's address, helper type). A Dictionary keeps an array of entries {int
+    /// hashCode, int next, K key, V value} (hashCode -1: a freed one) and their count; the
+    /// entry's layout comes from the array's element class (a struct's field offsets count
+    /// the object header it doesn't have in an array). Find the Clover keeps its currencies
+    /// so (`InventoryManager`: a Dictionary of an enum to a long).
+    fn dict_numbers(&self, pid: u32, dict: u64) -> Vec<(i64, u64, &'static str)> {
+        let w = self.lay.w;
+        let found = || -> Option<Vec<(i64, u64, &'static str)>> {
+            let k = self.class_of(dict)?;
+            if self.name(k)?.1 != "Dictionary`2" {
+                return None;
+            }
+            let field = |names: [&str; 2]| names.into_iter().find_map(|n| self.field(pid, k, n, false));
+            let entries = self.word(dict + field(["_entries", "entries"])?.0).filter(|&e| e >= 0x10000)?;
+            let mut n = [0u8; 4];
+            self.mem.read_exact_at(&mut n, dict + field(["_count", "count"])?.0).ok()?;
+            let (elem, len) = self.array(entries)?;
+            let count = (u32::from_le_bytes(n) as u64).min(len).min(MAX_DICT);
+            let fields = self.declared(elem);
+            let at = |name: &str| fields.iter().find(|f| f.0 == name).map(|f| (f.1, self.kind(f.3)));
+            let (base, _) = at("hashCode")?;
+            let (key, key_kind) = at("key")?;
+            let (value, value_kind) = at("value")?;
+            // A whole-number key: an int, or an enum (a value type) of an int's size.
+            if !matches!(key_kind, Some(TYPE_I4 | TYPE_U4 | TYPE_VALUETYPE)) || base != 2 * w || key != base + 8 || value < key + 4 {
+                return None;
+            }
+            let (kind, size) = match value_kind? {
+                TYPE_I4 | TYPE_U4 => ("i32", 4),
+                TYPE_R4 => ("f32", 4),
+                TYPE_R8 => ("f64", 8),
+                TYPE_I8 | TYPE_U8 => ("i64", 8),
+                _ => return None,
+            };
+            let stride = (value - base + size).next_multiple_of(if size == 8 || value - key >= 8 { 8 } else { 4 });
+            let mut b = vec![0u8; (count * stride) as usize];
+            self.mem.read_exact_at(&mut b, entries + 4 * w).ok()?;
+            let int = |o: u64| i32::from_le_bytes(b[o as usize..o as usize + 4].try_into().unwrap());
+            Some((0..count).filter(|i| int(i * stride) >= 0).map(|i| (int(i * stride + key - base) as i64, entries + 4 * w + i * stride + value - base, kind)).collect())
+        };
+        found().unwrap_or_default()
     }
 
     /// How to pick the element at slot `i` of the array `a` again: by a whole-number field
@@ -640,6 +710,14 @@ impl<'a> Mono<'a> {
 /// Unity objects can be told from those (their native object points back), so a field of a
 /// plain C# class gets no path there (it would lead to many places).
 pub fn discover(heap: &Heap, target: u64) -> Option<(MonoPath, Vec<u64>)> {
+    // A Dictionary's value the list showed: by the path it was listed with, if that leads there.
+    let listed = LISTED.lock().unwrap().iter().find(|l| l.0 == heap.pid && l.1 == target).map(|l| l.2.clone());
+    if let Some(path) = listed {
+        let leads = walk(heap, &find_roots(heap, &path), &path);
+        if leads.len() <= MAX_PLACES && leads.contains(&target) {
+            return Some((path, leads));
+        }
+    }
     let lay = layout_near(heap, target)?;
     let m = Mono::new(heap, lay);
     let (obj, k, field) = m.holder(target)?;
@@ -1042,7 +1120,8 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &MonoPath) -> Vec<u64> {
         .iter()
         .map(|&obj| {
             let k = m.class_of(obj).filter(|&k| m.is(k, path) && m.live(obj, k))?;
-            Some((m.age(obj, k), obj + m.offset(k, &path.field)?))
+            let (field, key) = keyed(&path.field);
+            Some((m.age(obj, k), m.keyed_at(heap.pid, obj + m.offset(k, field)?, key)?))
         })
         .collect();
     let Some(mut leads) = leads else { return Vec::new() };
@@ -1081,6 +1160,9 @@ const TYPE_R4: u8 = 0x0c;
 const TYPE_R8: u8 = 0x0d;
 /// Where a native Component keeps its GameObject, and a native GameObject its name (found on
 /// the game, `game_object_layout`).
+/// The Dictionary values the last list showed, with their paths (`discover` can't name them
+/// from the address: an entry isn't a field of an object).
+static LISTED: Mutex<Vec<(u32, u64, MonoPath)>> = Mutex::new(Vec::new());
 static GAME_OBJECT: Mutex<Option<(u32, Option<(u64, u64)>)>> = Mutex::new(None);
 
 /// Whether the game is a Unity game running C# (Mono with Unity's player or its
@@ -1166,6 +1248,14 @@ impl Mono<'_> {
         out
     }
 
+    /// The fields of an object of class `k` (the game's own classes') that may hold a
+    /// Dictionary: name and offset.
+    fn dict_fields(&self, k: u64, stop: &[u64]) -> Vec<(String, u64)> {
+        let mut chain: Vec<u64> = self.chain(k).into_iter().take_while(|c| !stop.contains(c)).collect();
+        chain.retain(|&c| self.name(c).is_some_and(|(ns, _)| !engine_namespace(&ns)));
+        chain.into_iter().flat_map(|c| self.declared(c)).filter(|f| f.2 & NOT_IN_OBJECT == 0 && self.kind(f.3) == Some(TYPE_GENERICINST)).map(|f| (f.0, f.1)).collect()
+    }
+
     /// The native GameObject of a live Unity component and its name.
     fn game_object(&self, pid: u32, obj: u64, k: u64) -> Option<(u64, String)> {
         let n = self.native(obj, k).filter(|&n| n != 0)?;
@@ -1225,6 +1315,7 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
             eprintln!("unity list: {what} at {} ms", started.elapsed().as_millis());
         }
     };
+    LISTED.lock().unwrap().clear();
     let unity = |class: &str| MonoPath { runtime, namespace: "UnityEngine".into(), class: class.into(), via: Vec::new(), field: String::new() };
     // The class layout is learned from a class's fields: MonoBehaviour declares none,
     // UnityEngine.Object has m_CachedPtr.
@@ -1347,8 +1438,18 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
         .into_iter()
         .filter_map(|(k, obj, g)| {
             let (ns, class) = m.name(k)?;
-            let fields: Vec<crate::ue::Listed> =
+            let mut fields: Vec<crate::ue::Listed> =
                 m.numbers(k, &base).into_iter().map(|(label, off, kind)| crate::ue::Listed { label, addr: obj + off, kind }).collect();
+            // The numbers its Dictionaries keep under whole-number keys: "_amounts[3]".
+            for (field, off) in m.dict_fields(k, &base) {
+                let Some(dict) = m.word(obj + off).filter(|&d| d >= 0x10000) else { continue };
+                for (key, addr, kind) in m.dict_numbers(pid, dict) {
+                    let label = format!("{}[{key}]", Mono::shown_name(&field));
+                    let path = MonoPath { runtime, namespace: ns.clone(), class: class.clone(), via: Vec::new(), field: format!("{field}[{key}]") };
+                    LISTED.lock().unwrap().push((pid, addr, path));
+                    fields.push(crate::ue::Listed { label, addr, kind });
+                }
+            }
             let more = !main(k, &g);
             if fields.is_empty() || more && total + fields.len() > crate::ue::MAX_LISTED {
                 return None;
@@ -1392,6 +1493,10 @@ mod tests {
         assert!(MonoPath::parse("mono:NewMovement").is_none());
         assert!(MonoPath::parse("mono:New Movement.hp").is_none());
         assert!(MonoPath::parse("gd:a.gd.x").is_none());
+        let t = "mono:InventoryManager.Inventory[3]";
+        let p = MonoPath::parse(t).unwrap();
+        assert_eq!((keyed(&p.field), p.text()), (("Inventory", Some(3)), t.to_owned()));
+        assert_eq!(keyed("hp"), ("hp", None));
         let t = "mono:Terraria::Main.player[0].statLife";
         let p = MonoPath::parse(t).unwrap();
         assert_eq!((p.class.as_str(), p.via.clone(), p.field.as_str()), ("Main", vec![Step { field: "player".into(), pick: Some(Pick::At(0)) }], "statLife"));
