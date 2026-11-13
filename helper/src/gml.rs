@@ -81,8 +81,13 @@ pub enum Ds {
 }
 
 impl Ds {
-    /// The kind a reference names (the high half of its value): one bit each.
+    /// The kind a reference names (the high half of its value): 0x02000000 and one bit each.
+    /// Other references have another top byte with the same low bits: a surface's was taken
+    /// for a grid's and a sprite's for a list's (Noise's Halloween Bash: `guisurf`).
     fn of_ref(kind: u32) -> Option<Ds> {
+        if kind >> 24 != 2 {
+            return None;
+        }
         match kind & 0xff_ffff {
             1 => Some(Ds::List),
             2 => Some(Ds::Map),
@@ -1184,6 +1189,14 @@ impl Gml {
         (0..u64::from(n)).map(|i| ptr(mem, self.w, at + self.w * i).filter(|&p| p == 0 || (heap.is_pointer(p) && self.ds_ok(mem, kind, class, p)))).collect()
     }
 
+    /// Whether the pointer at `r` is one of the runner's to a table: its capacity comes right
+    /// before, 16 slots or a multiple (every runner seen keeps {capacity, table*}). Without
+    /// this a vector of one buffer object passed for the table of Noise's Halloween Bash's
+    /// lists (a class of 40 objects that start like a list), and moved at every look.
+    fn sized(&self, mem: &Mem, r: u64) -> bool {
+        half(mem, r - self.w).is_some_and(|n| n >= 16 && n % 16 == 0 && n <= 1 << 16)
+    }
+
     /// For each set of objects, the runner's table of them: where the pointers to them sit
     /// side by side (gaps: destroyed ones), starting where another pointer (the runner's own)
     /// points, at or before the first of them, empty slots between: (that pointer's address,
@@ -1225,7 +1238,7 @@ impl Gml {
             .iter()
             .map(|s| {
                 let Some(&at) = s.iter().find(|&&a| pointed.iter().any(|&(_, v)| v == a)) else { return Vec::new() };
-                pointed.iter().filter(|&&(_, v)| v == at).map(|&(r, _)| (r, at)).collect()
+                pointed.iter().filter(|&&(r, v)| v == at && self.sized(mem, r)).map(|&(r, _)| (r, at)).collect()
             })
             .collect()
     }
@@ -1280,7 +1293,9 @@ impl Gml {
         heap.each_chunk(4 * w, |addr, b, fresh| {
             for off in (0..fresh).step_by(w) {
                 let (Some(vt), Some(count), Some(room), Some(items)) = (ptr_in(b, self.w, off), u32_at(b, off + w), u32_at(b, off + 2 * w), ptr_in(b, self.w, off + 3 * w)) else { break };
-                if vt < 0x1_0000 || count > room || room == 0 || room > MAX_ARRAY || !heap.read_only(vt) || !heap.is_pointer(items) {
+                // An empty one has no block yet: {vtable, 0, 0, null}.
+                let empty = count == 0 && room == 0 && items == 0;
+                if vt < 0x1_0000 || count > room || room > MAX_ARRAY || !heap.read_only(vt) || !(empty || (room != 0 && heap.is_pointer(items))) {
                     continue;
                 }
                 let of = classes.entry(vt).or_default();
@@ -1362,7 +1377,7 @@ impl Gml {
             (live > 0).then_some((live, slots.iter().filter(|&&p| p != 0).count()))
         };
         for kind in [Ds::Map, Ds::Grid].into_iter().filter(|&k| !of(k).is_empty()) {
-            let near = cands.iter().flat_map(|c| (c.1.saturating_sub(0x100)..=c.1 + 0x100).step_by(w)).filter(|a| !cands.iter().any(|c| c.1 == *a));
+            let near = cands.iter().flat_map(|c| (c.1.saturating_sub(0x100)..=c.1 + 0x100).step_by(w)).filter(|a| !cands.iter().any(|c| c.1 == *a) && self.sized(mem, *a));
             let best = near.filter_map(|a| Some((fits(kind, ptr(mem, self.w, a).filter(|&p| heap.is_pointer(p))?)?, a))).max();
             match kind {
                 Ds::Map => t.maps = best.map(|b| b.1),
@@ -1737,8 +1752,12 @@ pub fn walk(heap: &Heap, program: Option<&Path>, roots: &[u64], path: &GmlPath) 
         .collect()
 }
 
-/// The path to a number some instance's or the global object's variable holds.
-pub fn discover(heap: &Heap, program: Option<&Path>, target: u64) -> Option<(GmlPath, Vec<u64>)> {
+/// The path to a number some instance's or the global object's variable holds. `picked`:
+/// the name it was listed by, when the player saves it from the list: two variables may
+/// lead to one list (a destroyed list's index stays in its variable and the next list made
+/// takes it: Snack Hoard's `inventory[0]` was saved as `old_list[0]`, and lost when the
+/// game made the inventory anew).
+pub fn discover(heap: &Heap, program: Option<&Path>, target: u64, picked: Option<&str>) -> Option<(GmlPath, Vec<u64>)> {
     let g = shared(heap, program, true)?;
     let mem = heap.mem();
     let global = g.global(mem).map(|o| o.addr);
@@ -1759,6 +1778,7 @@ pub fn discover(heap: &Heap, program: Option<&Path>, target: u64) -> Option<(Gml
     if !holds_number(mem, target) {
         return None;
     }
+    let mut first = None;
     for o in &g.owners {
         if o.instance.is_none() && Some(o.addr) != global {
             continue;
@@ -1768,12 +1788,16 @@ pub fn discover(heap: &Heap, program: Option<&Path>, target: u64) -> Option<(Gml
             let Some((steps, _)) = g.inside(heap, rv, &var, true, usize::MAX).into_iter().find(|(_, at)| *at == target) else { continue };
             let path = GmlPath { object: o.instance.map(|(_, obj)| g.object_name(obj)), var, steps };
             let leads = walk(heap, program, &find_roots(heap, program, &path), &path);
-            if leads.contains(&target) {
-                return Some((path, leads));
+            if !leads.contains(&target) {
+                continue;
+            }
+            match picked {
+                Some(label) if format!("{}{}", path.var, steps_text(&path.steps)) != label => first = first.or(Some((path, leads))),
+                _ => return Some((path, leads)),
             }
         }
     }
-    None
+    first
 }
 
 /// The Browse tab's list: the global variables, then every instance's numbers (the player's
@@ -1908,6 +1932,20 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
     let mut held: Vec<(Ds, Vec<u32>)> = g.ds_held(mem).into_iter().collect();
     held.sort_by_key(|h| h.0 as u8);
     lines.push(format!("data structures: {} variables typed by the code, held now {held:?}, tables {:x?}", g.names.ds.len(), g.tables(heap)));
+    // Which variables hold them (the first of each kind).
+    let mut shown: HashMap<Ds, usize> = HashMap::new();
+    for o in &g.owners {
+        for (rv, key) in g.vars(mem, o.addr, o.map) {
+            let name = g.name_in(mem, o.addr, key).unwrap_or_default();
+            if let Some((kind, i)) = g.ds_of(mem, rv, g.names.ds.get(&name).copied()) {
+                let n = shown.entry(kind).or_default();
+                *n += 1;
+                if *n <= 6 {
+                    lines.push(format!("  {kind:?} {i}: {name} of {}, {} inside", o.instance.map_or("a struct or global".into(), |(_, obj)| g.object_name(obj)), g.ds_elements(heap, kind, i).len()));
+                }
+            }
+        }
+    }
     // What the first few arrays (kind 2) and structs (kind 6) point to: their layout.
     let global = g.global(mem).map(|o| o.addr);
     for (kind, label) in [(ARRAY, "array"), (OBJECT, "struct")] {

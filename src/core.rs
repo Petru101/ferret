@@ -1663,6 +1663,8 @@ struct Probe {
 
 pub struct Core {
     helper: Helper,
+    /// The label of the listed number being saved (`save_listed`), told to the helper.
+    picked: Option<String>,
     /// Looks for better ways to find saved values, in the background (started when needed).
     upgrader: Option<Upgrader>,
     capture: Option<WindowCapture>,
@@ -1780,6 +1782,7 @@ impl Core {
             revived: Vec::new(),
             helper: Helper::start(false)?,
             upgrader: None,
+            picked: None,
             capture: None,
             words: Vec::new(),
             area: None,
@@ -2184,13 +2187,17 @@ impl Core {
 
     /// Saves a number the Browse tab lists (no search needed): by its name only, never by
     /// tracing the game (the player didn't ask for a search, nor its pauses).
-    pub fn save_listed(&mut self, name: &str, loc: Loc) -> Result<bool, String> {
+    /// `label`: the name the list shows it by (the helper may know the place by two names).
+    pub fn save_listed(&mut self, name: &str, loc: Loc, label: Option<&str>) -> Result<bool, String> {
         let name: String = one_word(name).chars().take(MAX_NAME).collect();
         if name.is_empty() {
             return Err(tr!("the value needs a name"));
         }
         self.game()?;
-        self.save_at(&name, loc, 0, true)
+        self.picked = label.map(|l| l.replace(['\n', '\r'], " "));
+        let saved = self.save_at(&name, loc, 0, true);
+        self.picked = None;
+        saved
     }
 
     /// `save` of the place `loc`; `by_name`: only by name, else not at all.
@@ -2467,7 +2474,8 @@ impl Core {
     /// Last, the type the place holds: a Java field's own (a search for a whole number finds a
     /// `long`'s first 4 bytes), else `loc`'s.
     fn named_path(&mut self, loc: Loc, unreal: bool) -> Option<(String, usize, String, Kind)> {
-        let reply = self.helper.call(&format!("names {loc}{}", if unreal { " unreal" } else { "" }));
+        let like = self.picked.as_ref().map(|l| format!(" like {l}")).unwrap_or_default();
+        let reply = self.helper.call(&format!("names {loc}{}{like}", if unreal { " unreal" } else { "" }));
         for l in reply.iter().filter(|l| !l.starts_with("named ") && !l.starts_with("type ") && !(unreal && l.starts_with("0 named paths"))) {
             self.say(l);
         }

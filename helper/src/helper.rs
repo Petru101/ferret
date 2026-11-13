@@ -4582,12 +4582,17 @@ fn cmd_follow(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
 /// <places it leads to> <what it means>" (see names.rs), then a summary line. A Java field of
 /// another type than asked for says so first: "type <type>".
 fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    // "like <label>": the name the player picked it by in the list (it may be listed twice).
+    let (arg, picked) = match arg.split_once(" like ") {
+        Some((a, label)) => (a, Some(label)),
+        None => (arg, None),
+    };
     let (addr, only_unreal) = match arg.trim().strip_suffix(" unreal") {
         Some(a) => (a, true),
         None => (arg.trim(), false),
     };
     let (Some((target, kind)), Some(mem)) = (parse_loc(addr), s.mem.as_ref()) else {
-        return writeln!(out, "error: usage: names <hex addr[:type]> [unreal] (after attach)");
+        return writeln!(out, "error: usage: names <hex addr[:type]> [unreal] [like <label>] (after attach)");
     };
     // A flag is one bit of its byte; the byte may hold others.
     let bit = match kind {
@@ -4632,7 +4637,7 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     }
     // A variable of a GameMaker instance or of its global object.
     if s.doubles_only {
-        if let Some((p, leads)) = gml::discover(&heap, program_of(s.pid).as_deref(), target) {
+        if let Some((p, leads)) = gml::discover(&heap, program_of(s.pid).as_deref(), target, picked) {
             writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
             return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());
         }

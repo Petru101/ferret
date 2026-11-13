@@ -381,9 +381,9 @@ impl BrowseView {
             "everything" => self.everything.set_active(rest == "on"),
             "save" => {
                 let Some((i, name)) = rest.split_once(',') else { return };
-                let loc = i.trim().parse::<usize>().ok().and_then(|i| self.rows.borrow().get(i).map(|r| r.loc));
-                if let Some(loc) = loc {
-                    save(&self.worker, name.trim(), loc);
+                let row = i.trim().parse::<usize>().ok().and_then(|i| self.rows.borrow().get(i).map(|r| (r.loc, r.widget.title().to_string())));
+                if let Some((loc, label)) = row {
+                    save(&self.worker, name.trim(), loc, Some(&label));
                 }
             }
             _ => self.load(),
@@ -504,11 +504,11 @@ fn ask_save(worker: &Worker, label: &str, loc: Loc, parent: &impl IsA<gtk::Widge
     dialog.set_default_response(Some("save"));
     dialog.set_close_response("cancel");
     {
-        let (worker, entry) = (worker.clone(), entry.clone());
+        let (worker, entry, label) = (worker.clone(), entry.clone(), label.to_owned());
         dialog.connect_response(Some("save"), move |_, _| {
             let typed = core::one_word(&entry.text());
             let name = if typed.is_empty() { suggested.clone() } else { typed };
-            save(&worker, &name, loc);
+            save(&worker, &name, loc, Some(&label));
         });
     }
     dialog.set_focus(Some(&entry));
@@ -516,11 +516,11 @@ fn ask_save(worker: &Worker, label: &str, loc: Loc, parent: &impl IsA<gtk::Widge
 }
 
 /// Saves a listed number (the Save dialog, the D-Bus `listed save` action).
-pub fn save(worker: &Worker, name: &str, loc: Loc) {
-    let name = name.to_owned();
+pub fn save(worker: &Worker, name: &str, loc: Loc, label: Option<&str>) {
+    let (name, label) = (name.to_owned(), label.map(str::to_owned));
     worker.run(move |core| {
         Event::BrowseSaved(
-            core.save_listed(&name, loc).map(|_| (name.clone(), tr!("Saved {name}. Ferret finds it again every time you attach.", name), loc.kind.flag())),
+            core.save_listed(&name, loc, label.as_deref()).map(|_| (name.clone(), tr!("Saved {name}. Ferret finds it again every time you attach.", name), loc.kind.flag())),
         )
     });
 }
