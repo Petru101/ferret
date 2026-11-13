@@ -1646,6 +1646,13 @@ fn path_arg(p: &str) -> String {
 /// `PROBE_NEAR` still counts as carrying on from it.
 const PROBE_STEP: i64 = 100;
 const PROBE_NEAR: i64 = 49;
+/// A place that takes on the test value of one this near to it (bytes) doesn't count as its
+/// copy: they are one thing's own numbers (a counter's shown, target and start amounts side
+/// by side), not a value and a copy of it. Find the Clover's counter keeps three such; one
+/// took its neighbour's test value, so the neighbour passed for the value, while the real
+/// one (elsewhere, redrawn only when a clover is picked) had kept its own. A place sliding
+/// toward a neighbour's test value still counts: that is a display counting to a value.
+const PROBE_APART: u64 = 64;
 
 /// A box that went away since the pick (a pop-up fading in and out) is misread while it fades
 /// (Particle Fleet's gems bar read 0 and 10 while showing 12): a new number there counts only
@@ -4879,12 +4886,14 @@ impl Core {
             .map(|k| chases[k].is_none() && after[k].is_some_and(|v| (v - tests[k].test).abs() <= PROBE_NEAR))
             .collect();
         let source = |v: Option<i64>, k: usize| tests.iter().enumerate().position(|(j, t)| j != k && v == Some(t.test));
+        let apart = |j: usize, k: usize| tests[j].loc.addr.abs_diff(tests[k].loc.addr) > PROBE_APART;
         let followers: Vec<usize> = (0..tests.len())
-            .map(|j| (0..tests.len()).filter(|&k| source(after[k], k) == Some(j) || chases[k] == Some(j)).count())
+            .map(|j| (0..tests.len()).filter(|&k| (apart(j, k) && source(after[k], k) == Some(j)) || chases[k] == Some(j)).count())
             .collect();
         for (k, (t, v)) in tests.iter().zip(&after).enumerate() {
             let what = match (kept[k], source(*v, k), chases[k]) {
                 (true, _, _) => "kept".to_owned(),
+                (false, Some(j), _) if !apart(j, k) => format!("took its neighbour 0x{:012x}'s test value (one thing's own numbers: not counted as a copy)", tests[j].loc.addr),
                 (false, Some(j), _) => format!("took 0x{:012x}'s test value", tests[j].loc.addr),
                 (false, None, Some(j)) => format!(
                     "slides toward 0x{:012x}'s test value ({} -> {}): a display counting to it",
@@ -5019,7 +5028,7 @@ impl Core {
             std::thread::sleep(Duration::from_millis(1500));
             let after = self.peek(&locs);
             let stuck = after[k] == Some(test);
-            let followers = (0..tests.len()).filter(|&j| j != k && after[j] == Some(test)).count();
+            let followers = (0..tests.len()).filter(|&j| j != k && after[j] == Some(test) && tests[j].loc.addr.abs_diff(loc.addr) > PROBE_APART).count();
             let screen = if self.area.is_some() { self.read().ok().flatten() } else { None };
             let on_screen = screen.as_ref().is_some_and(|s| s.value() as i64 == test || s.scaled() == test);
             self.say(&format!(
