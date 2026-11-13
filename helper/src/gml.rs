@@ -1359,34 +1359,35 @@ impl Gml {
                 by[i].push(r);
             }
         }
-        let starts: Vec<Vec<u64>> = by
+        // Every run of them (the longest 64): look-alikes elsewhere may make a longer run than
+        // the table (Fjogel Rampage's two maps against 79 other things shaped like one).
+        let starts: Vec<Vec<Vec<u64>>> = by
             .into_iter()
             .map(|mut refs| {
                 refs.sort_unstable();
-                let mut run: Vec<u64> = Vec::new();
-                let mut longest: Vec<u64> = Vec::new();
+                let mut runs: Vec<Vec<u64>> = Vec::new();
                 for r in refs {
-                    if run.last().is_some_and(|&l| r - l > self.w * 64) {
-                        if run.len() > longest.len() {
-                            longest = std::mem::take(&mut run);
-                        }
-                        run.clear();
+                    match runs.last_mut() {
+                        Some(run) if run.last().is_some_and(|&l| r - l <= self.w * 64) => run.push(r),
+                        _ => runs.push(vec![r]),
                     }
-                    run.push(r);
                 }
-                if run.len() > longest.len() {
-                    longest = run;
-                }
-                let Some(&first) = longest.first() else { return Vec::new() };
-                (0..u64::from(MAX_DS)).filter_map(|k| first.checked_sub(k * self.w)).take_while(|&a| a == first || ptr(mem, self.w, a) == Some(0)).collect()
+                runs.sort_by_key(|run| std::cmp::Reverse(run.len()));
+                runs.truncate(64);
+                runs.into_iter()
+                    .map(|run| (0..u64::from(MAX_DS)).filter_map(|k| run[0].checked_sub(k * self.w)).take_while(|&a| a == run[0] || ptr(mem, self.w, a) == Some(0)).collect())
+                    .collect()
             })
             .collect();
-        let pointed: Vec<(u64, u64)> = heap.referrers(&starts.concat()).into_iter().filter_map(|r| Some((r, ptr(mem, self.w, r)?))).collect();
+        let all: Vec<u64> = starts.iter().flatten().flatten().copied().collect();
+        let pointed: Vec<(u64, u64)> = heap.referrers(&all).into_iter().filter_map(|r| Some((r, ptr(mem, self.w, r)?))).collect();
         starts
             .iter()
-            .map(|s| {
-                let Some(&at) = s.iter().find(|&&a| pointed.iter().any(|&(_, v)| v == a)) else { return Vec::new() };
-                pointed.iter().filter(|&&(r, v)| v == at && self.sized(mem, r)).map(|&(r, _)| (r, at)).collect()
+            .map(|runs| {
+                runs.iter()
+                    .filter_map(|s| s.iter().find(|&&a| pointed.iter().any(|&(r, v)| v == a && self.sized(mem, r))))
+                    .flat_map(|&at| pointed.iter().filter(move |&&(r, v)| v == at && self.sized(mem, r)).map(move |&(r, _)| (r, at)))
+                    .collect()
             })
             .collect()
     }
