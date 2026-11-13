@@ -67,6 +67,9 @@ pub struct Names {
     first_placed: Vec<(u32, u32)>,
     /// Variables the game's code gives a new ds_list, ds_map or ds_grid (`ds_variables`).
     ds: HashMap<String, Ds>,
+    /// The data file's bytecode version (GEN8): 14 in early 2015, 15 and 16 after, 17 for
+    /// GameMaker Studio 2.
+    bytecode: u8,
 }
 
 /// A data structure a variable holds only the index of.
@@ -111,7 +114,11 @@ fn ds_variables(d: &[u8], chunks: &HashMap<&[u8], (usize, usize)>) -> HashMap<St
     let mut out: HashMap<String, Ds> = HashMap::new();
     let bytecode = chunks.get(&b"GEN8"[..]).and_then(|&(g, _)| d.get(g + 1).copied()).unwrap_or(0);
     let (Some(&(fo, fs)), Some(&(vo, vs))) = (chunks.get(&b"FUNC"[..]), chunks.get(&b"VARI"[..])) else { return out };
-    if bytecode < 15 || fs < 4 {
+    // Bytecode 14 (early 2015): FUNC and VARI are entries of {name, uses, first use} from
+    // the chunk's start, a call is opcode 0xda and a pop 0x41 (0xd9 and 0x45 after).
+    let old = bytecode < 15;
+    let (call, pop) = if old { (0xdau8, 0x41u8) } else { (0xd9, 0x45) };
+    if bytecode < 14 || fs < 4 {
         return out;
     }
     // The instructions of a chain. For a function's calls GameMaker 2.3 and later point at the
@@ -128,8 +135,9 @@ fn ds_variables(d: &[u8], chunks: &HashMap<&[u8], (usize, usize)>) -> HashMap<St
         all
     };
     let mut calls: HashMap<usize, Ds> = HashMap::new();
-    for k in 0..u32_at(d, fo).unwrap_or(0).min(1 << 20) as usize {
-        let e = fo + 4 + 12 * k;
+    let functions = if old { fs / 12 } else { u32_at(d, fo).unwrap_or(0).min(1 << 20) as usize };
+    for k in 0..functions {
+        let e = fo + if old { 0 } else { 4 } + 12 * k;
         let (Some(name), Some(uses), Some(first)) = (u32_at(d, e).and_then(|n| cstr(d, n as usize)), u32_at(d, e + 4), u32_at(d, e + 8)) else { break };
         let kind = match name.as_str() {
             "ds_list_create" => Ds::List,
@@ -141,20 +149,20 @@ fn ds_variables(d: &[u8], chunks: &HashMap<&[u8], (usize, usize)>) -> HashMap<St
             _ => continue,
         };
         if first as i32 > 4 {
-            if d.get(first as usize + 3) != Some(&0xd9) && d.get(first as usize - 1) == Some(&0xd9) {
+            if d.get(first as usize + 3) != Some(&call) && d.get(first as usize - 1) == Some(&call) {
                 operand = 4;
             }
             calls.extend(chain(first as usize, uses as usize, operand).into_iter().map(|a| (a, kind)));
         }
     }
     // The pop right after such a call: whose variable it is.
-    let wanted: HashMap<usize, Ds> = calls.into_iter().filter(|&(a, _)| d.get(a + 11) == Some(&0x45)).map(|(a, k)| (a + 8, k)).collect();
+    let wanted: HashMap<usize, Ds> = calls.into_iter().filter(|&(a, _)| d.get(a + 11) == Some(&pop)).map(|(a, k)| (a + 8, k)).collect();
     let mut twice = HashSet::new();
-    let mut p = vo + 12;
-    while p + 20 <= vo + vs && !wanted.is_empty() {
-        let (Some(name), Some(uses), Some(first)) = (u32_at(d, p).and_then(|n| cstr(d, n as usize)), u32_at(d, p + 12), u32_at(d, p + 16)) else { break };
-        let local = u32_at(d, p + 4) == Some(-7i32 as u32);
-        p += 20;
+    let (mut p, size) = if old { (vo, 12) } else { (vo + 12, 20) };
+    while p + size <= vo + vs && !wanted.is_empty() {
+        let (Some(name), Some(uses), Some(first)) = (u32_at(d, p).and_then(|n| cstr(d, n as usize)), u32_at(d, p + size - 8), u32_at(d, p + size - 4)) else { break };
+        let local = !old && u32_at(d, p + 4) == Some(-7i32 as u32);
+        p += size;
         if local || first as i32 <= 0 {
             continue;
         }
@@ -235,7 +243,13 @@ impl Names {
             }
         }
         let ds = ds_variables(d, &chunks);
-        Some(Names { globals, objects, vari, placed, first_placed, ds })
+        let bytecode = chunks.get(&b"GEN8"[..]).and_then(|&(g, _)| d.get(g + 1).copied()).unwrap_or(0);
+        // Bytecode 14's VARI is another list (names only): nothing of it is used.
+        if bytecode < 15 {
+            globals.clear();
+            vari.clear();
+        }
+        Some(Names { globals, objects, vari, placed, first_placed, ds, bytecode })
     }
 }
 
@@ -363,6 +377,8 @@ pub struct Gml {
     maps: usize,
     /// GameMaker Studio 1.4: arrays instead of maps.
     flat: Option<Flat>,
+    /// Runners of early 2015 (bytecode 14): variables in lists of nodes (`locate_lists`).
+    lists: bool,
     /// How this runner lays out a GML array (`array_at`), once one was seen.
     arrays: OnceLock<Option<ArrayAt>>,
     /// The runner's tables of ds_lists, ds_maps and ds_grids (`tables`), once looked for.
@@ -444,6 +460,12 @@ fn name_tables(heap: &Heap, program: Option<&Path>, vari_names: &[String]) -> Op
             }
         }
     }
+    // Wine maps a Windows program without its file: the writable memory in the 64 MiB from
+    // where such programs are loaded.
+    if ranges.is_empty() {
+        let base: u64 = if w == 4 { 0x40_0000 } else { 0x1_4000_0000 };
+        ranges = regions.iter().filter(|r| r.perms.starts_with("rw") && r.path.is_empty() && r.start >= base && r.start < base + (64 << 20)).map(|r| (r.start, r.end.min(r.start + (16 << 20)))).collect();
+    }
     // At least 8 names, nearly all of the first 16 identifiers (Iron Snout's second is empty).
     let table = |p: u64, n: u32| -> bool {
         if p == 0 || !(8..=MAX_MAP).contains(&n) || !heap.is_pointer(p) {
@@ -468,6 +490,9 @@ fn name_tables(heap: &Heap, program: Option<&Path>, vari_names: &[String]) -> Op
                 found.push((global, instance));
             } else if table(shared.0, shared.1) && global == (0, 0) && instance == (0, 0) {
                 found.push((shared, shared));
+            } else if table(instance.0, instance.1) && global == (0, 0) && shared == (0, 0) {
+                // Runners of early 2015: one table, in the third place.
+                found.push((instance, instance));
             }
         }
         data.push(b);
@@ -557,6 +582,27 @@ fn read_cstr(mem: &Mem, at: u64) -> Option<String> {
     let end = b[..n].iter().position(|&c| c == 0)?;
     let t = std::str::from_utf8(&b[..end]).ok()?;
     (!t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '@')).then(|| t.to_owned())
+}
+
+/// A variable list of an early 2015 runner: {vtable, 64 buckets}, a bucket a chain of nodes
+/// {next, previous, RValue, id}, in the bucket id & 63: (the RValue, the id) of each. None
+/// when it isn't one.
+fn list_entries(mem: &Mem, w: u64, list: u64) -> Option<Vec<(u64, u32)>> {
+    let mut b = vec![0u8; 64 * w as usize];
+    mem.read_exact_at(&mut b, list + w).ok()?;
+    let mut out = Vec::new();
+    for k in 0..64u32 {
+        let mut node = ptr_in(&b, w, (k as u64 * w) as usize)?;
+        while node != 0 {
+            let id = half(mem, node + 2 * w + 16).filter(|id| (KEY_BASE..KEY_BASE + MAX_MAP).contains(id) && id & 63 == k)?;
+            out.push((node + 2 * w, id));
+            if out.len() > MAX_MAP as usize {
+                return None;
+            }
+            node = ptr(mem, w, node)?;
+        }
+    }
+    Some(out)
 }
 
 /// A table's names by index.
@@ -853,13 +899,113 @@ impl Gml {
                 }
             }
         }
-        Ok(Gml { pid: heap.pid, names, w, map_at, base, global_names, global_owner, slots, known, id_at, class, owners, maps: maps.len(), flat: None, arrays: OnceLock::new(), tables: OnceLock::new() })
+        Ok(Gml { pid: heap.pid, names, w, map_at, base, global_names, global_owner, slots, known, id_at, class, owners, maps: maps.len(), flat: None, lists: false, arrays: OnceLock::new(), tables: OnceLock::new() })
     }
 
     /// GameMaker Studio 1.4: the runner's name tables; owners are objects with a C++ vtable,
     /// an array of variables at +w and that array's length (the count of instance variable
     /// names) a few words in; the instances' class and id offset by vote as for maps; the
     /// global object the owner of another class with the most global variables set.
+    /// Runners of early 2015 (bytecode 14; Fjogel Rampage, Hordelicious): the global object's
+    /// and every instance's variables are in a list object {vtable, 64 buckets} of nodes
+    /// (`list_entries`), a variable's id 100000 + its place in the runner's one table of
+    /// names. An instance points to its list a fixed way before its id and object index
+    /// (0x80 on Fjogel Rampage), voted on over what points to the lists; the global list is
+    /// the one with the most variables no instance points to.
+    fn locate_lists(heap: &Heap, program: Option<&Path>, names: Names) -> Result<Gml, String> {
+        let w = heap.width() as u64;
+        let ws = w as usize;
+        let mem = heap.mem();
+        let (table, _) = name_tables(heap, program, &names.vari_names()).ok_or("no table of variable names")?;
+        // Lists: a vtable and 64 words, each empty or a pointer; the class with the most.
+        let mut classes: HashMap<u64, Vec<u64>> = HashMap::new();
+        heap.each_chunk(65 * ws, |addr, b, fresh| {
+            for off in (0..fresh).step_by(ws) {
+                let Some(vt) = ptr_in(b, w, off).filter(|&v| v > 0x1_0000 && v % w == 0 && heap.read_only(v)) else { continue };
+                if (1..=64).all(|k| ptr_in(b, w, off + k * ws).is_some_and(|p| p == 0 || heap.is_pointer(p))) {
+                    let of = classes.entry(vt).or_default();
+                    if of.len() < 1 << 16 {
+                        of.push(addr + off as u64);
+                    }
+                }
+            }
+        });
+        let held = |l: u64| list_entries(mem, w, l).map(|e| e.len());
+        // (A freed list may hold what no longer are nodes: left out, not held against the class.)
+        let (_, mut lists) = classes
+            .into_iter()
+            .map(|(vt, l)| (vt, l.into_iter().filter(|&l| held(l).is_some()).collect::<Vec<u64>>()))
+            .max_by_key(|(_, l)| (l.iter().filter(|&&l| held(l).is_some_and(|n| n > 0)).count(), l.len()))
+            .filter(|(_, l)| l.iter().any(|&l| held(l).is_some_and(|n| n > 0)))
+            .ok_or("no variable lists")?;
+        lists.sort_unstable();
+        // What points to a list, and the bytes from there: an instance's id and object index
+        // follow at the same distance in all of them.
+        let refs: Vec<(u64, u64, Vec<u8>)> = heap
+            .referrers(&lists)
+            .into_iter()
+            .filter_map(|r| {
+                // The bytes around it, ID_TO each way.
+                let mut b = vec![0u8; 2 * ID_TO as usize];
+                mem.read_exact_at(&mut b, r.checked_sub(ID_TO)?).ok()?;
+                Some((r, ptr(mem, w, r)?, b))
+            })
+            .collect();
+        let objects = names.objects.len() as u32;
+        let pair = |b: &[u8], d: usize| Some((u32_at(b, d)?, u32_at(b, d + 4)?)).filter(|&(id, obj)| (KEY_BASE..100_000_000).contains(&id) && obj < objects);
+        // The place where the most of them have an id: instances sit side by side, so the
+        // next one's id is at a fixed distance for most too (0x80 after the pointer on Fjogel
+        // Rampage, its own 0xb0 before: every variable was listed under its neighbour).
+        let id_at = (0..2 * ID_TO as usize - 8)
+            .step_by(4)
+            .filter(|&d| d.abs_diff(ID_TO as usize) >= ws)
+            .max_by_key(|&d| {
+                let pairs: Vec<(u32, u32)> = refs.iter().filter_map(|(_, _, b)| pair(b, d)).collect();
+                let ids: HashSet<u32> = pairs.iter().map(|p| p.0).collect();
+                (ids.len(), pairs.iter().filter(|p| names.placed.contains(p)).count())
+            })
+            .filter(|&d| refs.iter().any(|(_, _, b)| pair(b, d).is_some()))
+            .ok_or(format!("no instances among {} pointers to {} variable lists", refs.len(), lists.len()))?;
+        if std::env::var_os("FERRET_DEBUG").is_some() {
+            for (r, l, b) in &refs {
+                eprintln!("gml lists: {r:#x} -> list {l:#x} ({:?} variables), pair {:?}, placed {}", held(*l), pair(b, id_at), pair(b, id_at).is_some_and(|p| names.placed.contains(&p)));
+            }
+        }
+        let mut owners: Vec<Owner> = refs.iter().filter_map(|(r, l, b)| Some(Owner { addr: *r, map: *l, instance: Some(pair(b, id_at)?) })).collect();
+        // One owner a list: the instance the data file places in a room, else the lowest id
+        // (something else pointing to the gamejolt object's list, with the lists' vtable
+        // where an id would be, showed as a second object). One owner an instance too.
+        owners.sort_by_key(|o| (o.map, !o.instance.is_some_and(|p| names.placed.contains(&p)), o.instance));
+        owners.dedup_by_key(|o| o.map);
+        owners.sort_by_key(|o| (o.instance, o.addr));
+        owners.dedup_by_key(|o| o.instance);
+        let taken: HashSet<u64> = owners.iter().map(|o| o.map).collect();
+        let global = refs.iter().filter(|(_, l, _)| !taken.contains(l)).max_by_key(|(r, l, _)| (held(*l).unwrap_or(0), std::cmp::Reverse(*r))).filter(|(_, l, _)| held(*l).is_some_and(|n| n > 0));
+        let global_owner = global.map(|(r, _, _)| *r);
+        owners.extend(global.map(|(r, l, _)| Owner { addr: *r, map: *l, instance: None }));
+        let known: HashMap<u32, String> = table_names(mem, w, table).into_iter().map(|(i, n)| (i + KEY_BASE, n)).collect();
+        Ok(Gml {
+            pid: heap.pid,
+            names,
+            w,
+            map_at: 0,
+            base: KEY_BASE,
+            global_names: known.clone(),
+            global_owner,
+            slots: table.0,
+            known,
+            // From the pointer to the list, backwards too.
+            id_at: (id_at as u64).wrapping_sub(ID_TO),
+            class: 0,
+            owners,
+            maps: lists.len(),
+            flat: None,
+            lists: true,
+            arrays: OnceLock::new(),
+            tables: OnceLock::new(),
+        })
+    }
+
     fn locate_flat(heap: &Heap, program: Option<&Path>, names: Names) -> Result<Gml, String> {
         let w = heap.width() as u64;
         let mem = heap.mem();
@@ -915,6 +1061,7 @@ impl Gml {
             owners,
             maps,
             flat: Some(flat),
+            lists: false,
             arrays: OnceLock::new(),
             tables: OnceLock::new(),
         })
@@ -923,6 +1070,7 @@ impl Gml {
     /// An owner's variables: (RValue address, key).
     fn vars(&self, mem: &Mem, owner: u64, map: u64) -> Vec<(u64, u32)> {
         match self.flat {
+            _ if self.lists => list_entries(mem, self.w, map).unwrap_or_default(),
             Some(f) => flat_entries(mem, map, if self.global_owner == Some(owner) { f.global_n } else { f.instance_n }),
             None => entries(mem, self.w, map).unwrap_or_default(),
         }
@@ -1450,7 +1598,7 @@ impl Gml {
             Some((ARRAY, p)) => (p, self.elements(mem, p)),
             // A struct: an object with a variable map (not an instance or the global object,
             // which a variable may also point to: they are listed on their own).
-            Some((OBJECT, p)) if self.flat.is_none() && !self.owners.iter().any(|o| o.addr == p && (o.instance.is_some() || self.global_owner == Some(p))) => {
+            Some((OBJECT, p)) if self.flat.is_none() && !self.lists && !self.owners.iter().any(|o| o.addr == p && (o.instance.is_some() || self.global_owner == Some(p))) => {
                 let Some(map) = ptr(mem, self.w, p + self.map_at) else { return (p, Vec::new()) };
                 let vars = entries(mem, self.w, map).unwrap_or_default();
                 (p, vars.into_iter().filter_map(|(rv, key)| Some((Step::Field(self.name(mem, key)?), rv))).collect())
@@ -1633,7 +1781,14 @@ pub fn shared(heap: &Heap, program: Option<&Path>, fresh: bool) -> Option<Arc<Gm
     }
     let names = Names::parse(&game_data(heap, program)?)?;
     // GameMaker Studio 1.4 first: its name tables are quick to look for.
-    let g = Arc::new(Gml::locate_flat(heap, program, names.clone()).or_else(|_| Gml::locate(heap, program, names)).ok()?);
+    // Early 2015 runners (bytecode 14) first by their variable lists: the flat layout's search
+    // took a block of zeros in Fjogel Rampage's runner for an instance.
+    // and nothing else for them.
+    let g = Arc::new(match names.bytecode < 15 {
+        true => Gml::locate_lists(heap, program, names),
+        false => Gml::locate_flat(heap, program, names.clone()).or_else(|_| Gml::locate(heap, program, names)),
+    }
+    .ok()?);
     *found = Some((heap.pid, g.clone(), Instant::now()));
     Some(g)
 }
@@ -1733,7 +1888,7 @@ pub fn walk(heap: &Heap, program: Option<&Path>, roots: &[u64], path: &GmlPath) 
     roots
         .iter()
         .filter(|&&r| match index {
-            Some(i) => ptr(mem, g.w, r) == Some(g.class) && half(mem, r + g.id_at).is_some_and(|id| id >= KEY_BASE) && half(mem, r + g.id_at + 4) == Some(i as u32),
+            Some(i) => (g.lists || ptr(mem, g.w, r) == Some(g.class)) && half(mem, r.wrapping_add(g.id_at)).is_some_and(|id| id >= KEY_BASE) && half(mem, r.wrapping_add(g.id_at) + 4) == Some(i as u32),
             None => path.object.is_none(),
         })
         .filter_map(|&r| {
@@ -1899,6 +2054,11 @@ pub fn diagnose(heap: &Heap, program: Option<&Path>) -> Vec<String> {
         lines.push(format!("map 0x{h:x}: {} keys {lo}..{hi}", e.len()));
     }
     let Some(g) = shared(heap, program, true) else {
+        if names.bytecode < 15 {
+            let bytecode = names.bytecode;
+            lines.push(format!("as an early 2015 runner (bytecode {bytecode}): {}", Gml::locate_lists(heap, program, names).err().unwrap_or_default()));
+            return lines;
+        }
         lines.push(format!("as GameMaker Studio 1.4: {}", Gml::locate_flat(heap, program, names.clone()).err().unwrap_or_default()));
         lines.push(Gml::locate(heap, program, names).err().unwrap_or_else(|| "no variable maps found".into()));
         return lines;
