@@ -5,11 +5,14 @@
   "description": "Electron stand-ins for web games (see main.js)",
   "main": "main.js",
   "scripts": {
-    "build": "esbuild module/main.js --bundle --minify --format=esm --outfile=bundle/game.js && cp module/bundle.html bundle/index.html && esbuild phaser/main.js --bundle --minify --format=esm --outfile=phaser/dist/game.js"
+    "build": "esbuild module/main.js --bundle --minify --format=esm --outfile=bundle/game.js && cp module/bundle.html bundle/index.html && esbuild phaser/main.js --bundle --minify --format=esm --outfile=phaser/dist/game.js && sh pretend/build.sh"
   },
   "devDependencies": {
     "electron": "45.0.0",
     "esbuild": "0.28.2",
-    "phaser": "3.90.0"
+    "phaser": "3.90.0",
+    "pixi.js": "8.23.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   }
 }

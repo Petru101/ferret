@@ -1,0 +1,11 @@
+{
+  "name": "pixel-bloom",
+  "productName": "Pixel Bloom",
+  "version": "0.9.1",
+  "private": true,
+  "description": "Pretend game for Ferret: PixiJS 8, bundled and minified, state inside one async function",
+  "main": "main.js",
+  "dependencies": {
+    "pixi.js": "8.23.0"
+  }
+}

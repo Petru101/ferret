@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Moss Farm</title>
+<style>
+  body { margin: 0; font: 16px system-ui, sans-serif; background: #1d2b1f; color: #e6f2d8; }
+  main { max-width: 720px; margin: 24px auto; padding: 0 16px; }
+  h1 { margin: 0 0 4px; font-size: 28px; }
+  .big { font-size: 40px; font-variant-numeric: tabular-nums; margin: 12px 0; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
+  .stat { background: #2b3f2d; padding: 8px 12px; border-radius: 8px; min-width: 140px; font-variant-numeric: tabular-nums; }
+  button { font: inherit; padding: 10px 14px; border-radius: 8px; border: 0; background: #6aa84f; color: #10200f; cursor: pointer; }
+  button:disabled { background: #44573f; color: #88a080; cursor: default; }
+  #log { color: #a9c79a; min-height: 1.4em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Moss Farm</h1>
+  <div id="log">Grow some moss.</div>
+  <div class="big"><span id="moss">0</span> moss</div>
+  <div class="row">
+    <div class="stat">Per second: <span id="mps">0</span></div>
+    <div class="stat">Per click: <span id="mpc">1</span></div>
+    <div class="stat">Gems: <span id="gems">0</span></div>
+    <div class="stat">Bank: <span id="bank">0</span> coins</div>
+    <div class="stat">Multiplier: x<span id="mult">1</span></div>
+  </div>
+  <div class="row">
+    <button id="harvest">Harvest</button>
+    <button id="rain">Make it rain (+1 gem)</button>
+    <button id="sell">Sell 1000 moss</button>
+    <button id="prestige">Compost everything</button>
+  </div>
+  <h2>Helpers</h2>
+  <div class="row" id="shop"></div>
+</main>
+<script type="module" src="dist/game.js"></script>
+</body>
+</html>

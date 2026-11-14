@@ -1,0 +1,8 @@
+{
+  "name": "three-knights",
+  "productName": "Three Knights",
+  "version": "1.0.2",
+  "private": true,
+  "description": "Pretend game for Ferret: one inline script on a canvas, three heroes of one class, a private field",
+  "main": "main.js"
+}

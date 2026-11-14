@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Ant Colony</title>
+<style>
+  body { margin: 0; background: #2a2116; color: #f0e2c8; font: 15px system-ui, sans-serif; }
+  #bar { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px; justify-content: center; }
+  button { font: inherit; padding: 8px 12px; border: 0; border-radius: 6px; background: #d9913a; color: #2a1606; cursor: pointer; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="c" width="860" height="440"></canvas>
+<div id="bar">
+  <button id="feed">Drop crumbs (+50 food)</button>
+  <button id="hatch">Hatch an ant (20 food)</button>
+  <button id="hurt-queen">Poke the queen</button>
+  <button id="dig">Dig a tunnel</button>
+  <button id="storm">Call a storm</button>
+</div>
+<script type="module" src="dist/game.js"></script>
+</body>
+</html>

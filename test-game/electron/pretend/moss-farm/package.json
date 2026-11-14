@@ -1,0 +1,8 @@
+{
+  "name": "moss-farm",
+  "productName": "Moss Farm",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Pretend game for Ferret: an idle clicker made of plain HTML buttons (no canvas, no engine), bundled and minified",
+  "main": "main.js"
+}

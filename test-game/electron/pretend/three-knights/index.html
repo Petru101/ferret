@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Three Knights</title>
+<style>
+  body { margin: 0; background: #20182a; color: #eee; font: 15px system-ui, sans-serif; }
+  #bar { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px; }
+  button { font: inherit; padding: 8px 12px; border: 0; border-radius: 6px; background: #c9a227; color: #221; cursor: pointer; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="c" width="860" height="440"></canvas>
+<div id="bar">
+  <button id="hit-0">Hit Aldric</button>
+  <button id="hit-1">Hit Brenna</button>
+  <button id="hit-2">Hit Cedric</button>
+  <button id="heal">Heal all (costs 30 gold)</button>
+  <button id="train-1">Train Brenna (+40 xp)</button>
+  <button id="loot">Loot a chest</button>
+  <button id="potion">Drink a potion</button>
+  <button id="night">Next night</button>
+</div>
+<script>
+// One inline script, no build step, the way a quick hand-written game looks. What it gives
+// Ferret:
+// - three objects of the same class (Knight): their hp/mp/xp share names, so a saved
+//   `new:Knight.hp` would hit all three (an open problem in web.md);
+// - a private field (#luck), which V8 keeps under a private symbol, not a plain name;
+// - the party's gold and potions in a top-level `const` object (script scope);
+// - `var day`: a global on window; `let torches`: a top-level let holding a plain number.
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+class Knight {
+  #luck;
+  constructor(name, color, hp, mp, luck) {
+    this.name = name;
+    this.color = color;
+    this.hp = hp;
+    this.maxHp = hp;
+    this.mp = mp;
+    this.level = 1;
+    this.xp = 0;
+    this.strength = 10 + Math.round(luck * 4);
+    this.alive = true;
+    this.#luck = luck;
+  }
+  get luck() { return this.#luck; }
+  hurt(n) {
+    if (!this.alive) return;
+    if (Math.random() < this.#luck / 10) return log(`${this.name} dodged!`);
+    this.hp = Math.max(0, this.hp - n);
+    if (this.hp === 0) { this.alive = false; log(`${this.name} fell.`); }
+  }
+  gainXp(n) {
+    this.xp += n;
+    while (this.xp >= this.level * 100) {
+      this.xp -= this.level * 100;
+      this.level++;
+      this.maxHp += 15;
+      this.hp = this.maxHp;
+      this.strength += 2;
+      log(`${this.name} reached level ${this.level}.`);
+    }
+  }
+}
+
+const knights = [
+  new Knight("Aldric", "#e05d5d", 120, 10, 0.5),
+  new Knight("Brenna", "#5d9be0", 90, 60, 1.5),
+  new Knight("Cedric", "#6fcf6f", 100, 30, 2.5),
+];
+const party = { gold: 340, potions: 3, chestsOpened: 0 };
+var day = 1;
+let torches = 12;
+let lastMessage = "The party sets out.";
+
+function log(t) { lastMessage = t; }
+
+function draw() {
+  ctx.fillStyle = "#20182a";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#fff";
+  ctx.font = "22px monospace";
+  ctx.fillText(`Day ${day}   Gold ${party.gold}   Potions ${party.potions}   Torches ${torches}`, 24, 40);
+  ctx.font = "16px monospace";
+  ctx.fillStyle = "#c8b8e0";
+  ctx.fillText(lastMessage, 24, 70);
+  knights.forEach((k, i) => {
+    const x = 40 + i * 280, y = 110;
+    ctx.fillStyle = k.alive ? k.color : "#555";
+    ctx.fillRect(x, y, 80, 120);
+    ctx.fillStyle = "#fff";
+    ctx.font = "18px monospace";
+    ctx.fillText(k.name, x, y + 150);
+    ctx.font = "15px monospace";
+    ctx.fillText(`HP ${k.hp}/${k.maxHp}`, x, y + 175);
+    ctx.fillText(`MP ${k.mp}   Lv ${k.level}`, x, y + 198);
+    ctx.fillText(`XP ${k.xp}/${k.level * 100}`, x, y + 221);
+    ctx.fillText(`STR ${k.strength}`, x, y + 244);
+    ctx.fillStyle = "#400";
+    ctx.fillRect(x, y + 256, 200, 10);
+    ctx.fillStyle = "#e33";
+    ctx.fillRect(x, y + 256, 200 * k.hp / k.maxHp, 10);
+  });
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+knights.forEach((k, i) => document.getElementById("hit-" + i).addEventListener("click", () => k.hurt(15 + i * 5)));
+document.getElementById("heal").addEventListener("click", () => {
+  if (party.gold < 30) return log("Not enough gold to heal.");
+  party.gold -= 30;
+  for (const k of knights) { k.hp = k.maxHp; k.alive = true; }
+  log("The party is healed.");
+});
+document.getElementById("train-1").addEventListener("click", () => knights[1].gainXp(40));
+document.getElementById("loot").addEventListener("click", () => {
+  const g = 20 + Math.floor(Math.random() * 40);
+  party.gold += g;
+  party.chestsOpened++;
+  if (party.chestsOpened % 3 === 0) party.potions++;
+  log(`Found ${g} gold.`);
+});
+document.getElementById("potion").addEventListener("click", () => {
+  if (party.potions === 0) return log("No potions left.");
+  const k = knights.reduce((a, b) => (b.hp / b.maxHp < a.hp / a.maxHp ? b : a));
+  party.potions--;
+  k.hp = Math.min(k.maxHp, k.hp + 50);
+  k.alive = k.hp > 0;
+  log(`${k.name} drinks a potion.`);
+});
+document.getElementById("night").addEventListener("click", () => {
+  day++;
+  torches = Math.max(0, torches - 2);
+  for (const k of knights) k.mp = Math.min(k.mp + 10, 99);
+  log(`Night ${day - 1} passes.`);
+});
+
+// shell.js's commands (inline here: there's no bundle to import harness.js into).
+window.addEventListener("message", (e) => {
+  const [c, id, n] = String(e.data).split(" ");
+  if (c === "click") for (let i = 0; i < (Number(n) || 1); i++) document.getElementById(id)?.click();
+  if (c === "click" || c === "report") report();
+});
+function report() {
+  console.log("state " + JSON.stringify({
+    gold: party.gold, potions: party.potions, day, torches,
+    knights: knights.map((k) => ({ name: k.name, hp: k.hp, mp: k.mp, level: k.level, xp: k.xp, alive: k.alive, luck: k.luck })),
+  }));
+}
+setTimeout(report, 500);
+</script>
+</body>
+</html>

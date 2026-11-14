@@ -24,3 +24,4 @@ test-game/electron/phaser/dist/
 test-game/target-avx
 test-game/target32-avx.exe
 test-game/fake-ac.so
+test-game/electron/pretend/*/dist/

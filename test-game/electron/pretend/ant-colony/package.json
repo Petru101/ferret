@@ -1,0 +1,8 @@
+{
+  "name": "ant-colony",
+  "productName": "Ant Colony",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Pretend game for Ferret: state in typed arrays (ECS style) and a Web Worker with its own state",
+  "main": "main.js"
+}
