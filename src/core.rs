@@ -1402,6 +1402,9 @@ pub struct ValueRow {
     pub doubtful: Option<String>,
     /// Places it is kept in (a named path to all of an item's stacks); setting it sets each.
     pub places: usize,
+    /// The places are an item's stacks (an inventory found by the item's name: Unity, Godot's
+    /// dictionaries), not copies the game keeps of one number (React's state).
+    pub stacks: bool,
     /// Saved through pointer paths in an earlier run that this run hasn't confirmed: the player
     /// can confirm them by saying the game shows `value` (`Core::confirm_paths`).
     pub confirmable: bool,
@@ -3944,6 +3947,7 @@ impl Core {
                     unconfirmed,
                     doubtful,
                     places,
+                    stacks: entry.and_then(|e| e.named.first()).is_some_and(|t| !engine_path(t) || ["{", "mono:", "il2cpp:"].iter().any(|p| t.starts_with(p))),
                     confirmable,
                     read_only: java && !entry.is_some_and(java_named),
                     imported,

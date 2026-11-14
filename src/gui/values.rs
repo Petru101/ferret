@@ -268,12 +268,14 @@ impl ValuesView {
                     _ => tr!("At {place}, {kind}.", place = format!("0x{:x}", v.addr), kind),
                 },
             }];
-            if v.places > 1 {
+            if v.places > 1 && v.stacks {
                 about.push(ntr!(
                     "Kept in {n} place (every stack): setting it sets each.",
                     "Kept in {n} places (every stack): setting it sets each.",
                     v.places
                 ));
+            } else if v.places > 1 {
+                about.push(ntr!("Kept in {n} place: setting it sets each.", "Kept in {n} places: setting it sets each.", v.places));
             }
             if v.imported {
                 about.push(tr!("Imported, not checked yet: if the game shows this number, say so below. Ferret won't change it until then."));
