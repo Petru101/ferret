@@ -56,6 +56,9 @@ const TYPE_GENERICINST: u8 = 0x15;
 /// The most entries of a Dictionary listed.
 const MAX_DICT: u64 = 256;
 const TYPE_SZARRAY: u8 = 0x1d;
+const TYPE_STRING: u8 = 0x0e;
+/// The longest text key of a Dictionary taken for a name (UTF-16 units).
+const MAX_KEY: usize = 64;
 
 /// How the game runs its C#: Mono's runtime, or IL2CPP's (compiled to native code in
 /// GameAssembly; class names in the read-only global-metadata.dat).
@@ -125,12 +128,46 @@ impl Step {
     }
 }
 
-/// A path's last field, and the key when it names a Dictionary's value: "_amounts[3]".
-fn keyed(field: &str) -> (&str, Option<i64>) {
+/// A Dictionary's key: a whole number (an int or an enum), or text.
+#[derive(Clone, Debug, PartialEq)]
+enum Key {
+    Int(i64),
+    Text(String),
+}
+
+impl Key {
+    /// As a path writes it: `3`, or `"Kills%20Total"` (the text as `python::encode` writes
+    /// names: a path is split at its dots).
+    fn text(&self) -> String {
+        match self {
+            Key::Int(n) => n.to_string(),
+            Key::Text(t) => format!("\"{}\"", crate::python::encode(t)),
+        }
+    }
+
+    /// As the list shows it.
+    fn shown(&self) -> String {
+        match self {
+            Key::Int(n) => n.to_string(),
+            Key::Text(t) => format!("\"{t}\""),
+        }
+    }
+
+    fn parse(text: &str) -> Option<Key> {
+        match text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+            Some(t) => crate::python::decode(t).map(Key::Text),
+            None => text.parse().ok().map(Key::Int),
+        }
+    }
+}
+
+/// A path's last field, and the key when it names a Dictionary's value: "_amounts[3]",
+/// "stats[\"gold\"]".
+fn keyed(field: &str) -> (&str, Option<Key>) {
     match field.strip_suffix(']').and_then(|f| f.split_once('[')) {
-        Some((f, k)) => match k.parse() {
-            Ok(k) => (f, Some(k)),
-            Err(_) => (field, None),
+        Some((f, k)) => match Key::parse(k) {
+            Some(k) => (f, Some(k)),
+            None => (field, None),
         },
         None => (field, None),
     }
@@ -470,8 +507,14 @@ impl<'a> Mono<'a> {
     /// A Mono array: its element class and length. An array is {vtable, sync, bounds, length,
     /// elements}; its class's first word is the element class (not itself).
     fn array(&self, a: u64) -> Option<(u64, u64)> {
-        let ak = self.word(self.word(a).filter(|&v| v >= 0x10000)?).filter(|&k| k >= 0x10000)?;
-        let elem = self.word(ak).filter(|&e| e != ak && self.is_class(e))?;
+        let first = self.word(a).filter(|&v| v >= 0x10000)?;
+        // IL2CPP: the array's first word is its class, whose element class sits three words
+        // before its parent (element_class, castClass, declaringType, parent).
+        let (ak, elem_at) = match self.lay.runtime {
+            Runtime::Mono => (self.word(first).filter(|&k| k >= 0x10000)?, 0),
+            Runtime::Il2cpp => (first, self.lay.parent?.checked_sub(3 * self.lay.w)?),
+        };
+        let elem = self.word(ak + elem_at).filter(|&e| e != ak && self.is_class(e))?;
         let len = self.word(a + 3 * self.lay.w).filter(|&n| n < 1 << 24)?;
         Some((elem, len))
     }
@@ -544,20 +587,21 @@ impl<'a> Mono<'a> {
 
     /// Where a field's value is: the field itself, or with a key the value the Dictionary
     /// it points to keeps under it.
-    fn keyed_at(&self, pid: u32, at: u64, key: Option<i64>) -> Option<u64> {
+    fn keyed_at(&self, pid: u32, at: u64, key: Option<Key>) -> Option<u64> {
         let Some(key) = key else { return Some(at) };
         self.dict_numbers(pid, self.word(at)?).into_iter().find(|e| e.0 == key).map(|e| e.1)
     }
 
-    /// The numbers a `Dictionary<K, V>` keeps under whole-number keys (an enum's too): (key,
-    /// the value's address, helper type). A Dictionary keeps an array of entries {int
+    /// The numbers a `Dictionary<K, V>` keeps under whole-number keys (an enum's too) or
+    /// text keys (a string: the entry holds a pointer to it): (key, the value's address,
+    /// helper type). A Dictionary keeps an array of entries {int
     /// hashCode, int next, K key, V value} (hashCode -1: a freed one) and their count; the
     /// entry's layout comes from the array's element class (a struct's field offsets count
     /// the object header it doesn't have in an array). Find the Clover keeps its currencies
     /// so (`InventoryManager`: a Dictionary of an enum to a long).
-    fn dict_numbers(&self, pid: u32, dict: u64) -> Vec<(i64, u64, &'static str)> {
+    fn dict_numbers(&self, pid: u32, dict: u64) -> Vec<(Key, u64, &'static str)> {
         let w = self.lay.w;
-        let found = || -> Option<Vec<(i64, u64, &'static str)>> {
+        let found = || -> Option<Vec<(Key, u64, &'static str)>> {
             let k = self.class_of(dict)?;
             if self.name(k)?.1 != "Dictionary`2" {
                 return None;
@@ -573,8 +617,19 @@ impl<'a> Mono<'a> {
             let (base, _) = at("hashCode")?;
             let (key, key_kind) = at("key")?;
             let (value, value_kind) = at("value")?;
-            // A whole-number key: an int, or an enum (a value type) of an int's size.
-            if !matches!(key_kind, Some(TYPE_I4 | TYPE_U4 | TYPE_VALUETYPE)) || base != 2 * w || key != base + 8 || value < key + 4 {
+            // A whole-number key: an int, or an enum (a value type) of an int's size. A text
+            // key: a pointer to the string.
+            let text = key_kind == Some(TYPE_STRING);
+            // An enum is as wide as an int: the value comes right after it, or after 4 bytes
+            // of padding when it is 8 wide. A struct key isn't a number (Moonlighter's
+            // `Dictionary<Achievement, uint>`, a 40-byte struct: the low half of its first
+            // pointer was listed as the key).
+            let enum_sized = |size: u64| value == key + 4 || size == 8 && value == key + 8;
+            let key_ok = text || matches!(key_kind, Some(TYPE_I4 | TYPE_U4)) || key_kind == Some(TYPE_VALUETYPE) && enum_sized(match value_kind {
+                Some(TYPE_R8 | TYPE_I8 | TYPE_U8) => 8,
+                _ => 4,
+            });
+            if !key_ok || base != 2 * w || key != base + 8 || value < key + if text { w } else { 4 } {
                 return None;
             }
             let (kind, size) = match value_kind? {
@@ -588,9 +643,35 @@ impl<'a> Mono<'a> {
             let mut b = vec![0u8; (count * stride) as usize];
             self.mem.read_exact_at(&mut b, entries + 4 * w).ok()?;
             let int = |o: u64| i32::from_le_bytes(b[o as usize..o as usize + 4].try_into().unwrap());
-            Some((0..count).filter(|i| int(i * stride) >= 0).map(|i| (int(i * stride + key - base) as i64, entries + 4 * w + i * stride + value - base, kind)).collect())
+            let ptr = |o: u64| match w {
+                8 => u64::from_le_bytes(b[o as usize..o as usize + 8].try_into().unwrap()),
+                _ => int(o) as u32 as u64,
+            };
+            let key_of = |i: u64| match text {
+                true => self.string(ptr(i * stride + key - base)).map(Key::Text),
+                false => Some(Key::Int(int(i * stride + key - base) as i64)),
+            };
+            Some((0..count).filter(|i| int(i * stride) >= 0).filter_map(|i| Some((key_of(i)?, entries + 4 * w + i * stride + value - base, kind))).collect())
         };
         found().unwrap_or_default()
+    }
+
+    /// A C# string's text ({class or vtable, sync, int length, UTF-16}); None for an empty
+    /// one, one too long to be a key, or anything that isn't text.
+    fn string(&self, s: u64) -> Option<String> {
+        if s < 0x10000 {
+            return None;
+        }
+        let mut n = [0u8; 4];
+        self.mem.read_exact_at(&mut n, s + 2 * self.lay.w).ok()?;
+        let len = u32::from_le_bytes(n) as usize;
+        if len == 0 || len > MAX_KEY {
+            return None;
+        }
+        let mut b = vec![0u8; 2 * len];
+        self.mem.read_exact_at(&mut b, s + 2 * self.lay.w + 4).ok()?;
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16(&units).ok().filter(|t| !t.chars().any(char::is_control))
     }
 
     /// How to pick the element at slot `i` of the array `a` again: by a whole-number field
@@ -1443,9 +1524,12 @@ pub fn player(heap: &Heap) -> Option<Vec<crate::ue::ListedObject>> {
             // The numbers its Dictionaries keep under whole-number keys: "_amounts[3]".
             for (field, off) in m.dict_fields(k, &base) {
                 let Some(dict) = m.word(obj + off).filter(|&d| d >= 0x10000) else { continue };
+                if std::env::var_os("FERRET_DEBUG").is_some() {
+                    eprintln!("unity: {class}.{field} holds a {:?}, {} numbers by key", m.class_of(dict).and_then(|k| m.name(k)), m.dict_numbers(pid, dict).len());
+                }
                 for (key, addr, kind) in m.dict_numbers(pid, dict) {
-                    let label = format!("{}[{key}]", Mono::shown_name(&field));
-                    let path = MonoPath { runtime, namespace: ns.clone(), class: class.clone(), via: Vec::new(), field: format!("{field}[{key}]") };
+                    let label = format!("{}[{}]", Mono::shown_name(&field), key.shown());
+                    let path = MonoPath { runtime, namespace: ns.clone(), class: class.clone(), via: Vec::new(), field: format!("{field}[{}]", key.text()) };
                     LISTED.lock().unwrap().push((pid, addr, path));
                     fields.push(crate::ue::Listed { label, addr, kind });
                 }
@@ -1495,7 +1579,11 @@ mod tests {
         assert!(MonoPath::parse("gd:a.gd.x").is_none());
         let t = "mono:InventoryManager.Inventory[3]";
         let p = MonoPath::parse(t).unwrap();
-        assert_eq!((keyed(&p.field), p.text()), (("Inventory", Some(3)), t.to_owned()));
+        assert_eq!((keyed(&p.field), p.text()), (("Inventory", Some(Key::Int(3))), t.to_owned()));
+        let t = "mono:NumenManager.techLevels[\"Energy%20Eff%2E\"]";
+        let p = MonoPath::parse(t).unwrap();
+        assert_eq!((keyed(&p.field), p.text()), (("techLevels", Some(Key::Text("Energy Eff.".into()))), t.to_owned()));
+        assert_eq!(Key::Text("Energy Eff.".into()).text(), "\"Energy%20Eff%2E\"");
         assert_eq!(keyed("hp"), ("hp", None));
         let t = "mono:Terraria::Main.player[0].statLife";
         let p = MonoPath::parse(t).unwrap();
