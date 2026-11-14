@@ -182,6 +182,8 @@ pub fn ask_remove(worker: &Worker, name: &str, parent: &impl IsA<gtk::Widget>) {
         let name = name.clone();
         worker.run_now(move |core| Event::Done(core.remove(&name).map(|_| tr!("Removed {name}", name))));
         worker.run(|core| Event::Values(core.values()));
+        // The shape learned from it went along.
+        worker.run(|core| Event::Shapes(core.shape_count()));
     });
     dialog.present(Some(parent));
 }

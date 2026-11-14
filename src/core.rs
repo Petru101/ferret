@@ -2981,6 +2981,7 @@ impl Core {
         write_profile(&exe, &entries)?;
         self.helper.call(&format!("unlimit {name}"));
         self.limits();
+        self.forget_shape_of(name);
         if let Some(game) = self.game.as_mut() {
             game.entries.retain(|(n, _)| n != name);
             game.paths.retain(|(n, _)| n != name);
@@ -4714,6 +4715,46 @@ impl Core {
         self.unshaped = false;
         self.say(&format!("forgot where earlier finds were ({}): searches look everywhere", kinds_of_places(n)));
         Ok(n)
+    }
+
+    /// A saved value is being removed: the shape learned from it goes too, unless another saved
+    /// value is kept the same way. Why: a wrong find's shape sent every new search to the same
+    /// wrong place (Find the Clover's counter display) after the player had removed it.
+    fn forget_shape_of(&mut self, name: &str) {
+        let Some(game) = self.game.as_ref() else { return };
+        let exe = game.exe.clone();
+        let Some(loc) = game.entries.iter().find(|(n, l)| n == name && l.addr != 0).map(|(_, l)| *l) else { return };
+        let others: Vec<Loc> = game.entries.iter().filter(|(n, l)| n != name && l.addr != 0).map(|(_, l)| *l).collect();
+        if self.shapes.is_empty() {
+            return;
+        }
+        let Some(removed) = self.shape_at(loc) else { return };
+        let kept: Vec<Shape> = others.into_iter().filter_map(|l| self.shape_at(l)).collect();
+        let n = shapes::forget(&mut self.shapes, &removed, &kept);
+        if n == 0 {
+            return;
+        }
+        let path = shapes_path(&exe);
+        let saved = if self.shapes.is_empty() {
+            match fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+                _ => Ok(()),
+            }
+        } else {
+            shapes::save(&path, &self.shapes)
+        };
+        if let Err(e) = saved {
+            self.say(&format!("could not save the shapes: {e}"));
+        }
+        self.send_shapes();
+        self.shaped = false;
+        self.say(&format!("forgot the shape learned from {name}: new searches no longer look in places like it first"));
+    }
+
+    /// What is around a place now, as the helper describes it.
+    fn shape_at(&mut self, loc: Loc) -> Option<Shape> {
+        let reply = self.helper.call(&format!("shape {loc}"));
+        reply.first().and_then(|l| l.strip_prefix("shape ")).and_then(Shape::parse)
     }
 
     fn send_shapes(&mut self) {

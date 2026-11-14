@@ -107,6 +107,24 @@ pub fn learn(shapes: &mut Vec<Shape>, found: Shape) -> Learned {
     Learned::New
 }
 
+impl Shape {
+    /// Whether a place with `found` around it has this shape, but for one word in five: the
+    /// helper's rule for a scan (`Shape::fits` there).
+    fn fits(&self, found: &Shape) -> bool {
+        let misses = self.words.iter().filter(|w| !found.words.contains(w)).count();
+        self.kind == found.kind && misses <= self.words.len() / 5
+    }
+}
+
+/// Drops the shapes a value the player removed fits (it was the wrong place, and its shape would
+/// send the next search there again), but for those a value still saved fits too. `removed` and
+/// `kept` are what is around them now. How many went.
+pub fn forget(shapes: &mut Vec<Shape>, removed: &Shape, kept: &[Shape]) -> usize {
+    let before = shapes.len();
+    shapes.retain(|s| !s.fits(removed) || kept.iter().any(|k| s.fits(k)));
+    before - shapes.len()
+}
+
 /// One shape per line; lines this build can't read are dropped.
 pub fn load(path: &Path) -> Vec<Shape> {
     fs::read_to_string(path).unwrap_or_default().lines().filter_map(Shape::parse).collect()
@@ -158,5 +176,17 @@ mod tests {
         // Zeros all around: nothing to go by.
         assert_eq!(learn(&mut shapes, Shape::parse("i32 -8=0 -4=0 4=0 8=0").unwrap()), Learned::Plain);
         assert_eq!(shapes.len(), 2);
+    }
+
+    #[test]
+    fn a_removed_value_takes_its_shape_along() {
+        let hp = "f32 -16=p -8=p -4=42c80000 4=3f800000 8=p";
+        let mut shapes = vec![Shape::parse(LUMEN).unwrap(), Shape::parse(hp).unwrap()];
+        // The item's amount changed since (32=3 was learned with it): still its shape.
+        let lumen_now = Shape::parse(&LUMEN.replace("32=3", "32=5")).unwrap();
+        // Iron is saved too and is kept the same way: the shape stays for it.
+        assert_eq!(forget(&mut shapes, &lumen_now, &[Shape::parse(IRON).unwrap()]), 0);
+        assert_eq!(forget(&mut shapes, &lumen_now, &[Shape::parse(hp).unwrap()]), 1);
+        assert_eq!(shapes, vec![Shape::parse(hp).unwrap()]);
     }
 }
