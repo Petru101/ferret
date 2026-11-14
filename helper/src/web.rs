@@ -1834,7 +1834,17 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         for (i, h) in web.state_hooks(mem, f).into_iter().enumerate() {
             let path = WebPath { root: Root::React(format!("{n}:{i}")), steps: Vec::new() };
             match web.js.field(mem, h, "memoizedState") {
-                Some(v) if kind_of(v).is_some() => g.numbers.push((format!("state {}", i + 1), v, path)),
+                Some(v) if kind_of(v).is_some() => {
+                    // Listed at the queue's copy when it holds the same kind of number: the
+                    // queue stays for the component's life, while React makes new hook
+                    // objects at every redraw (a row listed at the hook froze at the first
+                    // one: 75 gold with the game at 84).
+                    let queued = match web.js.field(mem, h, "queue") {
+                        Some(Val::Obj(q)) => web.js.field(mem, q, "lastRenderedState").filter(|q| kind_of(*q) == kind_of(v)),
+                        _ => None,
+                    };
+                    g.numbers.push((format!("state {}", i + 1), queued.unwrap_or(v), path));
+                }
                 Some(Val::Obj(o)) if web.is_object(mem, o) => {
                     for (name, v) in web.js.fields(mem, o) {
                         if kind_of(v).is_some() {
