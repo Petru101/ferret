@@ -1089,10 +1089,16 @@ impl JavaPath {
     }
 
     /// As the list shows it: the class's short name and the fields (`Dungeon.hero.HP`).
+    /// What hangs off libGDX's game object is shown without the way there
+    /// (`Gdx.app.listener.sm.screens[2].player` as `sm.screens[2].player`).
     fn shown(&self) -> String {
-        match self.steps.is_empty() {
+        let full = match self.steps.is_empty() {
             true => short_name(&self.class).to_owned(),
             false => format!("{}.{}", short_name(&self.class), self.fields_text(false)),
+        };
+        match (self.class == "com/badlogic/gdx/Gdx", full.strip_prefix("Gdx.app.listener.")) {
+            (true, Some(rest)) if !rest.is_empty() => rest.to_owned(),
+            _ => full,
         }
     }
 
