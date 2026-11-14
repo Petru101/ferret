@@ -3867,6 +3867,7 @@ fn cmd_first(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         dr7 | 1 << (2 * n) | 1 << (16 + 4 * n) | len << (18 + 4 * n)
     });
     let addrs: Vec<u64> = locs.iter().map(|&(a, _)| a).collect();
+    let regions = maps(s.pid).unwrap_or_default();
     let mut changed = None;
     {
         let _tracing = tracing();
@@ -3884,7 +3885,11 @@ fn cmd_first(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
                 let Some(&(addr, kind)) = locs.get(hit.slot) else { return true };
                 let now = s.read(addr, kind);
                 if now != before[hit.slot] {
-                    changed = Some((addr, kind, now));
+                    // Written by a thread into its own stack (the mapping its stack pointer
+                    // is in): a local variable, or scratch memory a call reuses.
+                    let sp = trace::reg(&hit.regs, 4);
+                    let stack = regions.iter().any(|r| r.start <= sp && sp < r.end && r.start <= addr && addr < r.end);
+                    changed = Some((addr, kind, now, stack));
                     return false;
                 }
                 true
@@ -3892,8 +3897,8 @@ fn cmd_first(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
         );
     }
     match changed {
-        Some((addr, kind, now)) => {
-            writeln!(out, "first 0x{addr:x}:{} {}", kind.name(), now.map_or("??".into(), |v| v.to_string()))
+        Some((addr, kind, now, stack)) => {
+            writeln!(out, "first 0x{addr:x}:{} {}{}", kind.name(), now.map_or("??".into(), |v| v.to_string()), if stack { " stack" } else { "" })
         }
         None => writeln!(out, "none"),
     }

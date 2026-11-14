@@ -31,9 +31,17 @@ type_n() {
     out="$here/run/$FERRET_SESSION/out"
     before=$(wc -l < "$out")
     "$live" type "$1" >/dev/null
-    until tail -n +"$((before + 1))" "$out" | grep -q "^found it\|^error\|candidates\? left"; do sleep 0.3; done
+    # When Ferret waits for the number to change in the game, the player eats ($2 more): once.
+    until tail -n +"$((before + 1))" "$out" | grep -q "^found it\|^error\|candidates\? left"; do
+        if [ -n "${2:-}" ] && [ -z "$ate" ] && tail -n +"$((before + 1))" "$out" | grep -q "waiting up to"; then
+            ate=$2
+            game "eat $2" >&2
+        fi
+        sleep 0.3
+    done
     tail -n +"$((before + 1))" "$out"
 }
+ate=
 rm -f "$d/cmd"
 "$here/test-game/target" "$d/cmd" "$d/log" &
 pid=$!
@@ -48,9 +56,10 @@ food=500
 type_n 500 | tee "$d/out"
 if ! grep -q "put a test value back.*Kept: 1 candidate left" "$d/out"; then
     game "eat 7"
-    type_n 507
+    type_n 507 3
     keep_heap
-    game "eat 3"
+    # (Eaten during Ferret's wait, or now.)
+    [ -n "$ate" ] || game "eat 3"
     food=510
     type_n 510 | tee "$d/out"
 fi

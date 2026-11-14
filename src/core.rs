@@ -5111,8 +5111,9 @@ impl Core {
         // The player has to go to the game and gather or use some (Astro Colony's copper: 45 s
         // ran out first); Stop gives up sooner.
         const WAIT: Duration = Duration::from_secs(180);
-        let watched: Vec<usize> = (0..tests.len()).filter(|&k| kept[k]).collect();
-        let locs: Vec<Loc> = watched.iter().map(|&k| tests[k].loc).collect();
+        let mut watched: Vec<usize> = (0..tests.len()).filter(|&k| kept[k]).collect();
+        let mut locs: Vec<Loc> = watched.iter().map(|&k| tests[k].loc).collect();
+        let started = Instant::now();
         self.say(&format!(
             "neither the screen nor the other places told which one it is: waiting up to {} s for the game to change it",
             WAIT.as_secs()
@@ -5128,12 +5129,53 @@ impl Core {
         self.tell_matches(tests.len());
         // Watchpoints: the first one the game writes is the real value, even when it changes the
         // copies in the same frame. Polling below when the game can't be traced.
-        let arg: Vec<String> = locs.iter().map(|l| l.to_string()).collect();
+        const AFTER_JUNK: Duration = Duration::from_secs(5);
+        let mut junk_at: Option<Instant> = None;
         let cancel = self.cancel.clone();
-        let reply = self.helper.call_cancellable(&format!("first {} {}", arg.join(" "), WAIT.as_secs()), &cancel);
+        let reply = loop {
+            let arg: Vec<String> = locs.iter().map(|l| l.to_string()).collect();
+            // Once the game ran over one of them, it has been at the number: the others get
+            // `AFTER_JUNK` more, not the rest of the wait (the test stood 180 s on a second
+            // leftover nothing touched).
+            let left = match junk_at {
+                Some(at) => AFTER_JUNK.saturating_sub(at.elapsed()).as_secs().max(1),
+                None => WAIT.saturating_sub(started.elapsed()).as_secs().max(1),
+            };
+            let reply = self.helper.call_cancellable(&format!("first {} {left}", arg.join(" ")), &cancel);
+            // Scratch memory on a thread's stack that held the number by chance keeps a test
+            // write until a call reuses it: overwritten with something that doesn't carry on
+            // from the test value, it isn't the value, and the wait goes on without it (the
+            // stand-in's food: a leftover went from 807 to 128 when the player ate, and was
+            // saved as the value).
+            let junk = reply.iter().find_map(|l| l.strip_prefix("first ")).and_then(|l| {
+                let mut w = l.split_whitespace();
+                let (loc, v) = (parse_loc(w.next()?)?, w.next()?.parse::<f64>().ok()?);
+                let k = watched.iter().position(|&k| tests[k].loc.addr == loc.addr)?;
+                (w.next() == Some("stack") && (v.round() as i64 - tests[watched[k]].test).abs() > PROBE_NEAR).then_some((k, v))
+            });
+            match junk {
+                Some((k, v)) => {
+                    self.say(&format!(
+                        "0x{:012x}: the game overwrote its test value {} with {v}: scratch memory on the stack, not the value",
+                        tests[watched[k]].loc.addr, tests[watched[k]].test
+                    ));
+                    watched.remove(k);
+                    locs.remove(k);
+                    junk_at.get_or_insert_with(Instant::now);
+                    if locs.is_empty() || started.elapsed() >= WAIT || self.cancel.load(Ordering::Relaxed) {
+                        return Ok(None);
+                    }
+                }
+                None if junk_at.is_some() && reply.iter().any(|l| l == "none") => {
+                    self.say("the other places stayed as they were while the game went on: not the value");
+                    return Ok(None);
+                }
+                None => break reply,
+            }
+        };
         if let Some((loc, v)) = reply.iter().find_map(|l| l.strip_prefix("first ")).and_then(|l| {
-            let (a, v) = l.split_once(' ')?;
-            Some((parse_loc(a)?, v.parse::<f64>().ok()?))
+            let mut w = l.split_whitespace();
+            Some((parse_loc(w.next()?)?, w.next()?.parse::<f64>().ok()?))
         }) {
             let Some(&i) = watched.iter().find(|&&k| tests[k].loc.addr == loc.addr) else { return Ok(None) };
             let v = v.round() as i64;
