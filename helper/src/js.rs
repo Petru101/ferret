@@ -86,6 +86,8 @@ pub enum Val {
     Real(u64),
     /// true or false: the address of the slot pointing to it (`Kind::JsBool`).
     Bool(u64),
+    /// A number kept raw (a typed array's element): its address and the helper's value type.
+    Raw(u64, &'static str),
     /// Any other object (tagged): a JavaScript object, a string, null, a hole, or a number in a
     /// box other fields may share (not written).
     Obj(u64),
@@ -1171,6 +1173,16 @@ impl Js {
         self.descriptors(mem, m).into_iter().filter_map(|(k, _)| external(k)).collect()
     }
 
+    /// A property's name: its text, or for a private field (`#luck`: V8 keeps it under a
+    /// private symbol {map, hash, flags, description}) the symbol's description, which is
+    /// the name as written. Web games only.
+    fn key_name(&self, mem: &Mem, k: u64) -> Option<String> {
+        self.text(mem, k).or_else(|| {
+            let private = self.text(mem, self.word(mem, k - 1 + 12).filter(|_| self.number_map.is_some())?)?;
+            private.starts_with('#').then_some(private)
+        })
+    }
+
     /// Whether an array's or a hash table's length is a plain number, not a small integer
     /// (V8 15.x).
     pub(crate) fn plain_lengths(&self) -> bool {
@@ -1232,7 +1244,7 @@ impl Js {
                 let base = if det >> 30 & 1 == 1 { o } else if tagged(props) { props } else { continue };
                 let at = base - 1 + off * l.w;
                 let val = self.tagged_number(mem, at, (det >> 6) & 0x7 == 4, self.slot(mem, at, (det >> 6) & 0x7 == 2));
-                if let Some(name) = self.text(mem, k) {
+                if let Some(name) = self.key_name(mem, k) {
                     out.push((name, val));
                 }
                 continue;
@@ -1268,7 +1280,7 @@ impl Js {
                 let at = props - 1 + l.array_data() + (index - inside) * l.w;
                 self.tagged_number(mem, at, any, self.slot(mem, at, double))
             };
-            if let Some(name) = self.text(mem, k) {
+            if let Some(name) = self.key_name(mem, k) {
                 out.push((name, val));
             }
         }
@@ -1781,6 +1793,7 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
                         Val::Bool(addr) => Listed { label: e.label, addr, kind: "jsbool" },
                         Val::Int(addr) | Val::Obj(addr) => Listed { label: e.label, addr, kind: int_kind },
                         Val::Var(addr) => Listed { label: e.label, addr, kind: "jsvar" },
+                        Val::Raw(addr, kind) => Listed { label: e.label, addr, kind },
                         Val::Other => Listed { label: e.label, addr: 0, kind: int_kind },
                     })
                     .collect(),

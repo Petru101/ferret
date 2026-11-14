@@ -247,6 +247,8 @@ pub struct Scope {
     /// Where its variables start among the context's slots (after scope info, previous and,
     /// for modules and some functions, the extension).
     pub first: u32,
+    /// Where its code starts in its script (a function's: what tells it from the others).
+    pub start: u32,
 }
 
 /// One live context of a scope: its address (tagged) and the scope.
@@ -274,6 +276,9 @@ pub struct Web {
     pub legacy: Option<Legacy>,
     /// The bits of a map's bit_field for "callable" and "constructor" (`learn_cells`).
     function_bits: (u8, u8),
+    /// JavaScript's typed array constructors on this page, each with its numbers' value
+    /// type and size: looked up once (the list asks for every object it meets).
+    typed: Mutex<Option<Vec<(u64, &'static str, u64)>>>,
 }
 
 /// GDevelop's games found last (`Web::gd_games`), by process.
@@ -339,7 +344,7 @@ impl Web {
             if half(mem, meta - 1).map(|m| base | u64::from(m)) != Some(meta) {
                 continue;
             }
-            let mut web = Web { js: Js::web(base, meta, 0, true), scope_map, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: None, function_bits: (0x02, 0x40) };
+            let mut web = Web { js: Js::web(base, meta, 0, true), scope_map, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: None, function_bits: (0x02, 0x40), typed: Mutex::new(None) };
             for &(_, info) in found.iter().filter(|f| f.0 == map32 && f.1 & !0xffff_ffff == base) {
                 if let Some(scope) = web.scope(mem, info) {
                     web.scopes.push(scope);
@@ -410,7 +415,7 @@ impl Web {
             return None;
         }
         let number_map = js.number_map;
-        Some(Web { js, scope_map: 0, cell_map: None, property_map: None, number_map, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }), function_bits: (0x02, 0x40) })
+        Some(Web { js, scope_map: 0, cell_map: None, property_map: None, number_map, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }), function_bits: (0x02, 0x40), typed: Mutex::new(None) })
     }
 
     /// A ScopeInfo's kind and variables (None unless every name is a string).
@@ -436,7 +441,8 @@ impl Web {
             }
         };
         let modes = (0..u64::from(n)).map(|i| half(mem, infos + 4 * i).and_then(smi).map_or(0, |v| v as u32 & 0xf)).collect();
-        Some(Scope { info, kind, names, modes, first: 0 })
+        let start = half(mem, o + 16).and_then(smi).map_or(0, |v| v.max(0) as u32);
+        Some(Scope { info, kind, names, modes, first: 0, start })
     }
 
     /// Where V8's sandbox keeps its external pointer table: the start of the mapping that
@@ -563,6 +569,21 @@ impl Web {
     fn roots(&self, mem: &Mem) -> Vec<&Context> {
         let native = self.native;
         self.contexts.iter().filter(|c| self.scopes[c.scope].kind != FUNCTION_SCOPE || native.is_some() && self.js.word(mem, c.at - 1 + 12) == native).collect()
+    }
+
+    /// The contexts of functions called once right inside the game's scripts and modules
+    /// (`async function main() { let score = 0; ... }`, the usual shape of a PixiJS game):
+    /// a function context whose previous is one of `roots` and whose scope has no other
+    /// live context (a function called many times has many: a library's closures).
+    fn locals(&self, mem: &Mem) -> Vec<&Context> {
+        let outer: HashSet<u64> = self.roots(mem).into_iter().map(|c| c.at).collect();
+        let inner: Vec<&Context> =
+            self.contexts.iter().filter(|c| self.scopes[c.scope].kind == FUNCTION_SCOPE && !outer.contains(&c.at) && self.js.word(mem, c.at - 1 + 12).is_some_and(|p| outer.contains(&p))).collect();
+        let mut count: HashMap<usize, usize> = HashMap::new();
+        for c in &inner {
+            *count.entry(c.scope).or_default() += 1;
+        }
+        inner.into_iter().filter(|c| count[&c.scope] == 1).collect()
     }
 
     /// A context's variable `i` as a place: a number as its slot (`Val::Var`: what the slot
@@ -1081,6 +1102,65 @@ impl Web {
         self.js.word(mem, o - 1 + 4).is_some_and(|p| hash(p) || p & 1 == 1 && read_only(p)) && self.js.word(mem, o - 1 + 8).is_some_and(|p| p & 1 == 1 && read_only(p))
     }
 
+    /// A typed array's kind of number, by the constructor its map leads to (JavaScript's own
+    /// `Int32Array`, `Float64Array`...: globals on every page): the helper's value type and
+    /// the element's size.
+    fn typed_array(&self, mem: &Mem, o: u64) -> Option<(&'static str, u64)> {
+        const KINDS: [(&str, &str, u64); 8] = [
+            ("Int32Array", "i32", 4),
+            ("Uint32Array", "i32", 4),
+            ("Float64Array", "f64", 8),
+            ("Float32Array", "f32", 4),
+            ("Uint16Array", "u16", 2),
+            ("Uint8Array", "u8", 1),
+            ("Uint8ClampedArray", "u8", 1),
+            ("Int8Array", "i8", 1),
+        ];
+        let mut typed = self.typed.lock().unwrap();
+        let known = typed.get_or_insert_with(|| {
+            self.dictionary(mem)
+                .into_iter()
+                .filter_map(|cell| {
+                    let name = self.js.text(mem, self.js.word(mem, cell - 1 + 4)?)?;
+                    let kind = KINDS.iter().find(|k| k.0 == name)?;
+                    Some((self.js.word(mem, cell - 1 + 12)?, kind.1, kind.2))
+                })
+                .collect()
+        });
+        if known.is_empty() {
+            return None;
+        }
+        let constructor = self.constructor(mem, self.js.map_of(mem, o)?)?;
+        known.iter().find(|k| k.0 == constructor).map(|k| (k.1, k.2))
+    }
+
+    /// An object's elements: an array's (`Js::elements`), or a typed array's raw numbers
+    /// (entity-component games keep everything so). V8 15.x with the sandbox: {map,
+    /// properties, elements, .., buffer +0x10, .., byte length +0x20 (shifted left 29),
+    /// .., data +0x30 (an offset from the cage, shifted left 24), base +0x38}: a small
+    /// array's numbers are in its `elements` (the base; the offset is then the header's 7),
+    /// a big one's are outside the heap (base 0).
+    fn elements(&self, mem: &Mem, o: u64) -> Vec<(u32, Val)> {
+        let typed = || -> Option<Vec<(u32, Val)>> {
+            self.js.plain_lengths().then_some(())?;
+            let (kind, size) = self.typed_array(mem, o)?;
+            let word = |at: u64| {
+                let mut b = [0u8; 8];
+                mem.read_exact_at(&mut b, o - 1 + at).ok().map(|_| u64::from_le_bytes(b))
+            };
+            let bytes = word(0x20)? >> 29;
+            let base = u64::from(half(mem, o - 1 + 0x38)?);
+            // (On the heap: the base is the array's own `elements`.)
+            (base == 0 || Some(base) == half(mem, o - 1 + 8).map(u64::from)).then_some(())?;
+            let data = self.js.base() + (word(0x30)? >> 24) + base;
+            let count = (bytes / size).min(MAX_ELEMENTS as u64);
+            let mut probe = [0u8; 1];
+            (bytes <= 1 << 28 && bytes % size == 0 && count > 0 && mem.read_exact_at(&mut probe, data + count * size - 1).is_ok()).then_some(())?;
+            Some((0..count).map(|i| (i as u32, Val::Raw(data + i * size, kind))).collect())
+        };
+        typed().unwrap_or_else(|| self.js.elements(mem, o))
+    }
+
     /// Whether an object is a function (its map's bit_field, map +10: the callable bit,
     /// `function_bits`).
     fn callable(&self, mem: &Mem, o: u64) -> bool {
@@ -1146,6 +1226,16 @@ pub fn shared(heap: &Heap) -> Option<Arc<Web>> {
 pub enum Root {
     /// A variable of a script's, module's or outermost function's scope: `@ship`.
     Var(String),
+    /// A variable of a function called once inside a module or script (`async function
+    /// main() { let score = 0; ... }`): where the function starts in its script, then the
+    /// name, "1234:score" (`in:1234%3Ascore`). The place stands for the function: minified
+    /// names repeat from scope to scope, and a function's name isn't kept where this looks.
+    /// Stable for one build of the game.
+    Local(String),
+    /// A React component's state (a `useState` or `useReducer` hook): the component's place
+    /// among the ones with state, in the order React keeps them, then the hook's place
+    /// among the component's hooks, "1:0" (`react:1%3A0`). React keeps no names for either.
+    React(String),
     /// A property of the global object (a `var` or a function): `score`.
     Global(String),
     /// The objects made by the class a scope's variable holds: `new:Bt`.
@@ -1187,6 +1277,8 @@ impl WebPath {
         }
         let (make, rest): (fn(String) -> Root, &str) = match () {
             _ if rest.starts_with('@') => (Root::Var, &rest[1..]),
+            _ if rest.starts_with("in:") => (Root::Local, &rest[3..]),
+            _ if rest.starts_with("react:") => (Root::React, &rest[6..]),
             _ if rest.starts_with("new:") => (Root::New, &rest[4..]),
             _ if rest.starts_with("scene:") => (Root::Scene, &rest[6..]),
             _ if rest.starts_with("gdscene:") => (Root::GdScene, &rest[8..]),
@@ -1221,6 +1313,8 @@ impl WebPath {
     pub fn text(&self) -> String {
         let root = match &self.root {
             Root::Var(n) => format!("@{}", encode(n)),
+            Root::Local(n) => format!("in:{}", encode(n)),
+            Root::React(n) => format!("react:{}", encode(n)),
             Root::Global(n) => encode(n),
             Root::New(n) => format!("new:{}", encode(n)),
             Root::Scene(n) => format!("scene:{}", encode(n)),
@@ -1246,6 +1340,8 @@ impl WebPath {
     fn shown(&self) -> String {
         let root = match &self.root {
             Root::Var(n) | Root::Global(n) => n.clone(),
+            Root::Local(n) => local_name(n).1.to_owned(),
+            Root::React(n) => format!("component {} state {}", react_place(n).0 + 1, react_place(n).1 + 1),
             Root::New(n) => format!("new {n}"),
             Root::Scene(n) => format!("scene {n}"),
             Root::GdGame => "game".into(),
@@ -1275,9 +1371,146 @@ impl WebPath {
             })
             .unwrap_or(match &self.root {
                 Root::Var(n) | Root::Global(n) | Root::New(n) | Root::Scene(n) | Root::GdScene(n) => n,
+                Root::Local(n) => local_name(n).1,
+                Root::React(_) => "state",
                 Root::GdGame => "game",
                 Root::C2 => "runtime",
             })
+    }
+}
+
+/// Whether an object's properties are a React fiber's.
+fn fiber_shaped(fields: &[(String, Val)]) -> bool {
+    ["memoizedState", "stateNode", "return", "child", "sibling", "alternate"].iter().all(|n| fields.iter().any(|f| f.0 == *n))
+}
+
+/// A `Root::React`'s parts: which component (among those with state) and which hook.
+fn react_place(text: &str) -> (usize, usize) {
+    let part = |t: Option<&str>| t.and_then(|t| t.parse().ok()).unwrap_or(usize::MAX);
+    let mut it = text.split(':');
+    (part(it.next()), part(it.next()))
+}
+
+/// React (web games drawn with it keep every number in component state, nameless):
+/// a fiber is an object with `memoizedState`, `stateNode`, `return`, `child`, `sibling`,
+/// `alternate`; a function component's `memoizedState` is its first hook {memoizedState,
+/// baseState, baseQueue, queue, next}; a state hook (useState, useReducer) has a `queue`
+/// whose `lastRenderedState` repeats the value. React draws from one tree of fibers and
+/// builds the next in the other (`alternate`), each with hook objects of its own, and
+/// works an update out from `baseState`: a value is written in all of those places.
+impl Web {
+    fn is_fiber(&self, mem: &Mem, o: u64) -> bool {
+        fiber_shaped(&self.js.fields(mem, o))
+    }
+
+    /// A fiber among the objects the game's variables lead to (a few steps down).
+    fn any_fiber(&self, mem: &Mem) -> Option<u64> {
+        let mut queue: VecDeque<(u64, usize)> = VecDeque::new();
+        let contexts: Vec<&Context> = self.roots(mem).into_iter().chain(self.locals(mem)).collect();
+        for c in contexts {
+            for i in 0..self.scopes[c.scope].names.len() {
+                if let Val::Obj(o) = self.variable(mem, c, i) {
+                    queue.push_back((o, 1));
+                }
+            }
+        }
+        let mut seen: HashSet<u64> = HashSet::new();
+        while let Some((o, depth)) = queue.pop_front() {
+            if !seen.insert(o) || seen.len() > MAX_VISITED || !self.is_object(mem, o) {
+                continue;
+            }
+            if self.is_fiber(mem, o) {
+                return Some(o);
+            }
+            if depth < 4 {
+                queue.extend(self.js.fields(mem, o).into_iter().filter_map(|(_, v)| match v {
+                    Val::Obj(x) => Some((x, depth + 1)),
+                    _ => None,
+                }));
+            }
+        }
+        None
+    }
+
+    /// A component's state hooks, in order.
+    fn state_hooks(&self, mem: &Mem, fiber: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut hook = self.js.field(mem, fiber, "memoizedState");
+        for _ in 0..256 {
+            let Some(Val::Obj(h)) = hook else { break };
+            let names: Vec<String> = self.js.fields(mem, h).into_iter().map(|f| f.0).collect();
+            if !["memoizedState", "baseState", "queue", "next"].iter().all(|n| names.iter().any(|x| x == n)) {
+                break;
+            }
+            if matches!(self.js.field(mem, h, "queue"), Some(Val::Obj(q)) if self.js.field(mem, q, "lastRenderedState").is_some()) {
+                out.push(h);
+            }
+            hook = self.js.field(mem, h, "next");
+        }
+        out
+    }
+
+    /// The components with state, in the order of the tree React draws from (the one the
+    /// root's `current` names), found from any fiber.
+    fn react_components(&self, mem: &Mem, fiber: u64) -> Vec<u64> {
+        let object = |o: u64, name: &str| match self.js.field(mem, o, name) {
+            Some(Val::Obj(x)) if self.is_object(mem, x) => Some(x),
+            _ => None,
+        };
+        let mut top = fiber;
+        for _ in 0..10000 {
+            match object(top, "return") {
+                Some(up) => top = up,
+                None => break,
+            }
+        }
+        // The top fiber's `stateNode` is the root, whose `current` is the tree on screen.
+        let top = object(top, "stateNode").and_then(|root| object(root, "current")).filter(|&c| self.is_fiber(mem, c)).unwrap_or(top);
+        let (mut out, mut stack, mut seen) = (Vec::new(), vec![top], HashSet::new());
+        while let Some(f) = stack.pop() {
+            if !seen.insert(f) || seen.len() > 5000 {
+                continue;
+            }
+            if !self.state_hooks(mem, f).is_empty() {
+                out.push(f);
+            }
+            // (The child last: taken first.)
+            stack.extend(object(f, "sibling"));
+            stack.extend(object(f, "child"));
+        }
+        out
+    }
+
+    /// Every place React keeps a state hook's value in, for one fiber and its alternate:
+    /// the hook's `memoizedState` and `baseState` and its queue's `lastRenderedState`, or
+    /// with steps the number inside the object they hold.
+    fn react_places(&self, mem: &Mem, fiber: u64, hook: usize, steps: &[Step]) -> Vec<u64> {
+        let mut out = Vec::new();
+        let other = match self.js.field(mem, fiber, "alternate") {
+            Some(Val::Obj(a)) if self.is_fiber(mem, a) => Some(a),
+            _ => None,
+        };
+        for f in std::iter::once(fiber).chain(other) {
+            let Some(&h) = self.state_hooks(mem, f).get(hook) else { continue };
+            let queue = match self.js.field(mem, h, "queue") {
+                Some(Val::Obj(q)) => self.js.field(mem, q, "lastRenderedState"),
+                _ => None,
+            };
+            for v in [self.js.field(mem, h, "memoizedState"), self.js.field(mem, h, "baseState"), queue].into_iter().flatten() {
+                out.extend(follow(self, mem, v, steps));
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// A `Root::Local`'s parts: where its function starts, and the variable's name.
+fn local_name(text: &str) -> (u32, &str) {
+    match text.split_once(':') {
+        Some((start, name)) => (start.parse().unwrap_or(u32::MAX), name),
+        None => (u32::MAX, text),
     }
 }
 
@@ -1288,7 +1521,12 @@ pub fn find_roots(heap: &Heap, path: &WebPath) -> Vec<u64> {
     let mem = heap.mem();
     match &path.root {
         Root::Var(name) => web.variables(mem).into_iter().filter(|(n, _, _)| n == name).map(|(_, c, _)| c).collect(),
+        Root::Local(text) => {
+            let (start, name) = local_name(text);
+            web.locals(mem).into_iter().filter(|c| web.scopes[c.scope].start == start && web.scopes[c.scope].names.iter().any(|n| n == name)).map(|c| c.at).collect()
+        }
         Root::Global(name) => web.globals(mem).into_iter().filter(|(n, _, _)| n == name).map(|(_, c, _)| c).collect(),
+        Root::React(text) => web.any_fiber(mem).and_then(|f| web.react_components(mem, f).get(react_place(text).0).copied()).into_iter().collect(),
         Root::New(name) => {
             let classes: Vec<(String, u64)> = web.classes(mem).into_iter().filter(|(n, _)| n == name).collect();
             web.instances(heap, &classes).into_iter().map(|(_, o)| o).collect()
@@ -1304,6 +1542,10 @@ pub fn find_roots(heap: &Heap, path: &WebPath) -> Vec<u64> {
 pub fn walk(heap: &Heap, roots: &[u64], path: &WebPath) -> Vec<u64> {
     let Some(web) = shared(heap) else { return Vec::new() };
     let mem = heap.mem();
+    if let Root::React(text) = &path.root {
+        // (Still a component: the collector moves fibers.)
+        return roots.iter().filter(|&&f| web.is_object(mem, f) && web.is_fiber(mem, f)).flat_map(|&f| web.react_places(mem, f, react_place(text).1, &path.steps)).collect();
+    }
     let mut out: Vec<u64> = roots.iter().filter_map(|&r| follow(&web, mem, root_value(&web, mem, r, &path.root)?, &path.steps)).collect();
     out.sort_unstable();
     out.dedup();
@@ -1313,7 +1555,14 @@ pub fn walk(heap: &Heap, roots: &[u64], path: &WebPath) -> Vec<u64> {
 /// What a root holds now (None when it isn't that root any more).
 fn root_value(web: &Web, mem: &Mem, r: u64, root: &Root) -> Option<Val> {
     match root {
-        Root::Var(name) => {
+        // (A component's places are found in `walk`.)
+        Root::React(_) => None,
+        Root::Var(_) | Root::Local(_) => {
+            let name = match root {
+                Root::Local(text) => local_name(text).1,
+                Root::Var(name) => name.as_str(),
+                _ => return None,
+            };
             let c = web.contexts.iter().find(|c| c.at == r)?;
             // Still that scope's context.
             if web.js.word(mem, r - 1 + 8) != Some(web.scopes[c.scope].info) {
@@ -1340,11 +1589,11 @@ fn follow(web: &Web, mem: &Mem, mut v: Val, steps: &[Step]) -> Option<u64> {
         let Val::Obj(o) = v else { return None };
         v = match s {
             Step::Prop(name) => web.js.field(mem, o, name)?,
-            Step::Index(n) => web.js.elements(mem, o).into_iter().find(|(k, _)| k == n)?.1,
+            Step::Index(n) => web.elements(mem, o).into_iter().find(|(k, _)| k == n)?.1,
         };
     }
     match v {
-        Val::Int(a) | Val::Real(a) | Val::Bool(a) | Val::Var(a) => Some(a),
+        Val::Int(a) | Val::Real(a) | Val::Bool(a) | Val::Var(a) | Val::Raw(a, _) => Some(a),
         _ => None,
     }
 }
@@ -1360,7 +1609,7 @@ pub fn kind_now(heap: &Heap, roots: &[u64], path: &WebPath) -> Option<&'static s
         let Val::Obj(o) = v else { return None };
         v = match s {
             Step::Prop(name) => web.js.field(mem, o, name)?,
-            Step::Index(n) => web.js.elements(mem, o).into_iter().find(|(k, _)| k == n)?.1,
+            Step::Index(n) => web.elements(mem, o).into_iter().find(|(k, _)| k == n)?.1,
         };
     }
     web.kind(v)
@@ -1381,6 +1630,7 @@ fn kind_of(v: Val) -> Option<&'static str> {
         Val::Var(_) => Some("jsvar"),
         Val::Real(_) => Some("f64"),
         Val::Bool(_) => Some("jsbool"),
+        Val::Raw(_, kind) => Some(kind),
         _ => None,
     }
 }
@@ -1441,6 +1691,20 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
             _ => {}
         }
     }
+    // The variables of functions called once inside them: a game's state when it lives in
+    // `main()`. Its objects go before the ones the scripts' own variables lead to deeper
+    // down (Pixel Bloom's player was only reached through PixiJS's renderer).
+    for c in web.locals(mem) {
+        let scope = &web.scopes[c.scope];
+        for (i, name) in scope.names.iter().enumerate() {
+            let path = WebPath { root: Root::Local(format!("{}:{name}", scope.start)), steps: Vec::new() };
+            match web.variable(mem, c, i) {
+                v @ (Val::Var(_) | Val::Bool(_)) => vars.numbers.push((name.clone(), v, path)),
+                Val::Obj(o) => queue.push_back((o, path, 1)),
+                _ => {}
+            }
+        }
+    }
     let mut globals = Group { path: WebPath { root: Root::Global(String::new()), steps: Vec::new() }, class: "Globals".into(), numbers: Vec::new() };
     for (name, _, v) in web.globals(mem) {
         let path = WebPath { root: Root::Global(name.clone()), steps: Vec::new() };
@@ -1478,6 +1742,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     }
     out.extend([vars, globals].into_iter().filter(|g| !g.numbers.is_empty()));
     let (mut visited, mut listed) = (0, 0);
+    let mut fiber: Option<u64> = None;
     while let Some((o, path, depth)) = queue.pop_front().or_else(|| late.pop_front()) {
         let again = !seen.insert(o);
         if again || !web.is_object(mem, o) {
@@ -1490,6 +1755,13 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         if visited > MAX_VISITED || listed > MAX_LISTED {
             break;
         }
+        // React's own bookkeeping (lanes, flags, tags) isn't the game's: its components'
+        // state is listed apart, below.
+        let fields = web.js.fields(mem, o);
+        if fiber_shaped(&fields) {
+            fiber.get_or_insert(o);
+            continue;
+        }
         let class = match &path.root {
             Root::New(c) if path.steps.is_empty() => c.clone(),
             Root::Scene(_) if path.steps.is_empty() => "Scene".into(),
@@ -1500,7 +1772,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         let scene = matches!(path.root, Root::Scene(_)) && path.steps.is_empty();
         let mut g = Group { path: path.clone(), class, numbers: Vec::new() };
         let mut refs: Vec<(Step, u64)> = Vec::new();
-        for (name, v) in web.js.fields(mem, o) {
+        for (name, v) in fields {
             match v {
                 Val::Obj(_) if scene && PHASER.contains(&name.as_str()) => {}
                 Val::Obj(x) => refs.push((Step::Prop(name), x)),
@@ -1508,7 +1780,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
                 _ => {}
             }
         }
-        for (i, v) in web.js.elements(mem, o).into_iter().take(MAX_ELEMENTS) {
+        for (i, v) in web.elements(mem, o).into_iter().take(MAX_ELEMENTS) {
             match v {
                 Val::Obj(x) => refs.push((Step::Index(i), x)),
                 v if kind_of(v).is_some() => g.numbers.push((format!("[{i}]"), v, path.then(Step::Index(i)))),
@@ -1528,6 +1800,28 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         g.numbers.retain(|n| place(n.1).is_some_and(|a| a.wrapping_sub(base) >= READ_ONLY));
         if !g.numbers.is_empty() {
             listed += g.numbers.len();
+            out.push(g);
+        }
+    }
+    // React components' state: a number or a flag, or the numbers of the object a hook
+    // holds (a reducer's state), one level.
+    for (n, f) in fiber.map(|f| web.react_components(mem, f)).unwrap_or_default().into_iter().enumerate() {
+        let mut g = Group { path: WebPath { root: Root::React(format!("{n}:0")), steps: Vec::new() }, class: format!("Component {}", n + 1), numbers: Vec::new() };
+        for (i, h) in web.state_hooks(mem, f).into_iter().enumerate() {
+            let path = WebPath { root: Root::React(format!("{n}:{i}")), steps: Vec::new() };
+            match web.js.field(mem, h, "memoizedState") {
+                Some(v) if kind_of(v).is_some() => g.numbers.push((format!("state {}", i + 1), v, path)),
+                Some(Val::Obj(o)) if web.is_object(mem, o) => {
+                    for (name, v) in web.js.fields(mem, o) {
+                        if kind_of(v).is_some() {
+                            g.numbers.push((format!("state {}.{name}", i + 1), v, path.then(Step::Prop(name))));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !g.numbers.is_empty() {
             out.push(g);
         }
     }
@@ -1556,11 +1850,13 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
             // The game's own variables and its scene are its state, whatever their names.
             // GDevelop's objects' variables are the game's too (the maker named them).
             let own = !engine && g.path.steps.is_empty() && matches!(&g.path.root, Root::Var(n) | Root::Global(n) if n.is_empty())
-                || matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2) && (g.path.steps.is_empty() || g.class != "Object");
+                || matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2) && (g.path.steps.is_empty() || g.class != "Object")
+                || matches!(g.path.root, Root::React(_));
             let main = own || g.numbers.iter().any(|n| players(&n.0));
             let character = players(g.path.last_name()) || ["player", "hero", "ship"].contains(&g.path.last_name().to_ascii_lowercase().as_str());
             let name = match g.path.root {
                 Root::Var(ref n) | Root::Global(ref n) if n.is_empty() => g.class.clone(),
+                Root::React(_) => g.class.clone(),
                 Root::GdGame | Root::C2 if g.path.steps.is_empty() => g.class.clone(),
                 Root::GdScene(ref n) if g.path.steps.is_empty() => format!("{n} ({})", g.class),
                 // A GDevelop object's instance: "Player[0]".
@@ -1583,7 +1879,7 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
 
 fn place(v: Val) -> Option<u64> {
     match v {
-        Val::Int(a) | Val::Real(a) | Val::Bool(a) | Val::Var(a) => Some(a),
+        Val::Int(a) | Val::Real(a) | Val::Bool(a) | Val::Var(a) | Val::Raw(a, _) => Some(a),
         _ => None,
     }
 }
@@ -1591,7 +1887,11 @@ fn place(v: Val) -> Option<u64> {
 /// The path to a number the list has, checked by following it the way a restart does, and
 /// its value type.
 pub fn discover(heap: &Heap, target: u64) -> Option<(WebPath, Vec<u64>, &'static str)> {
-    let (_, v, path) = groups(heap)?.into_iter().flat_map(|g| g.numbers).find(|n| place(n.1) == Some(target))?;
+    // A React component's state by its place among the components, not through whatever of
+    // React's own variables happens to hold the same object now (Tiny Tavern's staff was
+    // saved as `g.cooks`).
+    let found: Vec<(String, Val, WebPath)> = groups(heap)?.into_iter().flat_map(|g| g.numbers).filter(|n| place(n.1) == Some(target)).collect();
+    let (_, v, path) = found.iter().find(|n| matches!(n.2.root, Root::React(_))).or(found.first())?.clone();
     let leads = walk(heap, &find_roots(heap, &path), &path);
     let kind = shared(heap)?.kind(v)?;
     leads.contains(&target).then_some((path, leads, kind))
@@ -1858,6 +2158,7 @@ pub fn diagnose(heap: &Heap) -> Vec<String> {
         Val::Real(a) => format!("double {:?}", f64_at(mem, a)),
         Val::Bool(a) => format!("bool at {a:#x}"),
         Val::Obj(o) => format!("object {o:#x} {}", web.js.fields(mem, o).iter().take(8).map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(",")),
+        Val::Raw(a, kind) => format!("{kind} at {a:#x}"),
         Val::Other => "-".into(),
     };
     let mut out = vec![format!(
@@ -1914,7 +2215,7 @@ mod tests {
 
     #[test]
     fn paths_read_back() {
-        for text in ["web:@ship.hp", "web:@omnis[0].hp", "web:score", "web:new:Bt.health", "web:scene:main.health", "web:gdgame._variables._variables.items.Score._value", "web:gdscene:Level%201._variables.x", "web:c2.Vf[3].data", "web:@a%20b.c[2][3].d", "web:@%24game.x"] {
+        for text in ["web:@ship.hp", "web:@omnis[0].hp", "web:score", "web:new:Bt.health", "web:scene:main.health", "web:gdgame._variables._variables.items.Score._value", "web:gdscene:Level%201._variables.x", "web:c2.Vf[3].data", "web:@a%20b.c[2][3].d", "web:@%24game.x", "web:in:1234%3Ascore", "web:in:88%3Ap.health", "web:react:0%3A2", "web:react:1%3A0.cooks"] {
             assert_eq!(WebPath::parse(text).unwrap().text(), text, "{text}");
         }
         let p = WebPath::parse("web:@game.ship.cargo[1]").unwrap();
