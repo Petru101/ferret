@@ -56,6 +56,9 @@ const LIBRARIES: &[&str] = &[
     "godot/registration/", "godot/util/", "godot/tools/",
 ];
 
+/// What the last list showed: (pid, address, label, path, type), for `discover`.
+static LISTED: Mutex<Vec<(u32, u64, String, JavaPath, &'static str)>> = Mutex::new(Vec::new());
+
 /// The most objects of Godot's JVM binding looked through for the game's scripts.
 const MAX_SCRIPTS: u32 = 1 << 16;
 
@@ -1105,7 +1108,12 @@ impl JavaPath {
 
     /// The path up to its first player-like field (`Dungeon.hero` of
     /// `Dungeon.hero.belongings.backpack`), if it goes through one.
+    /// Also a root that is the player's object itself (a Godot script `Player`, a thread's
+    /// `Player`): its health and weapons, a step down, belong with it.
     fn player_part(&self) -> Option<JavaPath> {
+        if self.thread && the_player(short_name(&self.class)) {
+            return Some(JavaPath { class: self.class.clone(), thread: true, steps: Vec::new() });
+        }
         let i = self.steps.iter().position(|s| matches!(s, Step::Field(n) if the_player(n)))?;
         Some(JavaPath { class: self.class.clone(), thread: self.thread, steps: self.steps[..=i].to_vec() })
     }
@@ -1360,6 +1368,11 @@ fn constant(name: &str) -> bool {
 /// static number (`Dungeon.gold`) first.
 pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     let groups = groups(heap)?;
+    {
+        let mut listed = LISTED.lock().unwrap();
+        listed.clear();
+        listed.extend(groups.iter().flat_map(|g| g.numbers.iter().map(|n| (heap.pid, n.1, n.0.clone(), n.3.clone(), n.2))));
+    }
     let mut out: Vec<ListedObject> = groups
         .into_iter()
         .map(|g| {
@@ -1385,10 +1398,24 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
 /// The path to a number the list has, checked by following it the way a restart does, and
 /// the field's type (a search for a whole number lands on a `long`'s first 4 bytes, or a
 /// `byte`'s: written as 4 bytes, either would go wrong).
-pub fn discover(heap: &Heap, target: u64) -> Option<(JavaPath, Vec<u64>, &'static str)> {
+/// `picked`: the label the list showed it by, when it is saved from the list. The collector
+/// moves objects every few seconds in some games (Reboot), so the place the list showed
+/// may hold nothing, or another object's number, by the time Save is pressed: the path the
+/// list had for that row is followed then, and `true` says the number is at a new place.
+pub fn discover(heap: &Heap, target: u64, picked: Option<&str>) -> Option<(JavaPath, Vec<u64>, &'static str, bool)> {
+    if let Some(label) = picked {
+        let listed = LISTED.lock().unwrap().iter().find(|l| l.0 == heap.pid && l.1 == target && l.2 == label).map(|l| (l.3.clone(), l.4));
+        if let Some((path, kind)) = listed {
+            let leads = walk(heap, &find_roots(heap, &path), &path);
+            if !leads.is_empty() {
+                let moved = !leads.contains(&target);
+                return Some((path, leads, kind, moved));
+            }
+        }
+    }
     let (_, _, kind, path) = groups(heap)?.into_iter().flat_map(|g| g.numbers).find(|n| n.1 == target)?;
     let leads = walk(heap, &find_roots(heap, &path), &path);
-    leads.contains(&target).then_some((path, leads, kind))
+    leads.contains(&target).then_some((path, leads, kind, false))
 }
 
 /// jvm [class]: what was found (the JVM, how it packs references, the field format), or a

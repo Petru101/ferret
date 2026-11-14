@@ -4666,10 +4666,14 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     }
     // A field of a Java game's objects, by its path from a class's static field.
     if s.java {
-        if let Some((p, leads, field)) = java::discover(&heap, target) {
+        if let Some((p, leads, field, moved)) = java::discover(&heap, target, picked) {
             // The field's own type, when the search's isn't it.
             if field != kind.name() {
                 writeln!(out, "type {field}")?;
+            }
+            // The listed number is at another place by now (the collector moved its object).
+            if moved {
+                writeln!(out, "moved")?;
             }
             writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
             return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());

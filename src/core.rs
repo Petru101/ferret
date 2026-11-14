@@ -1672,6 +1672,8 @@ pub struct Core {
     helper: Helper,
     /// The label of the listed number being saved (`save_listed`), told to the helper.
     picked: Option<String>,
+    /// Where that number is now, when the helper says it moved since it was listed.
+    moved_to: Option<Loc>,
     /// Looks for better ways to find saved values, in the background (started when needed).
     upgrader: Option<Upgrader>,
     capture: Option<WindowCapture>,
@@ -1790,6 +1792,7 @@ impl Core {
             helper: Helper::start(false)?,
             upgrader: None,
             picked: None,
+            moved_to: None,
             capture: None,
             words: Vec::new(),
             area: None,
@@ -2220,6 +2223,10 @@ impl Core {
         if by_name && named.is_none() {
             return Err(tr!("Ferret can't find this number again by its name, so it isn't saved. Find it with a search instead."));
         }
+        let loc = match self.moved_to.take() {
+            Some(now) => Loc { addr: now.addr, ..loc },
+            None => loc,
+        };
         // A GameMaker variable turns from a double into an int32 and back: saved as the
         // helper's GameMaker value, read as whichever it holds. A Lua value is written only
         // while it holds a number (a table that grew left the old place freed).
@@ -2487,7 +2494,8 @@ impl Core {
             self.say(l);
         }
         let kind = reply.iter().find_map(|l| l.strip_prefix("type ")).and_then(Kind::parse).unwrap_or(loc.kind);
-        for line in reply.iter().filter_map(|l| l.strip_prefix("named ")) {
+        let moved = self.picked.is_some() && reply.iter().any(|l| l == "moved");
+        for line in reply.iter().filter(|l| *l != "moved").filter_map(|l| l.strip_prefix("named ")) {
             let mut f = line.splitn(3, ' ');
             let (Some(text), Some(_)) = (f.next(), f.next()) else { continue };
             let (places, doubt) = self.follow_named(kind, text);
@@ -2497,6 +2505,14 @@ impl Core {
             }
             if places.iter().any(|(p, _)| p.addr == loc.addr) {
                 return Some((text.to_owned(), places.len(), f.next().unwrap_or_default().to_owned(), kind));
+            }
+            // Saved from the list, and the game moved it since the list was made (Java's
+            // collector): the helper followed the row's own path to where it is now.
+            if moved {
+                if let Some((p, _)) = places.first() {
+                    self.moved_to = Some(*p);
+                    return Some((text.to_owned(), places.len(), f.next().unwrap_or_default().to_owned(), kind));
+                }
             }
         }
         None
