@@ -1631,8 +1631,8 @@ pub struct App {
 /// The Electron app a program runs (Chromium's `resources.pak` beside it): its files in
 /// `resources/app.asar` or `resources/app/` (a packaged app), or the folder `--app-path`
 /// names (Electron's own program running a folder). A game when its files name a web game
-/// engine, or a page of it declares its `<canvas>` (a hand-written game draws in one; desktop
-/// apps build their pages with frameworks). Named after its program, which a packaged app
+/// engine, a page of it declares its `<canvas>`, or it simply isn't installed where the system
+/// keeps its apps and isn't a desktop app everyone knows (`KNOWN_APPS`). Named after its program, which a packaged app
 /// carries the name of, else its package.json's productName or name, else its folder.
 /// `inside`: a path as the game's process sees it (`os::inside`).
 pub fn electron_app(program: &Path, cmdline: &str, inside: impl Fn(&Path) -> PathBuf) -> Option<App> {
@@ -1653,10 +1653,35 @@ pub fn electron_app(program: &Path, cmdline: &str, inside: impl Fn(&Path) -> Pat
     let about = source.about(dir, app_path.as_deref())?;
     let program_name = program.file_name()?.to_string_lossy().into_owned();
     let name = match program_name.as_str() {
-        "electron" | "electron.exe" => about.product.or_else(|| app_path.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()))?,
+        "electron" | "electron.exe" => about.product.clone().or_else(|| app_path.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()))?,
         _ => program_name.trim_end_matches(".exe").to_owned(),
     };
-    Some(App { dir: app_path.unwrap_or_else(|| dir.to_path_buf()), name, game: about.game })
+    // Else any Electron app the player keeps among their own files that isn't a desktop app
+    // everyone knows: a game of plain buttons or a React one has no canvas and no engine
+    // (Moss Farm, Tiny Tavern), and a game that can't be opened is worse than an app listed
+    // too many (the user's call).
+    let own = !system_place(&program.to_string_lossy()) && !known_app(&name) && !about.product.as_deref().is_some_and(known_app);
+    Some(App { dir: app_path.unwrap_or_else(|| dir.to_path_buf()), name, game: about.game || own })
+}
+
+/// Where a system keeps its programs (a distribution's packages, Flatpak's and Snap's apps),
+/// not where a player unpacks a download.
+fn system_place(program: &str) -> bool {
+    ["/usr/", "/bin/", "/sbin/", "/lib", "/opt/", "/app/", "/nix/", "/snap/", "/var/lib/flatpak/"].iter().any(|d| program.starts_with(d))
+}
+
+/// Electron desktop apps people install themselves (a download in the home folder, a Windows
+/// app under AppData): not games.
+const KNOWN_APPS: &[&str] = &[
+    "discord", "code", "vscodium", "cursor", "windsurf", "slack", "obsidian", "teams", "signal", "spotify", "element", "notion", "whatsapp", "figma",
+    "postman", "insomnia", "bitwarden", "1password", "claude", "skype", "logseq", "joplin", "mattermost", "etcher", "heroic", "itch", "kitch",
+    "github", "githubdesktop", "visual studio code", "microsoft teams", "chatgpt", "termius", "hyper", "atom", "simplenote", "trello", "todoist", "tidal",
+];
+
+fn known_app(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let n = n.trim_end_matches(".exe").trim_end_matches("-desktop").trim_end_matches(" desktop");
+    KNOWN_APPS.iter().any(|a| n == *a || n.strip_prefix(a).is_some_and(|rest| rest.starts_with([' ', '-'])))
 }
 
 /// What an Electron app's files say about it.
@@ -1874,6 +1899,18 @@ pub fn diagnose(heap: &Heap) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apps_and_places() {
+        for app in ["Discord", "Code", "code.exe", "Obsidian", "GitHub Desktop", "Bitwarden", "heroic", "Claude", "Slack-desktop"] {
+            assert!(known_app(app), "{app}");
+        }
+        for game in ["Moss Farm", "Tiny Tavern", "Codex of Kings", "Elemental", "Claudette's Quest", "PetalGuard", "Hyperdrive"] {
+            assert!(!known_app(game), "{game}");
+        }
+        assert!(system_place("/usr/lib/claude-desktop/claude-desktop") && system_place("/app/Bitwarden/bitwarden") && system_place("/opt/Obsidian/obsidian"));
+        assert!(!system_place("/home/me/Games/moss-farm/moss-farm") && !system_place("/run/media/me/Games/x/x") && !system_place("C:/Users/me/AppData/Local/x/x.exe"));
+    }
 
     #[test]
     fn paths_read_back() {
