@@ -1315,7 +1315,10 @@ fn named_doubt(heap: &Heap, leads: &[u64], roots: &[u64], kind: Kind, path: &Nam
         }
     }
     // A long may hold more (a Java game's gold in the billions), up to what a double holds exactly.
-    let most = if kind == Kind::I64 { 9.007e15 } else { 1e9 };
+    // So may a JavaScript number, its only kind: an idle game counts in billions (Moss Farm's
+    // bank of 3,000,000,000 was "not a number").
+    let script = matches!(path, Named::Js(_) | Named::Web(_)) && matches!(kind, Kind::F64 | Kind::JsVar);
+    let most = if kind == Kind::I64 || script { 9.007e15 } else { 1e9 };
     let plausible = |v: f64| v.is_finite() && v.abs() < most && (v == 0.0 || v.abs() >= 1e-6);
     if !leads.iter().all(|&a| read_value(mem, a, kind).is_some_and(plausible)) {
         return Some("some of its places don't hold a number".into());

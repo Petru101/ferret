@@ -272,6 +272,8 @@ pub struct Web {
     /// An old V8 (4.x, 6.x: NW.js before 0.44; `locate_legacy`): no scopes are read, the
     /// roots are the global objects' properties and the engines' objects.
     pub legacy: Option<Legacy>,
+    /// The bits of a map's bit_field for "callable" and "constructor" (`learn_cells`).
+    function_bits: (u8, u8),
 }
 
 /// GDevelop's games found last (`Web::gd_games`), by process.
@@ -337,7 +339,7 @@ impl Web {
             if half(mem, meta - 1).map(|m| base | u64::from(m)) != Some(meta) {
                 continue;
             }
-            let mut web = Web { js: Js::web(base, meta, 0, true), scope_map, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: None };
+            let mut web = Web { js: Js::web(base, meta, 0, true), scope_map, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: None, function_bits: (0x02, 0x40) };
             for &(_, info) in found.iter().filter(|f| f.0 == map32 && f.1 & !0xffff_ffff == base) {
                 if let Some(scope) = web.scope(mem, info) {
                     web.scopes.push(scope);
@@ -350,7 +352,7 @@ impl Web {
         let mut web = best?;
         // Names V8's sandbox keeps outside the heap: read through its external pointer table,
         // then the scopes again.
-        web.js.ept = web.external_table(heap);
+        web.js.ept = web.external_table(heap, &[]);
         if web.js.ept.is_some() {
             let infos: Vec<u64> = web.scopes.iter().map(|s| s.info).collect();
             web.scopes = infos.into_iter().filter_map(|i| web.scope(mem, i)).collect();
@@ -370,6 +372,16 @@ impl Web {
             }
         }
         web.js.calibrate_web(mem, &objects);
+        // A minified bundle's scopes have no name kept outside the heap (`t`, `a`, `s`), but
+        // its objects' properties do when the page uses the same words (Moss Farm's `moss`,
+        // `gems` and `bank` are also its elements' ids): those fields had no name and were
+        // left out. The table is then found from them.
+        if web.js.ept.is_none() {
+            let unread: Vec<(u64, bool, u32)> = objects.iter().flat_map(|&o| web.js.unread_names(mem, o)).take(64).collect();
+            if unread.len() >= 2 {
+                web.js.ept = web.external_table(heap, &unread);
+            }
+        }
         web.learn_cells(mem);
         Some(web)
     }
@@ -398,7 +410,7 @@ impl Web {
             return None;
         }
         let number_map = js.number_map;
-        Some(Web { js, scope_map: 0, cell_map: None, property_map: None, number_map, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }) })
+        Some(Web { js, scope_map: 0, cell_map: None, property_map: None, number_map, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }), function_bits: (0x02, 0x40) })
     }
 
     /// A ScopeInfo's kind and variables (None unless every name is a string).
@@ -429,11 +441,12 @@ impl Web {
 
     /// Where V8's sandbox keeps its external pointer table: the start of the mapping that
     /// decodes the most of the scopes' unread names (external one-byte strings: {map, hash,
-    /// length, resource handle, characters handle}) into identifiers of their length. The
+    /// length, resource handle, characters handle}; `more`: other such names, as
+    /// `Js::unread_names` gives them) into identifiers of their length. The
     /// table is reserved outside the cage, its first segment read-only.
-    fn external_table(&self, heap: &Heap) -> Option<u64> {
+    fn external_table(&self, heap: &Heap, more: &[(u64, bool, u32)]) -> Option<u64> {
         let mem = heap.mem();
-        let mut samples: Vec<(u32, u32)> = Vec::new();
+        let mut samples: Vec<(u64, bool, u32)> = more.to_vec();
         for s in &self.scopes {
             let first = s.info - 1 + 24 + 4 * u64::from(s.kind == MODULE_SCOPE);
             for (i, n) in s.names.iter().enumerate().take(MAX_INLINED as usize) {
@@ -441,9 +454,9 @@ impl Web {
                     continue;
                 }
                 let Some(w) = self.js.word(mem, first + 4 * i as u64) else { continue };
-                let (Some(len), Some(handle)) = (half(mem, w - 1 + 8), half(mem, w - 1 + 16)) else { continue };
+                let Some(len) = half(mem, w - 1 + 8) else { continue };
                 if (1..=64).contains(&len) {
-                    samples.push((handle, len));
+                    samples.push((w - 1 + 12, false, len));
                 }
             }
             if samples.len() >= 24 {
@@ -457,15 +470,7 @@ impl Web {
             let mut b = vec![0u8; len as usize];
             mem.read_exact_at(&mut b, p).is_ok() && b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$') && !b[0].is_ascii_digit()
         };
-        let decodes = |t: u64| {
-            samples
-                .iter()
-                .filter(|&&(h, len)| {
-                    let mut e = [0u8; 8];
-                    mem.read_exact_at(&mut e, t + u64::from(h >> 6) * 8).is_ok() && identifier(u64::from_le_bytes(e) & 0xffff_ffff_ffff, len)
-                })
-                .count()
-        };
+        let decodes = |t: u64| samples.iter().filter(|&&(handles, uncached, len)| crate::js::external_chars(mem, t, handles, uncached, len).is_some_and(|p| identifier(p, len))).count();
         let base = self.js.base();
         let (t, n) = heap.starts().into_iter().filter(|&t| t & 0xfff == 0 && !(base..base + (1 << 32)).contains(&t)).map(|t| (t, decodes(t))).max_by_key(|x| x.1)?;
         (n * 2 >= samples.len() && n > 0).then_some(t)
@@ -623,6 +628,22 @@ impl Web {
         self.cell_map = majority(maps);
         let maps: Vec<u64> = self.dictionary(mem).into_iter().filter_map(|e| self.js.map_of(mem, e)).collect();
         self.property_map = majority(maps);
+        // Which bits of a map's bit_field say "a function" and "a constructor": bits 1 and 6,
+        // on V8 15.6 (Electron 45) bits 0 and 5. Told by JavaScript's own `isNaN` (a function)
+        // and `Number` (a constructor). With the old bits there, every function among the
+        // globals passed for an object and no class was found.
+        let bits_of = |name: &str| {
+            self.dictionary(mem).into_iter().find_map(|cell| {
+                let n = self.js.word(mem, cell - 1 + 4).and_then(|n| self.js.text(mem, n))?;
+                let o = self.js.word(mem, cell - 1 + 12).filter(|_| n == name)?;
+                self.js.map_of(mem, o).and_then(|m| half(mem, m - 1 + 8)).map(|w| (w >> 16) as u8)
+            })
+        };
+        if let (Some(function), Some(constructor)) = (bits_of("isNaN"), bits_of("Number")) {
+            let callable = if function & 0x02 != 0 { 0x02 } else if function & 0x01 != 0 { 0x01 } else { 0x02 };
+            let more = constructor & !function;
+            self.function_bits = (callable, if more & 0x40 != 0 { 0x40 } else if more & 0x20 != 0 { 0x20 } else { 0x40 });
+        }
         // HeapNumber's: the box of a double field ({map, double}) of the scopes' objects.
         let mut maps: Vec<u64> = Vec::new();
         for c in self.roots(mem) {
@@ -656,7 +677,10 @@ impl Web {
     fn dictionary(&self, mem: &Mem) -> Vec<u64> {
         let Some(global) = self.native.and_then(|n| self.js.word(mem, n - 1 + 16)) else { return Vec::new() };
         let Some(dict) = self.js.word(mem, global - 1 + 4).filter(|&d| self.js.map_of(mem, d).is_some()) else { return Vec::new() };
-        let Some(len) = half(mem, dict - 1 + 4).and_then(smi) else { return Vec::new() };
+        // (V8 15.x keeps the length as a plain number: read as a small integer, an odd one
+        // gave no globals at all (Three Knights' `var day`), an even one half of them.)
+        let len = half(mem, dict - 1 + 4).and_then(|n| if self.js.plain_lengths() { Some(n as i32) } else { smi(n) });
+        let Some(len) = len else { return Vec::new() };
         (0..len.clamp(0, 1 << 16) as u64).filter_map(|i| self.js.word(mem, dict - 1 + 8 + 4 * i)).filter(|&e| self.js.map_of(mem, e).is_some()).collect()
     }
 
@@ -1050,28 +1074,34 @@ impl Web {
         }
         let base = self.js.base();
         let read_only = |p: u64| p.wrapping_sub(base) < READ_ONLY || self.js.word(mem, p - 1).is_some_and(|m| m.wrapping_sub(base) < READ_ONLY);
-        [4, 8].iter().all(|f| self.js.word(mem, o - 1 + f).is_some_and(|p| p & 1 == 1 && read_only(p)))
+        // (An object used as a key of a Map or a Set keeps its hash, a small integer, where
+        // its properties would be: Moss Farm's helpers, keys of its buttons' Map, were left
+        // out.)
+        let hash = |p: u64| p & 1 == 0 && p >> 32 == 0;
+        self.js.word(mem, o - 1 + 4).is_some_and(|p| hash(p) || p & 1 == 1 && read_only(p)) && self.js.word(mem, o - 1 + 8).is_some_and(|p| p & 1 == 1 && read_only(p))
     }
 
-    /// Whether an object is a function (its map's bit_field, map +10: callable bit 1).
+    /// Whether an object is a function (its map's bit_field, map +10: the callable bit,
+    /// `function_bits`).
     fn callable(&self, mem: &Mem, o: u64) -> bool {
         if let Some(legacy) = &self.legacy {
             // (The type's low byte: V8 6.2 keeps a count in the byte after it.)
             let low = |t: Option<u16>| t.map(|t| t & 0xff);
             return legacy.function.is_some() && low(self.js.map_of(mem, o).and_then(|m| self.js.instance_type(mem, m))) == low(legacy.function);
         }
-        self.js.map_of(mem, o).and_then(|m| half(mem, m - 1 + 8)).is_some_and(|w| (w >> 16) & 0x2 != 0)
+        self.js.map_of(mem, o).and_then(|m| half(mem, m - 1 + 8)).is_some_and(|w| (w >> 16) as u8 & self.function_bits.0 != 0)
     }
 
     /// The game's classes: the constructors its scopes' variables hold (a map's bit_field,
-    /// map +10: callable bit 1, constructor bit 6).
+    /// map +10: the callable and constructor bits, `function_bits`).
     fn classes(&self, mem: &Mem) -> Vec<(String, u64)> {
         let mut out: Vec<(String, u64)> = Vec::new();
         for (name, c, i) in self.variables(mem) {
             let Some(ctx) = self.contexts.iter().find(|x| x.at == c) else { continue };
             let Val::Obj(o) = self.variable(mem, ctx, i) else { continue };
             let bits = self.js.map_of(mem, o).and_then(|m| half(mem, m - 1 + 8)).map(|w| (w >> 16) as u8);
-            if bits.is_some_and(|b| b & 0x42 == 0x42) {
+            let both = self.function_bits.0 | self.function_bits.1;
+            if bits.is_some_and(|b| b & both == both) {
                 out.push((name, o));
             }
         }
@@ -1430,8 +1460,12 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     for (key, o) in web.scenes(heap).into_iter().filter(|(k, _)| k != "__SYSTEM") {
         queue.push_front((o, WebPath { root: Root::Scene(key), steps: Vec::new() }, 1));
     }
+    // A class's objects are named by their class only when nothing else leads to them: a
+    // `new:` path means every object of the class at once (Three Knights' three knights
+    // were one "new Knight" written together, where `knights[0]` tells them apart).
+    let mut late: VecDeque<(u64, WebPath, usize)> = VecDeque::new();
     for (class, o) in web.instances(heap, &web.classes(mem)) {
-        queue.push_back((o, WebPath { root: Root::New(class), steps: Vec::new() }, 1));
+        late.push_back((o, WebPath { root: Root::New(class), steps: Vec::new() }, 1));
     }
     // Construct 2: the event sheets' global variables, by name.
     for runtime in web.c2_runtimes(heap).into_iter().take(1) {
@@ -1444,8 +1478,12 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     }
     out.extend([vars, globals].into_iter().filter(|g| !g.numbers.is_empty()));
     let (mut visited, mut listed) = (0, 0);
-    while let Some((o, path, depth)) = queue.pop_front() {
-        if !seen.insert(o) || !web.is_object(mem, o) {
+    while let Some((o, path, depth)) = queue.pop_front().or_else(|| late.pop_front()) {
+        let again = !seen.insert(o);
+        if again || !web.is_object(mem, o) {
+            if std::env::var_os("FERRET_DEBUG").is_some() && depth <= 2 {
+                eprintln!("web: {} at {o:x} left out: {}", path.text(), if again { "met before" } else { "not an object" });
+            }
             continue;
         }
         visited += 1;

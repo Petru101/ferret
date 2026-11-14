@@ -93,6 +93,31 @@ pub enum Val {
     Other,
 }
 
+/// Where a sandboxed external string's characters are. `handles` is where the string keeps
+/// its handles: the resource's, then the characters' (each an index, handle >> 6, into the
+/// external pointer table `table`, whose 8-byte entries keep the pointer in their low 48
+/// bits). A short one (`uncached`: the page's own words, which a script then shares, like an
+/// element's id) has only the resource: the browser's string holder, one of whose first
+/// words leads to Blink's string {refs, length, hash and flags, characters} or straight to
+/// its characters, taken when its length is the string's.
+pub(crate) fn external_chars(mem: &Mem, table: u64, handles: u64, uncached: bool, len: u32) -> Option<u64> {
+    let entry = |at: u64| word(mem, table + u64::from(half(mem, at)? >> 6) * 8).map(|e| e & 0xffff_ffff_ffff).filter(|&p| p >= 0x10000);
+    if !uncached {
+        return entry(handles + 4);
+    }
+    let resource = entry(handles)?;
+    // (Electron 45: the holder's second word is the characters themselves, Blink's string
+    // header right before them.)
+    (1..=4u64).find_map(|i| {
+        let p = word(mem, resource + 8 * i).filter(|&p| p >= 0x10000 && p % 4 == 0)?;
+        if half(mem, p - 8) == Some(len) {
+            Some(p)
+        } else {
+            (half(mem, p + 4) == Some(len)).then_some(p + 12)
+        }
+    })
+}
+
 /// How one game's V8 lays its objects out, and where its globals are.
 pub struct Js {
     l: Layout,
@@ -1019,11 +1044,7 @@ impl Js {
             // V8's sandbox: {.., resource handle, characters handle}, each an index (handle
             // >> 6) into the external pointer table, whose 8-byte entries keep the pointer in
             // their low 48 bits (a tag above).
-            2 if self.ept.is_some() => {
-                let handle = half(mem, o + body + 4)?;
-                let entry = word(mem, self.ept? + u64::from(handle >> 6) * 8)?;
-                chars(entry & 0xffff_ffff_ffff)
-            }
+            2 if self.ept.is_some() => chars(external_chars(mem, self.ept?, o + body, t & 0x10 != 0, len)?).filter(|t: &String| !t.chars().any(char::is_control)),
             2 if self.cells == Cells::Compressed => {
                 let resource = word(mem, o + body)?;
                 chars(word(mem, resource.checked_add_signed(self.ext)?)? + 12).filter(|t: &String| !t.chars().any(char::is_control))
@@ -1129,6 +1150,31 @@ impl Js {
             _ if texts.iter().any(|t| t == "false") => Some(false),
             _ => None,
         }
+    }
+
+    /// The names of an object's properties that can't be read yet because V8's sandbox
+    /// keeps them outside the heap (external strings; compressed V8 only): where each one's
+    /// handles are, whether it is a short one, its length (for `external_chars`).
+    pub(crate) fn unread_names(&self, mem: &Mem, o: u64) -> Vec<(u64, bool, u32)> {
+        let Some(m) = self.map_of(mem, o) else { return Vec::new() };
+        let external = |k: u64| {
+            let t = self.instance_type(mem, self.map_of(mem, k)?)?;
+            (t < 0x40 && t & 0x7 == 2 && self.text(mem, k).is_none()).then_some(())?;
+            let len = half(mem, k - 1 + 8)?;
+            if std::env::var_os("FERRET_DEBUG").is_some() {
+                let mut b = [0u8; 32];
+                let _ = mem.read_exact_at(&mut b, k - 1);
+                eprintln!("web: unread name at {k:x}, type {t:#x}, length {len}: {b:02x?}");
+            }
+            (1..=64).contains(&len).then_some((k - 1 + 12, t & 0x10 != 0, len))
+        };
+        self.descriptors(mem, m).into_iter().filter_map(|(k, _)| external(k)).collect()
+    }
+
+    /// Whether an array's or a hash table's length is a plain number, not a small integer
+    /// (V8 15.x).
+    pub(crate) fn plain_lengths(&self) -> bool {
+        self.offsets
     }
 
     /// An object's own properties by name, with what each holds (fast and dictionary-mode
