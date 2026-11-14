@@ -50,10 +50,23 @@ const MAX_INSTANCES: usize = 16;
 /// the cage's first pages.
 const READ_ONLY: u64 = 0x40000;
 
-/// Scope types (ScopeInfo's flags, bits 0-3).
+/// Scope types (ScopeInfo's flags, bits 0-3), as V8 14.6 and later number them. V8 14.2
+/// and before (Electron 39) have function 4 and module 5: `scope_kind` turns those into
+/// these (`Web.old_scopes`).
 const SCRIPT_SCOPE: u32 = 0;
 const MODULE_SCOPE: u32 = 3;
 const FUNCTION_SCOPE: u32 = 5;
+
+/// A scope's type as the newer V8 numbers it, from the flags' own bits; None for the types
+/// not read (class, eval, block...).
+fn scope_kind(raw: u32, old: bool) -> Option<u32> {
+    match (old, raw) {
+        (_, 0) => Some(SCRIPT_SCOPE),
+        (false, 3) | (true, 5) => Some(MODULE_SCOPE),
+        (false, 5) | (true, 4) => Some(FUNCTION_SCOPE),
+        _ => None,
+    }
+}
 /// VariableMode of a `const` (infos' bits 0-3).
 const MODE_CONST: u32 = 1;
 
@@ -261,6 +274,8 @@ pub struct Context {
 pub struct Web {
     pub js: Js,
     pub scope_map: u64,
+    /// The older numbering of scope types (`scope_kind`).
+    pub old_scopes: bool,
     /// ContextCell's map, if this V8 has them.
     pub cell_map: Option<u64>,
     /// PropertyCell's map (the global object's properties).
@@ -302,8 +317,9 @@ impl Web {
         }
         let mem = heap.mem();
         let u32_at = |b: &[u8], i: usize| b.get(i..i + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
-        // (map, ScopeInfo) of everything shaped like one.
-        let mut found: Vec<(u32, u64)> = Vec::new();
+        // (map, ScopeInfo, the flags' type bits, whether its names start right after the
+        // header) of everything shaped like one.
+        let mut found: Vec<(u32, u64, u32, bool)> = Vec::new();
         heap.each_chunk(64, |addr, b, fresh| {
             for off in (0..fresh).step_by(4) {
                 let w = |i: usize| u32_at(b, off + 4 * i);
@@ -317,18 +333,20 @@ impl Web {
                 }
                 let Some(flags) = w(1) else { break };
                 let kind = flags & 0xf;
-                if ![SCRIPT_SCOPE, MODULE_SCOPE, FUNCTION_SCOPE].contains(&kind) {
+                // Either numbering (which one: by the map chosen, below): 5 is a function in
+                // the newer and a module, with a word more before its names, in the older.
+                if ![0, 3, 4, 5].contains(&kind) {
                     continue;
                 }
-                let names = 6 + usize::from(kind == MODULE_SCOPE);
                 let n = n as usize;
                 // Names (references; from MAX_INLINED on, one hash table) then infos (Smis; the
                 // first few looked at).
                 let refs = if n < MAX_INLINED as usize { n } else { 1 };
-                if !(0..refs).all(|i| w(names + i).is_some_and(|x| x & 1 == 1)) || !(0..n.min(8)).all(|i| w(names + refs + i).is_some_and(|x| x & 1 == 0)) {
+                let shaped = |names: usize| (0..refs).all(|i| w(names + i).is_some_and(|x| x & 1 == 1)) && (0..n.min(8)).all(|i| w(names + refs + i).is_some_and(|x| x & 1 == 0));
+                if !(kind != 3 && shaped(6) || [3, 5].contains(&kind) && shaped(7)) {
                     continue;
                 }
-                found.push((map, addr + off as u64 + 1));
+                found.push((map, addr + off as u64 + 1, kind, shaped(6)));
             }
         });
         // The ScopeInfo map: of the candidates that are maps (a map's map is the meta map, a
@@ -344,8 +362,15 @@ impl Web {
             if half(mem, meta - 1).map(|m| base | u64::from(m)) != Some(meta) {
                 continue;
             }
-            let mut web = Web { js: Js::web(base, meta, 0, true), scope_map, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: None, function_bits: (0x02, 0x40), typed: Mutex::new(None) };
-            for &(_, info) in found.iter().filter(|f| f.0 == map32 && f.1 & !0xffff_ffff == base) {
+            let mut web = Web { js: Js::web(base, meta, 0, true), scope_map, old_scopes: false, cell_map: None, property_map: None, number_map: None, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: None, function_bits: (0x02, 0x40), typed: Mutex::new(None) };
+            // Type 5 is a function in the newer numbering (its names right after the header:
+            // every page has those) and a module in the older (a word more before its
+            // names, so none is shaped so); 4 is the older one's function. Counting 4s
+            // against 5s isn't enough: 4 is a class in the newer, and a PixiJS game has
+            // more of those than functions.
+            let of_this = |f: &&(u32, u64, u32, bool)| f.0 == map32 && f.1 & !0xffff_ffff == base;
+            web.old_scopes = !found.iter().filter(of_this).any(|f| f.2 == 5 && f.3) && found.iter().filter(of_this).any(|f| f.2 == 4);
+            for &(_, info, _, _) in found.iter().filter(|f| f.0 == map32 && f.1 & !0xffff_ffff == base) {
                 if let Some(scope) = web.scope(mem, info) {
                     web.scopes.push(scope);
                 }
@@ -415,13 +440,13 @@ impl Web {
             return None;
         }
         let number_map = js.number_map;
-        Some(Web { js, scope_map: 0, cell_map: None, property_map: None, number_map, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }), function_bits: (0x02, 0x40), typed: Mutex::new(None) })
+        Some(Web { js, scope_map: 0, old_scopes: false, cell_map: None, property_map: None, number_map, scopes: Vec::new(), contexts: Vec::new(), native: None, legacy: Some(Legacy { globals, function }), function_bits: (0x02, 0x40), typed: Mutex::new(None) })
     }
 
     /// A ScopeInfo's kind and variables (None unless every name is a string).
     fn scope(&self, mem: &Mem, info: u64) -> Option<Scope> {
         let o = info - 1;
-        let kind = half(mem, o + 4)? & 0xf;
+        let kind = scope_kind(half(mem, o + 4)? & 0xf, self.old_scopes)?;
         let n = smi(half(mem, o + 12)?)?.max(0) as u32;
         let first_name = o + 24 + 4 * u64::from(kind == MODULE_SCOPE);
         let (names, infos) = match n >= MAX_INLINED {
@@ -1765,6 +1790,12 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         seen.insert(runtime);
     }
     out.extend([vars, globals].into_iter().filter(|g| !g.numbers.is_empty()));
+    // React components' state first, so its objects are named by their component (the way
+    // that follows the game's redraws) and not by whatever variable also leads to them.
+    let early = web.any_fiber(mem);
+    if let Some(f) = early {
+        react_state(&web, mem, f, &mut seen, &mut out);
+    }
     let (mut visited, mut listed) = (0, 0);
     let mut fiber: Option<u64> = None;
     while let Some((o, path, depth)) = queue.pop_front().or_else(|| late.pop_front()) {
@@ -1827,10 +1858,25 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
             out.push(g);
         }
     }
-    // React components' state: a number or a flag, or the numbers of the object a hook
-    // holds (a reducer's state), one level.
-    for (n, f) in fiber.map(|f| web.react_components(mem, f)).unwrap_or_default().into_iter().enumerate() {
+    // A fiber only met deep down: its components now (their objects were listed on the way).
+    if early.is_none() {
+        if let Some(f) = fiber {
+            react_state(&web, mem, f, &mut seen, &mut out);
+        }
+    }
+    Some(out)
+}
+
+/// React components' state, from any fiber: a number or a flag, or the numbers of the
+/// object a hook holds and of the objects below it (a reducer's whole game state: Sky
+/// Realm Idle's rupies are `state 1.resources.rupies`), each object a group of its own.
+fn react_state(web: &Web, mem: &Mem, fiber: u64, seen: &mut HashSet<u64>, out: &mut Vec<Group>) {
+    const DEPTH: usize = 5;
+    let base = web.js.base();
+    let mut listed = 0;
+    for (n, f) in web.react_components(mem, fiber).into_iter().enumerate() {
         let mut g = Group { path: WebPath { root: Root::React(format!("{n}:0")), steps: Vec::new() }, class: format!("Component {}", n + 1), numbers: Vec::new() };
+        let mut queue: VecDeque<(u64, WebPath, usize)> = VecDeque::new();
         for (i, h) in web.state_hooks(mem, f).into_iter().enumerate() {
             let path = WebPath { root: Root::React(format!("{n}:{i}")), steps: Vec::new() };
             match web.js.field(mem, h, "memoizedState") {
@@ -1845,21 +1891,59 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
                     };
                     g.numbers.push((format!("state {}", i + 1), queued.unwrap_or(v), path));
                 }
-                Some(Val::Obj(o)) if web.is_object(mem, o) => {
+                Some(Val::Obj(o)) if web.is_object(mem, o) && seen.insert(o) => {
                     for (name, v) in web.js.fields(mem, o) {
-                        if kind_of(v).is_some() {
-                            g.numbers.push((format!("state {}.{name}", i + 1), v, path.then(Step::Prop(name))));
+                        match v {
+                            Val::Obj(x) => queue.push_back((x, path.then(Step::Prop(name)), 2)),
+                            v if kind_of(v).is_some() => g.numbers.push((format!("state {}.{name}", i + 1), v, path.then(Step::Prop(name)))),
+                            _ => {}
                         }
                     }
                 }
                 _ => {}
             }
         }
+        g.numbers.retain(|n| place(n.1).is_some_and(|a| a.wrapping_sub(base) >= READ_ONLY));
         if !g.numbers.is_empty() {
             out.push(g);
         }
+        while let Some((o, path, depth)) = queue.pop_front() {
+            if listed > MAX_LISTED / 4 {
+                break;
+            }
+            if !web.is_object(mem, o) || !seen.insert(o) {
+                continue;
+            }
+            let fields = web.js.fields(mem, o);
+            if fiber_shaped(&fields) {
+                continue;
+            }
+            let mut g = Group { path: path.clone(), class: "Object".into(), numbers: Vec::new() };
+            let mut refs: Vec<(Step, u64)> = Vec::new();
+            for (name, v) in fields {
+                match v {
+                    Val::Obj(x) => refs.push((Step::Prop(name), x)),
+                    v if kind_of(v).is_some() => g.numbers.push((name.clone(), v, path.then(Step::Prop(name)))),
+                    _ => {}
+                }
+            }
+            for (i, v) in web.elements(mem, o).into_iter().take(MAX_ELEMENTS) {
+                match v {
+                    Val::Obj(x) => refs.push((Step::Index(i), x)),
+                    v if kind_of(v).is_some() => g.numbers.push((format!("[{i}]"), v, path.then(Step::Index(i)))),
+                    _ => {}
+                }
+            }
+            if depth < DEPTH {
+                queue.extend(refs.into_iter().map(|(s, x)| (x, path.then(s), depth + 1)));
+            }
+            g.numbers.retain(|n| place(n.1).is_some_and(|a| a.wrapping_sub(base) >= READ_ONLY));
+            if !g.numbers.is_empty() {
+                listed += g.numbers.len();
+                out.push(g);
+            }
+        }
     }
-    Some(out)
 }
 
 /// The player's sort of number by its name: `player_like`'s words, and the short ones hand-written
@@ -1868,6 +1952,10 @@ fn players(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     player_like(name) || ["hp", "maxhp", "life", "xp", "exp", "credits", "cash", "hull", "shield", "shields", "armor", "armour"].contains(&n.as_str())
 }
+
+/// The last list made for the Browse tab, by process: each number's place then, with its
+/// path and value type (`discover` for a row whose object moved since).
+static LISTED: Mutex<Option<(u32, HashMap<u64, (WebPath, &'static str)>)>> = Mutex::new(None);
 
 /// Fewer numbers than this in a web game's list, and the objects its variables hold join it.
 const THIN_LIST: usize = 16;
@@ -1881,6 +1969,8 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     // An engine's own state found (GDevelop's variables, a Phaser scene, React components'
     // state): the scripts' top-level variables are then mostly its libraries' (PixiJS's,
     // React's: a hundred two-letter names above the game's seven numbers).
+    let listed = groups.iter().flat_map(|g| &g.numbers).filter_map(|(_, v, path)| Some((place(*v)?, (path.clone(), web.kind(*v)?)))).collect();
+    *LISTED.lock().unwrap() = Some((heap.pid, listed));
     let engine = groups.iter().any(|g| matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2 | Root::React(_)));
     let mut out: Vec<(ListedObject, bool)> = groups
         .into_iter()
@@ -1891,12 +1981,21 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
             // GDevelop's objects' variables are the game's too (the maker named them).
             let own = !engine && g.path.steps.is_empty() && matches!(&g.path.root, Root::Var(n) | Root::Global(n) if n.is_empty())
                 || matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2) && (g.path.steps.is_empty() || g.class != "Object")
-                || matches!(g.path.root, Root::React(_));
-            let main = own || g.numbers.iter().any(|n| players(&n.0));
+                || matches!(g.path.root, Root::React(_)) && g.path.steps.len() <= 1;
+            // The game's one big object by the name games give it (`var Game = {}`: Cookie
+            // Clicker's cookies), whatever its fields are called.
+            let whole = g.path.steps.is_empty()
+                && matches!(&g.path.root, Root::Var(n) | Root::Global(n) | Root::Local(n) if ["game", "state", "gamestate", "save", "savedata"].contains(&local_name(n).1.to_ascii_lowercase().as_str()));
+            // Particles have a `life` too (Cookie Clicker's list opened on 70 of them).
+            let effect = g.path.last_name().to_ascii_lowercase().contains("particle");
+            // A React state's lists (a game's weapon and enemy tables, each row with an
+            // `hp` and an `atk`) aren't the player's own numbers.
+            let table = matches!(g.path.root, Root::React(_)) && g.path.steps.iter().any(|s| matches!(s, Step::Index(_)));
+            let main = own || whole || !effect && !table && g.numbers.iter().any(|n| players(&n.0));
             let character = players(g.path.last_name()) || ["player", "hero", "ship"].contains(&g.path.last_name().to_ascii_lowercase().as_str());
             let name = match g.path.root {
                 Root::Var(ref n) | Root::Global(ref n) if n.is_empty() => g.class.clone(),
-                Root::React(_) => g.class.clone(),
+                Root::React(_) if g.path.steps.is_empty() => g.class.clone(),
                 Root::GdGame | Root::C2 if g.path.steps.is_empty() => g.class.clone(),
                 Root::GdScene(ref n) if g.path.steps.is_empty() => format!("{n} ({})", g.class),
                 // A GDevelop object's instance: "Player[0]".
@@ -1937,15 +2036,22 @@ fn place(v: Val) -> Option<u64> {
 
 /// The path to a number the list has, checked by following it the way a restart does, and
 /// its value type.
-pub fn discover(heap: &Heap, target: u64) -> Option<(WebPath, Vec<u64>, &'static str)> {
+pub fn discover(heap: &Heap, target: u64, picked: bool) -> Option<(WebPath, Vec<u64>, &'static str, bool)> {
     // A React component's state by its place among the components, not through whatever of
     // React's own variables happens to hold the same object now (Tiny Tavern's staff was
     // saved as `g.cooks`).
     let found: Vec<(String, Val, WebPath)> = groups(heap)?.into_iter().flat_map(|g| g.numbers).filter(|n| place(n.1) == Some(target)).collect();
-    let (_, v, path) = found.iter().find(|n| matches!(n.2.root, Root::React(_))).or(found.first())?.clone();
+    let Some((_, v, path)) = found.iter().find(|n| matches!(n.2.root, Root::React(_))).or(found.first()).cloned() else {
+        // Saved from the list, and the game moved it since the list was made (V8 moves a
+        // game's young objects every few seconds when it makes new state each tick: Sky
+        // Realm Idle): the row's own path from that list, followed to where it is now.
+        let (path, kind) = LISTED.lock().unwrap().as_ref().filter(|l| picked && l.0 == heap.pid).and_then(|l| l.1.get(&target).cloned())?;
+        let leads = walk(heap, &find_roots(heap, &path), &path);
+        return (!leads.is_empty()).then_some((path, leads, kind, true));
+    };
     let leads = walk(heap, &find_roots(heap, &path), &path);
     let kind = shared(heap)?.kind(v)?;
-    leads.contains(&target).then_some((path, leads, kind))
+    leads.contains(&target).then_some((path, leads, kind, false))
 }
 
 /// Learns the game's true and false (`js::learn_bools`) from its variables' objects.

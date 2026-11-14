@@ -4656,9 +4656,13 @@ fn cmd_names(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     // A web game's number, by its variable, global or class and the fields from there; its
     // value type first when the search's isn't it (a small integer is kept doubled).
     if is_web(s.pid) {
-        if let Some((p, leads, field)) = web::discover(&heap, target) {
+        if let Some((p, leads, field, moved)) = web::discover(&heap, target, picked.is_some()) {
             if field != kind.name() {
                 writeln!(out, "type {field}")?;
+            }
+            // The listed number is at another place by now (V8 moved its object).
+            if moved {
+                writeln!(out, "moved")?;
             }
             writeln!(out, "named {} {} {}", p.text(), leads.len(), p.describe())?;
             return writeln!(out, "1 named paths in {} ms", t.elapsed().as_millis());

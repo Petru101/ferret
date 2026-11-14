@@ -1047,9 +1047,21 @@ impl Js {
             // >> 6) into the external pointer table, whose 8-byte entries keep the pointer in
             // their low 48 bits (a tag above).
             2 if self.ept.is_some() => chars(external_chars(mem, self.ept?, o + body, t & 0x10 != 0, len)?).filter(|t: &String| !t.chars().any(char::is_control)),
-            2 if self.cells == Cells::Compressed => {
+            2 if self.cells == Cells::Compressed && self.ext != 0 => {
                 let resource = word(mem, o + body)?;
                 chars(word(mem, resource.checked_add_signed(self.ext)?)? + 12).filter(|t: &String| !t.chars().any(char::is_control))
+            }
+            // Where the resource keeps Blink's string wasn't learned (a web game found by
+            // JavaScript's own functions, none of them the browser's words): the word near
+            // the resource that leads to a Blink string of this length (Electron 11: 16
+            // bytes before it). Cookie Clicker's `Game.cookies` had no name without this:
+            // "cookies" is a word of the browser's.
+            2 if self.cells == Cells::Compressed => {
+                let resource = word(mem, o + body).filter(|&r| r >= 0x10000)?;
+                [-16i64, -24, 8, 16, -8].into_iter().find_map(|at| {
+                    let blink = word(mem, resource.checked_add_signed(at)?).filter(|&p| p >= 0x10000)?;
+                    (half(mem, blink + 4) == Some(len)).then(|| chars(blink + 12)).flatten().filter(|t: &String| !t.is_empty() && !t.chars().any(char::is_control))
+                })
             }
             // External in older V8 (the browser's own names, which a game's script then
             // shares: "name"): {.., resource, the resource's characters}; a short one (bit 4)
