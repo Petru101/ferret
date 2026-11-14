@@ -267,6 +267,10 @@ impl BrowseView {
     pub fn new_game(&self) {
         self.asked.set(false);
         self.clear();
+        // The last game's search would hide this one's list ("No names match").
+        self.search.set_text("");
+        self.changed.set_active(false);
+        self.everything.set_active(false);
         for r in self.tweak_rows.borrow_mut().drain(..) {
             self.tweaks.remove(&r);
         }

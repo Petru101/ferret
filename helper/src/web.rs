@@ -1490,7 +1490,14 @@ impl Web {
             Some(Val::Obj(a)) if self.is_fiber(mem, a) => Some(a),
             _ => None,
         };
-        for f in std::iter::once(fiber).chain(other) {
+        // The tree on screen first: the first place is the one shown as the value, and the
+        // other tree still holds the number from before the last redraw (a card showed 75
+        // gold while the game had 93).
+        let (first, second) = match other {
+            Some(a) if !self.on_screen(mem, fiber) && self.on_screen(mem, a) => (a, Some(fiber)),
+            _ => (fiber, other),
+        };
+        for f in std::iter::once(first).chain(second) {
             let Some(&h) = self.state_hooks(mem, f).get(hook) else { continue };
             let queue = match self.js.field(mem, h, "queue") {
                 Some(Val::Obj(q)) => self.js.field(mem, q, "lastRenderedState"),
@@ -1500,9 +1507,26 @@ impl Web {
                 out.extend(follow(self, mem, v, steps));
             }
         }
-        out.sort_unstable();
-        out.dedup();
+        let mut seen = HashSet::new();
+        out.retain(|a| seen.insert(*a));
         out
+    }
+
+    /// Whether a fiber is in the tree React draws from now: its top's root names that top
+    /// as `current`.
+    fn on_screen(&self, mem: &Mem, fiber: u64) -> bool {
+        let object = |o: u64, name: &str| match self.js.field(mem, o, name) {
+            Some(Val::Obj(x)) if self.is_object(mem, x) => Some(x),
+            _ => None,
+        };
+        let mut top = fiber;
+        for _ in 0..10000 {
+            match object(top, "return") {
+                Some(up) => top = up,
+                None => break,
+            }
+        }
+        object(top, "stateNode").and_then(|root| object(root, "current")) == Some(top)
     }
 }
 
@@ -1835,18 +1859,24 @@ fn players(name: &str) -> bool {
     player_like(name) || ["hp", "maxhp", "life", "xp", "exp", "credits", "cash", "hull", "shield", "shields", "armor", "armour"].contains(&n.as_str())
 }
 
+/// Fewer numbers than this in a web game's list, and the objects its variables hold join it.
+const THIN_LIST: usize = 16;
+
 /// The Browse tab's list for a web game: the objects with the player's sort of numbers first
 /// (hp, energy, gold, lives...), then the rest under Show Everything.
 pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     let mut groups = groups(heap)?;
     let web = shared(heap)?;
     groups.retain(|g| !g.numbers.is_empty());
-    // An engine's own state found (GDevelop's variables, a Phaser scene): the scripts' top-level
-    // variables are then mostly its libraries' (PixiJS's).
-    let engine = groups.iter().any(|g| matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2));
-    let mut out: Vec<ListedObject> = groups
+    // An engine's own state found (GDevelop's variables, a Phaser scene, React components'
+    // state): the scripts' top-level variables are then mostly its libraries' (PixiJS's,
+    // React's: a hundred two-letter names above the game's seven numbers).
+    let engine = groups.iter().any(|g| matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2 | Root::React(_)));
+    let mut out: Vec<(ListedObject, bool)> = groups
         .into_iter()
         .map(|g| {
+            // One or two steps from the game's own variables (`t`, `a[0]`).
+            let near = matches!(g.path.root, Root::Var(_) | Root::Local(_) | Root::Global(_)) && g.path.steps.len() <= 1;
             // The game's own variables and its scene are its state, whatever their names.
             // GDevelop's objects' variables are the game's too (the maker named them).
             let own = !engine && g.path.steps.is_empty() && matches!(&g.path.root, Root::Var(n) | Root::Global(n) if n.is_empty())
@@ -1863,16 +1893,27 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
                 Root::GdScene(_) if g.path.steps.len() == 4 => format!("{}{}", g.class, g.path.steps_text(false).rsplit('.').next().unwrap_or_default().trim_start_matches(&*g.class)),
                 _ => g.path.shown(),
             };
-            ListedObject {
+            let object = ListedObject {
                 name,
                 class: g.class,
                 role: if character && main { "character" } else { "game" },
                 owner: None,
                 more: !main,
                 fields: g.numbers.into_iter().filter_map(|(label, v, _)| Some(Listed { label, addr: place(v)?, kind: web.kind(v)? })).collect(),
-            }
+            };
+            (object, near)
         })
         .collect();
+    // Next to nothing to show (a minified game: no name says which object is the player's,
+    // and Moss Farm's list was one timer, its moss, gems and bank all under Show
+    // Everything): the objects the game's variables hold are shown too. Not with an engine
+    // or React found: their libraries' objects hang off the variables as well.
+    if !engine && out.iter().filter(|(o, _)| !o.more).map(|(o, _)| o.fields.len()).sum::<usize>() < THIN_LIST {
+        for (o, near) in &mut out {
+            o.more &= !*near;
+        }
+    }
+    let mut out: Vec<ListedObject> = out.into_iter().map(|(o, _)| o).collect();
     out.sort_by_key(|o| (o.more, o.role != "character"));
     Some(out)
 }
