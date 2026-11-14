@@ -5163,12 +5163,11 @@ impl Core {
                     locs.remove(k);
                     junk_at.get_or_insert_with(Instant::now);
                     if locs.is_empty() || started.elapsed() >= WAIT || self.cancel.load(Ordering::Relaxed) {
-                        return Ok(None);
+                        return Err("the game only ran over scratch memory that held the number by chance".into());
                     }
                 }
                 None if junk_at.is_some() && reply.iter().any(|l| l == "none") => {
-                    self.say("the other places stayed as they were while the game went on: not the value");
-                    return Ok(None);
+                    return Err("the game ran over scratch memory that held the number by chance, and the other places stayed as they were".into());
                 }
                 None => break reply,
             }
