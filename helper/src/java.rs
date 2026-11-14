@@ -50,7 +50,14 @@ const LIBRARIES: &[&str] = &[
     "de/jcm/", "org/jetbrains/", "org/intellij/", "com/fasterxml/", "org/yaml/", "javafx/", "com/jogamp/", "jogamp/", "org/joml/",
     "club/minnced/", "net/arikia/", "com/codedisaster/", "org/luaj/", "processing/core/", "processing/opengl/", "processing/awt/",
     "com/jcraft/",
+    // Godot's JVM binding (games scripted in Kotlin, Java or Scala): its wrappers of the
+    // engine's own classes.
+    "godot/api/", "godot/core/", "godot/internal/", "godot/common/", "godot/global/", "godot/annotation/", "godot/extension/", "godot/coroutines/",
+    "godot/registration/", "godot/util/", "godot/tools/",
 ];
+
+/// The most objects of Godot's JVM binding looked through for the game's scripts.
+const MAX_SCRIPTS: u32 = 1 << 16;
 
 /// A field of a class, as its metadata describes it.
 #[derive(Clone, Debug)]
@@ -318,6 +325,31 @@ fn unsigned5(b: &[u8], i: &mut usize) -> Option<u32> {
 }
 
 impl Jvm {
+    /// Why `locate` found no JVM: which of the things it needs aren't there.
+    fn missing(pid: u32, mem: &Mem) -> Vec<String> {
+        let Some(syms) = hotspot_symbols(pid).or_else(|| hotspot_exports(pid, mem)) else { return vec!["no gHotSpot symbols (libjvm.so) or exports (jvm.dll)".into()] };
+        let Some((structs, types, ints)) = read_tables(mem, &syms) else { return vec![format!("{} gHotSpot symbols, but the tables can't be read", syms.len())] };
+        let mut lines = vec![format!("{} symbols, {} fields, {} types, {} int constants", syms.len(), structs.len(), types.len(), ints.len())];
+        let has = |t: &str, f: &str| structs.contains_key(&(t.to_owned(), f.to_owned()));
+        let fields = [
+            ("Universe", "_narrow_oop._base"), ("Universe", "_narrow_klass._base"), ("Klass", "_java_mirror"), ("InstanceKlass", "_fields"),
+            ("InstanceKlass", "_java_fields_count"), ("ClassLoaderDataGraph", "_head"), ("ClassLoaderData", "_next"),
+            ("Klass", "_name"), ("Klass", "_super"), ("Klass", "_class_loader_data"), ("InstanceKlass", "_constants"), ("Symbol", "_length"), ("Symbol", "_body"),
+            ("Flag", "flags"), ("Flag", "numFlags"), ("Flag", "_name"), ("Flag", "_addr"), ("JavaThread", "_threadObj"), ("Threads", "_thread_list"),
+        ];
+        lines.extend(fields.iter().filter(|(t, f)| !has(t, f) && !(*t == "Klass" && has("InstanceKlass", f))).map(|(t, f)| format!("no field {t}::{f}")));
+        let consts = ["FieldInfo::field_slots", "FieldInfo::access_flags_offset", "FieldInfo::name_index_offset", "FieldInfo::signature_index_offset", "FieldInfo::low_packed_offset", "FieldInfo::high_packed_offset"];
+        lines.extend(consts.iter().filter(|c| !ints.contains_key(**c)).map(|c| format!("no constant {c}")));
+        lines.extend(["ConstantPool", "Flag"].iter().filter(|t| !types.contains_key(**t)).map(|t| format!("no type {t}")));
+        let like = |what: &str| structs.keys().filter(|k| k.0.contains(what) || k.1.contains(what)).map(|k| format!("{}::{}", k.0, k.1)).collect::<Vec<_>>().join(" ");
+        let of = |ty: &str| structs.iter().filter(|(k, _)| k.0 == ty).map(|(k, v)| format!("{} +{:#x}", k.1, v.2)).collect::<Vec<_>>().join(", ");
+        lines.push(format!("fields like them: {} | {}", like("narrow"), like("ClassLoaderData")));
+        lines.push(format!("Klass: {}", of("Klass")));
+        lines.push(format!("InstanceKlass: {}", of("InstanceKlass")));
+        lines.push(format!("SystemDictionary: {}; Dictionary/Hashtable: {} {} {}", of("SystemDictionary"), of("BasicHashtable<mtInternal>"), of("BasicHashtableEntry<mtInternal>"), of("HashtableEntry<Klass*, mtClass>")));
+        lines
+    }
+
     fn locate(pid: u32, mem: &Mem) -> Option<Jvm> {
         let syms = hotspot_symbols(pid).or_else(|| hotspot_exports(pid, mem))?;
         let (structs, types, ints) = read_tables(mem, &syms)?;
@@ -360,19 +392,48 @@ impl Jvm {
             return None;
         }
         let major = addr("Abstract_VM_Version", "_vm_major_version").and_then(|a| half(mem, a)).unwrap_or(0);
+        // Java 8's JVM counts its own versions: HotSpot 25. The old field format ended with
+        // JDK 20, so one that has it and says more than that is Java 8 (a real JDK 25 lays
+        // out small arrays another way: `array_base`).
+        let major = if old.is_some() && stream.is_none() && major > 20 { 8 } else { major };
         let threads = structs.get(&("JavaThread".into(), "_threadObj".into())).filter(|v| !v.1).map(|v| Threads {
             list: addr("ThreadsSMRSupport", "_java_thread_list").zip(off("ThreadsList", "_length")).zip(off("ThreadsList", "_threads")).map(|((a, l), t)| (a, l, t)),
             chain: addr("Threads", "_thread_list").zip(off("JavaThread", "_next")),
             obj: v.2,
             handle: v.0.as_deref().is_some_and(|t| t.contains("OopHandle")),
         });
+        // JDK 8's tables leave out two links of the class list. A Klass keeps `_next_link`
+        // right before `_class_loader_data`, which they do have; a ClassLoaderData's
+        // `_klasses` is the word that leads to a Klass of that loader's (voted over the
+        // loaders).
+        let cld_head = addr("ClassLoaderDataGraph", "_head")?;
+        let cld_next = off("ClassLoaderData", "_next")?;
+        // (JDK 8 lists it under InstanceKlass, +0x90, after Klass's `_next_sibling` +0x80.)
+        let klass_cld = off("Klass", "_class_loader_data").or_else(|| off("InstanceKlass", "_class_loader_data"));
+        let cld_klasses = off("ClassLoaderData", "_klasses").or_else(|| {
+            let klass_cld = klass_cld?;
+            let mut votes: HashMap<u64, usize> = HashMap::new();
+            let mut cld = word(mem, cld_head)?;
+            for _ in 0..64 {
+                if cld == 0 {
+                    break;
+                }
+                for o in (0..0x80u64).step_by(8) {
+                    if word(mem, cld + o).filter(|&k| k > 0x1_0000 && k % 8 == 0).and_then(|k| word(mem, k + klass_cld)) == Some(cld) {
+                        *votes.entry(o).or_default() += 1;
+                    }
+                }
+                cld = word(mem, cld + cld_next).unwrap_or(0);
+            }
+            votes.into_iter().max_by_key(|&(o, n)| (n, std::cmp::Reverse(o))).map(|(o, _)| o)
+        })?;
         let mut jvm = Jvm {
-            cld_head: addr("ClassLoaderDataGraph", "_head")?,
-            cld_klasses: off("ClassLoaderData", "_klasses")?,
-            cld_next: off("ClassLoaderData", "_next")?,
+            cld_head,
+            cld_klasses,
+            cld_next,
             klass_name: off("Klass", "_name")?,
             klass_super: off("Klass", "_super")?,
-            klass_next: off("Klass", "_next_link")?,
+            klass_next: off("Klass", "_next_link").or_else(|| klass_cld?.checked_sub(8))?,
             klass_mirror: off("Klass", "_java_mirror")?,
             mirror_handle: mirror_type.contains("OopHandle"),
             ik_constants: off("InstanceKlass", "_constants")?,
@@ -743,13 +804,20 @@ impl Jvm {
     /// A map's entries (up to `most`: the list shows `MAX_ELEMENTS`, a saved path looks among
     /// `MAX_SLOTS`): each key's text and what its value holds. None for anything but `MAPS`.
     fn entries(&self, heap: &Heap, o: u64, k: u64, most: u32) -> Option<Vec<(String, Val)>> {
+        Some(self.raw_entries(heap, o, k, most)?.into_iter().filter_map(|(key, v)| Some((self.key_text(heap, key)?, v))).collect())
+    }
+
+    /// A map's entries, whatever their keys are.
+    fn raw_entries(&self, heap: &Heap, o: u64, k: u64, most: u32) -> Option<Vec<(Val, Val)>> {
         let mem = heap.mem();
         let most = most as usize;
         let mut out: Vec<(Val, Val)> = Vec::new();
         let array = |name: &str| -> Vec<Val> {
             let Some((a, ak)) = self.field_object(heap, o, k, name) else { return Vec::new() };
             let Some(an) = self.klass_name(mem, ak).filter(|n| n.starts_with('[')) else { return Vec::new() };
-            self.elements_up_to(heap, a, &an, MAX_SLOTS).into_iter().map(|(_, v)| v).collect()
+            // (All of a big map's slots when all of it is asked for: half of the shooter's
+            // 8192 held its Player.)
+            self.elements_up_to(heap, a, &an, MAX_SLOTS.max(most as u32)).into_iter().map(|(_, v)| v).collect()
         };
         match self.map_kind(mem, k)? {
             "java/util/TreeMap" => {
@@ -805,7 +873,8 @@ impl Jvm {
                 }
             }
         }
-        Some(out.into_iter().take(most).filter_map(|(key, v)| Some((self.key_text(heap, key)?, v))).collect())
+        out.truncate(most);
+        Some(out)
     }
 
     /// The java.lang.Thread objects of the JVM's Java threads.
@@ -866,7 +935,41 @@ impl Jvm {
                 }
             }
         }
+        out.extend(self.godot_scripts(heap));
         out
+    }
+
+    /// The script objects of a Godot game scripted on the JVM (Godot Kotlin/JVM: Kotlin, Java,
+    /// Scala): the binding keeps every object it wraps in `MemoryManager.ObjectDB`, a HashMap
+    /// of weak references; those of the game's own classes are its scripts (the player's
+    /// node with its health). No static field of the game leads to them, and their keys are
+    /// the engine's object ids, new at every run: they are roots by class, as a thread's.
+    fn godot_scripts(&self, heap: &Heap) -> Vec<(u64, u64)> {
+        let mem = heap.mem();
+        let found = || -> Option<Vec<(u64, u64)>> {
+            let k = self.class(mem, "godot/internal/memory/MemoryManager")?;
+            let db = self.own_fields(mem, k).iter().find(|f| f.is_static && f.name == "ObjectDB").cloned()?;
+            let Val::Obj(map) = self.val(mem, self.mirror(mem, k)? + u64::from(db.offset), &db.sig) else { return None };
+            // (Its keys are the engine's object ids, objects of the binding's own.)
+            let entries = self.raw_entries(heap, map, self.klass_of(heap, map)?, MAX_SCRIPTS)?;
+            let mut out: Vec<(u64, u64)> = Vec::new();
+            for (_, v) in entries {
+                let Val::Obj(binding) = v else { continue };
+                // A node's binding holds it (`instance`); a reference-counted object's is a
+                // weak reference (`referent`).
+                let Some(bk) = self.klass_of(heap, binding) else { continue };
+                let Some((o, ok)) = self.field_object(heap, binding, bk, "instance").or_else(|| self.field_object(heap, binding, bk, "referent")) else { continue };
+                if self.klass_name(mem, ok).is_some_and(|n| !is_library(&n) && !n.starts_with('[')) && !out.iter().any(|r| r.0 == o) {
+                    out.push((o, ok));
+                }
+            }
+            if std::env::var_os("FERRET_DEBUG").is_some() {
+                let names: Vec<String> = out.iter().filter_map(|r| self.klass_name(mem, r.1)).collect();
+                eprintln!("java godot: {} script objects: {names:?}", out.len());
+            }
+            Some(out)
+        };
+        found().unwrap_or_default()
     }
 }
 
@@ -1103,7 +1206,8 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     // Paths through a player-like field (`Dungeon.hero...`) are walked first: the list stops at
     // `MAX_LISTED` numbers, and a game's UI objects alone can fill it before the hero's
     // inventory, four steps down, is reached (Shattered Pixel Dungeon).
-    let mut queues: [VecDeque<(u64, JavaPath, usize)>; 2] = [VecDeque::new(), VecDeque::new()];
+    // (The third: roots of a class with several such objects, tried when nothing else led to them.)
+    let mut queues: [VecDeque<(u64, JavaPath, usize)>; 3] = [VecDeque::new(), VecDeque::new(), VecDeque::new()];
     let queue_of = |p: &JavaPath| usize::from(p.player_part().is_none());
     let mut seen: HashSet<u64> = HashSet::new();
     for (name, k) in classes {
@@ -1127,17 +1231,48 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
             out.push(g);
         }
     }
-    for (o, k) in jvm.thread_roots(heap) {
-        if let Some(class) = jvm.klass_name(mem, k) {
-            let p = JavaPath { class, thread: true, steps: Vec::new() };
-            queues[queue_of(&p)].push_back((o, p, 1));
+    // libGDX holds the game itself: `Gdx.app.listener`, the game's ApplicationListener. A game
+    // none of whose own statics lead to its state is reached only that way (Bomber Bubble:
+    // two classes of constants were all the list had; LWJGL's loop runs on the main thread,
+    // so no thread root leads to it either).
+    let gdx = "com/badlogic/gdx/Gdx";
+    let listener = || -> Option<u64> {
+        let k = jvm.class(mem, gdx)?;
+        let app = jvm.own_fields(mem, k).iter().find(|f| f.is_static && f.name == "app").cloned()?;
+        let Val::Obj(app) = jvm.val(mem, jvm.mirror(mem, k)? + u64::from(app.offset), &app.sig) else { return None };
+        let f = jvm.instance_fields(mem, jvm.klass_of(heap, app)?).into_iter().find(|f| f.name == "listener")?;
+        match jvm.val(mem, app + u64::from(f.offset), &f.sig) {
+            Val::Obj(o) if o != 0 => Some(o),
+            _ => None,
+        }
+    };
+    if let Some(o) = listener() {
+        let p = JavaPath { class: gdx.to_owned(), thread: false, steps: vec![Step::Field("app".into()), Step::Field("listener".into())] };
+        queues[queue_of(&p)].push_back((o, p, 1));
+    }
+    // A root is named by its own class, not through another root that points to it (the
+    // Godot shooter's Player was listed as `Enemy.player`).
+    // A class with several root objects names them all at once (the shooter's two weapons:
+    // "every WeaponStats"): those wait for a path through another object, which tells them
+    // apart, and are roots only when there is none.
+    let mut rooted: HashSet<u64> = HashSet::new();
+    let roots: Vec<(u64, String)> = jvm.thread_roots(heap).into_iter().filter_map(|(o, k)| Some((o, jvm.klass_name(mem, k)?))).collect();
+    for (o, class) in &roots {
+        let alone = roots.iter().filter(|r| r.1 == *class).count() == 1;
+        let p = JavaPath { class: class.clone(), thread: true, steps: Vec::new() };
+        match alone {
+            true => {
+                queues[queue_of(&p)].push_back((*o, p, 1));
+                rooted.insert(*o);
+            }
+            false => queues[2].push_back((*o, p, 1)),
         }
     }
     let mut visited = 0;
     let mut listed = 0;
     // An object is named by the first path taken off the queues (not the first queued: a UI
     // static's `lastBag` would take the hero's backpack).
-    while let Some((o, path, depth)) = queues[0].pop_front().or_else(|| queues[1].pop_front()) {
+    while let Some((o, path, depth)) = queues[0].pop_front().or_else(|| queues[1].pop_front()).or_else(|| queues[2].pop_front()) {
         if !seen.insert(o) {
             continue;
         }
@@ -1193,7 +1328,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         }
         if depth < MAX_DEPTH {
             for (s, x) in refs {
-                if !seen.contains(&x) {
+                if !seen.contains(&x) && !rooted.contains(&x) {
                     let p = path.then(s);
                     queues[queue_of(&p)].push_back((x, p, depth + 1));
                 }
@@ -1261,7 +1396,11 @@ pub fn discover(heap: &Heap, target: u64) -> Option<(JavaPath, Vec<u64>, &'stati
 pub fn diagnose(heap: &Heap, class: &str) -> Vec<String> {
     let t = Instant::now();
     let mem = heap.mem();
-    let Some(jvm) = shared(heap.pid, mem) else { return vec!["no HotSpot tables found (libjvm.so's gHotSpotVMStructs)".into()] };
+    let Some(jvm) = shared(heap.pid, mem) else {
+        let mut lines = vec!["no HotSpot tables found (libjvm.so's gHotSpotVMStructs)".to_owned()];
+        lines.extend(Jvm::missing(heap.pid, mem));
+        return lines;
+    };
     let n = jvm.classes.lock().unwrap().all.len();
     let mut out = vec![format!(
         "JDK {}, {} classes, compressed oops {} (base {:#x}, shift {}), class pointers {} (base {:#x}, shift {}), compact headers {}, field info {} ({} ms)",
