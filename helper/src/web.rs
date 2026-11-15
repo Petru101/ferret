@@ -1079,13 +1079,37 @@ impl Web {
                 return out;
             }
         }
-        self.objects_where(heap, |m| self.js.descriptors(mem, m).into_iter().take(200).any(|(k, _)| self.js.text(mem, k).as_deref() == Some("c2runtime")).then(String::new))
+        let found: Vec<u64> = self
+            .objects_where(heap, |m| self.js.descriptors(mem, m).into_iter().take(if self.legacy.is_some() { 2000 } else { 200 }).any(|(k, _)| self.js.text(mem, k).as_deref() == Some("c2runtime")).then(String::new))
             .into_iter()
-            .filter_map(|(_, canvas)| match self.js.field(mem, canvas, "c2runtime")? {
-                Val::Obj(r) => Some(r),
-                _ => None,
+            .filter_map(|(_, canvas)| {
+                let v = self.js.field(mem, canvas, "c2runtime");
+                if std::env::var_os("FERRET_DEBUG").is_some() {
+                    eprintln!("construct 2: canvas {canvas:x}, c2runtime {v:?}");
+                    if let Some(Val::Obj(r)) = v {
+                        let f = self.js.fields(mem, r);
+                        eprintln!("construct 2: runtime {r:x}: {} fields, object {}, variables {:?}; first {:?}", f.len(), self.is_object(mem, r), self.c2_globals(mem, r).map(|g| (g.0, g.1.len())), f.iter().take(12).collect::<Vec<_>>());
+                    }
+                }
+                match v? {
+                    Val::Obj(r) => Some(r),
+                    _ => None,
+                }
             })
-            .collect()
+            .collect();
+        if !found.is_empty() || self.legacy.is_none() || self.js.c2_keys.is_empty() {
+            return found;
+        }
+        // Runtimes of 2013 keep themselves nowhere by name (`cr_createRuntime` returns one and
+        // the page drops it): the runtime is then the big object (some 170 fields) that holds
+        // the variables' list.
+        let mut big: Vec<u64> = self.objects_where(heap, |m| (self.js.descriptors(mem, m).len() >= 100).then(String::new)).into_iter().map(|(_, o)| o).collect();
+        let all = big.len();
+        big.retain(|&r| self.c2_globals(mem, r).is_some_and(|g| !g.1.is_empty()));
+        if std::env::var_os("FERRET_DEBUG").is_some() {
+            eprintln!("construct 2: no canvas names its runtime; {all} big objects, with variables: {big:x?}");
+        }
+        big
     }
 
     /// Construct 2's global variables: the runtime's array whose elements are its variables
@@ -1888,6 +1912,9 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         // React's own bookkeeping (lanes, flags, tags) isn't the game's: its components'
         // state is listed apart, below.
         let fields = web.js.fields(mem, o);
+        if std::env::var_os("FERRET_DEBUG").is_some() && depth <= 1 {
+            eprintln!("web: {} at {o:x}: {} fields {:?}", path.text(), fields.len(), fields.iter().take(8).map(|f| f.0.as_str()).collect::<Vec<_>>());
+        }
         if fiber_shaped(&fields) {
             fiber.get_or_insert(o);
             continue;

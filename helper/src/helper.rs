@@ -242,7 +242,20 @@ fn nwjs_app(pid: u32) -> Option<PathBuf> {
     let inside = os::inside(pid, dir);
     let has = |f: &str| inside.join(f).exists();
     let nw = has("nw.pak") || has("resources.pak") || has("lib/libnw.so") || has("nw.dll");
-    ((has("package.json") || has("package.nw")) && nw).then(|| dir.to_path_buf())
+    // (Or the game is a zip at the end of the program itself, as NW.js allows: `cat nw app.nw`;
+    // Yasminoku. Only next to NW.js's own nw.pak.)
+    let app = has("package.json") || has("package.nw") || has("nw.pak") && ends_with_zip(&os::inside(pid, &program));
+    (app && nw).then(|| dir.to_path_buf())
+}
+
+/// Whether a file ends with a zip's closing record ("PK\x05\x06" within its last 64 KiB: a
+/// comment may follow it).
+fn ends_with_zip(file: &Path) -> bool {
+    let Ok(f) = File::open(file) else { return false };
+    let Ok(len) = f.metadata().map(|m| m.len()) else { return false };
+    let n = len.min(65536 + 22);
+    let mut b = vec![0u8; n as usize];
+    f.read_exact_at(&mut b, len - n).is_ok() && b.windows(4).any(|w| w == b"PK\x05\x06")
 }
 
 /// An NW.js game runs its JavaScript, and keeps its values, in a Chromium renderer process
