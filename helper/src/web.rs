@@ -298,6 +298,10 @@ pub struct Web {
 
 /// GDevelop's games found last (`Web::gd_games`), by process.
 static GD_GAMES: Mutex<Option<(u32, Instant, Vec<u64>)>> = Mutex::new(None);
+/// An old V8's maps found last (`Web::objects_where_if`), by process.
+static OLD_MAPS: Mutex<Option<(u32, Instant, Vec<u64>)>> = Mutex::new(None);
+/// Vuex stores found last (`Web::vuex_states`), by process.
+static VUEX: Mutex<Option<(u32, Instant, Vec<u64>)>> = Mutex::new(None);
 const GD_GAMES_FOR: Duration = Duration::from_secs(10);
 
 /// What an old V8 was found with.
@@ -860,16 +864,24 @@ impl Web {
             let base = self.js.base();
             let read = |b: &[u8], off: usize| if ws == 8 { u64::from_le_bytes(b[off..off + 8].try_into().unwrap()) } else { base | u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as u64 };
             let meta = self.js.meta();
-            let mut maps: Vec<u64> = Vec::new();
-            heap.each_chunk(0, |addr, b, fresh| {
-                if base != 0 && addr & !0xffff_ffff != base {
-                    return;
-                }
-                for off in (0..fresh - fresh % ws).step_by(ws) {
-                    if read(b, off) == meta {
-                        maps.push(addr + off as u64 + 1);
+            // The maps found lately: a list asks for scenes, GDevelop's games, Construct's
+            // runtimes, classes and Vuex stores in turn, each a pass over memory for the same
+            // maps (Faceminer: 23 s a list).
+            let kept = OLD_MAPS.lock().unwrap().as_ref().filter(|(pid, at, _)| *pid == heap.pid && at.elapsed() < GD_GAMES_FOR).map(|m| m.2.clone());
+            let maps = kept.unwrap_or_else(|| {
+                let mut maps: Vec<u64> = Vec::new();
+                heap.each_chunk(0, |addr, b, fresh| {
+                    if base != 0 && addr & !0xffff_ffff != base {
+                        return;
                     }
-                }
+                    for off in (0..fresh - fresh % ws).step_by(ws) {
+                        if read(b, off) == meta {
+                            maps.push(addr + off as u64 + 1);
+                        }
+                    }
+                });
+                *OLD_MAPS.lock().unwrap() = Some((heap.pid, Instant::now(), maps.clone()));
+                maps
             });
             let total = maps.len();
             let of: HashMap<u64, String> = maps.into_iter().filter_map(|m| Some((m, name_of(m)?))).collect();
@@ -987,6 +999,50 @@ impl Web {
         games.sort_by_key(|&g| std::cmp::Reverse(self.gd_scenes(mem, g).len()));
         *GD_GAMES.lock().unwrap() = Some((heap.pid, Instant::now(), games.clone()));
         games
+    }
+
+    /// What a Proxy stands for (Vue wraps its state in them): {map, properties, target,
+    /// handler}, an object with no properties of its own whose third and fourth words are
+    /// objects; anything else as it is.
+    pub fn proxy_target(&self, mem: &Mem, o: u64) -> u64 {
+        let w = self.js.width();
+        let base = self.js.base();
+        // (Not V8's own read-only things: an empty object's elements are one of those.)
+        let object = |i: u64| self.js.word(mem, o - 1 + i * w).filter(|&p| p & 1 == 1 && (self.legacy.is_some() || p.wrapping_sub(base) >= READ_ONLY) && self.is_object(mem, p));
+        match (object(2), object(3)) {
+            (Some(target), Some(_)) if self.js.fields(mem, o).is_empty() => target,
+            _ => o,
+        }
+    }
+
+    /// Vuex stores' states (Vue games keep everything there): objects whose map has
+    /// `_committing`, `_actions`, `_mutations` and `_state`; the state is `_state.data`
+    /// (Vuex 4: a reactive Proxy around {data}), each behind its Proxy.
+    pub fn vuex_states(&self, heap: &Heap) -> Vec<u64> {
+        let mem = heap.mem();
+        let state = |store: u64| -> Option<u64> {
+            let Val::Obj(holder) = self.js.field(mem, store, "_state")? else { return None };
+            let Val::Obj(data) = self.js.field(mem, self.proxy_target(mem, holder), "data")? else { return None };
+            Some(self.proxy_target(mem, data)).filter(|&d| self.is_object(mem, d))
+        };
+        // Found lately and still stores (each search is two passes over memory).
+        if let Some((_, _, stores)) = VUEX.lock().unwrap().as_ref().filter(|(pid, at, stores)| *pid == heap.pid && at.elapsed() < GD_GAMES_FOR && stores.iter().all(|&s| state(s).is_some())) {
+            return stores.iter().filter_map(|&s| state(s)).collect();
+        }
+        let stores: Vec<u64> = self
+            .objects_where_if(
+                heap,
+                |m| {
+                    let names: Vec<String> = self.js.descriptors(mem, m).into_iter().take(40).filter_map(|(k, _)| self.js.text(mem, k)).collect();
+                    ["_committing", "_actions", "_mutations", "_state"].iter().all(|n| names.iter().any(|x| x == n)).then(String::new)
+                },
+                |s| state(s).is_some(),
+            )
+            .into_iter()
+            .map(|(_, o)| o)
+            .collect();
+        *VUEX.lock().unwrap() = Some((heap.pid, Instant::now(), stores.clone()));
+        stores.iter().filter_map(|&s| state(s)).collect()
     }
 
     /// Construct 2's runtimes: the canvas element's `c2runtime` (cr_createRuntime sets it; the
@@ -1116,7 +1172,11 @@ impl Web {
             // Its properties and elements are objects of V8's (arrays, dictionaries): a map's
             // next words are sizes and bits, a string's its hash and length.
             let w = self.js.width();
-            return self.js.map_of(mem, o).is_some() && [w, 2 * w].iter().all(|f| self.js.word(mem, o - 1 + f).is_some_and(|p| self.js.map_of(mem, p).is_some()));
+            // (An object used as a key of a Map or a WeakMap keeps its hash, a small integer,
+            // where its properties would be: Vue keeps such tables of everything reactive,
+            // and Faceminer's Vuex store wasn't taken for an object.)
+            let thing = |f: u64, hash: bool| self.js.word(mem, o - 1 + f).is_some_and(|p| hash && p & 1 == 0 && p >> 32 == 0 || self.js.map_of(mem, p).is_some());
+            return self.js.map_of(mem, o).is_some() && thing(w, self.js.base() != 0) && thing(2 * w, false);
         }
         let base = self.js.base();
         let read_only = |p: u64| p.wrapping_sub(base) < READ_ONLY || self.js.word(mem, p - 1).is_some_and(|m| m.wrapping_sub(base) < READ_ONLY);
@@ -1273,6 +1333,8 @@ pub enum Root {
     GdScene(String),
     /// Construct 2's runtime (the canvas's `c2runtime`): `c2`.
     C2,
+    /// A Vue game's Vuex store's state (`store.state`): `vuex`.
+    Vuex,
 }
 
 /// One step of a path: a property by name, or an element by index.
@@ -1293,7 +1355,7 @@ impl WebPath {
     /// "web:@<variable>|new:<class variable>|scene:<key>|<global>[.<property>|[i]]...".
     pub fn parse(text: &str) -> Option<WebPath> {
         let rest = text.strip_prefix("web:")?;
-        for (prefix, root) in [("gdgame", Root::GdGame), ("c2", Root::C2)] {
+        for (prefix, root) in [("gdgame", Root::GdGame), ("c2", Root::C2), ("vuex", Root::Vuex)] {
             if let Some(r) = rest.strip_prefix(prefix).filter(|r| r.is_empty() || r.starts_with(['.', '['])) {
                 let mut p = WebPath::parse(&format!("web:@x{r}"))?;
                 p.root = root;
@@ -1346,6 +1408,7 @@ impl WebPath {
             Root::GdGame => "gdgame".into(),
             Root::GdScene(n) => format!("gdscene:{}", encode(n)),
             Root::C2 => "c2".into(),
+            Root::Vuex => "vuex".into(),
         };
         format!("web:{root}{}", self.steps_text(true))
     }
@@ -1372,6 +1435,7 @@ impl WebPath {
             Root::GdGame => "game".into(),
             Root::GdScene(n) => n.clone(),
             Root::C2 => "runtime".into(),
+            Root::Vuex => "state".into(),
         };
         root + &self.steps_text(false)
     }
@@ -1400,6 +1464,7 @@ impl WebPath {
                 Root::React(_) => "state",
                 Root::GdGame => "game",
                 Root::C2 => "runtime",
+                Root::Vuex => "state",
             })
     }
 }
@@ -1584,6 +1649,7 @@ pub fn find_roots(heap: &Heap, path: &WebPath) -> Vec<u64> {
         Root::GdGame => web.gd_games(heap),
         Root::GdScene(name) => web.gd_games(heap).into_iter().flat_map(|g| web.gd_scenes(mem, g)).filter(|(n, _)| n == name).map(|(_, o)| o).collect(),
         Root::C2 => web.c2_runtimes(heap),
+        Root::Vuex => web.vuex_states(heap),
     }
 }
 
@@ -1629,13 +1695,14 @@ fn root_value(web: &Web, mem: &Mem, r: u64, root: &Root) -> Option<Val> {
             let n = web.js.word(mem, r - 1 + 4)?;
             (web.js.map_of(mem, r) == web.property_map && web.js.text(mem, n).as_deref() == Some(name)).then(|| web.js.slot(mem, r - 1 + 12, false))
         }
-        Root::New(_) | Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2 => web.js.map_of(mem, r).map(|_| Val::Obj(r)),
+        Root::New(_) | Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2 | Root::Vuex => web.js.map_of(mem, r).map(|_| Val::Obj(r)),
     }
 }
 
 fn follow(web: &Web, mem: &Mem, mut v: Val, steps: &[Step]) -> Option<u64> {
     for s in steps {
         let Val::Obj(o) = v else { return None };
+        let o = web.proxy_target(mem, o);
         v = match s {
             Step::Prop(name) => web.js.field(mem, o, name)?,
             Step::Index(n) => web.elements(mem, o).into_iter().find(|(k, _)| k == n)?.1,
@@ -1656,6 +1723,7 @@ pub fn kind_now(heap: &Heap, roots: &[u64], path: &WebPath) -> Option<&'static s
     let mut v = roots.iter().find_map(|&r| root_value(&web, mem, r, &path.root))?;
     for s in &path.steps {
         let Val::Obj(o) = v else { return None };
+        let o = web.proxy_target(mem, o);
         v = match s {
             Step::Prop(name) => web.js.field(mem, o, name)?,
             Step::Index(n) => web.elements(mem, o).into_iter().find(|(k, _)| k == n)?.1,
@@ -1790,6 +1858,11 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
         seen.insert(runtime);
     }
     out.extend([vars, globals].into_iter().filter(|g| !g.numbers.is_empty()));
+    // A Vue game's Vuex store: its state is the game's (Faceminer's money), reached by no
+    // variable or global on old Electron.
+    for state in web.vuex_states(heap).into_iter().take(1) {
+        queue.push_front((state, WebPath { root: Root::Vuex, steps: Vec::new() }, 1));
+    }
     // React components' state first, so its objects are named by their component (the way
     // that follows the game's redraws) and not by whatever variable also leads to them.
     let early = web.any_fiber(mem);
@@ -1799,6 +1872,8 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
     let (mut visited, mut listed) = (0, 0);
     let mut fiber: Option<u64> = None;
     while let Some((o, path, depth)) = queue.pop_front().or_else(|| late.pop_front()) {
+        // (Vue's reactive state: the object behind the Proxy.)
+        let o = web.proxy_target(mem, o);
         let again = !seen.insert(o);
         if again || !web.is_object(mem, o) {
             if std::env::var_os("FERRET_DEBUG").is_some() && depth <= 2 {
@@ -1818,6 +1893,7 @@ fn groups(heap: &Heap) -> Option<Vec<Group>> {
             continue;
         }
         let class = match &path.root {
+            Root::Vuex if path.steps.is_empty() => "Game state".into(),
             Root::New(c) if path.steps.is_empty() => c.clone(),
             Root::Scene(_) if path.steps.is_empty() => "Scene".into(),
             _ => "Object".into(),
@@ -1971,7 +2047,7 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
     // React's: a hundred two-letter names above the game's seven numbers).
     let listed = groups.iter().flat_map(|g| &g.numbers).filter_map(|(_, v, path)| Some((place(*v)?, (path.clone(), web.kind(*v)?)))).collect();
     *LISTED.lock().unwrap() = Some((heap.pid, listed));
-    let engine = groups.iter().any(|g| matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2 | Root::React(_)));
+    let engine = groups.iter().any(|g| matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2 | Root::React(_) | Root::Vuex));
     let mut out: Vec<(ListedObject, bool)> = groups
         .into_iter()
         .map(|g| {
@@ -1981,7 +2057,8 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
             // GDevelop's objects' variables are the game's too (the maker named them).
             let own = !engine && g.path.steps.is_empty() && matches!(&g.path.root, Root::Var(n) | Root::Global(n) if n.is_empty())
                 || matches!(g.path.root, Root::Scene(_) | Root::GdGame | Root::GdScene(_) | Root::C2) && (g.path.steps.is_empty() || g.class != "Object")
-                || matches!(g.path.root, Root::React(_)) && g.path.steps.len() <= 1;
+                || matches!(g.path.root, Root::React(_)) && g.path.steps.len() <= 1
+                || matches!(g.path.root, Root::Vuex) && g.path.steps.len() <= 1;
             // The game's one big object by the name games give it (`var Game = {}`: Cookie
             // Clicker's cookies), whatever its fields are called.
             let whole = g.path.steps.is_empty()
@@ -1990,13 +2067,13 @@ pub fn player(heap: &Heap) -> Option<Vec<ListedObject>> {
             let effect = g.path.last_name().to_ascii_lowercase().contains("particle");
             // A React state's lists (a game's weapon and enemy tables, each row with an
             // `hp` and an `atk`) aren't the player's own numbers.
-            let table = matches!(g.path.root, Root::React(_)) && g.path.steps.iter().any(|s| matches!(s, Step::Index(_)));
+            let table = matches!(g.path.root, Root::React(_) | Root::Vuex) && g.path.steps.iter().any(|s| matches!(s, Step::Index(_)));
             let main = own || whole || !effect && !table && g.numbers.iter().any(|n| players(&n.0));
             let character = players(g.path.last_name()) || ["player", "hero", "ship"].contains(&g.path.last_name().to_ascii_lowercase().as_str());
             let name = match g.path.root {
                 Root::Var(ref n) | Root::Global(ref n) if n.is_empty() => g.class.clone(),
                 Root::React(_) if g.path.steps.is_empty() => g.class.clone(),
-                Root::GdGame | Root::C2 if g.path.steps.is_empty() => g.class.clone(),
+                Root::GdGame | Root::C2 | Root::Vuex if g.path.steps.is_empty() => g.class.clone(),
                 Root::GdScene(ref n) if g.path.steps.is_empty() => format!("{n} ({})", g.class),
                 // A GDevelop object's instance: "Player[0]".
                 Root::GdScene(_) if g.path.steps.len() == 4 => format!("{}{}", g.class, g.path.steps_text(false).rsplit('.').next().unwrap_or_default().trim_start_matches(&*g.class)),
