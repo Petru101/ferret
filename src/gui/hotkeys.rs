@@ -20,7 +20,7 @@ const DESKTOP: &str = "/org/freedesktop/portal/desktop";
 const IFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 
 /// Id, what it does, the trigger asked for (the desktop may give another, or none).
-const KEYS: [(&str, &str, &str); 5] = [
+const KEYS: [(&str, &str, &str); 9] = [
     ("limits", n_!("Turn limits off or on"), "CTRL+SHIFT+F9"),
     ("search", n_!("Start or stop the search"), "CTRL+SHIFT+F10"),
     ("again", n_!("Scan again (the number stayed the same)"), "CTRL+SHIFT+F11"),
@@ -28,6 +28,11 @@ const KEYS: [(&str, &str, &str); 5] = [
     // Not F8: a dropped hotkey used it and Plasma may still hold it for Ferret.
     ("still", n_!("It's still (No Number?)"), "CTRL+SHIFT+F6"),
     ("moving", n_!("It's moving (No Number?)"), "CTRL+SHIFT+F7"),
+    // The other way: what it did since the last answer.
+    ("down", n_!("It went down (No Number?)"), "CTRL+SHIFT+F1"),
+    ("up", n_!("It went up (No Number?)"), "CTRL+SHIFT+F2"),
+    ("same", n_!("It's the same (No Number?)"), "CTRL+SHIFT+F5"),
+    ("changed", n_!("It changed (No Number?)"), "CTRL+SHIFT+F12"),
 ];
 
 pub struct Hotkeys {
@@ -167,8 +172,8 @@ impl Hotkeys {
     fn start_windows(self: &Rc<Self>) {
         use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT};
         use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
-        // The keys asked for elsewhere: Ctrl+Shift and F9, F10, F11, F6, F7.
-        const VK: [u32; 5] = [0x78, 0x79, 0x7A, 0x75, 0x76];
+        // The keys asked for elsewhere: Ctrl+Shift and F9, F10, F11, F6, F7, F1, F2, F5, F12.
+        const VK: [u32; 9] = [0x78, 0x79, 0x7A, 0x75, 0x76, 0x70, 0x71, 0x74, 0x7B];
         let (tx, rx) = async_channel::unbounded::<Result<String, Vec<bool>>>();
         std::thread::spawn(move || {
             let mods: HOT_KEY_MODIFIERS = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;

@@ -422,12 +422,30 @@ impl FindView {
         let still = gtk::Button::builder().label(tr!("It's Still")).css_classes(["guide-button"]).build();
         let moving = gtk::Button::builder().label(tr!("It's Moving")).css_classes(["guide-button"]).build();
         let motion_try = gtk::Button::builder().label(tr!("Try Them One by One")).css_classes(["suggested-action", "guide-button"]).build();
-        let motion_box = gtk::Box::builder().spacing(8).visible(false).build();
+        // The other way, for a value that changes only when the player does something (a
+        // nitrous tank): what it did since their last answer.
+        let compare: Vec<(core::Compare, gtk::Button)> = [
+            (core::Compare::Down, tr!("Went Down")),
+            (core::Compare::Up, tr!("Went Up")),
+            (core::Compare::Same, tr!("Same")),
+            (core::Compare::Changed, tr!("Changed")),
+        ]
+        .into_iter()
+        .map(|(how, label)| (how, gtk::Button::builder().label(label).css_classes(["guide-button"]).build()))
+        .collect();
+        let motion_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).visible(false).build();
+        let motion_row = gtk::Box::builder().spacing(8).halign(gtk::Align::End).build();
         // Try first: coming and going as the count crosses 20, it doesn't move the other two
         // (the bar's buttons sit at its right end).
         for b in [&motion_try, &still, &moving] {
-            motion_box.append(b);
+            motion_row.append(b);
         }
+        let compare_row = gtk::Box::builder().spacing(8).halign(gtk::Align::End).build();
+        for (_, b) in &compare {
+            compare_row.append(b);
+        }
+        motion_box.append(&motion_row);
+        motion_box.append(&compare_row);
         guide.actions.append(&motion_box);
 
         let typed_label = gtk::Label::builder().label(tr!("Can't read it?")).build();
@@ -669,6 +687,10 @@ impl FindView {
             still.connect_clicked(move |_| view_.set_motion(core::Motion::Still));
             let view_ = view.clone();
             moving.connect_clicked(move |_| view_.set_motion(core::Motion::Moving));
+            for (how, b) in compare {
+                let view_ = view.clone();
+                b.connect_clicked(move |_| view_.set_compare(how));
+            }
             let view_ = view.clone();
             motion_try.connect_clicked(move |_| {
                 // Trying writes to the game: the readings stop first.
@@ -1661,10 +1683,11 @@ impl FindView {
             Ok(()) => {
                 self.moving.set(true);
                 self.ask_motion(
-                    &tr!("Is it moving now?"),
+                    &tr!("What does it do?"),
                     &tr!(
-                        "Press It's Moving while it changes on its own (a ring counting, a bar filling or draining), and It's Still while it doesn't. \
-                         Ferret reads the game every 2 seconds. The hotkeys work from inside the game (the keyboard button at the top lists them)."
+                        "If it changes on its own for a while (a ring counting, a bar filling): press It's Moving while it does, It's Still while it doesn't. \
+                         If it changes only when you use it (nitrous, a charge): use it in the game, then press Went Down or Went Up, and Same while it hasn't changed. \
+                         The hotkeys work from inside the game (the keyboard button at the top lists them)."
                     ),
                     0,
                 );
@@ -1708,6 +1731,78 @@ impl FindView {
         self.following(self.last_count.get().unwrap_or(0), m == core::Motion::Moving);
         let motion = self.motion.clone();
         self.worker.run(move |core| Event::Followed(core.follow_motion(&motion)));
+    }
+
+    /// Went Down, Went Up, Same or Changed (buttons, hotkeys): what the value did since the
+    /// player's last answer. Running readings (It's Moving / It's Still) are stopped first.
+    pub fn set_compare(&self, how: core::Compare) {
+        if !self.moving.get() {
+            return;
+        }
+        if self.stop.is_visible() {
+            interrupt(&self.cancel, &self.stop);
+        } else if !self.typed.is_editable() {
+            return;
+        }
+        self.one_by_one.replace(None);
+        self.result.set_visible(false);
+        self.typed_searching(true);
+        self.searching(true);
+        let title = match how {
+            core::Compare::Down => tr!("Looking for what went down"),
+            core::Compare::Up => tr!("Looking for what went up"),
+            core::Compare::Same => tr!("Looking for what stayed the same"),
+            core::Compare::Changed => tr!("Looking for what changed"),
+        };
+        self.guide.show(Look::Wait, guide::HANDS_OFF, &title, &tr!("A moment."), None);
+        self.worker.run(move |core| Event::Compared(core.compare_step(how)));
+    }
+
+    /// An answer was compared: the places left (0: still the copy, nothing ruled out).
+    pub fn compared(&self, r: Result<usize, String>) {
+        self.mark_motion(None);
+        self.stop.set_visible(false);
+        self.typed_searching(false);
+        self.searching(false);
+        let n = match r {
+            Ok(n) => n,
+            Err(e) => {
+                self.moving.set(false);
+                return self.stopped(&e);
+            }
+        };
+        self.moving.set(true);
+        if n == 0 {
+            return self.ask_motion(
+                &tr!("Nothing to rule out yet"),
+                &tr!("Use it in the game first, then press Went Down or Went Up."),
+                0,
+            );
+        }
+        let text = self.count_text(n);
+        if n <= 20 {
+            self.show_list.set_active(true);
+        }
+        self.name_saved.set(n == 1);
+        let hint = match n {
+            1 => tr!("Try it: Ferret writes a number there, and you see whether the game changes. Or go on: change it in the game and say what it did."),
+            2..=20 => tr!("Try them one by one, or go on: change it in the game and say what it did."),
+            _ => tr!("Go on: change it in the game, then press Went Down or Went Up. Press Same while it hasn't changed: that rules out more too."),
+        };
+        self.ask_motion(&text, &hint, n);
+        self.list_matches(n);
+    }
+
+    /// The compare hotkeys; why not.
+    pub fn hotkey_compare(&self, how: core::Compare) -> Option<String> {
+        if !self.moving.get() {
+            return Some(tr!("Click No Number? in Ferret's Find Value tab first."));
+        }
+        if !self.stop.is_visible() && !self.typed.is_editable() {
+            return Some(tr!("Ferret is still busy with the last one. Try again in a moment."));
+        }
+        self.set_compare(how);
+        None
     }
 
     /// Lights It's Moving or It's Still (None: neither, nothing is being read).

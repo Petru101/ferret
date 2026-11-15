@@ -1468,6 +1468,31 @@ impl Motion {
     }
 }
 
+/// What the player says a value with no number did since their last answer (No Number?,
+/// `Core::compare_step`): for one that changes only when they do something.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Compare {
+    Down,
+    Up,
+    Same,
+    Changed,
+}
+
+impl Compare {
+    pub fn word(self) -> &'static str {
+        match self {
+            Compare::Down => "down",
+            Compare::Up => "up",
+            Compare::Same => "same",
+            Compare::Changed => "changed",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Compare> {
+        [Compare::Down, Compare::Up, Compare::Same, Compare::Changed].into_iter().find(|c| c.word() == word)
+    }
+}
+
 /// How often No Number? reads the game while the player says what the value does.
 pub const PHASE_EVERY: Duration = Duration::from_secs(2);
 
@@ -6040,6 +6065,39 @@ impl Core {
             self.tell_matches(n);
         }
         Ok(left(self))
+    }
+
+    /// One answer of No Number?'s other way (helper `compare`): the places that went the way
+    /// the player says the value did since their last answer (the first: since the copy).
+    /// Nothing is timed: for a value that changes only when the player does something
+    /// (Need for Speed's nitrous burns for a second or two: `phase_step`'s readings miss it).
+    /// The places left (0 while it's still the copy); a step nothing fits keeps them all.
+    pub fn compare_step(&mut self, how: Compare) -> Result<usize, String> {
+        self.game()?;
+        if self.search.is_none() && !self.phase_copy {
+            return Err(tr!("Nothing to compare with yet. Click No Number? first."));
+        }
+        self.phase_last = None;
+        let reply = self.helper.call(&format!("compare {}", how.word()));
+        self.say(&format!("value with no number, answer {}: {}", how.word(), reply.join(" ")));
+        if let Some(e) = first_error(&reply) {
+            if e.contains("no copy") {
+                self.phase_copy = false;
+                return Err(tr!("The copy of the game's memory is gone. Click No Number? to make a new one."));
+            }
+            return Err(e);
+        }
+        if let Some(n) = match_count(&reply).filter(|&n| n > 0) {
+            self.phase_copy = false;
+            self.search = Some((n, 0));
+            self.tell_matches(n);
+            if n <= 20 {
+                for l in self.helper.call("list 20") {
+                    self.say(&format!("  {l}"));
+                }
+            }
+        }
+        Ok(self.search.map_or(0, |(n, _)| n))
     }
 
     /// No Number?'s readings while the player says what the value does (`motion`: 1 moving, 2

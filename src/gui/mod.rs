@@ -24,7 +24,7 @@ use std::sync::{mpsc, Arc};
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-use crate::core::{AutoResult, Core, GameProcess, Gone, Motion, Refusal, ValueRow};
+use crate::core::{AutoResult, Compare, Core, GameProcess, Gone, Motion, Refusal, ValueRow};
 use crate::i18n::{ntr, tr};
 use crate::ocr::Word;
 
@@ -61,6 +61,8 @@ pub enum Event {
     ScannedAgain(Result<AutoResult, String>),
     /// No Number?: the copy of the game's memory is taken (or why not).
     Copied(Result<(), String>),
+    /// No Number?: an answer (Went Down, Went Up, Same, Changed) was compared; the places left.
+    Compared(Result<usize, String>),
     /// No Number?'s readings ended (`Core::follow_motion`).
     Followed(Result<AutoResult, String>),
     /// A save failed (why): the pick taken back, with the places matching again (`Core::unpick`).
@@ -428,9 +430,10 @@ impl Ui {
             "search" if self.attached.get().is_none() => Some((tr!("Can't search yet"), tr!("Open the game in Ferret first."))),
             "search" => self.find.hotkey_search().map(|why| (tr!("Can't search yet"), why)),
             "again" => self.find.hotkey_again().map(|why| (tr!("Can't scan again yet"), why)),
-            "moving" | "still" if self.attached.get().is_none() => Some((tr!("Can't search yet"), tr!("Open the game in Ferret first."))),
+            "moving" | "still" | "down" | "up" | "same" | "changed" if self.attached.get().is_none() => Some((tr!("Can't search yet"), tr!("Open the game in Ferret first."))),
             "moving" => self.find.hotkey_motion(Motion::Moving).map(|why| (tr!("Can't search yet"), why)),
             "still" => self.find.hotkey_motion(Motion::Still).map(|why| (tr!("Can't search yet"), why)),
+            "down" | "up" | "same" | "changed" => Compare::parse(id).and_then(|how| self.find.hotkey_compare(how)).map(|why| (tr!("Can't search yet"), why)),
             _ => None,
         };
         if let Some((title, why)) = refused {
@@ -964,6 +967,7 @@ impl Ui {
             Event::ScannedAgain(r) => self.find.scanned_again(r),
             Event::Copied(r) => self.find.copied(r),
             Event::Followed(r) => self.find.followed(r),
+            Event::Compared(r) => self.find.compared(r),
             Event::Unpicked(why, n) => self.find.unpicked(&why, n),
             Event::Undone(r, done) => self.find.undone(r, done),
             Event::Saved(Ok((name, msg))) => {
@@ -1147,6 +1151,15 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
             _ => ui.find.set_motion(Motion::Still),
         }),
     );
+    // No Number?'s other way: `compare down|up|same|changed`.
+    action(
+        "compare",
+        Box::new(|ui, how| {
+            if let Some(how) = Compare::parse(&how) {
+                ui.find.set_compare(how);
+            }
+        }),
+    );
     action("confirm", Box::new(|ui, yes| ui.find.answer_read(yes == "yes")));
     // Trying the places one at a time: start, try (with the number in the entry), yes, no, skip, stop.
     action("place", Box::new(|ui, step| ui.find.place_step(&step)));
@@ -1187,7 +1200,7 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
     action("save", Box::new(|ui, name| ui.find.save_as(&name)));
     action("tip", Box::new(|ui, how| ui.tips.close(how == "never")));
     action("close", Box::new(|ui, _| ui.window.close()));
-    // What a hotkey does, without the portal: `limits`, `search`, `again`, `moving`, `still`.
+    // What a hotkey does, without the portal: `limits`, `search`, `again`, `moving`, `still`, `down`, `up`, `same`, `changed`.
     action("hotkey", Box::new(|ui, id| ui.hotkey(&id)));
     // Shows the status card in one state, for looking at it (`turn` can't be set up easily).
     action(

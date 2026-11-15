@@ -120,12 +120,17 @@ fn run_command(core: &mut Core, line: &str) -> Result<(), String> {
         },
         "copy" => {
             core.copy_memory()?;
-            println!("copied: now moving or still");
+            println!("copied: now moving or still, or down, up, same or changed");
         }
         // No Number?'s readings, one at a time (the window takes one every 2 s).
         "moving" | "still" => {
             let motion = if cmd == "moving" { core::Motion::Moving } else { core::Motion::Still };
             println!("{} candidates left", core.phase_step(motion)?);
+        }
+        // No Number?'s other way: what the value did since the last answer.
+        "down" | "up" | "same" | "changed" => {
+            let how = core::Compare::parse(cmd).ok_or("usage: down|up|same|changed")?;
+            println!("{} candidates left", core.compare_step(how)?);
         }
         // Use This One on a listed place, and taking it back as a failed save does.
         "use" => {

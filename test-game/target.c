@@ -122,6 +122,12 @@ struct powers {
 
 static struct powers *powers;
 
+/* A nitrous tank (a float, 100 when full): "boost" burns 20 of it within a second and "refill N"
+ * adds N. It never moves by itself, and no number shows it: found only by saying whether it
+ * went down, up or stayed (No Number?'s Went Down / Went Up / Same). */
+static float *nitro;
+static int nitro_burning;
+
 /* The one routine for every power, as in From Dust. */
 __attribute__((noinline, noipa)) static void tick_power(struct power *pw)
 {
@@ -410,6 +416,7 @@ static void report(const char *log, const struct player *p, const double *coins,
         print_stacks(f, "logs", inv, logs_info);
         print_stacks(f, "stone", inv, stone_info);
         print_stacks(f, "chestlogs", chest, logs_info);
+        fprintf(f, " nitro=%.1f nitro_at=%p", *nitro, (void *)nitro);
         fprintf(f, " tokens=%d shown=%d powers=%.1f,%.1f,%.1f,%.1f\n", *tokens, *shown_tokens, powers->slot[0].elapsed,
                 powers->slot[1].elapsed, powers->slot[2].elapsed, powers->slot[3].elapsed);
         fclose(f);
@@ -557,6 +564,8 @@ int main(int argc, char **argv)
         shown_tokens = &h->shown;
     }
     *tokens = *shown_tokens = 140;
+    nitro = malloc(sizeof *nitro);
+    *nitro = 100;
     powers = calloc(1, sizeof *powers);
     powers->type = "powers";
     powers->count = 4;
@@ -635,6 +644,10 @@ int main(int argc, char **argv)
         for (n = 0; n < 4; n++)
             if (powers->slot[n].running)
                 tick_power(&powers->slot[n]);
+        if (nitro_burning > 0) {
+            *nitro = *nitro > 20.0f / 5 ? *nitro - 20.0f / 5 : 0;
+            nitro_burning--;
+        }
         if (*coins > most_coins)
             most_coins = *coins;
         f = fopen(argv[1], "r");
@@ -666,7 +679,11 @@ int main(int argc, char **argv)
         else if (sscanf(line, "power %d", &n) == 1 && n >= 1 && n <= 4) {
             powers->slot[n - 1].running = 1;
             powers->slot[n - 1].elapsed = 0;
-        } else if (sscanf(line, "tokens %d", &n) == 1)
+        } else if (!strncmp(line, "boost", 5))
+            nitro_burning = 5;
+        else if (sscanf(line, "refill %f", &x) == 1)
+            *nitro = *nitro + x > 100 ? 100 : *nitro + x;
+        else if (sscanf(line, "tokens %d", &n) == 1)
             *tokens += n;
         else if (sscanf(line, "wood %d", &n) == 1)
             *wood += n;

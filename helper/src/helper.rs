@@ -3148,6 +3148,52 @@ fn cmd_phase(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()>
     writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))
 }
 
+/// compare down|up|same|changed: a value with no number, by what the player says it did since
+/// their last answer (Cheat Engine's increased / decreased / unchanged / changed; `Core::
+/// compare_step`). The first answer compares with the copy of memory (`snap`), which "same"
+/// keeps as it is; later ones with each place's value at the last answer. For what changes
+/// only when the player does something (a nitrous tank, a charge used up): `phase` needs it
+/// to move on its own for a while.
+fn cmd_compare(out: &mut impl Write, s: &mut Session, arg: &str) -> io::Result<()> {
+    let arg = arg.trim();
+    let fits: fn(f64, f64) -> bool = match arg {
+        "down" => |v0, v1| v1 < v0,
+        "up" => |v0, v1| v1 > v0,
+        "same" => |v0, v1| v1 == v0,
+        "changed" => |v0, v1| v1 != v0,
+        _ => return writeln!(out, "error: usage: compare down|up|same|changed"),
+    };
+    let before = s.candidates.len();
+    if before == 0 && s.snap.is_some() {
+        if arg == "same" {
+            return writeln!(out, "0 matches (nothing to rule out yet, kept the copy)");
+        }
+        let first = |kind: Kind, v0: f64, v1: f64| (sane_number(kind, v0) && sane_number(kind, v1) && fits(v0, v1)).then_some(false);
+        return snap_step(out, s, &format!("compare {arg}"), &first, "too many places changed that way since the copy, kept it: try once more after the next change");
+    }
+    if s.mem.is_none() || before == 0 {
+        return writeln!(out, "error: no copy of the game's memory and no matches to go on from");
+    }
+    let now = s.read_all();
+    let next: Vec<Candidate> = s
+        .candidates
+        .iter()
+        .zip(now)
+        .filter_map(|(c, v)| {
+            let v = v?;
+            (sane_number(c.kind(), v) && fits(c.value, v)).then_some(Candidate { value: v, ..*c })
+        })
+        .collect();
+    if next.is_empty() {
+        return writeln!(out, "{before} -> 0 matches (kept the {before} from before)");
+    }
+    s.phase_now = None;
+    s.phase_steps = 0;
+    s.phase_rates = None;
+    s.replace(&format!("compare {arg}"), next);
+    writeln!(out, "{before} -> {} matches ({})", s.candidates.len(), kinds_text(&s.candidates))
+}
+
 /// has <hex addr>: the matches at that address, with their flags ("has 0x10:f32 = 2.5 moved"),
 /// or "has none"; for tests that know where the value is.
 fn cmd_has(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
@@ -5180,6 +5226,7 @@ pub fn run(as_user: Option<&str>) {
             "mark" => cmd_mark(&mut out, &mut session, arg),
             "snap" => cmd_snap(&mut out, &mut session, arg),
             "phase" => cmd_phase(&mut out, &mut session, arg),
+            "compare" => cmd_compare(&mut out, &mut session, arg),
             "has" => cmd_has(&mut out, &session, arg),
             "undo" => cmd_undo(&mut out, &mut session),
             "redo" => cmd_redo(&mut out, &mut session),
