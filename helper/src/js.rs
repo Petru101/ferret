@@ -446,15 +446,26 @@ impl Js {
         if std::env::var_os("FERRET_DEBUG").is_some() {
             eprintln!("locate (wide {wide}): {} of {} names found as strings, {} strings", names.iter().filter(|n| !n.is_empty()).count(), names.len(), names.iter().map(Vec::len).sum::<usize>());
         }
-        // A string's map's map is the meta map, which is its own map.
-        let meta = names.iter().flatten().find_map(|&s| {
-            let m = l.word(mem, s - 1).filter(|&m| tagged(m))?;
-            let meta = l.word(mem, m - 1).filter(|&x| tagged(x))?;
-            (l.word(mem, meta - 1) == Some(meta)).then_some(meta)
-        })?;
+        // A string's map's map is the meta map, which is its own map. One for each isolate:
+        // a page's workers have their own heaps, with the same names in them (Cross the Gap,
+        // Construct 3: the first one met was a worker's in some runs).
+        let mut metas: Vec<u64> = names
+            .iter()
+            .flatten()
+            .filter_map(|&s| {
+                let m = l.word(mem, s - 1).filter(|&m| tagged(m))?;
+                let meta = l.word(mem, m - 1).filter(|&x| tagged(x))?;
+                (l.word(mem, meta - 1) == Some(meta)).then_some(meta)
+            })
+            .collect();
+        metas.sort_unstable();
+        metas.dedup();
+        if metas.is_empty() {
+            return None;
+        }
         let all: Vec<u64> = names.iter().flatten().copied().collect();
         let refs = heap.referrers(&all);
-        let is_map = |m: u64| tagged(m) && l.word(mem, m - 1) == Some(meta);
+        let is_map = |m: u64| tagged(m) && l.word(mem, m - 1).is_some_and(|x| metas.contains(&x));
         // Each way of keeping globals, by the cell map it finds: the one finding the most
         // globals wins.
         let mut found: Vec<((Cells, u64), Vec<(usize, u64)>)> = Vec::new();
@@ -504,7 +515,7 @@ impl Js {
             }
         }
         if std::env::var_os("FERRET_DEBUG").is_some() {
-            eprintln!("locate (wide {wide}): {} places point to the names; cells: {:?}", refs.len(), found.iter().map(|(k, v)| (k.0, v.len())).collect::<Vec<_>>());
+            eprintln!("locate (wide {wide}): {} places point to the names; cells: {:?}", refs.len(), found.iter().map(|(k, v)| (k.0, v.len(), v.iter().map(|x| x.0).collect::<std::collections::BTreeSet<_>>().len(), format!("{:x}", k.1))).collect::<Vec<_>>());
         }
         // The most globals found; then (other things are shaped like cells too, and a big
         // game has enough of them to tie: SUPERHOTline Miami's 1.1 GB) the most whose values
@@ -526,6 +537,15 @@ impl Js {
         };
         // (Wide: the 7.4 arrangement only when nothing is kept the usual way; other things
         // are shaped like it: Electron 8 had 12 of them to its 10 cells.)
+        // (Wide, the 7.4 arrangement: other things are shaped like it and name the same
+        // functions, all with one value. Real cells hold a function each: Cross the Gap had
+        // 12 of those to its 10 cells.)
+        if wide {
+            found.retain(|(k, v)| {
+                let first = v.first().and_then(|&(_, cell)| l.word(mem, cell + 3 * w));
+                k.0 != Cells::Named || v.len() < 3 || v.iter().any(|&(_, cell)| l.word(mem, cell + 3 * w) != first)
+            });
+        }
         if found.iter().any(|(k, _)| k.0 == Cells::Wide) {
             found.retain(|(k, _)| k.0 == Cells::Wide);
         }
@@ -535,6 +555,8 @@ impl Js {
             gs.dedup();
             (gs.len(), alike(*cells, v))
         })?;
+        // (The isolate of the cells chosen: the one with the most of them, the page's.)
+        let meta = l.word(mem, cell_map - 1)?;
         let mut globals: Vec<(&'static str, Vec<u64>)> = wanted.iter().map(|g| (*g, Vec::new())).collect();
         for (g, cell) in got {
             if !globals[g].1.contains(&cell) {
