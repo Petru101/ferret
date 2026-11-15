@@ -1151,6 +1151,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
             _ => ui.find.set_motion(Motion::Still),
         }),
     );
+    // No Number?'s first question: `kind own|use`.
+    action("kind", Box::new(|ui, kind| ui.find.choose_kind(if kind == "own" { 1 } else { 2 })));
     // No Number?'s other way: `compare down|up|same|changed`.
     action(
         "compare",

@@ -121,6 +121,8 @@ pub struct Guide {
     hands_off: Cell<bool>,
     /// No Number? is reading the game, and whether the player said it's moving (`following`).
     following: Cell<Option<bool>>,
+    /// `save_seen` is what the bar shows.
+    seen: Cell<bool>,
     /// The count No Number?'s last notification gave.
     told: Cell<usize>,
 }
@@ -202,6 +204,7 @@ impl Guide {
             got_it_next: Rc::default(),
             hands_off: Cell::new(false),
             following: Cell::new(None),
+            seen: Cell::new(false),
             told: Cell::new(0),
         });
         guide.pick(&tr!("Click the number you want to find"), &tr!("In the picture of your game below, or drag a box around it."));
@@ -221,6 +224,7 @@ impl Guide {
         }
         self.away.take();
         self.following.set(None);
+        self.seen.set(false);
         self.look.set(look);
         for l in Look::ALL {
             self.root.remove_css_class(l.class());
@@ -383,6 +387,22 @@ impl Guide {
             _ => tr!("Don't let the bar change in the game yet. This turns green when it's your turn."),
         };
         self.show(Look::Wait, HANDS_OFF, &tr!("Copying the game's memory"), &hint, Some(done));
+    }
+
+    /// A save that waited for the game to change the value: it did, and Ferret checks the
+    /// code that changed it (a second an instruction; the card said Your turn all that time,
+    /// and the player thought it hadn't noticed).
+    pub fn save_seen(&self, done: f64) {
+        if self.look.get() == Look::Wait && self.bar.is_visible() && self.seen.get() {
+            self.bar.set_fraction(done.clamp(0.0, 1.0));
+            return;
+        }
+        self.give_up.set_visible(false);
+        let (title, hint) = (tr!("Got it: the game changed it"), tr!("Ferret is checking the code that changed it. A few more seconds, then it's saved."));
+        self.show(Look::Wait, SAVE, &title, &hint, Some(done));
+        self.seen.set(true);
+        // Said at once in the game, where the player is.
+        self.notify.send(&title, &hint, None, Some(6));
     }
 
     /// The copy is taken: the bar has to move before anything narrows down.

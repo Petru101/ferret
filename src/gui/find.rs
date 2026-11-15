@@ -120,6 +120,14 @@ pub struct FindView {
     /// whether it's moving or still with these buttons (or the hotkeys), `motion` tells the
     /// running readings (1 moving, 2 still); Try Them One by One once few are left.
     moving: Cell<bool>,
+    /// Which way the player picked after the copy (`choose_kind`): 0 not yet, 1 it changes on
+    /// its own (It's Moving / It's Still, readings every 2 s), 2 only when they use it (Went
+    /// Down / Went Up / Same / Changed, nothing timed). Only that way's buttons show and only
+    /// its hotkeys act: on one card the player's It's Still started readings between two
+    /// Went Down answers, which dropped the value.
+    kind: Cell<u8>,
+    kind_row: gtk::Box,
+    compare_row: gtk::Box,
     motion: Arc<AtomicU8>,
     motion_box: gtk::Box,
     motion_try: gtk::Button,
@@ -444,8 +452,14 @@ impl FindView {
         for (_, b) in &compare {
             compare_row.append(b);
         }
+        let own = gtk::Button::builder().label(tr!("It Changes on Its Own")).css_classes(["guide-button"]).build();
+        let used = gtk::Button::builder().label(tr!("Only When I Use It")).css_classes(["guide-button"]).build();
+        let kind_row = gtk::Box::builder().spacing(8).halign(gtk::Align::End).build();
+        kind_row.append(&own);
+        kind_row.append(&used);
         motion_box.append(&motion_row);
         motion_box.append(&compare_row);
+        motion_box.append(&kind_row);
         guide.actions.append(&motion_box);
 
         let typed_label = gtk::Label::builder().label(tr!("Can't read it?")).build();
@@ -641,6 +655,9 @@ impl FindView {
             typed_go: typed_go.clone(),
             last_typed: RefCell::default(),
             moving: Cell::default(),
+            kind: Cell::default(),
+            kind_row: kind_row.clone(),
+            compare_row: compare_row.clone(),
             motion: Arc::default(),
             motion_box,
             motion_try: motion_try.clone(),
@@ -691,6 +708,10 @@ impl FindView {
                 let view_ = view.clone();
                 b.connect_clicked(move |_| view_.set_compare(how));
             }
+            let view_ = view.clone();
+            own.connect_clicked(move |_| view_.choose_kind(1));
+            let view_ = view.clone();
+            used.connect_clicked(move |_| view_.choose_kind(2));
             let view_ = view.clone();
             motion_try.connect_clicked(move |_| {
                 // Trying writes to the game: the readings stop first.
@@ -1480,6 +1501,7 @@ impl FindView {
                 self.guide.your_turn(n, secs);
             }
             core::Phase::SaveTurn => self.guide.save_turn(),
+            core::Phase::SaveSeen(done) => self.guide.save_seen(done),
             core::Phase::Others(name, found) => self.guide.others(&name, found),
             core::Phase::Restoring(..) => {}
             core::Phase::Copying(done) => self.guide.copying(done),
@@ -1661,6 +1683,7 @@ impl FindView {
         }
         self.one_by_one.replace(None);
         self.moving.set(false);
+        self.kind.set(0);
         self.last_typed.replace(String::new());
         self.last_count.set(None);
         self.again.set_visible(false);
@@ -1683,11 +1706,9 @@ impl FindView {
             Ok(()) => {
                 self.moving.set(true);
                 self.ask_motion(
-                    &tr!("What does it do?"),
+                    &tr!("How does it change?"),
                     &tr!(
-                        "If it changes on its own for a while (a ring counting, a bar filling): press It's Moving while it does, It's Still while it doesn't. \
-                         If it changes only when you use it (nitrous, a charge): use it in the game, then press Went Down or Went Up, and Same while it hasn't changed. \
-                         The hotkeys work from inside the game (the keyboard button at the top lists them)."
+                        "On its own for a while, like a ring counting or a bar filling? Or only when you use it, like nitrous or a charge? Ferret looks for it differently."
                     ),
                     0,
                 );
@@ -1705,15 +1726,21 @@ impl FindView {
 
     fn offer_motion(&self, left: usize) {
         self.motion_try.set_visible((1..=20).contains(&left));
+        let kind = self.kind.get();
+        self.kind_row.set_visible(kind == 0);
+        self.motion_still.set_visible(kind == 1);
+        self.motion_moving.set_visible(kind == 1);
+        self.compare_row.set_visible(kind == 2);
         self.guide.offer(&self.motion_box);
     }
 
     /// It's Moving or It's Still (buttons, hotkeys): starts the readings, or tells the running
     /// ones what the value does now.
     pub fn set_motion(&self, m: core::Motion) {
-        if !self.moving.get() {
+        if !self.moving.get() || self.kind.get() == 2 {
             return;
         }
+        self.kind.set(1);
         self.motion.store(if m == core::Motion::Moving { 1 } else { 2 }, Ordering::Relaxed);
         if self.stop.is_visible() {
             self.following(self.last_count.get().unwrap_or(0), m == core::Motion::Moving);
@@ -1733,17 +1760,40 @@ impl FindView {
         self.worker.run(move |core| Event::Followed(core.follow_motion(&motion)));
     }
 
+    /// The first question after the copy: which way to look (`kind`). The card then shows
+    /// that way's buttons only.
+    pub fn choose_kind(&self, kind: u8) {
+        if !self.moving.get() || self.kind.get() != 0 || !self.typed.is_editable() {
+            return;
+        }
+        self.kind.set(kind);
+        match kind {
+            1 => self.ask_motion(
+                &tr!("Is it moving now?"),
+                &tr!(
+                    "Press It's Moving while it changes on its own (a ring counting, a bar filling or draining), and It's Still while it doesn't. \
+                     Ferret reads the game every 2 seconds. The hotkeys work from inside the game (the keyboard button at the top lists them)."
+                ),
+                0,
+            ),
+            _ => self.ask_motion(
+                &tr!("Use it, then say what it did"),
+                &tr!(
+                    "Use it in the game, then press Went Down or Went Up. Press Same while it hasn't changed: that rules out more too. \
+                     The hotkeys work from inside the game (the keyboard button at the top lists them)."
+                ),
+                0,
+            ),
+        }
+    }
+
     /// Went Down, Went Up, Same or Changed (buttons, hotkeys): what the value did since the
-    /// player's last answer. Running readings (It's Moving / It's Still) are stopped first.
+    /// player's last answer.
     pub fn set_compare(&self, how: core::Compare) {
-        if !self.moving.get() {
+        if !self.moving.get() || self.kind.get() == 1 || !self.typed.is_editable() {
             return;
         }
-        if self.stop.is_visible() {
-            interrupt(&self.cancel, &self.stop);
-        } else if !self.typed.is_editable() {
-            return;
-        }
+        self.kind.set(2);
         self.one_by_one.replace(None);
         self.result.set_visible(false);
         self.typed_searching(true);
@@ -1798,7 +1848,10 @@ impl FindView {
         if !self.moving.get() {
             return Some(tr!("Click No Number? in Ferret's Find Value tab first."));
         }
-        if !self.stop.is_visible() && !self.typed.is_editable() {
+        if self.kind.get() == 1 {
+            return Some(tr!("This search goes by It's Moving and It's Still. Click No Number? again to search the other way."));
+        }
+        if !self.typed.is_editable() {
             return Some(tr!("Ferret is still busy with the last one. Try again in a moment."));
         }
         self.set_compare(how);
@@ -1859,6 +1912,9 @@ impl FindView {
     pub fn hotkey_motion(&self, m: core::Motion) -> Option<String> {
         if !self.moving.get() {
             return Some(tr!("Click No Number? in Ferret's Find Value tab first."));
+        }
+        if self.kind.get() == 2 {
+            return Some(tr!("This search goes by Went Down, Went Up and Same. Click No Number? again to search the other way."));
         }
         if !self.stop.is_visible() && !self.typed.is_editable() {
             return Some(tr!("Ferret is still busy with the last one. Try again in a moment."));

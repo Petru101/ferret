@@ -512,6 +512,9 @@ pub enum Phase {
     /// Saving: nothing touched the value yet, so the player changes it in the game while Ferret
     /// watches which code does. Until it does or the player cancels.
     SaveTurn,
+    /// The game touched it: Ferret checks each instruction that did (about a second each),
+    /// how far. Nothing to do.
+    SaveSeen(f64),
     /// "More Like This": the player uses the value's others in the game (other powers, other
     /// units) while Ferret watches the value's code reach them: the value and how many so far.
     Others(String, usize),
@@ -5161,7 +5164,14 @@ impl Core {
              does it, the surest way to find it again. Cancel saves it another way."
         ));
         let cancel = self.cancel.clone();
-        let reply = self.helper.call_cancellable(&format!("sites {loc} 1 wait"), &cancel);
+        let on_phase = &mut self.on_phase;
+        let mut seen = |note: &str| {
+            let mut n = note.strip_prefix("seen ").unwrap_or("").split_whitespace().filter_map(|w| w.parse::<f64>().ok());
+            if let (Some(done), Some(all), Some(f)) = (n.next(), n.next(), on_phase.as_mut()) {
+                f(Phase::SaveSeen(if all > 0.0 { done / all } else { 0.0 }));
+            }
+        };
+        let reply = self.helper.call_noting(&format!("sites {loc} 1 wait"), &cancel, &mut seen);
         let cancelled = self.cancel.swap(false, Ordering::Relaxed);
         self.phase(Phase::Checking(1, 0.0));
         for l in reply.iter().filter(|l| !l.starts_with("site ")) {

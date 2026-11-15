@@ -3814,7 +3814,17 @@ fn cmd_sites(out: &mut impl Write, s: &Session, arg: &str) -> io::Result<()> {
     // value's place from them.
     let mut shared: Vec<(String, i64, Vec<u64>)> = Vec::new();
     let mut own = 0;
-    for (after, regs) in &hits {
+    // Each instruction is checked for a second below ("note seen <done> <all>": the player,
+    // asked to change the value, is told the change was seen; Need for Speed's nitrous had 14).
+    if wait && !hits.is_empty() {
+        writeln!(out, "note seen 0 {}", hits.len())?;
+        out.flush()?;
+    }
+    for (n, (after, regs)) in hits.iter().enumerate() {
+        if wait && n > 0 {
+            writeln!(out, "note seen {n} {}", hits.len())?;
+            out.flush()?;
+        }
         let before = 64u64;
         let mut code = vec![0u8; before as usize + 16];
         if mem.read_exact_at(&mut code, after - before).is_err() {
