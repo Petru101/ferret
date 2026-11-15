@@ -134,6 +134,26 @@ pub struct FindView {
     /// It's Still and It's Moving: the one the player said last is lit while the readings run.
     motion_still: gtk::Button,
     motion_moving: gtk::Button,
+    /// Which way to search the player picked on the tab's first page (`to_intro`): 0 not yet,
+    /// 1 a number on screen (the picture), 2 a number they type, 3 something with no number
+    /// that isn't a bar (a copy of memory, then `kind`). Each shows only its own tools
+    /// (`apply_door`); everything at once, with nothing saying where to begin, was the old
+    /// page (the user's call, with a mockup).
+    door: Rc<Cell<u8>>,
+    /// The picture was opened for a bar or icons: what the card asks for.
+    want_bar: Cell<bool>,
+    /// The no-number way picked on the question page, applied once the copy is made.
+    pending_kind: Cell<u8>,
+    /// Shown only with the picture / only when typing / only where Browse lists the game.
+    picture_only: Vec<gtk::Widget>,
+    typed_only: Vec<gtk::Widget>,
+    browse_strip: gtk::Box,
+    on_browse: RefCell<Option<Box<dyn Fn()>>>,
+    /// One plain sentence on the last thing that happened; the log is behind Details.
+    status: gtk::Label,
+    status_set: Cell<bool>,
+    /// The numbers typed so far with what each left (the typing door).
+    so_far: gtk::Label,
     /// How many places matched after the last search, to show how far a search narrowed it.
     last_count: Cell<Option<usize>>,
     digits: gtk::Box,
@@ -268,7 +288,6 @@ impl FindView {
         overlay.set_child(Some(&picture));
         overlay.add_overlay(&area);
         let pick_hint = gtk::Label::builder()
-            .label(tr!("Click the number you want to change, or drag a box around it"))
             .wrap(true)
             .justify(gtk::Justification::Center)
             .halign(gtk::Align::Center)
@@ -332,7 +351,7 @@ impl FindView {
             .tooltip_text(tr!("Forget the matches so far and search from scratch"))
             .build();
         let again = gtk::Button::builder()
-            .label(tr!("Scan Again"))
+            .label(tr!("Still the Same"))
             .tooltip_text(tr!("Keep only the places that hold the number the game shows now, even if it didn't change"))
             .visible(false)
             .build();
@@ -361,8 +380,10 @@ impl FindView {
             .left_margin(6)
             .right_margin(6)
             .build();
-        // Next to the picture, always in view: the player reads it to see what Ferret does.
-        let log_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).width_request(300).css_classes(["card"]).build();
+        // Behind Details: what Ferret does in its own words (addresses, counts), for bug
+        // reports. The card says what matters; next to the picture this read like a debug
+        // panel (the user's words).
+        let log_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).height_request(170).css_classes(["card"]).build();
         log_box.append(
             &gtk::Label::builder()
                 .label(tr!("What Ferret is doing"))
@@ -387,7 +408,11 @@ impl FindView {
         let start_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         start_slot.append(&start);
         guide.actions.append(&start_slot);
-        guide.on_show(move |look| start_slot.set_visible(look == Look::Pick));
+        let door = Rc::new(Cell::new(0u8));
+        {
+            let door = door.clone();
+            guide.on_show(move |look| start_slot.set_visible(look == Look::Pick && door.get() == 1));
+        }
 
         let one_by_one = gtk::Button::builder().label(tr!("Try Them One by One")).css_classes(["suggested-action", "guide-button"]).build();
         let keep_going = gtk::Button::builder()
@@ -462,23 +487,42 @@ impl FindView {
         motion_box.append(&kind_row);
         guide.actions.append(&motion_box);
 
-        let typed_label = gtk::Label::builder().label(tr!("Can't read it?")).build();
+        let typed_label = gtk::Label::builder().label(tr!("Ferret can't read it?")).build();
+        let type_it = gtk::Button::builder().label(tr!("Type It Instead")).valign(gtk::Align::Center).build();
         let typed = gtk::Entry::builder()
             .placeholder_text(tr!("Type the number"))
             .input_purpose(gtk::InputPurpose::Number)
-            .width_chars(14)
-            .valign(gtk::Align::Center)
+            .hexpand(true)
+            .css_classes(["big-entry"])
             .build();
-        let typed_go = gtk::Button::builder().label(tr!("Search")).valign(gtk::Align::Center).build();
-        let no_number = gtk::Button::builder()
-            .label(tr!("No Number?"))
-            .tooltip_text(tr!(
-                "For a value the game shows no number for, like a ring, a bar or hunger: Ferret copies the game's memory, then you tell it whether the value went up or down"
-            ))
-            .valign(gtk::Align::Center)
+        let typed_go = gtk::Button::builder().label(tr!("Search")).css_classes(["suggested-action", "guide-button"]).build();
+        // The typing door's middle: the field, and what was typed so far.
+        let typed_panel = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .hexpand(true)
+            .vexpand(true)
+            .css_classes(["card", "typed-panel"])
             .build();
+        typed_panel.append(&gtk::Label::builder().label(tr!("The number now")).xalign(0.0).css_classes(["heading"]).build());
+        let typed_row = gtk::Box::builder().spacing(10).build();
+        typed_row.append(&typed);
+        typed_row.append(&typed_go);
+        typed_panel.append(&typed_row);
+        typed_panel.append(
+            &gtk::Label::builder()
+                .label(tr!("Type it as the game shows it: 1,250 or 1.5 or 3:17 all work."))
+                .xalign(0.0)
+                .wrap(true)
+                .css_classes(["dim-label"])
+                .build(),
+        );
+        typed_panel.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        typed_panel.append(&gtk::Label::builder().label(tr!("So far")).xalign(0.0).css_classes(["caption-heading", "dim-label"]).build());
+        let so_far = gtk::Label::builder().xalign(0.0).yalign(0.0).wrap(true).selectable(false).build();
+        typed_panel.append(&so_far);
         let more_button = gtk::ToggleButton::builder()
-            .label(tr!("More"))
+            .label(tr!("Advanced"))
             .tooltip_text(tr!("Value types, the game's learned digits and the places of earlier finds"))
             .valign(gtk::Align::Center)
             .build();
@@ -497,7 +541,7 @@ impl FindView {
         for w in [capture.upcast_ref::<gtk::Widget>(), zoom.upcast_ref(), crop_box.upcast_ref(), unpick.upcast_ref(), undo.upcast_ref(), redo.upcast_ref(), again.upcast_ref(), start_over.upcast_ref()] {
             picture_tools.append(w);
         }
-        for w in [typed_label.upcast_ref::<gtk::Widget>(), typed.upcast_ref(), typed_go.upcast_ref(), no_number.upcast_ref(), more_button.upcast_ref()] {
+        for w in [typed_label.upcast_ref::<gtk::Widget>(), type_it.upcast_ref(), more_button.upcast_ref()] {
             typed_tools.append(w);
         }
         tools.append(&picture_tools);
@@ -535,7 +579,21 @@ impl FindView {
 
         let middle = gtk::Box::builder().spacing(12).margin_start(12).margin_end(12).vexpand(true).build();
         middle.append(&scroll);
-        middle.append(&log_box);
+        middle.append(&typed_panel);
+        let status = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
+        let details = gtk::ToggleButton::builder()
+            .label(tr!("Details"))
+            .tooltip_text(tr!("Everything Ferret did, step by step, as a bug report sends it"))
+            .css_classes(["flat"])
+            .build();
+        let status_row = gtk::Box::builder().spacing(10).margin_start(12).margin_end(12).css_classes(["card", "status-row"]).build();
+        status_row.append(&gtk::Label::builder().label("\u{25cf}").css_classes(["success"]).build());
+        status_row.append(&status);
+        status_row.append(&details);
+        // (Not expanding: the log's scrolled window would pass its own wish to grow up to it,
+        // and the hidden log took a share of the page's free height.)
+        let log_reveal = gtk::Revealer::builder().child(&log_box).margin_start(12).margin_end(12).vexpand(false).build();
+        details.bind_property("active", &log_reveal, "reveal-child").sync_create().build();
 
         let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(6).margin_bottom(12).build();
         let saved_grid = gtk::Grid::builder().column_spacing(24).row_spacing(4).build();
@@ -552,30 +610,104 @@ impl FindView {
         saved_box.append(&saved_grid);
         page.append(&saved_box);
 
-        let begin = gtk::Button::builder()
-            .label(tr!("Show the Game Window"))
-            .halign(gtk::Align::Center)
-            .css_classes(["pill", "suggested-action"])
+        // The first page: what to find, each answer a door to its own tools.
+        let door_button = |icon: &str, title: String, text: String, foot: String, wide: bool| {
+            let b = gtk::Box::builder()
+                .orientation(if wide { gtk::Orientation::Horizontal } else { gtk::Orientation::Vertical })
+                .spacing(if wide { 16 } else { 8 })
+                .build();
+            b.append(&gtk::Image::builder().icon_name(icon).pixel_size(32).halign(gtk::Align::Start).valign(gtk::Align::Center).css_classes(["accent"]).build());
+            let words = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).hexpand(true).build();
+            words.append(&gtk::Label::builder().label(title).xalign(0.0).wrap(true).css_classes(["title-4"]).build());
+            words.append(&gtk::Label::builder().label(text).xalign(0.0).wrap(true).build());
+            b.append(&words);
+            if !foot.is_empty() {
+                b.append(&gtk::Label::builder().label(foot).xalign(0.0).valign(gtk::Align::End).vexpand(!wide).wrap(true).css_classes(["caption-heading", "dim-label"]).build());
+            }
+            gtk::Button::builder().child(&b).css_classes(["door"]).build()
+        };
+        let door_shown = door_button(
+            "video-display-symbolic",
+            tr!("A number on screen"),
+            tr!("Gold, ammo, health as a number. You click it in a picture of the game and Ferret reads it for you."),
+            tr!("Most games: start here"),
+            false,
+        );
+        let door_typed = door_button(
+            "input-keyboard-symbolic",
+            tr!("A number I'll type"),
+            tr!("You know the number but Ferret can't read it: a fancy font, a tiny counter, a number on another screen."),
+            tr!("No picture needed"),
+            false,
+        );
+        let door_none = door_button(
+            "dialog-question-symbolic",
+            tr!("Something with no number"),
+            tr!("A health bar, a row of hearts, a nitrous tank, a timer behind a ring, hunger."),
+            tr!("Takes a few more steps"),
+            false,
+        );
+        let doors = gtk::Box::builder().spacing(12).homogeneous(true).valign(gtk::Align::Start).build();
+        for b in [&door_shown, &door_typed, &door_none] {
+            doors.append(b);
+        }
+        // Games whose numbers Browse lists by name: often faster than any search.
+        let open_browse = gtk::Button::builder().label(tr!("Open Browse")).css_classes(["suggested-action"]).valign(gtk::Align::Center).build();
+        let browse_strip = gtk::Box::builder().spacing(14).visible(false).css_classes(["browse-strip"]).build();
+        browse_strip.append(&open_browse);
+        browse_strip.append(
+            &gtk::Label::builder()
+                .label(tr!("This game lists its numbers by name. Look in Browse first: finding a name in a list is often faster than any search."))
+                .xalign(0.0)
+                .wrap(true)
+                .hexpand(true)
+                .build(),
+        );
+        let intro = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(6)
+            .margin_bottom(12)
             .build();
-        let type_instead = gtk::Button::builder()
-            .label(tr!("Type the Number Instead"))
-            .halign(gtk::Align::Center)
-            .css_classes(["pill"])
+        intro.append(&browse_strip);
+        intro.append(&doors);
+        // The no-number door's one more question.
+        let none_bar = door_button(
+            "view-continuous-symbolic",
+            tr!("A bar or a row of icons I can see"),
+            tr!("Health bar, stamina, hearts, shields. You draw a box around it in a picture of the game, and Ferret watches how full it is."),
+            String::new(),
+            true,
+        );
+        let none_own = door_button(
+            "preferences-system-time-symbolic",
+            tr!("It changes on its own for a while"),
+            tr!("A timer behind a ring, a power running out, hunger. You tell Ferret when it's moving and when it's still."),
+            String::new(),
+            true,
+        );
+        let none_use = door_button(
+            "weather-storm-symbolic",
+            tr!("It changes only when I use it"),
+            tr!("Nitrous, a charge, something you spend. You use it, then say whether it went down, went up or stayed the same."),
+            String::new(),
+            true,
+        );
+        let none_back = gtk::Button::builder().label(tr!("Back")).halign(gtk::Align::Start).build();
+        let none_page = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(10)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(6)
+            .margin_bottom(12)
             .build();
-        let intro = adw::StatusPage::builder()
-            .icon_name("edit-find-symbolic")
-            .title(tr!("Find a Value"))
-            .description(match cfg!(windows) {
-                true => tr!("Ferret looks at the game window, you pick the number, and then you just play. Only the game window is captured."),
-                false => tr!("Ferret looks at the game window, you pick the number, and then you just play. Only the game window is captured; the first time, your desktop asks which window to share."),
-            })
-            .child(&{
-                let buttons = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
-                buttons.append(&begin);
-                buttons.append(&type_instead);
-                buttons
-            })
-            .build();
+        for b in [&none_bar, &none_own, &none_use] {
+            none_page.append(b);
+        }
+        none_page.append(&none_back);
         let matches_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
         let matches = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -594,11 +726,17 @@ impl FindView {
         matches.append(&gtk::ScrolledWindow::builder().child(&matches_list).max_content_height(220).propagate_natural_height(true).build());
         page.append(&matches);
         page.append(&middle);
+        page.append(&status_row);
+        page.append(&log_reveal);
         page.append(&tools);
         page.append(&more_reveal);
         let root = gtk::Stack::new();
         root.add_named(&intro, Some("intro"));
+        root.add_named(&none_page, Some("nonumber"));
         root.add_named(&page, Some("pick"));
+        let picture_only: Vec<gtk::Widget> =
+            vec![scroll.clone().upcast(), capture.clone().upcast(), zoom.clone().upcast(), crop_box.clone().upcast(), typed_label.clone().upcast(), type_it.clone().upcast(), digits_row.clone().upcast()];
+        let typed_only: Vec<gtk::Widget> = vec![typed_panel.clone().upcast()];
 
         let view = Rc::new(Self {
             root,
@@ -663,6 +801,16 @@ impl FindView {
             motion_try: motion_try.clone(),
             motion_still: still.clone(),
             motion_moving: moving.clone(),
+            door,
+            want_bar: Cell::default(),
+            pending_kind: Cell::default(),
+            picture_only,
+            typed_only,
+            browse_strip,
+            on_browse: RefCell::default(),
+            status,
+            status_set: Cell::default(),
+            so_far,
             last_count: Cell::default(),
             digits,
             digits_hint,
@@ -673,8 +821,28 @@ impl FindView {
         });
 
         {
-            let view = view.clone();
-            begin.connect_clicked(move |_| view.capture());
+            let view_ = view.clone();
+            door_shown.connect_clicked(move |_| view_.open_door("shown"));
+            let view_ = view.clone();
+            door_typed.connect_clicked(move |_| view_.open_door("typed"));
+            let view_ = view.clone();
+            door_none.connect_clicked(move |_| view_.open_door("none"));
+            let view_ = view.clone();
+            none_bar.connect_clicked(move |_| view_.open_door("bar"));
+            let view_ = view.clone();
+            none_own.connect_clicked(move |_| view_.open_door("own"));
+            let view_ = view.clone();
+            none_use.connect_clicked(move |_| view_.open_door("use"));
+            let view_ = view.clone();
+            none_back.connect_clicked(move |_| view_.to_intro());
+            let view_ = view.clone();
+            type_it.connect_clicked(move |_| view_.open_door("typed"));
+            let view_ = view.clone();
+            open_browse.connect_clicked(move |_| {
+                if let Some(f) = view_.on_browse.borrow().as_ref() {
+                    f();
+                }
+            });
         }
         {
             let view = view.clone();
@@ -682,24 +850,7 @@ impl FindView {
         }
         {
             let view_ = view.clone();
-            type_instead.connect_clicked(move |_| {
-                view_.root.set_visible_child_name("pick");
-                match view_.selection.borrow().is_some() {
-                    true => view_.guide.pick(
-                        &tr!("Type the number the game shows"),
-                        &tr!("Below the picture. Then change it in the game and type the new one. Ferret learns the game's digits from it."),
-                    ),
-                    false => view_.guide.pick(
-                        &tr!("Type the number the game shows"),
-                        &tr!("Below the picture. Then change it in the game and type the new one. Click the number in the picture first, and Ferret learns the game's digits from it."),
-                    ),
-                }
-                view_.typed.grab_focus();
-            });
-            let view_ = view.clone();
             typed_go.connect_clicked(move |_| view_.type_number(&view_.typed.text()));
-            let view_ = view.clone();
-            no_number.connect_clicked(move |_| view_.copy_memory());
             let view_ = view.clone();
             still.connect_clicked(move |_| view_.set_motion(core::Motion::Still));
             let view_ = view.clone();
@@ -854,6 +1005,83 @@ impl FindView {
         view
     }
 
+    /// The tab's first page: what to find. Start Over and a new game come back here.
+    pub fn to_intro(&self) {
+        self.door.set(0);
+        self.want_bar.set(false);
+        self.pending_kind.set(0);
+        self.so_far.set_label("");
+        self.status.set_label(&tr!("Ready."));
+        self.status.set_tooltip_text(None);
+        self.status_set.set(false);
+        self.root.set_visible_child_name("intro");
+        self.guide.question(&tr!("What do you want to find?"), &tr!("Pick what fits the value in your game. Start Over brings you back here."));
+    }
+
+    /// A door of the first page or of the no-number question: "shown" (the picture), "typed",
+    /// "none" (the question), "bar" (the picture, for a bar or icons), "own" / "use" (a copy
+    /// of memory, then that way's buttons). Also the D-Bus `door` action.
+    pub fn open_door(&self, which: &str) {
+        if self.stop.is_visible() || !self.typed.is_editable() {
+            return;
+        }
+        match which {
+            "none" => {
+                self.root.set_visible_child_name("nonumber");
+                self.guide.question(&tr!("What is it like?"), &tr!("This is the last question. After it you only see the buttons for the way you picked."));
+            }
+            "shown" | "bar" => {
+                self.want_bar.set(which == "bar");
+                self.set_door(1);
+                self.capture();
+            }
+            "typed" => {
+                self.set_door(2);
+                self.root.set_visible_child_name("pick");
+                self.guide.pick(
+                    &tr!("Type the number the game shows now"),
+                    &tr!("Then change it in the game and type the new number. Two or three times is usually enough."),
+                );
+                self.typed.grab_focus();
+            }
+            "own" | "use" => {
+                self.set_door(3);
+                self.pending_kind.set(if which == "own" { 1 } else { 2 });
+                self.copy_memory();
+            }
+            _ => self.to_intro(),
+        }
+    }
+
+    /// Shows the tools of the way picked, and only those.
+    fn set_door(&self, door: u8) {
+        self.door.set(door);
+        for w in &self.picture_only {
+            w.set_visible(door == 1);
+        }
+        for w in &self.typed_only {
+            w.set_visible(door == 2);
+        }
+        self.guide.steps_for(door == 2);
+        self.start_over.set_label(&tr!("Back"));
+    }
+
+    /// Whether Browse lists this game's numbers by name: the first page says so.
+    pub fn set_browsable(&self, can: bool) {
+        self.browse_strip.set_visible(can);
+    }
+
+    pub fn on_browse(&self, f: impl Fn() + 'static) {
+        self.on_browse.replace(Some(Box::new(f)));
+    }
+
+    /// The status line under the picture: the last thing that happened, in a sentence.
+    fn set_status(&self, text: &str) {
+        self.status.set_label(text);
+        self.status.set_tooltip_text(Some(text));
+        self.status_set.set(true);
+    }
+
     /// Scale and offset of the frame inside the picture widget.
     fn layout(&self) -> Option<(f64, f64, f64)> {
         let texture = self.texture.borrow();
@@ -880,7 +1108,12 @@ impl FindView {
     /// the middle of the picture (`factor`; 0 = fit).
     pub fn debug_frame(&self, path: &str) {
         if let Ok(t) = gdk::Texture::from_filename(path) {
+            self.set_door(1);
             self.root.set_visible_child_name("pick");
+            self.guide.pick(
+                &tr!("Click the number in the picture"),
+                &tr!("No box around it? Drag a rectangle over it yourself. Ferret reads it, then asks you to change it in the game."),
+            );
             self.set_frame(t);
             self.area.queue_draw();
         }
@@ -1073,6 +1306,12 @@ impl FindView {
 
     /// "1,200 places match", or "1,200 -> 35 places match" when an earlier search had more.
     fn count_text(&self, n: usize) -> String {
+        let text = self.count_text_only(n);
+        self.set_status(&text);
+        text
+    }
+
+    fn count_text_only(&self, n: usize) -> String {
         match self.last_count.replace(Some(n)) {
             Some(before) if before != n => ntr!(
                 "{before} \u{2192} {n} place matches",
@@ -1098,7 +1337,10 @@ impl FindView {
     }
 
     pub fn capture(&self) {
-        // The intro page has no instruction bar: errors would go unseen there.
+        // (The D-Bus `capture` action doesn't go through a door.)
+        if self.door.get() != 1 {
+            self.set_door(1);
+        }
         self.root.set_visible_child_name("pick");
         let note = match cfg!(windows) {
             true => String::new(),
@@ -1119,11 +1361,16 @@ impl FindView {
                 self.root.set_visible_child_name("pick");
                 // Nothing is picked for the player, even with one number on screen: they may want
                 // a bar there, and a pick they didn't make read like Ferret doing things on its own.
-                self.guide.pick(
-                    &tr!("Click the number you want to find"),
-                    &tr!("In the picture of your game below. Or drag a box around it, around a bar, or around a row of icons such as hearts."),
-                );
-                self.pick_hint.set_visible(self.selection.borrow().is_none());
+                match self.want_bar.get() {
+                    true => self.guide.pick(
+                        &tr!("Drag a box around the bar or the icons"),
+                        &tr!("In the picture of your game below. Ferret watches how full the bar is, or how many icons are full."),
+                    ),
+                    false => self.guide.pick(
+                        &tr!("Click the number in the picture"),
+                        &tr!("No box around it? Drag a rectangle over it yourself. Ferret reads it, then asks you to change it in the game."),
+                    ),
+                }
                 self.area.queue_draw();
             }
             Err(e) => {
@@ -1318,6 +1565,7 @@ impl FindView {
     /// Something the player has to do now (the search waits for it).
     pub fn ask(&self, msg: &str) {
         self.guide.note(msg);
+        self.set_status(msg);
         // The search waits for the player (the probe): it can be given up, typed or not.
         if !self.typed.is_editable() || self.stop.is_visible() {
             self.stop.set_visible(true);
@@ -1328,6 +1576,9 @@ impl FindView {
     /// be tried then. While Start runs they can: trying one stops it first.
     fn searching(&self, searching: bool) {
         self.matches_list.set_sensitive(!searching);
+        if searching {
+            self.start_over.set_label(&tr!("Start Over"));
+        }
     }
 
     pub fn start(&self) {
@@ -1530,6 +1781,7 @@ impl FindView {
     }
 
     fn found(&self, loc: core::Loc) {
+        self.set_status(&tr!("Found it!"));
         self.matches.set_visible(false);
         self.again.set_visible(false);
         let at = format!("0x{:x} ({})", loc.addr, super::kind_text(loc.kind));
@@ -1571,6 +1823,10 @@ impl FindView {
         interrupt(&self.cancel, &self.stop);
         self.one_by_one.replace(None);
         self.moving.set(false);
+        // (The D-Bus `type` action doesn't go through a door.)
+        if self.door.get() == 0 {
+            self.set_door(2);
+        }
         self.root.set_visible_child_name("pick");
         self.last_typed.replace(text.trim().to_owned());
         self.nudge(None);
@@ -1590,6 +1846,18 @@ impl FindView {
     }
 
     pub fn typed_done(&self, r: Result<AutoResult, String>) {
+        // What each typed number left, for the typing door.
+        let left = match &r {
+            Ok(AutoResult::Found(_)) => tr!("found it"),
+            Ok(AutoResult::Several(n)) | Ok(AutoResult::PutBack(n)) => ntr!("{n} place matches", "{n} places match", *n, n = grouped(*n)),
+            Ok(AutoResult::Unsure(_)) => ntr!("{n} place matches", "{n} places match", 1, n = grouped(1)),
+            Err(_) => String::new(),
+        };
+        if !left.is_empty() {
+            let typed = self.last_typed.borrow().clone();
+            let before = self.so_far.label();
+            self.so_far.set_label(&format!("{before}{}{typed}  \u{2192}  {left}", if before.is_empty() { "" } else { "\n" }));
+        }
         self.typed.set_text("");
         self.narrowed(r, &tr!("Change the number in the game, then type the new one."), true);
         self.typed.grab_focus();
@@ -1681,6 +1949,11 @@ impl FindView {
         if self.stop.is_visible() || !self.typed.is_editable() {
             return;
         }
+        // (The D-Bus `copy` action doesn't go through a door.)
+        if self.door.get() != 3 {
+            self.set_door(3);
+            self.pending_kind.set(0);
+        }
         self.one_by_one.replace(None);
         self.moving.set(false);
         self.kind.set(0);
@@ -1703,6 +1976,11 @@ impl FindView {
         self.typed_searching(false);
         self.searching(false);
         match r {
+            Ok(()) if self.pending_kind.get() != 0 => {
+                self.moving.set(true);
+                self.set_status(&tr!("Ferret has a copy of the game's memory to compare with."));
+                self.choose_kind(self.pending_kind.replace(0));
+            }
             Ok(()) => {
                 self.moving.set(true);
                 self.ask_motion(
@@ -2018,10 +2296,7 @@ impl FindView {
     /// Says what to do after Start Over; again once it's done, over what a search it stopped
     /// said.
     pub fn started_over(&self) {
-        match self.selection.borrow().is_some() {
-            true => self.guide.pick(&tr!("Starting over"), &tr!("Click Start, or type the number the game shows.")),
-            false => self.guide.pick(&tr!("Starting over"), &tr!("Click a number in the picture, or type the number the game shows.")),
-        }
+        self.to_intro();
     }
 
     pub fn start_over(&self) {
@@ -2123,7 +2398,6 @@ impl FindView {
         self.crop.set_paintable(None::<&gdk::Paintable>);
         self.start.set_sensitive(false);
         self.nudge(None);
-        self.pick_hint.set_visible(self.texture.borrow().is_some());
         self.area.queue_draw();
         self.guide.pick(&tr!("No box picked"), &tr!("Type the number the game holds below, or click one in the picture."));
         self.worker.run(|core| {
@@ -2152,8 +2426,7 @@ impl FindView {
         self.result.set_visible(false);
         self.typed.set_text("");
         self.start.set_sensitive(false);
-        self.guide.pick(&tr!("Click the number you want to find"), &tr!("In the picture of your game below, or drag a box around it."));
-        self.root.set_visible_child_name("intro");
+        self.to_intro();
     }
 
     /// Lists the places still matching, each with Try (write a value) and Use This One.
@@ -2501,6 +2774,7 @@ impl FindView {
         self.result.set_visible(false);
         self.name.set_text("");
         self.nudge(None);
+        self.set_status(&tr!("Saved {name}", name));
         // Back to picking: the next step (and the bar leaves the Values tab, where the value is).
         self.guide.pick(
             &tr!("Saved {name}", name),
@@ -2537,6 +2811,11 @@ impl FindView {
 
     /// The values saved for this game (from the 1 s refresh), listed under the save row.
     pub fn saved_values(&self, values: &[core::ValueRow]) {
+        // Until something else happens: what was found again when the game was opened.
+        if !self.status_set.get() && !values.is_empty() {
+            let names: Vec<&str> = values.iter().map(|v| v.name.as_str()).collect();
+            self.status.set_label(&tr!("Your saved values are found again: {names}", names = names.join(", ")));
+        }
         let rows: Vec<(String, String, String)> = values
             .iter()
             .map(|v| {

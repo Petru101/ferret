@@ -79,6 +79,7 @@ const STEPS: [&str; 5] = [n_!("Pick the number"), n_!("Hands off"), n_!("Change 
 pub struct Guide {
     pub root: gtk::Box,
     steps: Vec<gtk::Label>,
+    steps_row: gtk::Box,
     icon: gtk::Image,
     tag: gtk::Label,
     /// Turns while shown. Not a gtk::Spinner: on Windows (GTK 4.24) one hidden once never turned
@@ -182,6 +183,7 @@ impl Guide {
         let guide = Rc::new(Self {
             root,
             steps,
+            steps_row,
             icon,
             tag,
             spinner,
@@ -290,6 +292,20 @@ impl Guide {
     /// Nothing runs: what the player can do next.
     pub fn pick(&self, title: &str, hint: &str) {
         self.show(Look::Pick, PICK, title, hint, None);
+    }
+
+    /// A question before any search (the Find tab's doors): no steps yet.
+    pub fn question(&self, title: &str, hint: &str) {
+        self.show(Look::Pick, PICK, title, hint, None);
+        self.steps_row.set_visible(false);
+    }
+
+    /// A way to search is picked: the steps show, the first named after it (the number is
+    /// picked in the picture, or typed).
+    pub fn steps_for(&self, typed: bool) {
+        let first = if typed { tr!("Type the number") } else { gettext(STEPS[0]) };
+        self.steps[0].set_label(&format!("1  {first}"));
+        self.steps_row.set_visible(true);
     }
 
     /// Ferret works on something the player asked for: hands off at once, before the core

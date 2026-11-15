@@ -602,6 +602,7 @@ impl Ui {
             self.stack.set_visible_child_name("values");
         }
         page.set_visible(can);
+        self.find.set_browsable(can);
         // A game opened as it starts has no objects yet: asked again a while later.
         if !can {
             let ui = self.clone();
@@ -1151,6 +1152,8 @@ fn add_debug_actions(app: &adw::Application, ui: &Rc<Ui>) {
             _ => ui.find.set_motion(Motion::Still),
         }),
     );
+    // The Find tab's doors: `door shown|typed|none|bar|own|use|intro`.
+    action("door", Box::new(|ui, which| ui.find.open_door(&which)));
     // No Number?'s first question: `kind own|use`.
     action("kind", Box::new(|ui, kind| ui.find.choose_kind(if kind == "own" { 1 } else { 2 })));
     // No Number?'s other way: `compare down|up|same|changed`.
@@ -1291,6 +1294,15 @@ fn load_css() {
          @keyframes nudge { from { box-shadow: 0 0 0 0 alpha(@accent_bg_color, 0.9); } \
          to { box-shadow: 0 0 0 12px alpha(@accent_bg_color, 0); } } \
          button.nudge { animation: nudge 1.3s ease-out infinite; } \
+         button.door { padding: 18px; border-radius: 12px; } \
+         button.door label { font-weight: normal; } \
+         button.door label.title-4 { font-weight: 800; } \
+         button.door label.caption-heading { font-weight: 700; } \
+         .browse-strip { padding: 12px 16px; border-radius: 12px; background-color: alpha(@accent_bg_color, 0.14); \
+         border: 1px solid alpha(@accent_bg_color, 0.4); } \
+         .status-row { padding: 2px 4px 2px 14px; } \
+         .typed-panel { padding: 22px; } \
+         entry.big-entry { font-size: 1.5em; min-height: 52px; } \
          .pick-hint { font-size: 1.4em; font-weight: bold; padding: 10px 18px; border-radius: 12px; \
          background-color: alpha(@accent_bg_color, 0.92); color: @accent_fg_color; box-shadow: 0 2px 8px alpha(black, 0.4); } \
          .read-number { font-size: 40px; font-weight: 800; font-feature-settings: \"tnum\"; } \
@@ -1316,6 +1328,10 @@ fn build(app: &adw::Application) {
     let phase = Rc::new(phase::PhaseCard::new());
     let guide = guide::Guide::new(notify.clone());
     let find = find::FindView::new(worker.clone(), cancel, scan_now, guide.clone());
+    {
+        let stack = stack.clone();
+        find.on_browse(move || stack.set_visible_child_name("browse"));
+    }
     {
         // Stop Waiting and Cancel (a save waiting for the game) both stop what waits.
         let find_ = find.clone();
